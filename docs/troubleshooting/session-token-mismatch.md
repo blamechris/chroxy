@@ -8,9 +8,13 @@ using the `[session-binding-*]` diagnostic logs introduced for issue
 
 Clients (app or dashboard) see one of:
 
-- `session_error` with `code: 'SESSION_TOKEN_MISMATCH'` — most paths.
+- `session_error` or `error` with `code: 'SESSION_TOKEN_MISMATCH'` on
+  the WebSocket path (shape depends on call site — most handlers send
+  `session_error`; `permission_response` uses the generic `error`
+  envelope via `handler-utils.js:sendError`).
 - HTTP `403 { "error": "not authorized for this permission request", "code": "SESSION_TOKEN_MISMATCH" }`
-  — legacy `/permission` HTTP path.
+  from the legacy `POST /permission-response` HTTP path
+  (`packages/server/src/http-routes.js`).
 
 On Android specifically (issue #2832), the most common trigger is:
 backgrounding the app while a permission prompt is visible, then tapping
@@ -31,12 +35,12 @@ Call sites (for reference, in `packages/server/src/`):
 
 | Handler | Scenario |
 | --- | --- |
-| `handlers/session-handlers.js` | `create_session` / `resume_session` / `switch_session` / `rename_session` blocks a bound client from escaping its session. |
+| `handlers/session-handlers.js` | `create_session` / `switch_session` / `rename_session` blocks a bound client from escaping its session. |
 | `handlers/conversation-handlers.js` | `resume_conversation` / `context_request` on the wrong session. |
 | `handlers/feature-handlers.js` | `feature_request` / `web_task_*` on the wrong session. |
 | `handlers/settings-handlers.js` | `permission_response` whose `requestId` maps to a different session than the client's binding. **This is the #2832 path.** |
-| `ws-permissions.js` | HTTP `POST /permission/:requestId` with mismatched binding. |
-| `handler-utils.js` | Generic `assertBoundSession` helper used by feature wrappers. |
+| `ws-permissions.js` | HTTP `POST /permission-response` with mismatched binding. |
+| `handler-utils.js` | Generic `resolveSession` / `enforceBoundSession` helpers used by feature wrappers. |
 
 ## Step 1 — Enable debug logs
 
@@ -72,14 +76,15 @@ Quit the tray app, relaunch from a shell with `LOG_LEVEL=debug` exported:
 ```bash
 LOG_LEVEL=debug /Applications/Chroxy.app/Contents/MacOS/chroxy
 ```
-(macOS GUI launch has a minimal env — see `memory/feedback_tauri_gui_path.md`.
-Launching from a shell with the env var set is the reliable way to pass it
-through to the spawned Node server.)
+(macOS GUI launch has a minimal env — launching from a shell with the
+env var set is the reliable way to pass it through to the spawned Node
+server.)
 
 **Programmatically (tests or embedded use):**
 ```js
-import { setLogLevel } from '@chroxy/server/logger.js'
-setLogLevel('debug')
+process.env.LOG_LEVEL = 'debug'
+// Set before requiring/importing the server so `initFileLogging` and
+// the per-module loggers in `packages/server/src/logger.js` pick it up.
 ```
 
 Revert by removing `LOG_LEVEL` (defaults to `info`) and restarting.
@@ -101,12 +106,14 @@ Grep the server log for the single permission request that was rejected.
 The `requestId` is the stable correlation key across all three log lines.
 
 ```bash
-# Find the reject (warn-level, always visible)
-grep '\[session-binding-reject\]' ~/.chroxy/logs/server.log | tail -20
+# Find the reject (warn-level, always visible).
+# Log file is ~/.chroxy/logs/chroxy.log (rotated as chroxy.1.log,
+# chroxy.2.log, chroxy.3.log — see packages/server/src/logger.js).
+grep '\[session-binding-reject\]' ~/.chroxy/logs/chroxy.log | tail -20
 
 # Pick the failing requestId out of the JSON payload, then replay:
 REQ=req_abc123   # from the rejected entry
-grep -E "\[session-binding-(create|resend|reject)\].*$REQ" ~/.chroxy/logs/server.log
+grep -E "\[session-binding-(create|resend|reject)\].*$REQ" ~/.chroxy/logs/chroxy.log
 ```
 
 Expected timeline for a #2832-shaped failure:
@@ -114,7 +121,7 @@ Expected timeline for a #2832-shaped failure:
 ```
 DEBUG [session-binding-create] permission req_abc123 created (sessionId=sess-42)
 DEBUG [session-binding-resend] permission req_abc123 resent to client client-ios (sessionId=sess-42, activeSession=sess-42, boundSession=sess-42)
-WARN  [session-binding-reject] permission_response rejected {"requestId":"req_abc123","decision":"approve","clientId":"client-ios-2","activeSessionId":"sess-42","boundSessionId":"sess-42","mappedSessionId":"sess-99","requestCreatedAt":1713830400000,"clientConnectedAt":1713830461000,"requestAgeMs":61000,"likelyPostReconnect":true}
+WARN  [session-binding-reject] permission_response rejected {"requestId":"req_abc123","decision":"allow","clientId":"client-ios-2","activeSessionId":"sess-42","boundSessionId":"sess-42","mappedSessionId":"sess-99","requestCreatedAt":1713830400000,"clientConnectedAt":1713830461000,"requestAgeMs":61000,"likelyPostReconnect":true}
 ```
 
 The `[session-binding-reject]` payload includes every correlation field
@@ -123,7 +130,7 @@ needed for triage in a single structured line:
 | Field | Meaning |
 | --- | --- |
 | `requestId` | Correlation key — same across create / resend / reject. |
-| `decision` | `approve` / `deny` / `ask` as submitted by the client. |
+| `decision` | `allow` / `allowAlways` / `deny` as submitted by the client (see `PermissionResponseSchema` in `packages/protocol/src/schemas/client.ts`). |
 | `clientId` | Which WebSocket client submitted the response. Different from the `[session-binding-create]` client means a reconnect happened. |
 | `activeSessionId` | The session the client is *currently* subscribed to. |
 | `boundSessionId` | The session the client's token is *bound* to (set at auth for pairing-issued tokens). |
@@ -184,5 +191,8 @@ hypotheses on #2832 applies.
   `conversation-handlers.js`; the permission-response and feature-handler
   paths still return the generic message.
 - `docs/error-taxonomy.md` — the three WebSocket error response shapes
-  (`error`, `server_error`, `session_error`). `SESSION_TOKEN_MISMATCH` is
-  always a `session_error` (or 403 JSON on the HTTP path).
+  (`error`, `server_error`, `session_error`). `SESSION_TOKEN_MISMATCH`
+  may arrive as either `session_error` or `error` on the WebSocket path
+  (the `permission_response` handler uses the generic `error` envelope
+  via `handler-utils.js:sendError`), or as a 403 JSON response on the
+  legacy HTTP path.
