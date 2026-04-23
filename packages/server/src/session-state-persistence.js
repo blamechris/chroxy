@@ -67,6 +67,14 @@ export class SessionStatePersistence {
    * happens, remove the stale `.bak` and retry once before giving up — a
    * missing rotation is acceptable (the write still proceeds) but silently
    * skipping it leaves no prior-generation file to recover from.
+   *
+   * Subtlety: EPERM/EACCES/EBUSY are ambiguous — they can indicate either a
+   * locked *destination* (which our unlink+retry fixes) or a locked *source*
+   * (which our retry cannot fix). If we unlinked `.bak` on a source-locked
+   * error and the retry then failed, we would have silently deleted the prior
+   * generation for nothing. To stay crash-safe we snapshot the `.bak` bytes
+   * before unlinking and restore them if the retry fails, so the caller is
+   * never worse off than if rotation had simply been skipped.
    * @private
    */
   _rotateToBak(mainPath, bakPath) {
@@ -80,6 +88,16 @@ export class SessionStatePersistence {
       }
       log.warn(`Rotation to .bak failed with ${err.code}; clearing stale .bak and retrying`)
     }
+    // Snapshot the prior-generation .bak so we can restore it if the retry
+    // still fails (e.g. when the source file was actually the locked one).
+    let priorBak = null
+    try {
+      priorBak = fs.readFileSync(bakPath)
+    } catch (readErr) {
+      if (readErr && readErr.code !== 'ENOENT') {
+        log.warn(`Failed to snapshot existing .bak before retry: ${readErr.message}`)
+      }
+    }
     try { fs.unlinkSync(bakPath) } catch (unlinkErr) {
       if (unlinkErr && unlinkErr.code !== 'ENOENT') {
         log.warn(`Failed to clear stale .bak: ${unlinkErr.message}`)
@@ -89,9 +107,16 @@ export class SessionStatePersistence {
       fs.renameSync(mainPath, bakPath)
     } catch (retryErr) {
       // Still locked — give up on rotation; the primary write below will
-      // still proceed so the user's state is not lost. Prior generation
-      // (if any remains) is left as-is.
+      // still proceed so the user's state is not lost. Restore the prior
+      // generation bytes (if any) so a recovery path remains available.
       log.warn(`Retry of .bak rotation failed: ${retryErr?.message || retryErr}`)
+      if (priorBak !== null) {
+        try {
+          writeFileRestricted(bakPath, priorBak)
+        } catch (restoreErr) {
+          log.warn(`Failed to restore prior .bak after retry failure: ${restoreErr?.message || restoreErr}`)
+        }
+      }
     }
   }
 
