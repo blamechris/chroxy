@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('codex')
@@ -67,6 +68,17 @@ export class CodexSession extends BaseSession {
     })
   }
 
+  /**
+   * Build the env for the codex subprocess.
+   *
+   * Uses an explicit allowlist so operator secrets (ANTHROPIC_API_KEY,
+   * CHROXY_HOOK_SECRET, arbitrary DB credentials, etc.) never leak into a
+   * third-party CLI's environment.
+   */
+  _buildChildEnv() {
+    return buildSpawnEnv('codex')
+  }
+
   destroy() {
     this._destroying = true
     this._processReady = false
@@ -106,7 +118,7 @@ export class CodexSession extends BaseSession {
     const proc = spawn(CODEX, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: this._buildChildEnv(),
     })
 
     this._process = proc
