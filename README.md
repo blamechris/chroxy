@@ -25,6 +25,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 - **No tmux required** — CLI headless mode wraps Claude Code directly via the Agent SDK. Just start and connect.
 - **Two views, one session** — Switch between a clean chat UI (markdown-rendered) and a full xterm.js terminal emulator.
 - **Multi-session** — Run multiple Claude sessions from one server. Create, switch, and destroy from any client.
+- **Multi-provider** — Claude (SDK + CLI), Codex, or Gemini — pick per-session. See [docs/providers.md](docs/providers.md).
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
@@ -143,7 +144,7 @@ chroxy/
 Mobile App / Desktop ◄──► Cloudflare Tunnel ◄──► WebSocket Server ◄──► Session Provider ◄──► Claude Code
 ```
 
-- **Server:** `server-cli.js` starts a WebSocket server and creates sessions via pluggable providers (`sdk-session.js` for the Agent SDK, `cli-session.js` for legacy `claude -p`, `docker-session.js` for container isolation)
+- **Server:** `server-cli.js` starts a WebSocket server and creates sessions via pluggable providers (`sdk-session.js` for the Agent SDK, `cli-session.js` for legacy `claude -p`, `gemini-session.js`, `codex-session.js`, `docker-session.js` for container isolation). See [docs/providers.md](docs/providers.md) for setup, env vars, and capabilities per provider.
 - **WebSocket layer:** Auth, E2E encryption (TweetNaCl), message routing, session management, permission handling
 - **Tunnel:** Cloudflare Quick or Named tunnel for secure remote access without port forwarding
 - **Supervisor:** When using a tunnel (quick or named), owns the tunnel and auto-restarts the server on crash with exponential backoff
