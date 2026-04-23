@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('gemini')
@@ -35,6 +36,19 @@ const GEMINI = resolveBinary('gemini', [
   '/usr/bin/gemini',
 ])
 
+// Per-provider model allowlist — #2946.
+// `set_model` must reject a Claude model on a Gemini session (the CLI would
+// exit opaquely). Keep this list small and explicit; issue #2956 tracks a
+// proper registry fed by `gemini models list` or similar.
+const GEMINI_ALLOWED_MODELS = Object.freeze([
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.0-pro',
+  'gemini-2.0-flash',
+  'gemini-1.5-pro',
+  'gemini-1.5-flash',
+])
+
 export class GeminiSession extends BaseSession {
   static get capabilities() {
     return {
@@ -47,6 +61,15 @@ export class GeminiSession extends BaseSession {
       terminal: false,
       thinkingLevel: false,
     }
+  }
+
+  /**
+   * Model IDs this provider accepts in `set_model`. Returns a plain array so
+   * the settings handler can surface it to the client on rejection.
+   * @returns {string[]}
+   */
+  static getAllowedModels() {
+    return GEMINI_ALLOWED_MODELS
   }
 
   constructor({ cwd, model, permissionMode } = {}) {
@@ -63,6 +86,17 @@ export class GeminiSession extends BaseSession {
     process.nextTick(() => {
       this.emit('ready', { sessionId: null, model: this.model, tools: [] })
     })
+  }
+
+  /**
+   * Build the env for the gemini subprocess.
+   *
+   * Uses an explicit allowlist so operator secrets (ANTHROPIC_API_KEY,
+   * OPENAI_API_KEY, CHROXY_HOOK_SECRET, arbitrary DB credentials, etc.)
+   * never leak into a third-party CLI's environment.
+   */
+  _buildChildEnv() {
+    return buildSpawnEnv('gemini')
   }
 
   destroy() {
@@ -104,7 +138,7 @@ export class GeminiSession extends BaseSession {
     const proc = spawn(GEMINI, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: this._buildChildEnv(),
     })
 
     this._process = proc
