@@ -64,6 +64,19 @@ export function buildCodexArgs(text, model) {
   return args
 }
 
+// Per-provider model allowlist — #2946.
+// `set_model` must reject a Claude or Gemini model on a Codex session (the
+// CLI would exit opaquely). Keep this list small and explicit; issue #2956
+// tracks a proper registry fed by the Codex CLI itself.
+const CODEX_ALLOWED_MODELS = Object.freeze([
+  'gpt-5-codex',
+  'gpt-5',
+  'gpt-4.1',
+  'gpt-4o',
+  'o1',
+  'o3',
+])
+
 export class CodexSession extends BaseSession {
   static get capabilities() {
     return {
@@ -76,6 +89,15 @@ export class CodexSession extends BaseSession {
       terminal: false,
       thinkingLevel: false,
     }
+  }
+
+  /**
+   * Model IDs this provider accepts in `set_model`. Returns a plain array so
+   * the settings handler can surface it to the client on rejection.
+   * @returns {string[]}
+   */
+  static getAllowedModels() {
+    return CODEX_ALLOWED_MODELS
   }
 
   constructor({ cwd, model, permissionMode } = {}) {
