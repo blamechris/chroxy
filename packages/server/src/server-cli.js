@@ -17,7 +17,7 @@ import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
-import { registerDockerProvider } from './providers.js'
+import { registerDockerProvider, resolveProviderLabel } from './providers.js'
 import { loadModelsCache, getModels } from './models.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -74,6 +74,27 @@ export function buildTunnelReadyStatus({ tunnelUrl }) {
     tunnelUrl,
     message: 'Tunnel is ready',
   }
+}
+
+/**
+ * Build the single-line startup banner string (#2953).
+ *
+ * Renders as `Chroxy Server vX.Y.Z (<provider label>)`. The provider label is
+ * resolved via `resolveProviderLabel()` so each provider contributes its own
+ * `static get displayLabel()`, replacing the previous hardcoded
+ * `PROVIDER_LABELS` map that had to be updated manually every time a new
+ * provider landed (Gemini/Codex had been falling through to the raw id).
+ *
+ * Exported so tests can assert the exact banner text without executing
+ * `startCliServer()` end-to-end.
+ *
+ * @param {{ version: string, provider?: string }} args
+ * @returns {string} Banner line (no outer box, no padding)
+ */
+export function buildServerBanner({ version, provider }) {
+  const providerType = provider || 'claude-sdk'
+  const modeStr = resolveProviderLabel(providerType)
+  return `Chroxy Server v${version} (${modeStr})`
 }
 
 function checkNoAuthWarnings({ authRequired, tunnel }) {
@@ -179,13 +200,7 @@ export async function startCliServer(config) {
     process.exit(1)
   }
 
-  const providerType = config.provider || 'claude-sdk'
-  const PROVIDER_LABELS = {
-    'claude-cli': 'claude-cli (CLI legacy mode)',
-    'claude-sdk': 'claude-sdk (SDK mode)',
-  }
-  const modeStr = PROVIDER_LABELS[providerType] || providerType
-  const banner = `Chroxy Server v${SERVER_VERSION} (${modeStr})`
+  const banner = buildServerBanner({ version: SERVER_VERSION, provider: config.provider })
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
   const right = pad - left

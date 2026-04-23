@@ -153,6 +153,26 @@ export function getProvider(name) {
 }
 
 /**
+ * Resolve a human-readable label for a provider name (#2953).
+ *
+ * Reads the class's `static get displayLabel()` so each provider owns its own
+ * display name. Falls back to the raw provider id for unknown providers so
+ * the server still boots with a readable banner even if someone registers a
+ * custom provider without a label, and returns `'unknown'` for empty input.
+ *
+ * @param {string | undefined | null} name - Provider identifier
+ * @returns {string} Human-readable label
+ */
+export function resolveProviderLabel(name) {
+  if (!name || typeof name !== 'string') return 'unknown'
+  const ProviderClass = providers.get(name)
+  if (ProviderClass && typeof ProviderClass.displayLabel === 'string' && ProviderClass.displayLabel.length > 0) {
+    return ProviderClass.displayLabel
+  }
+  return name
+}
+
+/**
  * List all registered providers with their capabilities.
  * Excludes aliases (e.g. 'docker') to prevent duplicate entries in UI.
  * @returns {Array<{ name: string, capabilities: ProviderCapabilities }>}
