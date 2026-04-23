@@ -72,6 +72,30 @@ export class GeminiSession extends BaseSession {
     return GEMINI_ALLOWED_MODELS
   }
 
+  /**
+   * Preflight dependency spec used by `chroxy doctor`.
+   */
+  static get preflight() {
+    return {
+      label: 'Gemini',
+      binary: {
+        name: 'gemini',
+        args: ['--version'],
+        candidates: [
+          '/opt/homebrew/bin/gemini',
+          '/usr/local/bin/gemini',
+          '/usr/bin/gemini',
+        ],
+        installHint: 'install Gemini CLI (see https://github.com/google-gemini/generative-ai-cli)',
+      },
+      credentials: {
+        envVars: ['GEMINI_API_KEY'],
+        hint: 'set GEMINI_API_KEY',
+        optional: false,
+      },
+    }
+  }
+
   constructor({ cwd, model, permissionMode } = {}) {
     super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto' })
     this.resumeSessionId = null
