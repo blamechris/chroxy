@@ -795,8 +795,11 @@ impl ServerManager {
         let full_path =
             build_enriched_path(&base_path, &node_bin, home_dir.as_deref(), path_sep);
         cmd.env("PATH", &full_path);
-        // Ensure HOME is set — macOS GUI apps may not inherit it
-        if let Some(home) = dirs::home_dir() {
+        // Ensure HOME is set — macOS GUI apps may not inherit it. Reuse the
+        // already-resolved `home_dir` so PATH and HOME are derived from the
+        // same value rather than risking a second, potentially divergent
+        // `dirs::home_dir()` lookup.
+        if let Some(ref home) = home_dir {
             cmd.env("HOME", home);
         }
         // Pass config as env vars (same pattern as supervisor.js)
