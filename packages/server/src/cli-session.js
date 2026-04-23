@@ -69,6 +69,35 @@ export class CliSession extends BaseSession {
     }
   }
 
+  /**
+   * Preflight dependency spec used by `chroxy doctor`.
+   * Declares the binary and credential requirements for this provider so
+   * doctor.js can check only the binaries the configured provider actually
+   * needs (see issue #2951).
+   */
+  static get preflight() {
+    return {
+      label: 'Claude CLI',
+      binary: {
+        name: 'claude',
+        args: ['--version'],
+        candidates: [
+          join(homedir(), '.local/bin/claude'),
+          '/opt/homebrew/bin/claude',
+          '/usr/local/bin/claude',
+          join(homedir(), '.claude/local/node_modules/.bin/claude'),
+          join(homedir(), '.npm-global/bin/claude'),
+        ],
+        installHint: 'install Claude Code CLI',
+      },
+      credentials: {
+        envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+        hint: 'run `claude login` or set ANTHROPIC_API_KEY',
+        optional: true,
+      },
+    }
+  }
+
   constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms } = {}) {
     super({ cwd, model, permissionMode })
     this.allowedTools = allowedTools || []

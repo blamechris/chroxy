@@ -100,6 +100,30 @@ export class CodexSession extends BaseSession {
     return CODEX_ALLOWED_MODELS
   }
 
+  /**
+   * Preflight dependency spec used by `chroxy doctor`.
+   */
+  static get preflight() {
+    return {
+      label: 'Codex',
+      binary: {
+        name: 'codex',
+        args: ['--version'],
+        candidates: [
+          '/opt/homebrew/bin/codex',
+          '/usr/local/bin/codex',
+          '/usr/bin/codex',
+        ],
+        installHint: 'install Codex CLI',
+      },
+      credentials: {
+        envVars: ['OPENAI_API_KEY'],
+        hint: 'set OPENAI_API_KEY',
+        optional: false,
+      },
+    }
+  }
+
   constructor({ cwd, model, permissionMode } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // buildCodexArgs() omits the `-c model=...` flag so Codex CLI defers
