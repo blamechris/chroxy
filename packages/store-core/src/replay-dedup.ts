@@ -8,7 +8,8 @@
  *
  * Dedup strategy, in order:
  *   1. For `response` entries with a stable server `messageId`, match on the
- *      id or its `-response` suffix (tool_start id collision — see #2902).
+ *      id or its `-response` suffix (tool_start / stream_start id collision —
+ *      see `stream-id.ts` and #2546).
  *   2. For `user_input` entries with a stable server `messageId`, match on
  *      exact id — the server stamps the optimistic sender id on replay.
  *   3. Fallback: structural equality on (type, content, timestamp, tool,
