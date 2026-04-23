@@ -550,7 +550,7 @@
 }
 
 .tab-status-dot.status-busy {
-  background: var(--status-warning, #f59e0b);
+  background: var(--warning-fg, #fbbf24);
   animation: pulse 1.5s infinite;
 }
 
@@ -4013,7 +4013,7 @@
   padding: 0 4px;
   border-radius: 3px;
 }
-.file-tree-git.git-modified { color: #e8a838; }
+.file-tree-git.git-modified { color: var(--warning-fg, #fbbf24); }
 .file-tree-git.git-added { color: #4eca6a; }
 .file-tree-git.git-deleted { color: #ff5b5b; }
 .file-tree-git.git-renamed { color: #4a9eff; }
@@ -4060,9 +4060,9 @@
 }
 
 .file-viewer-truncated {
-  color: var(--warning, #e8a838);
+  color: var(--warning-fg, #fbbf24);
   font-size: 11px;
-  background: rgba(232, 168, 56, 0.15);
+  background: var(--warning-bg-subtle, #fbbf2422);
   padding: 1px 6px;
   border-radius: 3px;
 }
