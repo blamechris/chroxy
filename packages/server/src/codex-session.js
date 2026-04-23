@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('codex')
@@ -29,12 +30,51 @@ const log = createLogger('codex')
  *   error        { message }
  */
 
-const DEFAULT_MODEL = 'gpt-5.4'
+/**
+ * No default model is hard-coded here.
+ *
+ * Previously this module shipped `DEFAULT_MODEL = 'gpt-5.4'`, which pinned
+ * the server to a specific Codex release and caused `codex exec -c model=...`
+ * to fail whenever that version wasn't available on the host. Instead we now
+ * pass `null` through to `BaseSession` when no model is supplied, and
+ * `buildCodexArgs()` below omits the `-c model=...` override so Codex CLI
+ * falls back to whatever default is configured in `~/.codex/config.toml`.
+ */
+const DEFAULT_MODEL = null
 
 const CODEX = resolveBinary('codex', [
   '/opt/homebrew/bin/codex',
   '/usr/local/bin/codex',
   '/usr/bin/codex',
+])
+
+/**
+ * Build the argv passed to `codex exec`. Exported for unit testing.
+ *
+ * @param {string} text   User prompt
+ * @param {string|null} model  Optional model ID. If falsy, no `-c model=` flag
+ *                              is appended — Codex CLI uses its own default.
+ * @returns {string[]}
+ */
+export function buildCodexArgs(text, model) {
+  const args = ['exec', text, '--json']
+  if (model) {
+    args.push('-c', `model="${model}"`)
+  }
+  return args
+}
+
+// Per-provider model allowlist — #2946.
+// `set_model` must reject a Claude or Gemini model on a Codex session (the
+// CLI would exit opaquely). Keep this list small and explicit; issue #2956
+// tracks a proper registry fed by the Codex CLI itself.
+const CODEX_ALLOWED_MODELS = Object.freeze([
+  'gpt-5-codex',
+  'gpt-5',
+  'gpt-4.1',
+  'gpt-4o',
+  'o1',
+  'o3',
 ])
 
 export class CodexSession extends BaseSession {
@@ -51,7 +91,19 @@ export class CodexSession extends BaseSession {
     }
   }
 
+  /**
+   * Model IDs this provider accepts in `set_model`. Returns a plain array so
+   * the settings handler can surface it to the client on rejection.
+   * @returns {string[]}
+   */
+  static getAllowedModels() {
+    return CODEX_ALLOWED_MODELS
+  }
+
   constructor({ cwd, model, permissionMode } = {}) {
+    // `model` may be null/undefined — BaseSession coerces to null and
+    // buildCodexArgs() omits the `-c model=...` flag so Codex CLI defers
+    // to its own default from ~/.codex/config.toml.
     super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto' })
     this.resumeSessionId = null
     this._process = null
@@ -65,6 +117,17 @@ export class CodexSession extends BaseSession {
     process.nextTick(() => {
       this.emit('ready', { sessionId: null, model: this.model, tools: [] })
     })
+  }
+
+  /**
+   * Build the env for the codex subprocess.
+   *
+   * Uses an explicit allowlist so operator secrets (ANTHROPIC_API_KEY,
+   * CHROXY_HOOK_SECRET, arbitrary DB credentials, etc.) never leak into a
+   * third-party CLI's environment.
+   */
+  _buildChildEnv() {
+    return buildSpawnEnv('codex')
   }
 
   destroy() {
@@ -97,16 +160,13 @@ export class CodexSession extends BaseSession {
     this._isBusy = true
     this._currentMessageId = `codex-msg-${++this._messageCounter}`
 
-    const args = ['exec', text, '--json']
-    if (this.model) {
-      args.push('-c', `model="${this.model}"`)
-    }
+    const args = buildCodexArgs(text, this.model)
 
     let stderrBuf = ''
     const proc = spawn(CODEX, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: this._buildChildEnv(),
     })
 
     this._process = proc
