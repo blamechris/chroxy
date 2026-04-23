@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -30,7 +30,13 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // prevent them from switching to any other session.
   if (client.boundSessionId && client.boundSessionId !== targetId) {
     log.warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
     return
   }
 
@@ -53,13 +59,17 @@ function handleCreateSession(ws, client, msg, ctx) {
     // Enrich the error with the bound session's name so the client can render
     // a remediation hint ("This device is paired to session X — disconnect to
     // create new sessions.") rather than an opaque "Not authorized". See #2904.
-    const boundEntry = ctx.sessionManager?.getSession?.(client.boundSessionId)
+    // Issue #2912: payload shape is unified across all SESSION_TOKEN_MISMATCH
+    // call sites via buildSessionTokenMismatchPayload — every send site produces
+    // `{code, message, boundSessionId, boundSessionName}` so clients never see
+    // divergent shapes while branching on the code.
     ctx.send(ws, {
       type: 'session_error',
-      message: 'Not authorized: client is bound to a specific session',
-      code: 'SESSION_TOKEN_MISMATCH',
-      boundSessionId: client.boundSessionId,
-      boundSessionName: boundEntry?.name ?? null,
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+        message: 'Not authorized: client is bound to a specific session',
+      }),
     })
     return
   }
@@ -135,7 +145,13 @@ async function handleDestroySession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
     return
   }
 
@@ -184,7 +200,13 @@ function handleRenameSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
     return
   }
 
