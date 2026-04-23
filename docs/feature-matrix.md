@@ -149,17 +149,17 @@ For per-provider feature support (Claude Agent SDK, legacy `claude -p`, Gemini, 
 
 ## Providers
 
-Per-provider capability support. Values come from each session class's `static get capabilities()` in `packages/server/src/`. See [docs/providers.md](providers.md) for setup instructions, env vars, and model lists.
+Per-provider feature support. Capability-contract rows (Permission handling, Live model switching, Permission mode switching, Plan mode, Conversation resume) reflect each session class's `static get capabilities()` in `packages/server/src/`. The remaining rows (Attachments, Backing binary / SDK, Required env) are provider notes documented here rather than fields on the capabilities contract. See [docs/providers.md](providers.md) for setup instructions, env vars, and model lists.
 
 | Capability | `claude-sdk` (default) | `claude-cli` | `gemini` | `codex` |
 |------------|------------------------|--------------|----------|---------|
 | Permission handling | Y (in-process) | Y (HTTP hook) | — | — |
 | Live model switching | Y | Y | Y | Y |
 | Permission mode switching | Y | Y | — | — |
-| Plan mode | Y | Y | — | — |
-| Conversation resume | Y | Y | — | — |
-| Attachments | Y | Y | — | — |
+| Plan mode | — | Y | — | — |
+| Conversation resume | Y | — | — | — |
+| Attachments | Y | Y | — (error on use) | — (error on use) |
 | Backing binary / SDK | `@anthropic-ai/claude-agent-sdk` | `claude -p` | `gemini -p` | `codex exec` |
-| Required env | Claude Code login / `ANTHROPIC_API_KEY` | Claude Code login / `ANTHROPIC_API_KEY` | `GEMINI_API_KEY` | `OPENAI_API_KEY` |
+| Required env | Claude Code login / `ANTHROPIC_API_KEY` | Claude Code login | `GEMINI_API_KEY` | `OPENAI_API_KEY` |
 
 Docker variants (`docker-sdk`, `docker-cli`) inherit capabilities from their base Claude provider and additionally run the session inside an isolated container — see the Container Environments section above.

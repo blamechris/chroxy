@@ -34,7 +34,7 @@ The `provider` key picks which AI CLI backs a session by default:
 | Value | Backing binary / SDK | Required env |
 |-------|----------------------|--------------|
 | `claude-sdk` (default) | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
-| `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login or `ANTHROPIC_API_KEY` |
+| `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
 | `gemini` | `gemini -p` CLI | `GEMINI_API_KEY` |
 | `codex` | `codex exec` CLI | `OPENAI_API_KEY` |
 | `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |

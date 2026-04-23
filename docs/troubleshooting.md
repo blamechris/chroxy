@@ -134,7 +134,7 @@ See [docs/providers.md](providers.md) for Gemini CLI installation and supported 
 
 **Symptom:** Model errors or empty responses
 - Gemini's default model is `gemini-2.5-pro`. Switch with `--model gemini-2.5-flash` (or any model your API key has access to).
-- The Gemini provider does **not** support attachments, plan mode, permission handling, or conversation resume — these are no-ops. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
+- The Gemini provider does **not** support attachments, plan mode, permission handling, or conversation resume. Sending a message with attachments emits an `error` event rather than being silently ignored. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
 
 ## 11. Codex provider errors (`--provider codex`)
 
@@ -153,7 +153,7 @@ See [docs/providers.md](providers.md) for Codex CLI installation and supported m
 
 **Symptom:** Model not supported / invocation fails
 - Codex's default model is `gpt-5.4`. Switch with `--model <name>` using a model your API key has access to.
-- The Codex provider does **not** support attachments, plan mode, permission handling, or conversation resume — these are no-ops. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
+- The Codex provider does **not** support attachments, plan mode, permission handling, or conversation resume. Sending a message with attachments emits an `error` event rather than being silently ignored. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
 
 ## 12. Expo dev build issues (app development)
 
