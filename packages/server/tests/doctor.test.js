@@ -1,8 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parse as parsePath, join } from 'node:path'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { parse as parsePath } from 'node:path'
 import { runDoctorChecks, checkBinary } from '../src/doctor.js'
 
 /**
@@ -129,40 +127,43 @@ describe('runDoctorChecks', () => {
     // installed. checkBinary should fall through to the candidate list
     // and still resolve the binary.
     //
-    // This test is self-contained: it creates a temp stub executable
-    // and passes its path via `candidates`, so it asserts the fallback
-    // logic regardless of what (if anything) is installed on the host.
-    // (Self-contained because `node --test-name-pattern` skips parent
-    // hooks, so setup/teardown live inside the `it` body.)
+    // Cross-platform strategy: use the running Node binary itself
+    // (`process.execPath`) as the "candidate". Node supports `--version`
+    // on every platform, so no shell-stub file is needed — this works
+    // on macOS, Linux, and Windows without branching.
+    //
+    // Self-contained inside the `it` body because `node --test-name-pattern`
+    // skips parent before/after hooks.
     const originalPath = process.env.PATH
-    const dir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-stub-'))
-    const stubPath = join(dir, 'fake-claude')
-    const stubVersion = 'fake-claude 9.9.9-stub'
     try {
-      writeFileSync(stubPath, `#!/bin/sh\necho "${stubVersion}"\n`)
-      chmodSync(stubPath, 0o755)
+      // Strip PATH so `which`/`where` in resolveBinary cannot find a node
+      // binary and the resolver must fall through to the candidate list.
+      process.env.PATH = ''
 
-      // Strip PATH so `which` in resolveBinary cannot find the stub and
-      // the resolver must fall through to the candidate list.
-      process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
-
-      const result = checkBinary('fake-claude', ['--version'], {
+      const result = checkBinary('definitely-not-a-real-binary-xyz', ['--version'], {
         parseVersion: (out) => out.trim().split('\n')[0],
         required: true,
-        candidates: [stubPath],
-        installHint: 'install fake-claude',
+        candidates: [process.execPath],
+        installHint: 'install definitely-not-a-real-binary-xyz',
       })
 
-      assert.equal(result.name, 'fake-claude')
+      assert.equal(result.name, 'definitely-not-a-real-binary-xyz')
       assert.equal(
         result.status,
         'pass',
         `expected pass via candidate fallback, got ${result.status}: ${result.message}`,
       )
-      assert.equal(result.message, stubVersion)
+      // Node prints a version like `v22.x.y` — assert on the shape rather
+      // than an exact value so the test survives Node patch upgrades.
+      assert.match(result.message, /^v\d+\.\d+\.\d+/)
     } finally {
-      process.env.PATH = originalPath
-      rmSync(dir, { recursive: true, force: true })
+      // `process.env.PATH = undefined` coerces to the literal string
+      // "undefined", so restore correctly when PATH was originally unset.
+      if (originalPath === undefined) {
+        delete process.env.PATH
+      } else {
+        process.env.PATH = originalPath
+      }
     }
   })
 })
