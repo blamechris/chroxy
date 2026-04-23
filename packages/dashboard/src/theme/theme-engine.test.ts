@@ -102,8 +102,8 @@ function parseRootTokensFromCss(): string[] {
   const cssPath = join(__dirname, 'theme.css')
   const css = readFileSync(cssPath, 'utf-8')
 
-  // Extract the `:root { ... }` block
-  const rootMatch = css.match(/:root\s*\{([\s\S]*?)\n\}/)
+  // Extract the `:root { ... }` block, allowing any whitespace before the closing brace
+  const rootMatch = css.match(/:root\s*\{([\s\S]*?)\s*\}/)
   if (!rootMatch || !rootMatch[1]) {
     throw new Error('Could not locate :root block in theme.css')
   }
@@ -124,8 +124,11 @@ function parseRootTokensFromCss(): string[] {
 
 describe('theme-engine ALL_CSS_VARS consistency', () => {
   it('every themeable --var in theme.css is registered in ALL_CSS_VARS cleanup list', async () => {
-    // Import the module so we can access ALL_CSS_VARS via the exported helper
-    const engineModule = await import('./theme-engine')
+    // We don't import ALL_CSS_VARS directly (it isn't exported) — instead we exercise
+    // the cleanup behavior via applyTheme(default), which iterates ALL_CSS_VARS and
+    // removes each property. Any token present in theme.css but missing from
+    // ALL_CSS_VARS will survive the cleanup and appear in `leaked`.
+    const { applyTheme } = await import('./theme-engine')
     const cssTokens = parseRootTokensFromCss()
 
     // Apply a synthetic theme that sets every parsed token, then switch back to
@@ -136,7 +139,7 @@ describe('theme-engine ALL_CSS_VARS consistency', () => {
       root.style.setProperty(`--${name}`, 'rgb(1, 2, 3)')
     }
 
-    engineModule.applyTheme(getThemeById('default'))
+    applyTheme(getThemeById('default'))
 
     const leaked: string[] = []
     for (const name of cssTokens) {
