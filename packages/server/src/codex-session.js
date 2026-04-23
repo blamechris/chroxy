@@ -29,13 +29,39 @@ const log = createLogger('codex')
  *   error        { message }
  */
 
-const DEFAULT_MODEL = 'gpt-5.4'
+/**
+ * No default model is hard-coded here.
+ *
+ * Previously this module shipped `DEFAULT_MODEL = 'gpt-5.4'`, which pinned
+ * the server to a specific Codex release and caused `codex exec -c model=...`
+ * to fail whenever that version wasn't available on the host. Instead we now
+ * pass `null` through to `BaseSession` when no model is supplied, and
+ * `buildCodexArgs()` below omits the `-c model=...` override so Codex CLI
+ * falls back to whatever default is configured in `~/.codex/config.toml`.
+ */
+const DEFAULT_MODEL = null
 
 const CODEX = resolveBinary('codex', [
   '/opt/homebrew/bin/codex',
   '/usr/local/bin/codex',
   '/usr/bin/codex',
 ])
+
+/**
+ * Build the argv passed to `codex exec`. Exported for unit testing.
+ *
+ * @param {string} text   User prompt
+ * @param {string|null} model  Optional model ID. If falsy, no `-c model=` flag
+ *                              is appended — Codex CLI uses its own default.
+ * @returns {string[]}
+ */
+export function buildCodexArgs(text, model) {
+  const args = ['exec', text, '--json']
+  if (model) {
+    args.push('-c', `model="${model}"`)
+  }
+  return args
+}
 
 export class CodexSession extends BaseSession {
   static get capabilities() {
@@ -52,6 +78,9 @@ export class CodexSession extends BaseSession {
   }
 
   constructor({ cwd, model, permissionMode } = {}) {
+    // `model` may be null/undefined — BaseSession coerces to null and
+    // buildCodexArgs() omits the `-c model=...` flag so Codex CLI defers
+    // to its own default from ~/.codex/config.toml.
     super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto' })
     this.resumeSessionId = null
     this._process = null
@@ -97,10 +126,7 @@ export class CodexSession extends BaseSession {
     this._isBusy = true
     this._currentMessageId = `codex-msg-${++this._messageCounter}`
 
-    const args = ['exec', text, '--json']
-    if (this.model) {
-      args.push('-c', `model="${this.model}"`)
-    }
+    const args = buildCodexArgs(text, this.model)
 
     let stderrBuf = ''
     const proc = spawn(CODEX, args, {
