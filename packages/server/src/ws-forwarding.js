@@ -100,6 +100,13 @@ function setupSessionForwarding(normalizer, ctx) {
     broadcast({ type: 'session_updated', sessionId, name })
   })
 
+  // Restore failures — surface to clients so the UI can show a "needs
+  // attention" card for sessions whose env vars / provider setup is broken
+  // (#2954). History stays on disk; client shows a retry affordance.
+  sessionManager.on('session_restore_failed', (payload) => {
+    broadcast({ type: 'session_restore_failed', ...payload })
+  })
+
   // Dev server preview: broadcast tunnel start/stop to clients
   devPreview.on('dev_preview_started', ({ sessionId, port, url }) => {
     broadcastToSession(sessionId, { type: 'dev_preview', port, url })

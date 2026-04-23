@@ -151,6 +151,34 @@ describe('setupForwarding', () => {
     })
   })
 
+  describe('session_restore_failed event (#2954)', () => {
+    it('broadcasts restore failure to all clients with full payload', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_restore_failed', {
+        sessionId: 'sess-bad',
+        name: 'Gemini',
+        provider: 'gemini-cli',
+        errorCode: 'RESTORE_FAILED',
+        errorMessage: 'GEMINI_API_KEY environment variable is not set',
+        originalHistoryPreserved: true,
+      })
+
+      const call = ctx.broadcast.mock.calls.find(c =>
+        c.arguments[0].type === 'session_restore_failed'
+      )
+      assert.ok(call, 'should broadcast session_restore_failed')
+      const msg = call.arguments[0]
+      assert.equal(msg.sessionId, 'sess-bad')
+      assert.equal(msg.name, 'Gemini')
+      assert.equal(msg.provider, 'gemini-cli')
+      assert.equal(msg.errorCode, 'RESTORE_FAILED')
+      assert.equal(msg.errorMessage, 'GEMINI_API_KEY environment variable is not set')
+      assert.equal(msg.originalHistoryPreserved, true)
+    })
+  })
+
   describe('setupForwarding with cliSession', () => {
     it('sets up CLI forwarding when cliSession provided (no sessionManager)', () => {
       const cliSession = new EventEmitter()
