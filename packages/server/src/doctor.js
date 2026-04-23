@@ -131,8 +131,9 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose } = {
   // Also handles npm workspace hoisting: deps may live in a parent
   // node_modules/ (e.g. `<repo>/node_modules/commander`) when installed
   // via `npm ci --workspace=@chroxy/server` at the workspace root. The
-  // helper walks up the tree and uses createRequire to match what Node
-  // actually does at import time.
+  // helper walks up the tree and uses createRequire (CommonJS resolution)
+  // as a reliable proxy for whether deps are installed — close enough to
+  // ESM import behavior for plain package-name lookups used here.
   const deps = checkDependencies({
     startDir: SERVER_PKG_DIR,
     probes: ['commander', 'ws', '@anthropic-ai/claude-agent-sdk'],

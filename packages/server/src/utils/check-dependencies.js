@@ -44,14 +44,17 @@ export function checkDependencies({ startDir, probes }) {
     }
   }
 
-  // 2. Walk-up fallback: look for node_modules/<probe>/ in each ancestor.
+  // 2. Walk-up fallback: look for node_modules/<probe>/package.json in each
+  // ancestor. Checking package.json (not just the directory) avoids false
+  // positives from empty dirs, partially extracted installs, or stray folders
+  // that Node would still fail to resolve at import time.
   // Stops at the filesystem root (when dirname returns the same path).
   let dir = startDir
   // Safety cap — real trees never exceed a few dozen levels.
   for (let i = 0; i < 64; i++) {
     for (const probe of probes) {
       const candidate = join(dir, 'node_modules', probe)
-      if (existsSync(candidate)) {
+      if (existsSync(join(candidate, 'package.json'))) {
         return { ok: true, foundAt: candidate }
       }
     }
