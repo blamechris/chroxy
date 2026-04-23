@@ -34,6 +34,14 @@ const CONFIG_SCHEMA = {
   tunnelConfig: 'object',
   legacyCli: 'boolean',
   provider: 'string',
+  // Providers the user opted into during `chroxy init`. Informational
+  // today — `provider` remains the authoritative runtime selector — but
+  // recording the user's intent here lets future features (dashboard,
+  // multi-provider routing) know which backends are expected to be
+  // configured without re-prompting. Entries should be valid provider
+  // ids from the `providers.js` registry (e.g. 'claude-sdk', 'codex',
+  // 'gemini'). Added with the `chroxy init` provider picker (#2950).
+  providers: 'array',
   maxPayload: 'number',
   maxToolInput: 'number',
   noEncrypt: 'boolean',
