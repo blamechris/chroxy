@@ -28,6 +28,8 @@ const ALL_CSS_VARS = [
   'accent-red-light', 'accent-red-subtle', 'accent-red-border',
   'border-primary', 'border-secondary', 'border-subtle', 'border-focus',
   'border-permission', 'border-question',
+  'banner-border-subtle',
+  'warning-fg',
   'status-connected', 'status-disconnected', 'status-connecting', 'status-restarting',
   'syntax-keyword', 'syntax-string', 'syntax-comment', 'syntax-number',
   'syntax-function', 'syntax-operator', 'syntax-punctuation', 'syntax-plain',
