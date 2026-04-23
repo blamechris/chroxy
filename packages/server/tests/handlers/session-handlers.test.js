@@ -258,14 +258,15 @@ describe('session-handlers', () => {
     })
 
     // Issue #2912: rename_session rejection must carry the same unified
-    // SESSION_TOKEN_MISMATCH shape as every other emit site.
-    it('includes boundSessionId and boundSessionName in the rejection payload', async () => {
+    // SESSION_TOKEN_MISMATCH shape as every other emit site. The bound-client
+    // mismatch path in handleRenameSession calls ctx.send synchronously and
+    // returns before doRename() — no await is needed.
+    it('includes boundSessionId and boundSessionName in the rejection payload', () => {
       const ctx = makeCtx()
       ctx._sessions.set('sess-a', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' })
       const client = makeClient({ boundSessionId: 'sess-a' })
 
       sessionHandlers.rename_session(makeWs(), client, { sessionId: 'sess-b', name: 'NewName' }, ctx)
-      await new Promise(r => setTimeout(r, 10))
 
       const [, sent] = ctx.send.lastCall
       assert.equal(sent.boundSessionId, 'sess-a')
