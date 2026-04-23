@@ -402,6 +402,8 @@ describe('App', () => {
       render(<App />)
       const banner = screen.getByTestId('tunnel-warming-banner')
       expect(banner).toBeInTheDocument()
+      expect(banner).not.toHaveClass('tunnel-warming-banner--hidden')
+      expect(banner.getAttribute('aria-hidden')).toBeNull()
       expect(banner.textContent).toMatch(/warming/i)
       expect(banner.textContent).toMatch(/3\/20/)
       expect(banner.textContent).toMatch(/QR will appear shortly/i)
@@ -416,6 +418,7 @@ describe('App', () => {
       render(<App />)
       const banner = screen.getByTestId('tunnel-warming-banner')
       expect(banner).toBeInTheDocument()
+      expect(banner).not.toHaveClass('tunnel-warming-banner--hidden')
       expect(banner.textContent).toMatch(/warming/i)
       expect(banner.textContent).toMatch(/QR will appear shortly/i)
     })
@@ -427,25 +430,67 @@ describe('App', () => {
         tunnelProgress: { attempt: 1, maxAttempts: 20 },
       }
       render(<App />)
-      expect(screen.getByTestId('tunnel-warming-banner')).toBeInTheDocument()
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner).not.toHaveClass('tunnel-warming-banner--hidden')
     })
 
-    it('does not show the banner when serverPhase is ready', () => {
+    it('keeps the banner slot rendered but hidden when serverPhase is ready (#2915)', () => {
       stateOverrides = {
         connectionPhase: 'connected',
         serverPhase: 'ready',
       }
       render(<App />)
-      expect(screen.queryByTestId('tunnel-warming-banner')).not.toBeInTheDocument()
+      // Reserved slot is always rendered to prevent layout shift — the banner
+      // becomes visually hidden rather than unmounted so surrounding content
+      // does not reflow when the tunnel finishes warming.
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner).toHaveClass('tunnel-warming-banner--hidden')
+      expect(banner.getAttribute('aria-hidden')).toBe('true')
+      expect(banner.textContent).toBe('')
     })
 
-    it('does not show the banner when serverPhase is null', () => {
+    it('keeps the banner slot rendered but hidden when serverPhase is null (#2915)', () => {
       stateOverrides = {
         connectionPhase: 'connected',
         serverPhase: null,
       }
       render(<App />)
-      expect(screen.queryByTestId('tunnel-warming-banner')).not.toBeInTheDocument()
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner).toHaveClass('tunnel-warming-banner--hidden')
+      expect(banner.getAttribute('aria-hidden')).toBe('true')
+      expect(banner.textContent).toBe('')
+    })
+
+    it('preserves identical banner slot geometry across warming ↔ connected transitions (#2915)', () => {
+      // Warming state
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'tunnel_warming',
+        tunnelProgress: { attempt: 3, maxAttempts: 20 },
+      }
+      const { rerender } = render(<App />)
+      const warmingBanner = screen.getByTestId('tunnel-warming-banner')
+      const warmingClasses = Array.from(warmingBanner.classList).sort()
+      const warmingTagName = warmingBanner.tagName
+
+      // Transition to connected/ready state
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'ready',
+      }
+      rerender(<App />)
+      const readyBanner = screen.getByTestId('tunnel-warming-banner')
+
+      // Same element type and present in the same position in the DOM tree,
+      // only differing by the --hidden modifier class. No insertion/removal
+      // means no layout shift in surrounding content.
+      expect(readyBanner.tagName).toBe(warmingTagName)
+      expect(warmingClasses).not.toContain('tunnel-warming-banner--hidden')
+      expect(readyBanner).toHaveClass('tunnel-warming-banner--hidden')
+      expect(readyBanner).toHaveClass('tunnel-warming-banner')
     })
   })
 })
