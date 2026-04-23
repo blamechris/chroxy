@@ -49,10 +49,12 @@ describe('CreateSessionModal — dynamic providers (#2948)', () => {
     expect(modalSrc).toMatch(/fetchProviders/);
   });
 
-  test('renders provider label via a PROVIDER_LABELS lookup with name fallback', () => {
+  test('renders provider label via the shared label helper with name fallback', () => {
     // Must render a human-readable label (e.g. "Claude Code (SDK)") and fall
-    // back to the raw provider name if unknown.
-    expect(modalSrc).toMatch(/PROVIDER_LABELS/);
+    // back to the raw provider name if unknown. The helper (getProviderLabel)
+    // or the raw PROVIDER_LABELS map is acceptable — both end up in the same
+    // lookup with the same fallback semantics.
+    expect(modalSrc).toMatch(/getProviderLabel|PROVIDER_LABELS/);
   });
 
   test('iterates availableProviders to render chips', () => {

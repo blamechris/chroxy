@@ -14,7 +14,7 @@ import {
 import { useConnectionStore } from '../store/connection';
 import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
-import { PROVIDER_LABELS } from '../constants/providers';
+import { getProviderLabel } from '../constants/providers';
 
 interface CreateSessionModalProps {
   visible: boolean;
@@ -49,7 +49,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     DEFAULT_PROVIDER_CHIP,
     ...availableProviders.map((p) => ({
       id: p.name,
-      label: PROVIDER_LABELS[p.name] || p.name,
+      label: getProviderLabel(p.name),
     })),
   ];
 

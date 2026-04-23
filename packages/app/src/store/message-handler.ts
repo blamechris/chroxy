@@ -2031,7 +2031,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'provider_list': {
       if (Array.isArray(msg.providers)) {
-        set({ availableProviders: msg.providers as ProviderInfo[] });
+        // Validate element shape before storing — guard against misbehaving
+        // servers / malicious endpoints that might send non-objects or
+        // objects without a string `name`.
+        const providers: ProviderInfo[] = msg.providers
+          .filter(
+            (p): p is { name: string; capabilities?: unknown } =>
+              !!p &&
+              typeof p === 'object' &&
+              typeof (p as { name?: unknown }).name === 'string',
+          )
+          .map((p) => {
+            const entry: ProviderInfo = { name: p.name };
+            if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
+              entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
+            }
+            return entry;
+          });
+        set({ availableProviders: providers });
       }
       break;
     }
