@@ -507,8 +507,16 @@ export function loadConnection(): { url: string; token: string } | null {
   return _storage.loadConnection() as { url: string; token: string } | null
 }
 
-export function clearConnection(): void {
-  _storage.clearConnection()
+/**
+ * Wipe the persisted connection URL + token from localStorage.
+ *
+ * NOTE: Storage-only. This does NOT close the active WebSocket, reset in-memory
+ * store state, or navigate the UI. Use the store-level `clearSavedConnection()`
+ * for the full "forget this server" flow, or `disconnect()` to close the live
+ * socket.
+ */
+export function clearSavedCredentials(): void {
+  _storage.clearSavedCredentials()
 }
 
 // ---------------------------------------------------------------------------

@@ -37,8 +37,17 @@ export interface StorageAdapter {
   saveConnection(url: string, token: string): void | Promise<void>
   /** Load saved connection. Returns null if none saved. */
   loadConnection(): { url: string; token: string } | null | Promise<{ url: string; token: string } | null>
-  /** Clear saved connection. */
-  clearConnection(): void | Promise<void>
+  /**
+   * Wipe the persisted connection URL + token from storage only.
+   *
+   * NOTE: This is a storage-only operation. It does NOT close the active WebSocket,
+   * reset in-memory store state, or trigger UI navigation. Callers who want the
+   * full "forget this server" user flow should use the store-level
+   * `clearSavedConnection()` helper, which chains this together with resetting
+   * the `savedConnection` state. Callers who want to close the live socket
+   * should use `disconnect()`.
+   */
+  clearSavedCredentials(): void | Promise<void>
 }
 
 /** Combined platform adapters passed to the message handler factory. */

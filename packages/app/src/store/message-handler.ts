@@ -632,7 +632,15 @@ export async function loadConnection(): Promise<{ url: string; token: string } |
   return null;
 }
 
-export async function clearConnection(): Promise<void> {
+/**
+ * Wipe the persisted connection URL + token from SecureStore.
+ *
+ * NOTE: Storage-only. This does NOT close the active WebSocket, reset in-memory
+ * store state, or navigate the UI. Use the store-level `clearSavedConnection()`
+ * for the full "forget this server" flow (storage + state), or `disconnect()`
+ * to close the live socket + reset in-memory state.
+ */
+export async function clearSavedCredentials(): Promise<void> {
   try {
     await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
     await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
@@ -1045,10 +1053,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
                   // Close the active socket, reset in-memory state AND
                   // forget the stored credentials — otherwise ConnectScreen
                   // auto-reconnects with the same bound token and the user
-                  // is stuck. `clearConnection` alone is a SecureStore wipe;
-                  // it doesn't touch the live socket. `disconnect()` handles
-                  // the socket + in-memory state; `clearSavedConnection()`
-                  // wipes storage.
+                  // is stuck. `clearSavedCredentials` alone is a SecureStore
+                  // wipe; it doesn't touch the live socket. `disconnect()`
+                  // handles the socket + in-memory state;
+                  // `clearSavedConnection()` wipes storage + state.
                   const s = getStore().getState();
                   try { s.disconnect(); } catch { /* best-effort */ }
                   const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
