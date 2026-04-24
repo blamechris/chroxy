@@ -322,6 +322,9 @@ export declare const UnsubscribeSessionsSchema: z.ZodObject<{
 export declare const ListProvidersSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
 }, z.core.$strip>;
+export declare const ListSkillsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"list_skills">;
+}, z.core.$strip>;
 export declare const ListReposSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_repos">;
 }, z.core.$strip>;
@@ -565,6 +568,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionIds: z.ZodArray<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"list_skills">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_repos">;
 }, z.core.$strip>, z.ZodObject<{

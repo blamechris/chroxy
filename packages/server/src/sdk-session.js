@@ -117,8 +117,8 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox } = {}) {
-    super({ cwd, model, permissionMode })
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir } = {}) {
+    super({ cwd, model, permissionMode, skillsDir })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -213,12 +213,18 @@ export class SdkSession extends BaseSession {
     let didStreamText = false
 
     const sdkPermMode = this._sdkPermissionMode()
+    // Skills MVP (#2957) — append shared skills via SDK systemPrompt.append.
+    const skillsText = this._buildSystemPrompt()
+    const systemPrompt = { type: 'preset', preset: 'claude_code' }
+    if (skillsText) {
+      systemPrompt.append = skillsText
+    }
     const options = {
       cwd: this.cwd,
       permissionMode: sdkPermMode,
       includePartialMessages: true,
       settingSources: ['user', 'project', 'local'],
-      systemPrompt: { type: 'preset', preset: 'claude_code' },
+      systemPrompt,
       tools: { type: 'preset', preset: 'claude_code' },
     }
 

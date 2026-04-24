@@ -206,6 +206,7 @@ function _isSecureRequest(req) {
  *   { type: 'list_files', path? }                       — request file listing for a path
  *   { type: 'list_providers' }                          — request available provider list
  *   { type: 'list_repos' }                              — request workspace repository list
+ *   { type: 'list_skills' }                             — request active skills list
  *   { type: 'pair', pairingCode }                       — pair with another device via pairing code
  *   { type: 'query_permission_audit', last? }           — query permission audit log
  *   { type: 'remove_repo', path }                       — remove a repository path from workspace
@@ -306,6 +307,7 @@ function _isSecureRequest(req) {
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
  *   { type: 'provider_list', providers }                — available providers
+ *   { type: 'skills_list', skills }                     — active skills (name, description per entry)
  *   { type: 'push_token_error', message }               — push token registration error
  *   { type: 'cost_update', sessionId, cost }            — session cost update
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit

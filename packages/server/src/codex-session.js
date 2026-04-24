@@ -143,13 +143,16 @@ export class CodexSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // buildCodexArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto' })
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto', skillsDir })
     this.resumeSessionId = null
     this._process = null
+    // Skills MVP (#2957) — Codex does not accept a system-prompt flag, so
+    // prepend the skills text to the first user message only.
+    this._skillsPrepended = false
   }
 
   start() {
@@ -203,7 +206,18 @@ export class CodexSession extends BaseSession {
     this._isBusy = true
     this._currentMessageId = `codex-msg-${++this._messageCounter}`
 
-    const args = buildCodexArgs(text, this.model)
+    // Skills MVP (#2957) — prepend skills to the first user message of the
+    // session (Codex CLI has no --system-prompt flag).
+    let effectiveText = text
+    if (!this._skillsPrepended) {
+      const skillsText = this._buildSystemPrompt()
+      if (skillsText) {
+        effectiveText = `${skillsText}\n\n---\n\n${text}`
+      }
+      this._skillsPrepended = true
+    }
+
+    const args = buildCodexArgs(effectiveText, this.model)
 
     let stderrBuf = ''
     const proc = spawn(CODEX, args, {
