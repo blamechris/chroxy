@@ -177,6 +177,92 @@ pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
     out
 }
 
+/// Build an enriched PATH string for the spawned server child process.
+///
+/// macOS GUI apps (including launchd-launched apps like Tauri tray binaries)
+/// inherit a minimal PATH — typically `/usr/bin:/bin:/usr/sbin:/sbin` — that
+/// omits Homebrew, nvm, pipx, npm-global, and other user install locations.
+/// Without enrichment, any subprocess the server spawns (claude binary, git,
+/// cloudflared, hook scripts, MCP servers) will silently fail to resolve
+/// common tools.
+///
+/// This is a pure function so it can be unit-tested without touching the real
+/// environment or filesystem. The caller is responsible for supplying
+/// `base_path` (usually from `std::env::var("PATH")`) and `home_dir` (usually
+/// from `dirs::home_dir()`).
+///
+/// Semantics:
+/// - `node_bin` is always prepended first so the bundled Node is preferred.
+/// - Common system bins (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
+///   `/bin`) are prepended next on Unix.
+/// - User install dirs (`~/.local/bin`, `~/.npm-global/bin`,
+///   `~/.claude/local/node_modules/.bin`) are prepended when `home_dir` is
+///   `Some`. They are NOT filesystem-checked — the goal is defense-in-depth,
+///   and a non-existent dir on PATH is harmless.
+/// - Directories already present in `base_path` are skipped to avoid
+///   duplicates, but the check is conservative (substring match) rather than
+///   element-level parsing, which matches the historical behavior.
+/// - `base_path` is appended verbatim at the end.
+///
+/// On Windows, only `node_bin` and `base_path` are joined — the user install
+/// dirs and Unix-specific system bins do not apply.
+pub(crate) fn build_enriched_path(
+    base_path: &str,
+    node_bin: &str,
+    home_dir: Option<&std::path::Path>,
+    path_sep: &str,
+) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+
+    // Bundled Node directory — always first so it wins over any system node.
+    if !node_bin.is_empty() {
+        dirs.push(node_bin.to_string());
+    }
+
+    // System bins (Unix). We leave Windows PATH handling to the OS default
+    // because `%PATH%` semantics and typical install locations differ.
+    #[cfg(unix)]
+    {
+        for dir in &[
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ] {
+            if !base_path.contains(dir) && !dirs.iter().any(|d| d == dir) {
+                dirs.push((*dir).to_string());
+            }
+        }
+    }
+
+    // User install dirs — only on Unix, and only when we know $HOME.
+    #[cfg(unix)]
+    if let Some(home) = home_dir {
+        for rel in &[
+            ".local/bin",
+            ".npm-global/bin",
+            ".claude/local/node_modules/.bin",
+        ] {
+            let candidate = home.join(rel).display().to_string();
+            if !base_path.contains(&candidate) && !dirs.iter().any(|d| d == &candidate) {
+                dirs.push(candidate);
+            }
+        }
+    }
+
+    // Silence unused-param warnings on Windows builds.
+    #[cfg(windows)]
+    let _ = home_dir;
+
+    if dirs.is_empty() {
+        return base_path.to_string();
+    }
+    if base_path.is_empty() {
+        return dirs.join(path_sep);
+    }
+    format!("{}{}{}", dirs.join(path_sep), path_sep, base_path)
+}
+
 /// Current state of the server process.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerStatus {
@@ -738,35 +824,33 @@ impl ServerManager {
         let mut cmd = Command::new(&node_path);
         cmd.arg(&cli_js).arg("start");
 
-        // Build a comprehensive PATH.  macOS GUI apps inherit a minimal
-        // PATH (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
-        // nvm, and tools like cloudflared. Prepend common locations.
-        let node_bin = node_path.parent().unwrap().display().to_string();
+        // Build a comprehensive PATH. macOS GUI apps launched via launchd
+        // (including this Tauri tray binary) inherit a minimal PATH
+        // (`/usr/bin:/bin:/usr/sbin:/sbin`) that misses Homebrew, nvm,
+        // npm-global, pipx, `~/.claude/local/node_modules/.bin`, and
+        // cloudflared. Without enrichment, every subprocess the server
+        // spawns (claude CLI, git, hooks, MCP servers) will silently fail
+        // to resolve common tools. See issue #2893 for the defense-in-depth
+        // rationale — this is the root-cause fix, complementing per-binary
+        // `resolveBinary()` fallback lists in the Node server.
+        let node_bin = node_path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         let base_path = std::env::var("PATH").unwrap_or_default();
-        let mut extra_dirs: Vec<String> = vec![node_bin];
-        // Homebrew (macOS only)
-        #[cfg(target_os = "macos")]
-        for dir in &["/opt/homebrew/bin", "/usr/local/bin"] {
-            if !base_path.contains(dir) {
-                extra_dirs.push(dir.to_string());
-            }
-        }
-        // User-local bins (Unix)
-        #[cfg(unix)]
-        if let Some(home) = dirs::home_dir() {
-            let local_bin = home.join(".local/bin");
-            if local_bin.is_dir() {
-                extra_dirs.push(local_bin.display().to_string());
-            }
-        }
+        let home_dir = dirs::home_dir();
         #[cfg(unix)]
         let path_sep = ":";
         #[cfg(windows)]
         let path_sep = ";";
-        let full_path = format!("{}{}{}", extra_dirs.join(path_sep), path_sep, base_path);
+        let full_path =
+            build_enriched_path(&base_path, &node_bin, home_dir.as_deref(), path_sep);
         cmd.env("PATH", &full_path);
-        // Ensure HOME is set — macOS GUI apps may not inherit it
-        if let Some(home) = dirs::home_dir() {
+        // Ensure HOME is set — macOS GUI apps may not inherit it. Reuse the
+        // already-resolved `home_dir` so PATH and HOME are derived from the
+        // same value rather than risking a second, potentially divergent
+        // `dirs::home_dir()` lookup.
+        if let Some(ref home) = home_dir {
             cmd.env("HOME", home);
         }
         // Pass config as env vars (same pattern as supervisor.js)
@@ -1146,6 +1230,126 @@ impl Drop for ServerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- build_enriched_path --
+    //
+    // These tests pin down the pure PATH-enrichment helper used before
+    // spawning the Node server child. They exercise the Unix path shape
+    // because the helper is Unix-specific (Windows only gets node_bin +
+    // base_path).
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_prepends_node_bin_first() {
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", None, ":");
+        assert!(
+            out.starts_with("/tmp/node/bin:"),
+            "node_bin must be prepended first, got: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_appends_base_path_verbatim() {
+        let out = build_enriched_path("/existing:/stuff", "/tmp/node/bin", None, ":");
+        assert!(
+            out.ends_with("/existing:/stuff"),
+            "base_path should end the result, got: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_includes_system_bins_on_unix() {
+        // Base path is deliberately missing Homebrew + /usr/local/bin.
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", None, ":");
+        assert!(out.contains("/opt/homebrew/bin"), "homebrew missing: {}", out);
+        assert!(out.contains("/usr/local/bin"), "/usr/local/bin missing: {}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_skips_system_dir_already_in_base_path() {
+        let out = build_enriched_path(
+            "/opt/homebrew/bin:/usr/bin:/bin",
+            "/tmp/node/bin",
+            None,
+            ":",
+        );
+        // Homebrew appears exactly once (in the base path) — not prepended again.
+        let occurrences = out.matches("/opt/homebrew/bin").count();
+        assert_eq!(occurrences, 1, "homebrew duplicated in: {}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_includes_user_install_dirs_when_home_is_some() {
+        let home = std::path::PathBuf::from("/Users/alice");
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", Some(&home), ":");
+        assert!(
+            out.contains("/Users/alice/.local/bin"),
+            "~/.local/bin missing: {}",
+            out
+        );
+        assert!(
+            out.contains("/Users/alice/.npm-global/bin"),
+            "~/.npm-global/bin missing: {}",
+            out
+        );
+        assert!(
+            out.contains("/Users/alice/.claude/local/node_modules/.bin"),
+            "~/.claude/local/node_modules/.bin missing: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_omits_user_install_dirs_when_home_is_none() {
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", None, ":");
+        assert!(!out.contains(".local/bin"), "should not inject .local/bin without HOME: {}", out);
+        assert!(!out.contains(".npm-global/bin"), "should not inject .npm-global/bin without HOME: {}", out);
+        assert!(
+            !out.contains(".claude/local/node_modules/.bin"),
+            "should not inject claude-local without HOME: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_handles_empty_base_path() {
+        // An empty base PATH happens when `env -i` strips it — the helper
+        // must still produce a usable PATH (no leading/trailing separators,
+        // no empty elements).
+        let out = build_enriched_path("", "/tmp/node/bin", None, ":");
+        assert!(!out.is_empty());
+        assert!(!out.starts_with(':'), "leading separator: {}", out);
+        assert!(!out.ends_with(':'), "trailing separator: {}", out);
+        assert!(!out.contains("::"), "empty element: {}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_handles_empty_node_bin() {
+        // resolve_node22() could conceivably return a root path with no
+        // parent — guard against prepending an empty string (which would
+        // produce a leading `:` and silently search CWD).
+        let out = build_enriched_path("/usr/bin:/bin", "", None, ":");
+        assert!(!out.starts_with(':'), "leading separator: {}", out);
+        assert!(!out.contains("::"), "empty element: {}", out);
+    }
+
+    #[test]
+    fn build_enriched_path_honors_custom_separator() {
+        // Windows callers pass ";" — verify the helper does not hardcode ":".
+        let out = build_enriched_path("C:\\Windows;C:\\Windows\\System32", "C:\\node", None, ";");
+        // The windows branch only prepends node_bin + base_path.
+        assert!(out.starts_with("C:\\node;"), "unexpected prefix: {}", out);
+        assert!(out.ends_with("C:\\Windows;C:\\Windows\\System32"), "unexpected suffix: {}", out);
+    }
 
     #[test]
     fn initial_generation_is_zero() {
