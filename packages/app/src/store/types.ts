@@ -168,6 +168,22 @@ export interface PermissionRule {
   pattern?: string;
 }
 
+export interface ProviderCapabilities {
+  permissions?: boolean;
+  inProcessPermissions?: boolean;
+  modelSwitch?: boolean;
+  permissionModeSwitch?: boolean;
+  planMode?: boolean;
+  resume?: boolean;
+  terminal?: boolean;
+  thinkingLevel?: boolean;
+}
+
+export interface ProviderInfo {
+  name: string;
+  capabilities?: ProviderCapabilities;
+}
+
 export interface SessionState extends BaseSessionState {
   activityState: SessionActivity;
   sessionRules?: PermissionRule[];
@@ -251,6 +267,9 @@ export interface ConnectionState {
 
   // Available permission modes from server (CLI mode)
   availablePermissionModes: { id: string; label: string }[];
+
+  // Available providers from server (for session creation UI)
+  availableProviders: ProviderInfo[];
 
   // Connected clients (multi-client awareness)
   myClientId: string | null;
@@ -373,6 +392,9 @@ export interface ConnectionState {
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
+
+  // Providers
+  fetchProviders: () => void;
 
   // Slash commands
   fetchSlashCommands: () => void;

@@ -960,21 +960,25 @@ export function App() {
         onStartServer={isTauri() ? handleStartServer : undefined}
       />
 
-      {/* Tunnel warming banner — shown during Cloudflare DNS propagation (#2836) */}
-      {isTunnelWarming && (
-        <div
-          className="tunnel-warming-banner"
-          data-testid="tunnel-warming-banner"
-          role="status"
-          aria-live="polite"
-        >
-          Tunnel warming up
-          {tunnelProgress
-            ? `… attempt ${tunnelProgress.attempt}/${tunnelProgress.maxAttempts}`
-            : '…'}{' '}
-          (QR will appear shortly)
-        </div>
-      )}
+      {/* Tunnel warming banner — shown during Cloudflare DNS propagation (#2836).
+          Always rendered as a fixed-height slot to avoid layout shift when toggled (#2915). */}
+      <div
+        className={`tunnel-warming-banner${isTunnelWarming ? '' : ' tunnel-warming-banner--hidden'}`}
+        data-testid="tunnel-warming-banner"
+        role="status"
+        aria-live="polite"
+        aria-hidden={isTunnelWarming ? undefined : true}
+      >
+        {isTunnelWarming ? (
+          <>
+            Tunnel warming up
+            {tunnelProgress
+              ? `… attempt ${tunnelProgress.attempt}/${tunnelProgress.maxAttempts}`
+              : '…'}{' '}
+            (QR will appear shortly)
+          </>
+        ) : null}
+      </div>
 
       {/* Header */}
       <header id="header">

@@ -550,7 +550,7 @@
 }
 
 .tab-status-dot.status-busy {
-  background: var(--status-warning, #f59e0b);
+  background: var(--warning-fg, #fbbf24);
   animation: pulse 1.5s infinite;
 }
 
@@ -1552,13 +1552,38 @@
 .btn-retry:hover { opacity: 0.85; }
 
 /* ---- Tunnel Warming Banner (#2836) ---- */
+/* Always rendered as a fixed-height reserved slot so toggling the warming
+   message does not shift the header/toolbar below it (#2915). The slot
+   height is fixed regardless of content so the DOM height stays constant
+   across warming ↔ connected transitions. */
 .tunnel-warming-banner {
+  box-sizing: border-box;
+  height: 2rem;
   padding: 0.5rem 1rem;
   background: var(--bg-secondary, #1a1a2e);
   color: var(--warning-fg, #fbbf24);
   border-bottom: 1px solid var(--banner-border-subtle, #252540);
   font-size: 0.85rem;
+  line-height: 1;
   text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: opacity 120ms ease-out;
+}
+
+/* Reserved-slot placeholder: keeps the same geometry but is visually
+   neutral. Uses visibility:hidden so assistive tech skips it, while the
+   box itself continues to occupy layout space. The background/border are
+   removed so the placeholder is indistinguishable from the surrounding
+   chrome. aria-hidden is also set on the element in the React layer. */
+.tunnel-warming-banner--hidden {
+  visibility: hidden;
+  background: transparent;
+  border-bottom-color: transparent;
+  color: transparent;
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* Directory Browser (#1434) */
@@ -4013,7 +4038,7 @@
   padding: 0 4px;
   border-radius: 3px;
 }
-.file-tree-git.git-modified { color: #e8a838; }
+.file-tree-git.git-modified { color: var(--warning-fg, #fbbf24); }
 .file-tree-git.git-added { color: #4eca6a; }
 .file-tree-git.git-deleted { color: #ff5b5b; }
 .file-tree-git.git-renamed { color: #4a9eff; }
@@ -4060,9 +4085,9 @@
 }
 
 .file-viewer-truncated {
-  color: var(--warning, #e8a838);
+  color: var(--warning-fg, #fbbf24);
   font-size: 11px;
-  background: rgba(232, 168, 56, 0.15);
+  background: var(--warning-bg-subtle, #fbbf2422);
   padding: 1px 6px;
   border-radius: 3px;
 }

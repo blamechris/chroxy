@@ -98,7 +98,7 @@ pub(crate) fn cloudflared_pids_to_kill(procs: &[(u32, String)], port: u16) -> Ve
 
 /// Parse one line of `ps -eo pid=,command=` output into (pid, full_command).
 /// Returns `None` for malformed lines.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn parse_ps_line(line: &str) -> Option<(u32, String)> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
@@ -175,6 +175,92 @@ pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
         out.push((pid as u32, cmd.to_string()));
     }
     out
+}
+
+/// Build an enriched PATH string for the spawned server child process.
+///
+/// macOS GUI apps (including launchd-launched apps like Tauri tray binaries)
+/// inherit a minimal PATH — typically `/usr/bin:/bin:/usr/sbin:/sbin` — that
+/// omits Homebrew, nvm, pipx, npm-global, and other user install locations.
+/// Without enrichment, any subprocess the server spawns (claude binary, git,
+/// cloudflared, hook scripts, MCP servers) will silently fail to resolve
+/// common tools.
+///
+/// This is a pure function so it can be unit-tested without touching the real
+/// environment or filesystem. The caller is responsible for supplying
+/// `base_path` (usually from `std::env::var("PATH")`) and `home_dir` (usually
+/// from `dirs::home_dir()`).
+///
+/// Semantics:
+/// - `node_bin` is always prepended first so the bundled Node is preferred.
+/// - Common system bins (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
+///   `/bin`) are prepended next on Unix.
+/// - User install dirs (`~/.local/bin`, `~/.npm-global/bin`,
+///   `~/.claude/local/node_modules/.bin`) are prepended when `home_dir` is
+///   `Some`. They are NOT filesystem-checked — the goal is defense-in-depth,
+///   and a non-existent dir on PATH is harmless.
+/// - Directories already present in `base_path` are skipped to avoid
+///   duplicates, but the check is conservative (substring match) rather than
+///   element-level parsing, which matches the historical behavior.
+/// - `base_path` is appended verbatim at the end.
+///
+/// On Windows, only `node_bin` and `base_path` are joined — the user install
+/// dirs and Unix-specific system bins do not apply.
+pub(crate) fn build_enriched_path(
+    base_path: &str,
+    node_bin: &str,
+    home_dir: Option<&std::path::Path>,
+    path_sep: &str,
+) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+
+    // Bundled Node directory — always first so it wins over any system node.
+    if !node_bin.is_empty() {
+        dirs.push(node_bin.to_string());
+    }
+
+    // System bins (Unix). We leave Windows PATH handling to the OS default
+    // because `%PATH%` semantics and typical install locations differ.
+    #[cfg(unix)]
+    {
+        for dir in &[
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ] {
+            if !base_path.contains(dir) && !dirs.iter().any(|d| d == dir) {
+                dirs.push((*dir).to_string());
+            }
+        }
+    }
+
+    // User install dirs — only on Unix, and only when we know $HOME.
+    #[cfg(unix)]
+    if let Some(home) = home_dir {
+        for rel in &[
+            ".local/bin",
+            ".npm-global/bin",
+            ".claude/local/node_modules/.bin",
+        ] {
+            let candidate = home.join(rel).display().to_string();
+            if !base_path.contains(&candidate) && !dirs.iter().any(|d| d == &candidate) {
+                dirs.push(candidate);
+            }
+        }
+    }
+
+    // Silence unused-param warnings on Windows builds.
+    #[cfg(windows)]
+    let _ = home_dir;
+
+    if dirs.is_empty() {
+        return base_path.to_string();
+    }
+    if base_path.is_empty() {
+        return dirs.join(path_sep);
+    }
+    format!("{}{}{}", dirs.join(path_sep), path_sep, base_path)
 }
 
 /// Current state of the server process.
@@ -426,32 +512,9 @@ impl ServerManager {
     /// sends SIGTERM / terminates. Waits briefly for them to exit.
     #[cfg(unix)]
     fn kill_orphan_cloudflared(port: u16, log_buf: &Arc<Mutex<VecDeque<String>>>) {
-        let output = match Command::new("ps").args(["-eo", "pid=,command="]).output() {
-            Ok(out) => out,
-            Err(err) => {
-                let msg = format!(
-                    "[cloudflared-cleanup] ps spawn failed: {} — skipping orphan cleanup on port {}",
-                    err, port
-                );
-                eprintln!("{}", msg);
-                Self::push_log_line(log_buf, msg);
-                return;
-            }
-        };
-
-        if !output.status.success() {
-            let stderr_snip = Self::stderr_snippet(&output.stderr);
-            let msg = format!(
-                "[cloudflared-cleanup] ps exited {} — skipping orphan cleanup on port {}: {}",
-                output.status, port, stderr_snip
-            );
-            eprintln!("{}", msg);
-            Self::push_log_line(log_buf, msg);
-            return;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let procs: Vec<(u32, String)> = stdout.lines().filter_map(parse_ps_line).collect();
+        let procs = Self::enumerate_unix_processes_with_runner(port, log_buf, &|| {
+            Command::new("ps").args(["-eo", "pid=,command="]).output()
+        });
 
         let pids = cloudflared_pids_to_kill(&procs, port);
         if pids.is_empty() {
@@ -507,6 +570,54 @@ impl ServerManager {
         thread::sleep(Duration::from_millis(500));
     }
 
+    /// Testable unix enumerator. Runs the injected process-listing command
+    /// via `runner`, logs any failure to `log_buf`, and returns the parsed
+    /// (pid, command_line) pairs (empty on failure).
+    ///
+    /// Production callers pass a runner that spawns `ps -eo pid=,command=`;
+    /// tests pass a closure that returns a synthetic `io::Error` or
+    /// non-success `Output` to exercise the failure-path diagnostics
+    /// added in #2868 (issue #2887).
+    ///
+    /// Available on unix (production) and in tests on any platform so the
+    /// failure paths can be exercised deterministically on dev hosts. The
+    /// `#[cfg(any(unix, test))]` gate matches `parse_ps_line` — both symbols
+    /// must be available together, and neither needs to exist in a Windows
+    /// release build where `kill_orphan_cloudflared` takes a different path.
+    #[cfg(any(unix, test))]
+    fn enumerate_unix_processes_with_runner(
+        port: u16,
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+        runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+    ) -> Vec<(u32, String)> {
+        let output = match runner() {
+            Ok(out) => out,
+            Err(err) => {
+                let msg = format!(
+                    "[cloudflared-cleanup] ps spawn failed: {} — skipping orphan cleanup on port {}",
+                    err, port
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(log_buf, msg);
+                return Vec::new();
+            }
+        };
+
+        if !output.status.success() {
+            let stderr_snip = Self::stderr_snippet(&output.stderr);
+            let msg = format!(
+                "[cloudflared-cleanup] ps exited {} — skipping orphan cleanup on port {}: {}",
+                output.status, port, stderr_snip
+            );
+            eprintln!("{}", msg);
+            Self::push_log_line(log_buf, msg);
+            return Vec::new();
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().filter_map(parse_ps_line).collect()
+    }
+
     /// Enumerate (pid, command_line) pairs on Windows.
     ///
     /// Primary: `wmic process get ProcessId,CommandLine /format:csv`
@@ -520,10 +631,44 @@ impl ServerManager {
     /// JSON on a single line.
     #[cfg(windows)]
     fn enumerate_windows_processes(log_buf: &Arc<Mutex<VecDeque<String>>>) -> Vec<(u32, String)> {
-        match Command::new("wmic")
-            .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
-            .output()
-        {
+        Self::enumerate_windows_processes_with_runners(
+            log_buf,
+            &|| {
+                Command::new("wmic")
+                    .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
+                    .output()
+            },
+            &|| {
+                Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+                    ])
+                    .output()
+            },
+        )
+    }
+
+    /// Testable windows enumerator. Accepts separate runners for the `wmic`
+    /// primary path and the PowerShell `Get-CimInstance` fallback so each
+    /// of the four failure modes (wmic spawn err, wmic non-success,
+    /// powershell spawn err, powershell non-success) can be exercised by
+    /// unit tests without a real Windows host (issue #2887).
+    ///
+    /// Logs exactly match the pre-refactor strings from #2868 so consumers
+    /// scraping the log buffer for diagnostics see no wire-format change.
+    ///
+    /// Available on windows (production) and in tests on any platform so
+    /// the failure paths can be exercised deterministically on dev hosts.
+    #[cfg(any(windows, test))]
+    fn enumerate_windows_processes_with_runners(
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+        wmic_runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+        powershell_runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+    ) -> Vec<(u32, String)> {
+        match wmic_runner() {
             Ok(output) => {
                 if output.status.success() && !output.stdout.is_empty() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -565,15 +710,7 @@ impl ServerManager {
         }
 
         // wmic absent or returned nothing — fall back to PowerShell.
-        let output = match Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
-            ])
-            .output()
-        {
+        let output = match powershell_runner() {
             Ok(out) => out,
             Err(err) => {
                 let msg = format!(
@@ -687,35 +824,33 @@ impl ServerManager {
         let mut cmd = Command::new(&node_path);
         cmd.arg(&cli_js).arg("start");
 
-        // Build a comprehensive PATH.  macOS GUI apps inherit a minimal
-        // PATH (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
-        // nvm, and tools like cloudflared. Prepend common locations.
-        let node_bin = node_path.parent().unwrap().display().to_string();
+        // Build a comprehensive PATH. macOS GUI apps launched via launchd
+        // (including this Tauri tray binary) inherit a minimal PATH
+        // (`/usr/bin:/bin:/usr/sbin:/sbin`) that misses Homebrew, nvm,
+        // npm-global, pipx, `~/.claude/local/node_modules/.bin`, and
+        // cloudflared. Without enrichment, every subprocess the server
+        // spawns (claude CLI, git, hooks, MCP servers) will silently fail
+        // to resolve common tools. See issue #2893 for the defense-in-depth
+        // rationale — this is the root-cause fix, complementing per-binary
+        // `resolveBinary()` fallback lists in the Node server.
+        let node_bin = node_path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         let base_path = std::env::var("PATH").unwrap_or_default();
-        let mut extra_dirs: Vec<String> = vec![node_bin];
-        // Homebrew (macOS only)
-        #[cfg(target_os = "macos")]
-        for dir in &["/opt/homebrew/bin", "/usr/local/bin"] {
-            if !base_path.contains(dir) {
-                extra_dirs.push(dir.to_string());
-            }
-        }
-        // User-local bins (Unix)
-        #[cfg(unix)]
-        if let Some(home) = dirs::home_dir() {
-            let local_bin = home.join(".local/bin");
-            if local_bin.is_dir() {
-                extra_dirs.push(local_bin.display().to_string());
-            }
-        }
+        let home_dir = dirs::home_dir();
         #[cfg(unix)]
         let path_sep = ":";
         #[cfg(windows)]
         let path_sep = ";";
-        let full_path = format!("{}{}{}", extra_dirs.join(path_sep), path_sep, base_path);
+        let full_path =
+            build_enriched_path(&base_path, &node_bin, home_dir.as_deref(), path_sep);
         cmd.env("PATH", &full_path);
-        // Ensure HOME is set — macOS GUI apps may not inherit it
-        if let Some(home) = dirs::home_dir() {
+        // Ensure HOME is set — macOS GUI apps may not inherit it. Reuse the
+        // already-resolved `home_dir` so PATH and HOME are derived from the
+        // same value rather than risking a second, potentially divergent
+        // `dirs::home_dir()` lookup.
+        if let Some(ref home) = home_dir {
             cmd.env("HOME", home);
         }
         // Pass config as env vars (same pattern as supervisor.js)
@@ -1095,6 +1230,126 @@ impl Drop for ServerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- build_enriched_path --
+    //
+    // These tests pin down the pure PATH-enrichment helper used before
+    // spawning the Node server child. They exercise the Unix path shape
+    // because the helper is Unix-specific (Windows only gets node_bin +
+    // base_path).
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_prepends_node_bin_first() {
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", None, ":");
+        assert!(
+            out.starts_with("/tmp/node/bin:"),
+            "node_bin must be prepended first, got: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_appends_base_path_verbatim() {
+        let out = build_enriched_path("/existing:/stuff", "/tmp/node/bin", None, ":");
+        assert!(
+            out.ends_with("/existing:/stuff"),
+            "base_path should end the result, got: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_includes_system_bins_on_unix() {
+        // Base path is deliberately missing Homebrew + /usr/local/bin.
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", None, ":");
+        assert!(out.contains("/opt/homebrew/bin"), "homebrew missing: {}", out);
+        assert!(out.contains("/usr/local/bin"), "/usr/local/bin missing: {}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_skips_system_dir_already_in_base_path() {
+        let out = build_enriched_path(
+            "/opt/homebrew/bin:/usr/bin:/bin",
+            "/tmp/node/bin",
+            None,
+            ":",
+        );
+        // Homebrew appears exactly once (in the base path) — not prepended again.
+        let occurrences = out.matches("/opt/homebrew/bin").count();
+        assert_eq!(occurrences, 1, "homebrew duplicated in: {}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_includes_user_install_dirs_when_home_is_some() {
+        let home = std::path::PathBuf::from("/Users/alice");
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", Some(&home), ":");
+        assert!(
+            out.contains("/Users/alice/.local/bin"),
+            "~/.local/bin missing: {}",
+            out
+        );
+        assert!(
+            out.contains("/Users/alice/.npm-global/bin"),
+            "~/.npm-global/bin missing: {}",
+            out
+        );
+        assert!(
+            out.contains("/Users/alice/.claude/local/node_modules/.bin"),
+            "~/.claude/local/node_modules/.bin missing: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_omits_user_install_dirs_when_home_is_none() {
+        let out = build_enriched_path("/usr/bin:/bin", "/tmp/node/bin", None, ":");
+        assert!(!out.contains(".local/bin"), "should not inject .local/bin without HOME: {}", out);
+        assert!(!out.contains(".npm-global/bin"), "should not inject .npm-global/bin without HOME: {}", out);
+        assert!(
+            !out.contains(".claude/local/node_modules/.bin"),
+            "should not inject claude-local without HOME: {}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_handles_empty_base_path() {
+        // An empty base PATH happens when `env -i` strips it — the helper
+        // must still produce a usable PATH (no leading/trailing separators,
+        // no empty elements).
+        let out = build_enriched_path("", "/tmp/node/bin", None, ":");
+        assert!(!out.is_empty());
+        assert!(!out.starts_with(':'), "leading separator: {}", out);
+        assert!(!out.ends_with(':'), "trailing separator: {}", out);
+        assert!(!out.contains("::"), "empty element: {}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_handles_empty_node_bin() {
+        // resolve_node22() could conceivably return a root path with no
+        // parent — guard against prepending an empty string (which would
+        // produce a leading `:` and silently search CWD).
+        let out = build_enriched_path("/usr/bin:/bin", "", None, ":");
+        assert!(!out.starts_with(':'), "leading separator: {}", out);
+        assert!(!out.contains("::"), "empty element: {}", out);
+    }
+
+    #[test]
+    fn build_enriched_path_honors_custom_separator() {
+        // Windows callers pass ";" — verify the helper does not hardcode ":".
+        let out = build_enriched_path("C:\\Windows;C:\\Windows\\System32", "C:\\node", None, ";");
+        // The windows branch only prepends node_bin + base_path.
+        assert!(out.starts_with("C:\\node;"), "unexpected prefix: {}", out);
+        assert!(out.ends_with("C:\\Windows;C:\\Windows\\System32"), "unexpected suffix: {}", out);
+    }
 
     #[test]
     fn initial_generation_is_zero() {
@@ -1670,21 +1925,298 @@ mod tests {
         assert!(snip.contains("hi"));
     }
 
-    // -- kill_orphan_cloudflared: enumeration-failure logging (#2868) --
+    // -- kill_orphan_cloudflared: enumeration-failure logging (#2868, #2887) --
 
     #[cfg(unix)]
     #[test]
     fn kill_orphan_cloudflared_logs_when_ps_spawn_fails() {
-        // We can't easily force `ps` to be missing, but we can verify the
-        // happy path doesn't panic and the log buffer handle is threaded
-        // through correctly. Real-world spawn failure on systems without
-        // `ps` (e.g. stripped container) is covered by the manual
-        // `Command::new("ps")` substitution above.
+        // Smoke test: the real call path on a dev machine where `ps`
+        // exists — proves the signature compiles and the happy path
+        // does not panic. Deterministic failure-path coverage lives in
+        // the `enumerate_unix_processes_*` tests below (#2887).
         let mgr = ServerManager::new();
         // Call with an obviously-unused port so no PIDs match.
         ServerManager::kill_orphan_cloudflared(1, &mgr.log_buffer);
-        // No assertions on buffer contents — on dev machines `ps` exists,
-        // so this just verifies the signature compiles and does not panic.
+    }
+
+    // -- enumerate_unix_processes_with_runner: deterministic unix
+    //    failure-path coverage via injected command factory (#2887) --
+
+    /// Build a synthetic non-success `Output`. Uses
+    /// `ExitStatus::from_raw` with a non-zero code so `.success()` is
+    /// false across both unix (raw wait status) and windows (raw
+    /// exit code) targets.
+    fn fake_failed_output(stderr: &[u8]) -> std::process::Output {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            // Encode exit code 2 in the high byte of wait(2) status.
+            std::process::ExitStatus::from_raw(2 << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(2)
+        };
+        std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    fn fake_ok_output(stdout: &[u8]) -> std::process::Output {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        };
+        std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn log_buffer_contains(
+        buf: &Arc<Mutex<VecDeque<String>>>,
+        needle: &str,
+    ) -> bool {
+        lock_or_recover(buf).iter().any(|line| line.contains(needle))
+    }
+
+    #[test]
+    fn enumerate_unix_processes_logs_and_returns_empty_on_spawn_err() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_unix_processes_with_runner(
+            9876,
+            &mgr.log_buffer,
+            &|| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no ps here")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] ps spawn failed: "),
+            "expected ps-spawn-failed log line, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "no ps here"),
+            "expected io::Error message in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "port 9876"),
+            "expected port in log line, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_unix_processes_logs_and_returns_empty_on_non_zero_exit() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_unix_processes_with_runner(
+            4242,
+            &mgr.log_buffer,
+            &|| Ok(fake_failed_output(b"ps: permission denied")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] ps exited "),
+            "expected ps-exited log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "ps: permission denied"),
+            "expected stderr snippet in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "port 4242"),
+            "expected port in log line, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_unix_processes_returns_parsed_pairs_on_success() {
+        let mgr = ServerManager::new();
+        let stdout = b"  1234 /usr/bin/cloudflared tunnel --url http://localhost:8765\n  5678 /bin/bash\n";
+        let procs = ServerManager::enumerate_unix_processes_with_runner(
+            8765,
+            &mgr.log_buffer,
+            &|| Ok(fake_ok_output(stdout)),
+        );
+        assert_eq!(procs.len(), 2);
+        assert_eq!(procs[0].0, 1234);
+        assert!(procs[0].1.contains("cloudflared"));
+        assert!(
+            lock_or_recover(&mgr.log_buffer).is_empty(),
+            "success path must not emit any log lines"
+        );
+    }
+
+    // -- enumerate_windows_processes_with_runners: deterministic
+    //    windows failure-path coverage via injected command factories
+    //    (#2887). All four paths run on dev macOS/Linux via cross-
+    //    platform `cfg(any(windows, test))` gating. --
+
+    #[test]
+    fn enumerate_windows_processes_logs_wmic_spawn_err_then_falls_back() {
+        let mgr = ServerManager::new();
+        // wmic spawn fails, powershell returns empty JSON array.
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "blocked by policy")),
+            &|| Ok(fake_ok_output(b"[]")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] wmic spawn failed "),
+            "expected wmic-spawn-failed log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "blocked by policy"),
+            "expected io::Error message in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "falling back to powershell"),
+            "expected fallback notice in log, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_logs_wmic_non_success_then_falls_back() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Ok(fake_failed_output(b"wmic: access denied")),
+            &|| Ok(fake_ok_output(b"[]")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] wmic exited "),
+            "expected wmic-exited log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "wmic: access denied"),
+            "expected stderr snippet in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "falling back to powershell"),
+            "expected fallback notice in log, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_logs_powershell_spawn_err() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            // wmic fails too so we actually reach the powershell fallback.
+            &|| Ok(fake_failed_output(b"wmic broken")),
+            &|| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "powershell missing")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] powershell spawn failed: "),
+            "expected powershell-spawn-failed log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "powershell missing"),
+            "expected io::Error message in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "cannot enumerate processes"),
+            "expected terminal diagnostic, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_logs_powershell_non_success() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Ok(fake_failed_output(b"wmic exit 1")),
+            &|| Ok(fake_failed_output(b"Get-CimInstance: The WMI provider returned an error")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] powershell exited "),
+            "expected powershell-exited log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "Get-CimInstance: The WMI provider returned an error"),
+            "expected stderr snippet in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "cannot enumerate processes"),
+            "expected terminal diagnostic, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_wmic_success_skips_powershell() {
+        let mgr = ServerManager::new();
+        let wmic_stdout = b"Node,CommandLine,ProcessId\r\nWIN-HOST,cloudflared tunnel --url http://localhost:8765,4242\r\n";
+        let powershell_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ps_flag = powershell_called.clone();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Ok(fake_ok_output(wmic_stdout)),
+            &|| {
+                ps_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(fake_ok_output(b"[]"))
+            },
+        );
+        assert!(!procs.is_empty(), "wmic success should yield parsed procs");
+        assert_eq!(procs[0].0, 4242);
+        assert!(
+            !powershell_called.load(std::sync::atomic::Ordering::SeqCst),
+            "powershell fallback must not run when wmic returns usable rows"
+        );
+        assert!(
+            lock_or_recover(&mgr.log_buffer).is_empty(),
+            "wmic-success path must not emit any log lines"
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_wmic_not_found_uses_distinct_log() {
+        // ErrorKind::NotFound is special-cased to "wmic not present"
+        // rather than "wmic spawn failed" so the diagnostic matches
+        // the systemic case (Windows 11 22H2+ ships without wmic).
+        let mgr = ServerManager::new();
+        ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "wmic not on PATH")),
+            &|| Ok(fake_ok_output(b"[]")),
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] wmic not present "),
+            "expected wmic-not-present log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            !log_buffer_contains(&mgr.log_buffer, "wmic spawn failed"),
+            "spawn-failed log must not appear for NotFound errors"
+        );
     }
 
     #[test]

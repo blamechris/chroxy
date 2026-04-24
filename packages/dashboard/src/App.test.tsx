@@ -420,6 +420,8 @@ describe('App', () => {
       render(<App />)
       const banner = screen.getByTestId('tunnel-warming-banner')
       expect(banner).toBeInTheDocument()
+      expect(banner).not.toHaveClass('tunnel-warming-banner--hidden')
+      expect(banner.getAttribute('aria-hidden')).toBeNull()
       expect(banner.textContent).toMatch(/warming/i)
       expect(banner.textContent).toMatch(/3\/20/)
       expect(banner.textContent).toMatch(/QR will appear shortly/i)
@@ -434,6 +436,7 @@ describe('App', () => {
       render(<App />)
       const banner = screen.getByTestId('tunnel-warming-banner')
       expect(banner).toBeInTheDocument()
+      expect(banner).not.toHaveClass('tunnel-warming-banner--hidden')
       expect(banner.textContent).toMatch(/warming/i)
       expect(banner.textContent).toMatch(/QR will appear shortly/i)
     })
@@ -445,25 +448,74 @@ describe('App', () => {
         tunnelProgress: { attempt: 1, maxAttempts: 20 },
       }
       render(<App />)
-      expect(screen.getByTestId('tunnel-warming-banner')).toBeInTheDocument()
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner).not.toHaveClass('tunnel-warming-banner--hidden')
     })
 
-    it('does not show the banner when serverPhase is ready', () => {
+    it('keeps the banner slot rendered but hidden when serverPhase is ready (#2915)', () => {
       stateOverrides = {
         connectionPhase: 'connected',
         serverPhase: 'ready',
       }
       render(<App />)
-      expect(screen.queryByTestId('tunnel-warming-banner')).not.toBeInTheDocument()
+      // Reserved slot is always rendered to prevent layout shift — the banner
+      // becomes visually hidden rather than unmounted so surrounding content
+      // does not reflow when the tunnel finishes warming.
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner).toHaveClass('tunnel-warming-banner--hidden')
+      expect(banner.getAttribute('aria-hidden')).toBe('true')
+      expect(banner.textContent).toBe('')
     })
 
-    it('does not show the banner when serverPhase is null', () => {
+    it('keeps the banner slot rendered but hidden when serverPhase is null (#2915)', () => {
       stateOverrides = {
         connectionPhase: 'connected',
         serverPhase: null,
       }
       render(<App />)
-      expect(screen.queryByTestId('tunnel-warming-banner')).not.toBeInTheDocument()
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner).toHaveClass('tunnel-warming-banner--hidden')
+      expect(banner.getAttribute('aria-hidden')).toBe('true')
+      expect(banner.textContent).toBe('')
+    })
+
+    it('preserves identical banner slot geometry across warming ↔ connected transitions (#2915)', () => {
+      // Warming state
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'tunnel_warming',
+        tunnelProgress: { attempt: 3, maxAttempts: 20 },
+      }
+      const { rerender } = render(<App />)
+      const warmingBanner = screen.getByTestId('tunnel-warming-banner')
+      const warmingClasses = new Set(warmingBanner.classList)
+
+      // Transition to connected/ready state
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'ready',
+      }
+      rerender(<App />)
+      const readyBanner = screen.getByTestId('tunnel-warming-banner')
+      const readyClasses = new Set(readyBanner.classList)
+
+      // DOM node identity: React must reuse the exact same element across the
+      // transition (not unmount/remount). A replaced node — even one with the
+      // same tagName and class — could still cause layout shift via CSS
+      // transitions or micro reflow.
+      expect(readyBanner).toBe(warmingBanner)
+      expect(readyBanner.isSameNode(warmingBanner)).toBe(true)
+
+      // Exact classList delta: only the --hidden modifier toggles. No other
+      // classes appear or disappear, which would indicate extra styling churn.
+      const added = [...readyClasses].filter((c) => !warmingClasses.has(c))
+      const removed = [...warmingClasses].filter((c) => !readyClasses.has(c))
+      expect(added).toEqual(['tunnel-warming-banner--hidden'])
+      expect(removed).toEqual([])
+      expect(readyBanner).toHaveClass('tunnel-warming-banner')
     })
   })
 })
