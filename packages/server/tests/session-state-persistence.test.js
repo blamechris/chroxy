@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'fs'
-import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { SessionStatePersistence } from '../src/session-state-persistence.js'
@@ -588,5 +588,66 @@ describe('SessionStatePersistence defaults', () => {
   it('allows overriding TTL', () => {
     const p = new SessionStatePersistence({ stateFilePath: '/tmp/test.json', stateTtlMs: 1000 })
     assert.equal(p._stateTtlMs, 1000)
+  })
+})
+
+describe('SessionStatePersistence rename-failure cleanup (regression: #2909)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-rename-fail-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  // Force both the .bak rotation and the final rename to fail by making
+  // `<stateFile>` and `<stateFile>.bak` non-empty directories. `renameSync`
+  // into a non-empty directory fails with ENOTEMPTY/EISDIR on POSIX, which
+  // is the closest portable analogue of a "transient FS error".
+  function blockRename() {
+    mkdirSync(stateFile)
+    writeFileSync(join(stateFile, 'sentinel'), 'block main rename')
+    mkdirSync(stateFile + '.bak')
+    writeFileSync(join(stateFile + '.bak', 'sentinel'), 'block bak rename')
+  }
+
+  it('removes the orphaned .tmp file when the final rename fails', () => {
+    blockRename()
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    assert.throws(
+      () => p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'T', cwd: '/tmp' }] }),
+      /EISDIR|ENOTEMPTY|EEXIST|EPERM|EACCES/
+    )
+
+    assert.equal(existsSync(stateFile + '.tmp'), false, 'orphaned .tmp file must be cleaned up')
+  })
+
+  it('surfaces the original rename error (does not swallow)', () => {
+    blockRename()
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    let caught = null
+    try {
+      p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'T', cwd: '/tmp' }] })
+    } catch (err) {
+      caught = err
+    }
+    assert.ok(caught, 'serializeState must re-throw')
+    const okCodes = new Set(['EISDIR', 'ENOTEMPTY', 'EEXIST', 'EPERM', 'EACCES'])
+    assert.ok(okCodes.has(caught.code), `unexpected error code: ${caught.code}`)
+  })
+
+  it('does not leak .tmp across repeated rename failures', () => {
+    blockRename()
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    assert.throws(() => p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'T', cwd: '/tmp' }] }))
+    assert.throws(() => p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's2', name: 'U', cwd: '/tmp' }] }))
+    assert.equal(existsSync(stateFile + '.tmp'), false, '.tmp should never leak across repeated failures')
   })
 })
