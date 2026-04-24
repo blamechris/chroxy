@@ -269,6 +269,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   availableModels: [],
   defaultModelId: null,
   availablePermissionModes: [],
+  availableProviders: [],
   myClientId: null,
   connectedClients: [],
   primaryClientId: null,
@@ -730,6 +731,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availableModels: [],
       defaultModelId: null,
       availablePermissionModes: [],
+      availableProviders: [],
       myClientId: null,
       connectedClients: [],
       primaryClientId: null,
@@ -1146,6 +1148,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'git_commit', message });
+    }
+  },
+
+  fetchProviders: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'list_providers' });
     }
   },
 
