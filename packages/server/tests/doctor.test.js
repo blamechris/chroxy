@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { parse as parsePath } from 'node:path'
-import { runDoctorChecks } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary } from '../src/doctor.js'
 
 /**
  * Integration tests for doctor.js.
@@ -128,26 +128,49 @@ describe('runDoctorChecks', () => {
     }
   })
 
-  it('finds claude via candidate paths when PATH omits the install dir', async () => {
+  it('finds binary via candidate paths when PATH omits the install dir', async () => {
     // Simulates a GUI-launched process (e.g. Tauri on macOS) whose
-    // inherited PATH excludes the dir where claude is actually installed.
-    // checkBinary should fall through to the candidate list and still
-    // resolve the binary.
+    // inherited PATH excludes the dir where the binary is actually
+    // installed. checkBinary should fall through to the candidate list
+    // and still resolve the binary.
+    //
+    // Cross-platform strategy: use the running Node binary itself
+    // (`process.execPath`) as the "candidate". Node supports `--version`
+    // on every platform, so no shell-stub file is needed — this works
+    // on macOS, Linux, and Windows without branching.
+    //
+    // Self-contained inside the `it` body because `node --test-name-pattern`
+    // skips parent before/after hooks.
     const originalPath = process.env.PATH
     try {
-      process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
-      const { checks } = await runDoctorChecks({ providers: ['claude-cli'] })
-      const claudeCheck = checks.find(c => c.name === 'claude')
-      assert.ok(claudeCheck)
-      if (claudeCheck.status === 'pass') {
-        // If claude is installed at any of the known candidate paths,
-        // the stripped PATH should NOT have prevented resolution.
-        assert.ok(claudeCheck.message, 'expected version string on pass')
-      }
-      // If still 'fail', this host simply has no claude binary anywhere —
-      // that's a valid outcome, not a regression of the fallback logic.
+      // Strip PATH so `which`/`where` in resolveBinary cannot find a node
+      // binary and the resolver must fall through to the candidate list.
+      process.env.PATH = ''
+
+      const result = checkBinary('definitely-not-a-real-binary-xyz', ['--version'], {
+        parseVersion: (out) => out.trim().split('\n')[0],
+        required: true,
+        candidates: [process.execPath],
+        installHint: 'install definitely-not-a-real-binary-xyz',
+      })
+
+      assert.equal(result.name, 'definitely-not-a-real-binary-xyz')
+      assert.equal(
+        result.status,
+        'pass',
+        `expected pass via candidate fallback, got ${result.status}: ${result.message}`,
+      )
+      // Node prints a version like `v22.x.y` — assert on the shape rather
+      // than an exact value so the test survives Node patch upgrades.
+      assert.match(result.message, /^v\d+\.\d+\.\d+/)
     } finally {
-      process.env.PATH = originalPath
+      // `process.env.PATH = undefined` coerces to the literal string
+      // "undefined", so restore correctly when PATH was originally unset.
+      if (originalPath === undefined) {
+        delete process.env.PATH
+      } else {
+        process.env.PATH = originalPath
+      }
     }
   })
 })
