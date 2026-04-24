@@ -376,6 +376,43 @@ describe('setLogLevel (#747)', () => {
   })
 })
 
+describe('getLogLevel (#2889)', () => {
+  afterEach(() => {
+    // Reset to a known level after each test — use the module's
+    // closeFileLogging() which also normalizes _logLevel to 'info'.
+    closeFileLogging()
+  })
+
+  it('is exported as a function', async () => {
+    const { getLogLevel } = await import('../src/logger.js')
+    assert.equal(typeof getLogLevel, 'function')
+  })
+
+  it('round-trips every supported level through setLogLevel', async () => {
+    const { getLogLevel, setLogLevel } = await import('../src/logger.js')
+    for (const level of ['debug', 'info', 'warn', 'error']) {
+      setLogLevel(level)
+      assert.equal(getLogLevel(), level, `expected getLogLevel()==='${level}' after setLogLevel('${level}')`)
+    }
+  })
+
+  it('lets tests restore a prior non-info level instead of clobbering it (#2889)', async () => {
+    const { getLogLevel, setLogLevel } = await import('../src/logger.js')
+    // Simulate a suite started with LOG_LEVEL=debug in the environment.
+    setLogLevel('debug')
+    const prior = getLogLevel()
+    assert.equal(prior, 'debug')
+
+    // Inside a test, a nested suite bumps the level (old pattern would have
+    // then restored 'info' and silently lost the debug setting).
+    setLogLevel('error')
+    // New pattern: round-trip the captured prior level.
+    setLogLevel(prior)
+    assert.equal(getLogLevel(), 'debug',
+      'prior level must be restored, not hard-coded to info')
+  })
+})
+
 describe('logger file write error handling (#746)', () => {
   let logDir
 

@@ -188,6 +188,20 @@ export function setLogLevel(level) {
 }
 
 /**
+ * Get the current minimum log level as a string.
+ * Useful for tests that need to round-trip the level across
+ * `beforeEach`/`afterEach` without clobbering a non-default
+ * `LOG_LEVEL` env configuration. (#2889)
+ * @returns {'debug' | 'info' | 'warn' | 'error'}
+ */
+export function getLogLevel() {
+  for (const [name, value] of Object.entries(LOG_LEVELS)) {
+    if (value === _logLevel) return name
+  }
+  return 'info'
+}
+
+/**
  * Create a component logger. Backward-compatible with existing API.
  * @param {string} component - Component name for log prefix
  * @param {object} [context] - Optional context (e.g. { sessionId })

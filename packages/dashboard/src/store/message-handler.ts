@@ -16,6 +16,7 @@ import {
   consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage,
   resolveStreamId,
   resolveSessionId,
+  isReplayDuplicate,
   handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
   handleAvailablePermissionModes as sharedAvailablePermissionModes,
@@ -506,8 +507,16 @@ export function loadConnection(): { url: string; token: string } | null {
   return _storage.loadConnection() as { url: string; token: string } | null
 }
 
-export function clearConnection(): void {
-  _storage.clearConnection()
+/**
+ * Wipe the persisted connection URL + token from localStorage.
+ *
+ * NOTE: Storage-only. This does NOT close the active WebSocket, reset in-memory
+ * store state, or navigate the UI. Use the store-level `clearSavedConnection()`
+ * for the full "forget this server" flow, or `disconnect()` to close the live
+ * socket.
+ */
+export function clearSavedCredentials(): void {
+  _storage.clearSavedCredentials()
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,23 +1564,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       const stableMessageId = typeof msg.messageId === 'string' ? msg.messageId : undefined;
       // During any history replay, skip if an equivalent message is already in cache (dedup).
-      // For user_input entries the server stamps a stable `messageId` (issue #2902) that
-      // matches the sender's optimistic copy; prefer exact id match for that case.
-      // Fall back to (content, timestamp) equality for older servers / non-user_input types.
+      // Shared helper lives in @chroxy/store-core (#2903).
       if (_receivingHistoryReplay) {
         const targetState = targetId ? get().sessionStates[targetId] : null;
         const cached = targetState ? targetState.messages : get().messages;
-        if (stableMessageId && msgType === 'user_input') {
-          if (cached.some((m) => m.id === stableMessageId)) break;
-        } else {
-          const isDuplicate = cached.some((m) => {
-            if (m.type !== msgType || m.content !== msg.content) return false;
-            if (m.timestamp !== msg.timestamp) return false;
-            if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
-            return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
-          });
-          if (isDuplicate) break;
-        }
+        if (isReplayDuplicate(cached, {
+          messageType: msgType,
+          messageId: stableMessageId,
+          content: msg.content,
+          timestamp: msg.timestamp as number | undefined,
+          tool: msg.tool as string | undefined,
+          options: msg.options as ChatMessage['options'],
+        })) break;
       }
       const newMsg: ChatMessage = {
         // Preserve the server-assigned messageId so future replays can still dedup by id.
