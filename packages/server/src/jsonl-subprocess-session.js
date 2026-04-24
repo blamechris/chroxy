@@ -16,8 +16,14 @@ import { BaseSession } from './base-session.js'
  *   - resolvedBinary     — result of resolveBinary(name, candidates)
  *   - apiKeyEnv          — env var name required for start() (e.g. 'OPENAI_API_KEY')
  *   - providerName       — short name used for log prefixes / error text (e.g. 'codex')
- *   - displayLabel       — human label used in error text (e.g. 'Codex')
- *   - messageIdPrefix    — prefix for generated message IDs (e.g. 'codex')
+ *
+ * Optional subclass overrides (statics — defaults derived from providerName):
+ *   - displayLabel       — human label used in error text (defaults to providerName)
+ *   - messageIdPrefix    — prefix for generated message IDs (defaults to providerName)
+ *
+ * Note: the required statics above throw when accessed on an unconfigured subclass,
+ * but this happens at the time the getter is first read (e.g. during start() or
+ * sendMessage()), not at module-load time.
  *
  * Required instance overrides:
  *   - _buildArgs(text)               — argv for spawn; inject model flag etc.
@@ -214,11 +220,18 @@ export class JsonlSubprocessSession extends BaseSession {
 
     proc.stderr.on('data', (chunk) => {
       if (this._destroying) return
-      const msg = chunk.toString().trim()
-      if (!msg) return
-      if (this._shouldSkipStderr(msg)) return
-      if (stderrBuf.length < DEFAULT_STDERR_CAP) {
-        stderrBuf += (stderrBuf ? '\n' : '') + msg
+      // Split per-line so _shouldSkipStderr is applied to each line individually.
+      // A single data chunk may contain multiple lines; trimming the whole chunk
+      // would cause a skippable line (e.g. DeprecationWarning) to suppress real
+      // error lines that share the same chunk.
+      const lines = chunk.toString().split('\n')
+      for (const line of lines) {
+        const msg = line.trim()
+        if (!msg) continue
+        if (this._shouldSkipStderr(msg)) continue
+        if (stderrBuf.length < DEFAULT_STDERR_CAP) {
+          stderrBuf += (stderrBuf ? '\n' : '') + msg
+        }
       }
     })
 

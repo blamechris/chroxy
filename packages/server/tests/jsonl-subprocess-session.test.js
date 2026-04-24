@@ -463,7 +463,19 @@ describe('JsonlSubprocessSession (base)', () => {
     })
 
     it('empty and invalid JSONL lines are filtered before _processJsonlLine', async () => {
-      writeShim([{ type: 'done' }])
+      // Shim emits a blank line, raw text, and one valid JSONL object.
+      // Only the valid object should reach _processJsonlLine.
+      const shimBodyLines = [
+        '#!/usr/bin/env node',
+        `process.stdout.write('')`,          // emit blank line
+        `process.stdout.write('\\n')`,        // another blank
+        `process.stdout.write('not-json\\n')`, // invalid JSON
+        `process.stdout.write(JSON.stringify({ type: 'done' }) + '\\n')`,
+        `process.exit(0)`,
+      ]
+      writeFileSync(shimPath, shimBodyLines.join('\n'))
+      chmodSync(shimPath, 0o755)
+
       const P = makeTestProviderClass()
       let processedCount = 0
       const original = P.prototype._processJsonlLine
