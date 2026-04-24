@@ -3,7 +3,7 @@ import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { createLogger } from './logger.js'
+import { createLogger, redactSensitive } from './logger.js'
 
 const log = createLogger('codex')
 
@@ -78,6 +78,16 @@ const CODEX_ALLOWED_MODELS = Object.freeze([
 ])
 
 export class CodexSession extends BaseSession {
+  /**
+   * Human-readable label shown in the startup banner and anywhere else the
+   * server needs to name this provider (#2953). Each provider owns its own
+   * display name so `server-cli.js` no longer has to maintain a hardcoded
+   * `PROVIDER_LABELS` map that drifts every time a new provider lands.
+   */
+  static get displayLabel() {
+    return 'OpenAI Codex'
+  }
+
   static get capabilities() {
     return {
       permissions: false,
@@ -274,7 +284,7 @@ export class CodexSession extends BaseSession {
         this.emit('stream_end', { messageId: this._currentMessageId })
       }
       if (code !== 0 && code !== null) {
-        const detail = stderrBuf ? `: ${stderrBuf.slice(0, 500)}` : ''
+        const detail = stderrBuf ? `: ${redactSensitive(stderrBuf.slice(0, 500))}` : ''
         this.emit('error', { message: `Codex process exited with code ${code}${detail}` })
       }
       // Emit result only if turn.completed wasn't received

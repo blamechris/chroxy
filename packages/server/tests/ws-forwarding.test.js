@@ -1,9 +1,9 @@
-import { describe, it, afterEach, mock } from 'node:test'
+import { describe, it, afterEach, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
+import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -654,13 +654,20 @@ describe('executeRegistrations (via setupCliForwarding)', () => {
 
 describe('[session-binding-create] diagnostic log (#2832, #2855, #2854)', () => {
   let currentListener = null
+  let priorLogLevel = null
+  beforeEach(() => {
+    // Capture the level configured at suite start (typically from
+    // process.env.LOG_LEVEL, but may have been changed by another suite)
+    // so afterEach can round-trip it — never hard-code 'info'. (#2889)
+    priorLogLevel = getLogLevel()
+  })
   afterEach(() => {
     if (currentListener) {
       removeLogListener(currentListener)
       currentListener = null
     }
-    // Restore default level so unrelated suites are unaffected.
-    setLogLevel('info')
+    // Restore the prior level so unrelated suites are unaffected.
+    setLogLevel(priorLogLevel)
   })
 
   it('emits [session-binding-create] when SDK permission_request is registered with the event sessionId', () => {

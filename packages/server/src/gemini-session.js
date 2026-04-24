@@ -3,7 +3,7 @@ import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { createLogger } from './logger.js'
+import { createLogger, redactSensitive } from './logger.js'
 
 const log = createLogger('gemini')
 
@@ -50,6 +50,16 @@ const GEMINI_ALLOWED_MODELS = Object.freeze([
 ])
 
 export class GeminiSession extends BaseSession {
+  /**
+   * Human-readable label shown in the startup banner and anywhere else the
+   * server needs to name this provider (#2953). Each provider owns its own
+   * display name so `server-cli.js` no longer has to maintain a hardcoded
+   * `PROVIDER_LABELS` map that drifts every time a new provider lands.
+   */
+  static get displayLabel() {
+    return 'Google Gemini'
+  }
+
   static get capabilities() {
     return {
       permissions: false,
@@ -208,7 +218,7 @@ export class GeminiSession extends BaseSession {
         this.emit('stream_end', { messageId: this._currentMessageId })
       }
       if (code !== 0 && code !== null) {
-        const detail = stderrBuf ? `: ${stderrBuf.slice(0, 500)}` : ''
+        const detail = stderrBuf ? `: ${redactSensitive(stderrBuf.slice(0, 500))}` : ''
         this.emit('error', { message: `Gemini process exited with code ${code}${detail}` })
       }
       // Emit result so clients transition from busy to idle

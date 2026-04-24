@@ -1,129 +1,38 @@
 /**
  * Provider registry for session backends.
  *
- * Decouples SessionManager from specific session implementations.
- * New providers can be registered without modifying SessionManager or WsServer.
+ * Built-in providers are a plain object literal below. Docker providers are
+ * registered lazily by registerDockerProvider() when environments are enabled
+ * and the Docker daemon is reachable.
  *
- * Built-in providers:
- *   - 'claude-sdk': Agent SDK session (SdkSession) — default
- *   - 'claude-cli': Legacy CLI process session (CliSession)
+ * To add a new first-class provider: import the session class and add it to
+ * the PROVIDERS literal. To add one externally (rare), call registerProvider()
+ * — but editing this file is preferred.
  *
- * Docker providers (registered at runtime when environments are enabled):
- *   - 'docker-cli': Docker-isolated CLI session (DockerSession)
- *   - 'docker-sdk': Docker-isolated SDK session (DockerSdkSession)
- *   - 'docker': backward-compatible alias for 'docker-cli'
- *
- * Example: Registering a custom provider
- * ```js
- * import { EventEmitter } from 'events'
- * import { registerProvider } from './providers.js'
- *
- * class CustomSession extends EventEmitter {
- *   constructor({ cwd, model, permissionMode, port, apiToken }) {
- *     super()
- *     this.cwd = cwd
- *     this.model = model
- *     this.permissionMode = permissionMode
- *     this.isRunning = false
- *     this.resumeSessionId = null
- *   }
- *
- *   static get capabilities() {
- *     return {
- *       permissions: true,
- *       inProcessPermissions: false,
- *       modelSwitch: true,
- *       permissionModeSwitch: true,
- *       planMode: false,
- *       resume: false,
- *       terminal: false,
- *       thinkingLevel: false,
- *     }
- *   }
- *
- *   start() { ... }
- *   destroy() { ... }
- *   sendMessage(text) { ... }
- *   interrupt() { ... }
- *   setModel(model) { ... }
- *   setPermissionMode(mode) { ... }
- * }
- *
- * registerProvider('my-custom-provider', CustomSession)
- * // Now use: npx chroxy start --provider my-custom-provider
- * ```
- *
- * @typedef {Object} ProviderCapabilities
- * @property {boolean} permissions      - Supports permission handling
- * @property {boolean} inProcessPermissions - Handles permissions in-process (no HTTP hook)
- * @property {boolean} modelSwitch      - Supports live model switching
- * @property {boolean} permissionModeSwitch - Supports live permission mode switching
- * @property {boolean} planMode         - Emits plan mode events
- * @property {boolean} resume           - Supports conversation resume via resumeSessionId
- * @property {boolean} terminal         - Provides raw terminal output
- *
- * Provider classes must:
- *   - Extend EventEmitter
- *   - Accept a config object in constructor: { cwd, model, permissionMode, ... }
- *   - Expose: start(), destroy(), sendMessage(text), interrupt(), setModel(model), setPermissionMode(mode)
- *   - start() MUST be synchronous (throw on failure, don't return a rejected promise)
- *   - Expose properties: model, permissionMode, isRunning, resumeSessionId
- *   - Emit events: ready, stream_start, stream_delta, stream_end, message,
- *     tool_start, result, error, user_question, agent_spawned, agent_completed
- *   - Implement `static get capabilities()` returning ProviderCapabilities
- *
- * @typedef {Object} ProviderSession
- * @property {function(string, Array=, Object=): Promise<void>} sendMessage - Send a message to the AI
- * @property {function(): void|Promise<void>} interrupt - Interrupt the current operation
- * @property {function(string): boolean} setModel - Set the AI model; returns true if changed
- * @property {function(string): boolean} setPermissionMode - Set permission mode; returns true if changed
- * @property {function(): void} start - Start the session process (must be synchronous)
- * @property {function(): void} destroy - Clean up and destroy the session
- * @property {function(string, string): void} [respondToPermission] - Required when capabilities.inProcessPermissions is true
- * @property {function(string, string=): void} [respondToQuestion] - Required when capabilities.inProcessPermissions is true
+ * Session classes must extend EventEmitter and expose start/destroy/sendMessage/
+ * interrupt/setModel/setPermissionMode plus a static `capabilities` getter.
+ * See sdk-session.js or cli-session.js for a worked example.
  */
+import { CliSession } from './cli-session.js'
+import { SdkSession } from './sdk-session.js'
+import { GeminiSession } from './gemini-session.js'
+import { CodexSession } from './codex-session.js'
 
-/** Required methods every provider class prototype must expose. */
-const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
-
-/** Methods required when the provider handles permissions in-process. */
-const IN_PROCESS_PERMISSION_METHODS = ['respondToPermission', 'respondToQuestion']
-
-/**
- * Validates that a provider class implements the ProviderSession interface.
- * Checks the class prototype so no instance is created during registration.
- * When `ProviderClass.capabilities.inProcessPermissions` is true, also validates
- * that `respondToPermission` and `respondToQuestion` are present.
- * @param {Function} ProviderClass - Session class to validate
- * @param {string} name - Provider name for error messages
- * @throws {Error} If any required method is missing from the prototype
- */
-export function validateProviderClass(ProviderClass, name) {
-  if (typeof ProviderClass !== 'function' || !ProviderClass.prototype) {
-    throw new Error(`Provider '${name}' must be a constructable class`)
-  }
-  for (const method of REQUIRED_METHODS) {
-    if (typeof ProviderClass.prototype[method] !== 'function') {
-      throw new Error(`Provider '${name}' missing required method: ${method}`)
-    }
-  }
-  if (ProviderClass.capabilities?.inProcessPermissions) {
-    for (const method of IN_PROCESS_PERMISSION_METHODS) {
-      if (typeof ProviderClass.prototype[method] !== 'function') {
-        throw new Error(`Provider '${name}' has inProcessPermissions=true but is missing required method: ${method}`)
-      }
-    }
-  }
+const PROVIDERS = {
+  'claude-cli': CliSession,
+  'claude-sdk': SdkSession,
+  'gemini': GeminiSession,
+  'codex': CodexSession,
 }
 
-const providers = new Map()
-const aliases = new Set()
+// Names hidden from listProviders() (backward-compat aliases, etc.)
+const HIDDEN = new Set()
 
 /**
  * Register a provider class by name.
  * @param {string} name - Provider identifier (e.g. 'claude-sdk')
  * @param {Function} ProviderClass - Session class with static capabilities getter
- * @param {{ alias: boolean }} [opts] - Mark as alias to exclude from listProviders()
+ * @param {{ alias?: boolean }} [opts] - Mark as alias to exclude from listProviders()
  */
 export function registerProvider(name, ProviderClass, opts) {
   if (typeof name !== 'string' || !name) {
@@ -132,9 +41,8 @@ export function registerProvider(name, ProviderClass, opts) {
   if (typeof ProviderClass !== 'function') {
     throw new Error(`Provider "${name}" must be a class/constructor`)
   }
-  validateProviderClass(ProviderClass, name)
-  providers.set(name, ProviderClass)
-  if (opts?.alias) aliases.add(name)
+  PROVIDERS[name] = ProviderClass
+  if (opts?.alias) HIDDEN.add(name)
 }
 
 /**
@@ -144,23 +52,43 @@ export function registerProvider(name, ProviderClass, opts) {
  * @throws {Error} If provider is not registered
  */
 export function getProvider(name) {
-  const ProviderClass = providers.get(name)
+  const ProviderClass = PROVIDERS[name]
   if (!ProviderClass) {
-    const available = [...providers.keys()].join(', ')
+    const available = Object.keys(PROVIDERS).join(', ')
     throw new Error(`Unknown provider "${name}". Available: ${available}`)
   }
   return ProviderClass
 }
 
 /**
+ * Resolve a human-readable label for a provider name (#2953).
+ *
+ * Reads the class's `static get displayLabel()` so each provider owns its own
+ * display name. Falls back to the raw provider id for unknown providers so
+ * the server still boots with a readable banner even if someone registers a
+ * custom provider without a label, and returns `'unknown'` for empty input.
+ *
+ * @param {string | undefined | null} name - Provider identifier
+ * @returns {string} Human-readable label
+ */
+export function resolveProviderLabel(name) {
+  if (!name || typeof name !== 'string') return 'unknown'
+  const ProviderClass = PROVIDERS[name]
+  if (ProviderClass && typeof ProviderClass.displayLabel === 'string' && ProviderClass.displayLabel.length > 0) {
+    return ProviderClass.displayLabel
+  }
+  return name
+}
+
+/**
  * List all registered providers with their capabilities.
  * Excludes aliases (e.g. 'docker') to prevent duplicate entries in UI.
- * @returns {Array<{ name: string, capabilities: ProviderCapabilities }>}
+ * @returns {Array<{ name: string, capabilities: object }>}
  */
 export function listProviders() {
   const list = []
-  for (const [name, ProviderClass] of providers) {
-    if (aliases.has(name)) continue
+  for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+    if (HIDDEN.has(name)) continue
     list.push({
       name,
       capabilities: ProviderClass.capabilities || {},
@@ -168,17 +96,6 @@ export function listProviders() {
   }
   return list
 }
-
-// Register built-in providers
-import { CliSession } from './cli-session.js'
-import { SdkSession } from './sdk-session.js'
-import { GeminiSession } from './gemini-session.js'
-import { CodexSession } from './codex-session.js'
-
-registerProvider('claude-cli', CliSession)
-registerProvider('claude-sdk', SdkSession)
-registerProvider('gemini', GeminiSession)
-registerProvider('codex', CodexSession)
 
 /**
  * Register docker providers when environments are enabled.
