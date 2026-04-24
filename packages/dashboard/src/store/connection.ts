@@ -96,7 +96,7 @@ import {
   clearMessageQueue,
   enqueueMessage,
   updateActiveSession,
-  clearConnection,
+  clearSavedCredentials,
   loadConnection,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
@@ -467,7 +467,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   clearSavedConnection: () => {
-    clearConnection();
+    clearSavedCredentials();
     set({ savedConnection: null });
   },
 

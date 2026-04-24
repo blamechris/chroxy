@@ -1,8 +1,8 @@
-import { describe, it, afterEach, mock } from 'node:test'
+import { describe, it, afterEach, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { createPermissionHandler, sanitizeToolInput } from '../src/ws-permissions.js'
-import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
+import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
 
 /**
  * ws-permissions.js unit tests (#1730)
@@ -614,13 +614,19 @@ describe('createPermissionHandler', () => {
 
 describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#2832, #2855, #2854)', () => {
   let currentListener = null
+  let priorLogLevel = null
+  beforeEach(() => {
+    // Capture the level configured at suite start so afterEach can
+    // round-trip it — never hard-code 'info'. (#2889)
+    priorLogLevel = getLogLevel()
+  })
   afterEach(() => {
     if (currentListener) {
       removeLogListener(currentListener)
       currentListener = null
     }
-    // Restore the default level so other suites are not affected.
-    setLogLevel('info')
+    // Restore the prior level so other suites are not affected.
+    setLogLevel(priorLogLevel)
   })
 
   describe('handlePermissionRequest (HTTP /permission — [session-binding-create])', () => {

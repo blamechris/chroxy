@@ -64,7 +64,6 @@ const PLATFORM_SPECIFIC = {
 
   // Dashboard only
   'log_entry': 'dashboard',          // console page is dashboard-only
-  'provider_list': 'dashboard',      // provider selector is dashboard-only
   'file_list': 'dashboard',          // file explorer sidebar is dashboard-only
   'environment_created': 'dashboard', // environment panel is dashboard-only
   'environment_list': 'dashboard',    // environment panel is dashboard-only
