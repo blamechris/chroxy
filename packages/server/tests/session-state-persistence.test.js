@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'fs'
 import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -409,6 +410,162 @@ describe('SessionStatePersistence backup rotation (regression: #2906)', () => {
     // Main file should be removed (it was unparseable), .bak preserved as a last-resort copy
     assert.equal(existsSync(stateFile), false)
     assert.ok(existsSync(stateFile + '.bak'), '.bak preserved for future recovery')
+  })
+})
+
+describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-win-bak-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+    mock.restoreAll()
+  })
+
+  function makeFsError(code, msg) {
+    const err = new Error(msg ?? `${code}: simulated`)
+    err.code = code
+    return err
+  }
+
+  it('retries rotation after clearing a locked .bak on Windows (EPERM)', () => {
+    // Seed a prior main file and a stale .bak (as would exist after prior write).
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ id: 'prev', name: 'Previous', cwd: '/tmp' }] }))
+    writeFileSync(stateFile + '.bak', 'stale-bak-contents')
+
+    const originalRename = fs.renameSync
+    const originalUnlink = fs.unlinkSync
+    let renameCalls = 0
+    let unlinkedBak = false
+
+    mock.method(fs, 'renameSync', (src, dst) => {
+      renameCalls++
+      // First call is the rotate attempt: simulate Windows EPERM on locked .bak
+      if (renameCalls === 1 && dst === stateFile + '.bak') {
+        throw makeFsError('EPERM', 'operation not permitted, rename')
+      }
+      return originalRename(src, dst)
+    })
+    mock.method(fs, 'unlinkSync', (p) => {
+      if (p === stateFile + '.bak') unlinkedBak = true
+      return originalUnlink(p)
+    })
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile, isWindowsOverride: true })
+    assert.doesNotThrow(() => {
+      p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
+    })
+
+    assert.ok(unlinkedBak, 'should unlink the locked .bak before retrying rotation')
+    // Rename called: (1) initial rotate (threw), (2) retry rotate, (3) tmp → main
+    assert.equal(renameCalls, 3, 'should call rename three times: initial rotate + retry + final tmp→main')
+    assert.ok(existsSync(stateFile), 'main state file should exist after serialize')
+    assert.ok(existsSync(stateFile + '.bak'), '.bak should exist after successful retry')
+    const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
+    assert.equal(bak.sessions[0].name, 'Previous', '.bak should hold the prior generation after retry')
+  })
+
+  it('proceeds with the main write even if rotation retry still fails on Windows', () => {
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ id: 'prev', name: 'Previous', cwd: '/tmp' }] }))
+
+    const originalRename = fs.renameSync
+    let renameCalls = 0
+
+    mock.method(fs, 'renameSync', (src, dst) => {
+      renameCalls++
+      // Fail both rotate attempts (main → .bak), let the final tmp → main succeed.
+      if (dst === stateFile + '.bak') {
+        throw makeFsError('EBUSY', 'resource busy or locked, rename')
+      }
+      return originalRename(src, dst)
+    })
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile, isWindowsOverride: true })
+    assert.doesNotThrow(() => {
+      p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
+    })
+
+    assert.ok(renameCalls >= 3, 'rotate attempted twice, then final tmp → main')
+    assert.ok(existsSync(stateFile), 'main state file must still be written when rotation fails')
+    const main = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(main.sessions[0].name, 'New', 'new state should be persisted even if .bak rotation failed')
+  })
+
+  it('does not retry rotation on POSIX (single rename attempt, no unlink)', () => {
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ id: 'prev', name: 'Previous', cwd: '/tmp' }] }))
+
+    const originalRename = fs.renameSync
+    let rotateAttempts = 0
+    let unlinkOfBak = 0
+
+    mock.method(fs, 'renameSync', (src, dst) => {
+      if (dst === stateFile + '.bak') {
+        rotateAttempts++
+        throw makeFsError('EPERM', 'should not retry on POSIX')
+      }
+      return originalRename(src, dst)
+    })
+    mock.method(fs, 'unlinkSync', (p) => {
+      if (p === stateFile + '.bak') unlinkOfBak++
+      // Don't invoke real unlink for .bak — the rotate never happened so there's nothing to clean
+    })
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile, isWindowsOverride: false })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
+
+    assert.equal(rotateAttempts, 1, 'POSIX path must not retry rotation')
+    assert.equal(unlinkOfBak, 0, 'POSIX path must not unlink the .bak (rename replaces atomically)')
+  })
+
+  it('restores the prior .bak if the retry rename fails (source was locked, not destination)', () => {
+    // Seed a prior main file and an existing valid .bak holding the prior generation.
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ id: 'cur', name: 'Current', cwd: '/tmp' }] }))
+    const priorBakContents = JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ id: 'old', name: 'PriorGen', cwd: '/tmp' }] })
+    writeFileSync(stateFile + '.bak', priorBakContents)
+
+    const originalRename = fs.renameSync
+    // Simulate the source being locked: every rotate attempt throws EPERM,
+    // but tmp → main succeeds (so state write still happens).
+    mock.method(fs, 'renameSync', (src, dst) => {
+      if (dst === stateFile + '.bak') {
+        throw makeFsError('EPERM', 'operation not permitted, rename (source locked)')
+      }
+      return originalRename(src, dst)
+    })
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile, isWindowsOverride: true })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
+
+    // Prior generation must still be recoverable from .bak even though both
+    // rotation attempts failed — we snapshotted and restored it.
+    assert.ok(existsSync(stateFile + '.bak'), '.bak must be restored after retry failure')
+    const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
+    assert.equal(bak.sessions[0].name, 'PriorGen', 'prior generation .bak contents must be preserved')
+  })
+
+  it('does not retry rotation for unrelated error codes on Windows', () => {
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ id: 'prev', name: 'Previous', cwd: '/tmp' }] }))
+
+    const originalRename = fs.renameSync
+    let rotateAttempts = 0
+
+    mock.method(fs, 'renameSync', (src, dst) => {
+      if (dst === stateFile + '.bak') {
+        rotateAttempts++
+        throw makeFsError('EIO', 'I/O error, not a lock')
+      }
+      return originalRename(src, dst)
+    })
+
+    const p = new SessionStatePersistence({ stateFilePath: stateFile, isWindowsOverride: true })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
+
+    assert.equal(rotateAttempts, 1, 'non-lock errors should not trigger retry')
   })
 })
 

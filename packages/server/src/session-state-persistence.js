@@ -1,9 +1,15 @@
-import { existsSync, readFileSync, unlinkSync, renameSync, mkdirSync } from 'fs'
+import fs from 'fs'
 import { dirname } from 'path'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('session-state-persistence')
+
+// Codes we treat as "destination is temporarily locked" on Windows.
+// EPERM/EACCES: antivirus or another process holds a handle.
+// EBUSY: destination is in use.
+// EEXIST: destination already exists and rename won't atomically replace (NTFS).
+const WINDOWS_LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
 
 /**
  * Handles serialization/deserialization of session state to/from disk.
@@ -15,12 +21,14 @@ export class SessionStatePersistence {
    * @param {string} options.stateFilePath - Path to session state JSON file
    * @param {number} [options.stateTtlMs=86400000] - Max age of persisted state before discard (default: 24 hours)
    * @param {number} [options.persistDebounceMs=2000] - Debounce interval for state file writes
+   * @param {boolean} [options.isWindowsOverride] - Test-only: force Windows-specific branches regardless of host platform
    */
-  constructor({ stateFilePath, stateTtlMs, persistDebounceMs = 2000 } = {}) {
+  constructor({ stateFilePath, stateTtlMs, persistDebounceMs = 2000, isWindowsOverride } = {}) {
     this._stateFilePath = stateFilePath
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000
     this._persistDebounceMs = persistDebounceMs
     this._persistTimer = null
+    this._isWindows = isWindowsOverride ?? isWindows
   }
 
   /**
@@ -30,28 +38,86 @@ export class SessionStatePersistence {
    */
   serializeState(state) {
     const dir = dirname(this._stateFilePath)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     const tmpPath = this._stateFilePath + '.tmp'
     const bakPath = this._stateFilePath + '.bak'
     writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
     // Rotate the current file to .bak so one generation survives a crash
     // or partial write during the rename below. Best-effort — a missing
     // source file (first write) or rename failure must not block the new write.
-    if (existsSync(this._stateFilePath)) {
-      try { renameSync(this._stateFilePath, bakPath) } catch (err) {
-        log.warn(`Failed to rotate state file to .bak: ${err?.message || err}`)
-      }
+    if (fs.existsSync(this._stateFilePath)) {
+      this._rotateToBak(this._stateFilePath, bakPath)
     }
-    if (isWindows) {
-      try { unlinkSync(this._stateFilePath) } catch (err) {
+    if (this._isWindows) {
+      try { fs.unlinkSync(this._stateFilePath) } catch (err) {
         if (err && err.code !== 'ENOENT') {
           log.error(`Failed to remove existing state file: ${err.message}`)
         }
       }
     }
-    renameSync(tmpPath, this._stateFilePath)
+    fs.renameSync(tmpPath, this._stateFilePath)
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
+  }
+
+  /**
+   * Rotate the current state file to `.bak`. On POSIX `rename` atomically
+   * replaces the destination, but on Windows a pre-existing or locked `.bak`
+   * (antivirus / open handle) causes EPERM/EACCES/EBUSY/EEXIST. When that
+   * happens, remove the stale `.bak` and retry once before giving up — a
+   * missing rotation is acceptable (the write still proceeds) but silently
+   * skipping it leaves no prior-generation file to recover from.
+   *
+   * Subtlety: EPERM/EACCES/EBUSY are ambiguous — they can indicate either a
+   * locked *destination* (which our unlink+retry fixes) or a locked *source*
+   * (which our retry cannot fix). If we unlinked `.bak` on a source-locked
+   * error and the retry then failed, we would have silently deleted the prior
+   * generation for nothing. To stay crash-safe we snapshot the `.bak` bytes
+   * before unlinking and restore them if the retry fails, so the caller is
+   * never worse off than if rotation had simply been skipped.
+   * @private
+   */
+  _rotateToBak(mainPath, bakPath) {
+    try {
+      fs.renameSync(mainPath, bakPath)
+      return
+    } catch (err) {
+      if (!this._isWindows || !err || !WINDOWS_LOCK_CODES.has(err.code)) {
+        log.warn(`Failed to rotate state file to .bak: ${err?.message || err}`)
+        return
+      }
+      log.warn(`Rotation to .bak failed with ${err.code}; clearing stale .bak and retrying`)
+    }
+    // Snapshot the prior-generation .bak so we can restore it if the retry
+    // still fails (e.g. when the source file was actually the locked one).
+    let priorBak = null
+    try {
+      priorBak = fs.readFileSync(bakPath)
+    } catch (readErr) {
+      if (readErr && readErr.code !== 'ENOENT') {
+        log.warn(`Failed to snapshot existing .bak before retry: ${readErr.message}`)
+      }
+    }
+    try { fs.unlinkSync(bakPath) } catch (unlinkErr) {
+      if (unlinkErr && unlinkErr.code !== 'ENOENT') {
+        log.warn(`Failed to clear stale .bak: ${unlinkErr.message}`)
+      }
+    }
+    try {
+      fs.renameSync(mainPath, bakPath)
+    } catch (retryErr) {
+      // Still locked — give up on rotation; the primary write below will
+      // still proceed so the user's state is not lost. Restore the prior
+      // generation bytes (if any) so a recovery path remains available.
+      log.warn(`Retry of .bak rotation failed: ${retryErr?.message || retryErr}`)
+      if (priorBak !== null) {
+        try {
+          writeFileRestricted(bakPath, priorBak)
+        } catch (restoreErr) {
+          log.warn(`Failed to restore prior .bak after retry failure: ${restoreErr?.message || restoreErr}`)
+        }
+      }
+    }
   }
 
   /**
@@ -63,21 +129,21 @@ export class SessionStatePersistence {
     const bakPath = this._stateFilePath + '.bak'
     // If the main file is missing or unreadable, fall back to the rotated
     // .bak copy (written by serializeState before every successful write).
-    const sourcePath = existsSync(mainPath) ? mainPath : (existsSync(bakPath) ? bakPath : null)
+    const sourcePath = fs.existsSync(mainPath) ? mainPath : (fs.existsSync(bakPath) ? bakPath : null)
     if (!sourcePath) return null
 
     let state
     try {
-      state = JSON.parse(readFileSync(sourcePath, 'utf-8'))
+      state = JSON.parse(fs.readFileSync(sourcePath, 'utf-8'))
     } catch (err) {
       log.error(`Failed to parse session state at ${sourcePath}: ${err.message}`)
       // Only unlink the main file; preserve .bak as last-resort recovery
       if (sourcePath === mainPath) {
-        try { unlinkSync(mainPath) } catch {}
+        try { fs.unlinkSync(mainPath) } catch {}
         // Try the backup before giving up
-        if (existsSync(bakPath)) {
+        if (fs.existsSync(bakPath)) {
           try {
-            state = JSON.parse(readFileSync(bakPath, 'utf-8'))
+            state = JSON.parse(fs.readFileSync(bakPath, 'utf-8'))
             log.info(`Recovered session state from ${bakPath}`)
           } catch (bakErr) {
             log.error(`Failed to parse backup state: ${bakErr.message}`)
