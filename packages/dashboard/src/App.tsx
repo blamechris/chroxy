@@ -39,6 +39,7 @@ import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
+import { formatShortcutKeys } from './utils/platform'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer } from './hooks/useTauriIPC'
@@ -854,26 +855,32 @@ export function App() {
     return null
   }, [storeMsgMap, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
 
-  const SHORTCUTS: ShortcutEntry[] = useMemo(() => [
-    { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
-    { keys: 'Cmd+K', description: 'Command palette', section: 'Global' },
-    { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
-    { keys: 'Cmd+N', description: 'New session', section: 'Global' },
-    { keys: 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
-    { keys: 'Cmd+,', description: 'Settings', section: 'Global' },
-    { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
-    { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
-    { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
-    { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
-    { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
-    { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
-    { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
-    { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
-    { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
-    { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
-    { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
-    { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
-  ], [])
+  const SHORTCUTS: ShortcutEntry[] = useMemo(() => {
+    // #2883: author entries with canonical `Cmd+...` labels and rewrite to
+    // `Ctrl+...` at render time on non-Mac platforms so the cheat-sheet
+    // matches the modifier the user can actually press.
+    const rawEntries: ShortcutEntry[] = [
+      { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
+      { keys: 'Cmd+K', description: 'Command palette', section: 'Global' },
+      { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
+      { keys: 'Cmd+N', description: 'New session', section: 'Global' },
+      { keys: 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
+      { keys: 'Cmd+,', description: 'Settings', section: 'Global' },
+      { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
+      { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
+      { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
+      { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
+      { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
+      { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
+      { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
+      { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
+      { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
+      { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
+      { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
+      { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
+    ]
+    return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
+  }, [])
 
   // Compute context window usage percentage from active model metadata
   const contextPercent = useMemo(() => {
