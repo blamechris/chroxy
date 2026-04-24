@@ -573,6 +573,87 @@ describe('redactSensitive (#1849)', () => {
   })
 })
 
+describe('redactSensitive API key patterns (#2961)', () => {
+  it('redacts OpenAI sk- keys (legacy format, 48+ chars after prefix)', () => {
+    const key = 'sk-' + 'a'.repeat(48)
+    const result = redactSensitive(`stderr: invalid key ${key} rejected`)
+    assert.ok(!result.includes(key), 'raw OpenAI key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts OpenAI sk-proj- scoped keys', () => {
+    const key = 'sk-proj-' + 'A1b2C3d4_E5f6-G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6'
+    const result = redactSensitive(`Error: Invalid API key ${key}`)
+    assert.ok(!result.includes(key), 'raw OpenAI project key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts Anthropic sk-ant-api03- keys', () => {
+    const key = 'sk-ant-api03-' + 'A1b2C3d4_E5f6-G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2'
+    const result = redactSensitive(`authentication_error: invalid x-api-key ${key}`)
+    assert.ok(!result.includes(key), 'raw Anthropic key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts Google AIza API keys (exactly 35 chars after prefix)', () => {
+    const key = 'AIza' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r' // 35 chars after AIza
+    const result = redactSensitive(`GeminiAPI: invalid key ${key}`)
+    assert.ok(!result.includes(key), 'raw Google key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts API keys embedded in JSON-like stderr output', () => {
+    const key = 'sk-ant-api03-' + 'Z1y2X3w4V5u6T7s8R9q0P1o2N3m4L5k6J7i8H9g0F1e2'
+    const stderr = `{"error":"invalid key","key":"${key}","hint":"use --api-key flag"}`
+    const result = redactSensitive(stderr)
+    assert.ok(!result.includes(key))
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('does NOT redact unrelated strings starting with "sk-" but too short', () => {
+    // sk-short is a typo/filler, not a real key — should pass through
+    const msg = 'fallback-sku-code and sk-demo are examples'
+    const result = redactSensitive(msg)
+    assert.equal(result, msg, 'short sk- strings should not be false-positively redacted')
+  })
+
+  it('does NOT redact the literal word "AIzawa" or non-key "AIza" prefixed names', () => {
+    // AIza-style prefix with fewer than 35 trailing chars should not match
+    const msg = 'AIza123 is too short to be a key'
+    const result = redactSensitive(msg)
+    assert.equal(result, msg, 'short AIza strings should not be false-positively redacted')
+  })
+
+  it('does NOT redact unrelated SKU identifiers', () => {
+    const msg = 'product SKU: ABC-1234 stock level OK'
+    const result = redactSensitive(msg)
+    assert.equal(result, msg)
+  })
+
+  it('redacts multiple API keys in the same message', () => {
+    const openai = 'sk-' + 'a'.repeat(48)
+    const google = 'AIza' + 'B'.repeat(35)
+    const msg = `keys found: ${openai} and ${google}`
+    const result = redactSensitive(msg)
+    assert.ok(!result.includes(openai))
+    assert.ok(!result.includes(google))
+  })
+
+  it('redacts API keys passed through createLogger output', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('provider-test')
+    const key = 'sk-ant-api03-' + 'L1e2a3k4_test_key-12345678901234567890123456789012'
+    log.error(`stderr: ${key}`)
+
+    assert.equal(entries.length, 1)
+    assert.ok(!entries[0].message.includes(key), 'key must be redacted in logger output')
+    assert.ok(entries[0].message.includes('[REDACTED]'))
+    setLogListener(null)
+  })
+})
+
 describe('withSession', () => {
   afterEach(() => {
     setLogListener(null)
