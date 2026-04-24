@@ -5,6 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { getProvider } from './providers.js'
+import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
 import { readSessionContext } from './session-context.js'
@@ -84,6 +85,11 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
 
 // Re-export formatIdleDuration from SessionTimeoutManager for backward compatibility
 export { formatIdleDuration }
+
+// Re-export preflight errors so call sites that catch createSession() failures
+// can detect/branch on PROVIDER_BINARY_NOT_FOUND / PROVIDER_CREDENTIAL_MISSING
+// without taking a separate dependency on utils/preflight.js.
+export { ProviderBinaryNotFoundError, ProviderCredentialMissingError }
 
 /**
  * @typedef {Object} SessionManagerConfig
@@ -299,6 +305,15 @@ export class SessionManager extends EventEmitter {
     const sessionId = randomBytes(16).toString('hex')
     const sessionName = name || `Session ${++this._sessionCounter}`
 
+    // Pre-flight: verify the provider's binary exists and required credential
+    // env vars are set BEFORE constructing/spawning. Without this, a missing
+    // binary surfaces as an opaque ENOENT after the session has already
+    // appeared in the UI. Runs BEFORE worktree creation so a failed preflight
+    // doesn't leave an orphan worktree behind. (#2962)
+    const resolvedProviderType = provider || this._providerType
+    const PreflightProviderClass = getProvider(resolvedProviderType)
+    runProviderPreflight(PreflightProviderClass)
+
     // Worktree isolation — create a detached git worktree for this session
     let resolvedCwd = baseCwd
     let worktreePath = null
@@ -333,8 +348,9 @@ export class SessionManager extends EventEmitter {
       log.info(`Created worktree for session ${sessionId} at ${worktreeDir}`)
     }
 
-    const resolvedProvider = provider || this._providerType
-    const ProviderClass = getProvider(resolvedProvider)
+    const resolvedProvider = resolvedProviderType
+    const ProviderClass = PreflightProviderClass
+
     const providerOpts = {
       cwd: resolvedCwd,
       model: resolvedModel,

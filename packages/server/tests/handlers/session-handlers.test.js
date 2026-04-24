@@ -174,6 +174,24 @@ describe('session-handlers', () => {
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /disk full/)
     })
+
+    it('propagates err.code on session_error for preflight failures (#2962)', () => {
+      // Simulate the preflight layer throwing a coded error so the UI can
+      // render an actionable hint (e.g. "install Codex CLI") instead of just
+      // the message.
+      const ctx = makeCtx()
+      ctx.sessionManager.createSession = createSpy(() => {
+        const err = new Error('Codex: required binary "codex" not found. install Codex CLI.')
+        err.code = 'PROVIDER_BINARY_NOT_FOUND'
+        throw err
+      })
+      sessionHandlers.create_session(makeWs(), makeClient(), { provider: 'codex' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'PROVIDER_BINARY_NOT_FOUND')
+      assert.match(sent.message, /codex/)
+    })
   })
 
   describe('destroy_session — boundSessionId enforcement', () => {
