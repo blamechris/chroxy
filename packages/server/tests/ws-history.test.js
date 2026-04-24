@@ -313,6 +313,53 @@ describe('sendPostAuthInfo — multi-session mode', () => {
     sendPostAuthInfo(ctx, ws)
     assert.equal(ctx.permissions.resendPendingPermissions.callCount, 1)
   })
+
+  // #2954 — surface sessions that failed to restore at server startup so
+  // newly connecting clients see the "needs attention" state without waiting
+  // for another event to fire.
+  it('sends session_restore_failed for sessions that failed to restore', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getFailedRestores = () => [
+      {
+        sessionId: 'bad-sess',
+        name: 'Gemini',
+        provider: 'gemini-cli',
+        errorCode: 'RESTORE_FAILED',
+        errorMessage: 'GEMINI_API_KEY environment variable is not set',
+      },
+    ]
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const failedMsg = ctx._sends.find(m => m.type === 'session_restore_failed')
+    assert.ok(failedMsg, 'session_restore_failed was not sent')
+    assert.equal(failedMsg.sessionId, 'bad-sess')
+    assert.equal(failedMsg.name, 'Gemini')
+    assert.equal(failedMsg.provider, 'gemini-cli')
+    assert.equal(failedMsg.errorCode, 'RESTORE_FAILED')
+    assert.equal(failedMsg.errorMessage, 'GEMINI_API_KEY environment variable is not set')
+    assert.equal(failedMsg.originalHistoryPreserved, true)
+  })
+
+  it('omits session_restore_failed when sessionManager has no getFailedRestores (backward compat)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    // Explicitly no getFailedRestores method
+    assert.equal(typeof manager.getFailedRestores, 'undefined')
+
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const failedMsg = ctx._sends.find(m => m.type === 'session_restore_failed')
+    assert.equal(failedMsg, undefined, 'Should not send session_restore_failed without getFailedRestores')
+  })
 })
 
 describe('sendPostAuthInfo — encryption', () => {

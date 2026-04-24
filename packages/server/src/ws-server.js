@@ -250,6 +250,8 @@ function _isSecureRequest(req) {
  *   { type: 'session_switched', sessionId, name, cwd, conversationId? } — switched active session
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
+ *   { type: 'session_restore_failed', sessionId, name, provider, errorCode, errorMessage, originalHistoryPreserved }
+ *     — session in persisted state could not be restored (e.g. missing env var); history kept on disk for retry
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay

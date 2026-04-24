@@ -114,6 +114,24 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     send(ws, { type: 'session_list', sessions })
 
+    // Surface any sessions that failed to restore at startup (#2954) so newly
+    // connecting clients see the "needs attention" state without having to
+    // reconnect after the event fired.
+    if (typeof sessionManager.getFailedRestores === 'function') {
+      for (const failed of sessionManager.getFailedRestores()) {
+        if (client.boundSessionId && failed.sessionId !== client.boundSessionId) continue
+        send(ws, {
+          type: 'session_restore_failed',
+          sessionId: failed.sessionId,
+          name: failed.name,
+          provider: failed.provider,
+          errorCode: failed.errorCode,
+          errorMessage: failed.errorMessage,
+          originalHistoryPreserved: true,
+        })
+      }
+    }
+
     let activeId = defaultSessionId
     let entry = activeId ? sessionManager.getSession(activeId) : null
     if (!entry) {
