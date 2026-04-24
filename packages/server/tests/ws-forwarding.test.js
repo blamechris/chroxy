@@ -1,9 +1,9 @@
-import { describe, it, afterEach, mock } from 'node:test'
+import { describe, it, afterEach, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
+import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -148,6 +148,34 @@ describe('setupForwarding', () => {
       assert.ok(call)
       assert.equal(call.arguments[0].name, 'New Name')
       assert.equal(call.arguments[0].sessionId, 'sess-1')
+    })
+  })
+
+  describe('session_restore_failed event (#2954)', () => {
+    it('broadcasts restore failure to all clients with full payload', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_restore_failed', {
+        sessionId: 'sess-bad',
+        name: 'Gemini',
+        provider: 'gemini-cli',
+        errorCode: 'RESTORE_FAILED',
+        errorMessage: 'GEMINI_API_KEY environment variable is not set',
+        originalHistoryPreserved: true,
+      })
+
+      const call = ctx.broadcast.mock.calls.find(c =>
+        c.arguments[0].type === 'session_restore_failed'
+      )
+      assert.ok(call, 'should broadcast session_restore_failed')
+      const msg = call.arguments[0]
+      assert.equal(msg.sessionId, 'sess-bad')
+      assert.equal(msg.name, 'Gemini')
+      assert.equal(msg.provider, 'gemini-cli')
+      assert.equal(msg.errorCode, 'RESTORE_FAILED')
+      assert.equal(msg.errorMessage, 'GEMINI_API_KEY environment variable is not set')
+      assert.equal(msg.originalHistoryPreserved, true)
     })
   })
 
@@ -626,13 +654,20 @@ describe('executeRegistrations (via setupCliForwarding)', () => {
 
 describe('[session-binding-create] diagnostic log (#2832, #2855, #2854)', () => {
   let currentListener = null
+  let priorLogLevel = null
+  beforeEach(() => {
+    // Capture the level configured at suite start (typically from
+    // process.env.LOG_LEVEL, but may have been changed by another suite)
+    // so afterEach can round-trip it — never hard-code 'info'. (#2889)
+    priorLogLevel = getLogLevel()
+  })
   afterEach(() => {
     if (currentListener) {
       removeLogListener(currentListener)
       currentListener = null
     }
-    // Restore default level so unrelated suites are unaffected.
-    setLogLevel('info')
+    // Restore the prior level so unrelated suites are unaffected.
+    setLogLevel(priorLogLevel)
   })
 
   it('emits [session-binding-create] when SDK permission_request is registered with the event sessionId', () => {

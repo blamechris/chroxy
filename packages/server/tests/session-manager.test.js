@@ -411,6 +411,91 @@ describe('SessionManager.restoreState', () => {
 
     mgr.destroyAll()
   })
+
+  // Guardian FM-01 (#2954): surface restore failures and preserve history on disk
+  it('emits session_restore_failed event when a session fails to restore', () => {
+    const savedHistory = [
+      { type: 'message', messageType: 'user_input', content: 'my question', timestamp: 1000 },
+      { type: 'message', messageType: 'response', content: 'my answer', timestamp: 2000 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { id: 'failing-id', name: 'Gemini Bad', cwd: '/nonexistent/path/that/does/not/exist', model: null, permissionMode: 'approve', sdkSessionId: null, provider: 'gemini-cli', history: savedHistory },
+      ],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+
+    const failureEvents = []
+    mgr.on('session_restore_failed', (ev) => failureEvents.push(ev))
+
+    mgr.restoreState()
+
+    assert.equal(failureEvents.length, 1, 'Should emit exactly one session_restore_failed event')
+    const ev = failureEvents[0]
+    assert.equal(ev.name, 'Gemini Bad')
+    assert.equal(ev.provider, 'gemini-cli')
+    assert.ok(typeof ev.sessionId === 'string' && ev.sessionId.length > 0, 'Failed event should carry a sessionId')
+    assert.ok(typeof ev.errorMessage === 'string' && ev.errorMessage.length > 0, 'Failed event should carry errorMessage')
+    assert.ok(typeof ev.errorCode === 'string', 'Failed event should carry errorCode (even if generic)')
+    assert.equal(ev.originalHistoryPreserved, true, 'history must be preserved on disk')
+
+    mgr.destroyAll()
+  })
+
+  it('preserves failed session history on disk so retry works', () => {
+    const savedHistory = [
+      { type: 'message', messageType: 'user_input', content: 'preserved question', timestamp: 1000 },
+      { type: 'message', messageType: 'response', content: 'preserved answer', timestamp: 2000 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { id: 'good-id', name: 'Good', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: [{ type: 'message', messageType: 'user_input', content: 'good q', timestamp: 500 }] },
+        { id: 'bad-id', name: 'Bad', cwd: '/nonexistent/path/that/does/not/exist', model: null, permissionMode: 'approve', sdkSessionId: null, provider: 'gemini-cli', history: savedHistory },
+      ],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    const onDisk = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    // Failed session must survive on disk with its full history
+    const bySavedName = Object.fromEntries(onDisk.sessions.map(s => [s.name, s]))
+    assert.ok(bySavedName.Bad, 'Failed session should still be present on disk')
+    assert.equal(bySavedName.Bad.history.length, 2, `Failed session history lost on disk — got ${bySavedName.Bad.history?.length}`)
+    assert.equal(bySavedName.Bad.history[0].content, 'preserved question')
+    assert.equal(bySavedName.Bad.history[1].content, 'preserved answer')
+    assert.equal(bySavedName.Bad.provider, 'gemini-cli', 'Provider must be preserved so retry uses same provider')
+    assert.equal(bySavedName.Bad.cwd, '/nonexistent/path/that/does/not/exist', 'cwd must be preserved')
+
+    mgr.destroyAll()
+  })
+
+  it('listSessions includes failed restores with needs_attention flag', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { id: 'bad-id', name: 'Bad', cwd: '/nonexistent/path/that/does/not/exist', model: null, permissionMode: 'approve', sdkSessionId: null, provider: 'gemini-cli', history: [] },
+      ],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    const failed = mgr.getFailedRestores()
+    assert.equal(failed.length, 1, 'getFailedRestores() should return the failed session')
+    assert.equal(failed[0].name, 'Bad')
+    assert.equal(failed[0].provider, 'gemini-cli')
+    assert.equal(failed[0].needsAttention, true)
+    assert.ok(failed[0].errorMessage)
+
+    mgr.destroyAll()
+  })
 })
 
 describe('SessionManager auto-persist', () => {

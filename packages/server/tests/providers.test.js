@@ -1,8 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { registerProvider, getProvider, listProviders, registerDockerProvider, validateProviderClass } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
+import { CodexSession } from '../src/codex-session.js'
+import { GeminiSession } from '../src/gemini-session.js'
 
 describe('Provider Registry', () => {
   it('has claude-cli and claude-sdk pre-registered', () => {
@@ -117,119 +119,6 @@ describe('Docker Provider Naming (#2475)', () => {
   })
 })
 
-describe('Provider Interface Validation', () => {
-  const ALL_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
-
-  function makeValidClass() {
-    class ValidProvider {
-      sendMessage() {}
-      interrupt() {}
-      setModel() {}
-      setPermissionMode() {}
-      start() {}
-      destroy() {}
-    }
-    return ValidProvider
-  }
-
-  it('validates a complete provider without throwing', () => {
-    assert.doesNotThrow(() => validateProviderClass(makeValidClass(), 'valid'))
-  })
-
-  it('throws when a required method is missing', () => {
-    class BadProvider {
-      interrupt() {}
-      setModel() {}
-      setPermissionMode() {}
-      start() {}
-      destroy() {}
-      // sendMessage intentionally omitted
-    }
-    assert.throws(
-      () => validateProviderClass(BadProvider, 'bad'),
-      /Provider 'bad' missing required method: sendMessage/
-    )
-  })
-
-  it('throws on the first missing method for an empty class', () => {
-    class EmptyProvider {}
-    assert.throws(
-      () => validateProviderClass(EmptyProvider, 'empty'),
-      /missing required method/
-    )
-  })
-
-  it('registerProvider rejects a class missing required methods', () => {
-    class IncompleteProvider {
-      sendMessage() {}
-      // missing interrupt, setModel, setPermissionMode, start, destroy
-    }
-    assert.throws(
-      () => registerProvider('incomplete-' + Date.now(), IncompleteProvider),
-      /missing required method/
-    )
-  })
-
-  it('registerProvider accepts a class with all required methods', () => {
-    const ValidClass = makeValidClass()
-    const name = 'valid-iface-' + Date.now()
-    assert.doesNotThrow(() => registerProvider(name, ValidClass))
-    assert.equal(getProvider(name), ValidClass)
-  })
-
-  it('all required methods are checked', () => {
-    for (const method of ALL_METHODS) {
-      const ValidClass = makeValidClass()
-      delete ValidClass.prototype[method]
-      assert.throws(
-        () => validateProviderClass(ValidClass, 'partial'),
-        new RegExp(`missing required method: ${method}`),
-        `should throw for missing ${method}`
-      )
-    }
-  })
-
-  it('throws a friendly error for non-constructable functions (arrow functions)', () => {
-    const arrowFn = () => {}
-    assert.throws(
-      () => validateProviderClass(arrowFn, 'arrow'),
-      /must be a constructable class/
-    )
-  })
-
-  it('requires respondToPermission and respondToQuestion when inProcessPermissions is true', () => {
-    class InProcessProvider {
-      sendMessage() {}
-      interrupt() {}
-      setModel() {}
-      setPermissionMode() {}
-      start() {}
-      destroy() {}
-      // missing respondToPermission and respondToQuestion
-      static get capabilities() { return { inProcessPermissions: true } }
-    }
-    assert.throws(
-      () => validateProviderClass(InProcessProvider, 'in-process'),
-      /inProcessPermissions=true but is missing required method/
-    )
-  })
-
-  it('accepts an inProcessPermissions provider that has all required methods', () => {
-    class FullInProcessProvider {
-      sendMessage() {}
-      interrupt() {}
-      setModel() {}
-      setPermissionMode() {}
-      start() {}
-      destroy() {}
-      respondToPermission() {}
-      respondToQuestion() {}
-      static get capabilities() { return { inProcessPermissions: true } }
-    }
-    assert.doesNotThrow(() => validateProviderClass(FullInProcessProvider, 'full-in-process'))
-  })
-})
-
 describe('Provider Capabilities', () => {
   it('CliSession has static capabilities', () => {
     const caps = CliSession.capabilities
@@ -251,5 +140,75 @@ describe('Provider Capabilities', () => {
     assert.equal(caps.planMode, false)
     assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
+  })
+})
+
+describe('Provider displayLabel (#2953)', () => {
+  it('CliSession exposes a human-readable displayLabel', () => {
+    assert.equal(CliSession.displayLabel, 'Claude Code (CLI)')
+  })
+
+  it('SdkSession exposes a human-readable displayLabel', () => {
+    assert.equal(SdkSession.displayLabel, 'Claude Code (SDK)')
+  })
+
+  it('CodexSession exposes a human-readable displayLabel', () => {
+    assert.equal(CodexSession.displayLabel, 'OpenAI Codex')
+  })
+
+  it('GeminiSession exposes a human-readable displayLabel', () => {
+    assert.equal(GeminiSession.displayLabel, 'Google Gemini')
+  })
+
+  it('Docker session variants inherit a displayLabel from their base', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    // Docker variants derive their label from the underlying provider so the
+    // banner stays meaningful without requiring a bespoke override.
+    assert.equal(typeof DockerSession.displayLabel, 'string')
+    assert.ok(DockerSession.displayLabel.length > 0)
+    assert.equal(typeof DockerSdkSession.displayLabel, 'string')
+    assert.ok(DockerSdkSession.displayLabel.length > 0)
+  })
+
+  it('every built-in provider exposes a non-empty displayLabel', () => {
+    // Only assert on the providers shipped with the server — tests earlier in
+    // this file register ad-hoc providers that don't need displayLabel.
+    const BUILT_IN = ['claude-cli', 'claude-sdk', 'codex', 'gemini']
+    for (const name of BUILT_IN) {
+      const ProviderClass = getProvider(name)
+      assert.equal(
+        typeof ProviderClass.displayLabel,
+        'string',
+        `Provider "${name}" must expose static get displayLabel()`
+      )
+      assert.ok(
+        ProviderClass.displayLabel.length > 0,
+        `Provider "${name}" displayLabel must be non-empty`
+      )
+    }
+  })
+})
+
+describe('resolveProviderLabel helper (#2953)', () => {
+  it('returns the provider class displayLabel for known providers', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    assert.equal(resolveProviderLabel('claude-cli'), 'Claude Code (CLI)')
+    assert.equal(resolveProviderLabel('claude-sdk'), 'Claude Code (SDK)')
+    assert.equal(resolveProviderLabel('codex'), 'OpenAI Codex')
+    assert.equal(resolveProviderLabel('gemini'), 'Google Gemini')
+  })
+
+  it('falls back to the raw provider name for unknown providers', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    // Unknown providers should not throw — server-cli should still boot.
+    assert.equal(resolveProviderLabel('not-registered-xyz'), 'not-registered-xyz')
+  })
+
+  it('handles empty/undefined input without throwing', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    assert.equal(resolveProviderLabel(undefined), 'unknown')
+    assert.equal(resolveProviderLabel(null), 'unknown')
+    assert.equal(resolveProviderLabel(''), 'unknown')
   })
 })

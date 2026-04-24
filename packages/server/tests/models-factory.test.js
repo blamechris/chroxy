@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createModelsRegistry, canonicalStringify } from '../src/models.js'
-import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
+import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
 
 describe('createModelsRegistry', () => {
   it('returns an object with all registry methods', () => {
@@ -334,19 +334,24 @@ describe('silent failure logging (#2830)', () => {
   let cachePath
   let entries
   let listener
+  let priorLogLevel
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'chroxy-models-log-'))
     cachePath = join(dir, 'models-cache.json')
     entries = []
     listener = (entry) => entries.push(entry)
+    // Capture the level configured at suite start so afterEach can
+    // round-trip it — never hard-code 'info'. (#2889)
+    priorLogLevel = getLogLevel()
     setLogLevel('debug')
     addLogListener(listener)
   })
 
   afterEach(() => {
     removeLogListener(listener)
-    setLogLevel('info')
+    // Restore the prior level so other suites are not affected.
+    setLogLevel(priorLogLevel)
     rmSync(dir, { recursive: true, force: true })
   })
 

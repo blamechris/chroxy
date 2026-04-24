@@ -81,6 +81,9 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
  *   session_updated   { sessionId, name }
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
+ *   session_restore_failed { sessionId, name, provider, errorCode, errorMessage, originalHistoryPreserved }
+ *     — emitted when a session in the persisted state file fails to restore (e.g. missing env var).
+ *       History on disk is preserved so the user can retry after fixing the underlying issue.
  */
 
 // Re-export formatIdleDuration from SessionTimeoutManager for backward compatibility
@@ -207,6 +210,13 @@ export class SessionManager extends EventEmitter {
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
+
+    // Failed-restore tracking (#2954 — Guardian FM-01): sessions whose on-disk
+    // state could not be re-hydrated (e.g. missing API key env var). We keep
+    // the original saved payload in-memory so serializeState() can rewrite it
+    // back to disk unchanged — the user's history must not be dropped just
+    // because the provider happened to be misconfigured at boot.
+    this._failedRestores = new Map() // sessionId -> { saved, error }
 
     // Session idle timeout (delegated to SessionTimeoutManager)
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
@@ -695,6 +705,15 @@ export class SessionManager extends EventEmitter {
       })
     }
 
+    // Preserve sessions that failed to restore (#2954 — Guardian FM-01).
+    // Without this, the next successful write drops them from disk and the
+    // user's history is permanently lost. We write them back exactly as
+    // they were loaded so a retry (after the user sets the missing env var
+    // and restarts) can fully re-hydrate history.
+    for (const [, { saved }] of this._failedRestores) {
+      state.sessions.push(saved)
+    }
+
     // Persist cost tracking so budget survives restarts
     const budgetState = this._costBudget.serialize()
     state.costs = budgetState.costs
@@ -718,6 +737,7 @@ export class SessionManager extends EventEmitter {
     const hasVersion = typeof state.version === 'number'
 
     let firstId = null
+    let anyFailure = false
     const oldToNew = new Map() // old serialized session ID → new session ID
     for (const saved of state.sessions) {
       try {
@@ -752,7 +772,30 @@ export class SessionManager extends EventEmitter {
         if (!firstId) firstId = sessionId
         log.info(`Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
       } catch (err) {
-        log.error(`Failed to restore session "${saved.name}": ${err.message}`)
+        // Guardian FM-01 (#2954): don't silently drop the session. Track it
+        // so serializeState() rewrites it back to disk (preserving history)
+        // and surface an event so clients can show a "needs attention" UI.
+        anyFailure = true
+        const failedId = this._registerFailedRestore(saved, err)
+        // Advance _sessionCounter past failed "Session N" names too, so any
+        // new sessions created during this boot don't collide with the name
+        // still occupying disk state.
+        if (saved.name) {
+          const match = saved.name.match(/^Session (\d+)$/)
+          if (match) {
+            const n = parseInt(match[1], 10)
+            if (n > this._sessionCounter) this._sessionCounter = n
+          }
+        }
+        log.error(`Failed to restore session "${saved.name}" (${saved.provider || 'default'}): ${err.message}`)
+        this.emit('session_restore_failed', {
+          sessionId: failedId,
+          name: saved.name,
+          provider: saved.provider || this._providerType,
+          errorCode: err?.code || 'RESTORE_FAILED',
+          errorMessage: err?.message || String(err),
+          originalHistoryPreserved: true,
+        })
       }
     }
 
@@ -761,10 +804,65 @@ export class SessionManager extends EventEmitter {
 
     // Now that history and budget are reseeded, flush once so the on-disk
     // state reflects the restored state (and so any subsequent abrupt
-    // shutdown preserves it). Only flush if we actually restored something.
-    if (firstId) this._flushPersist()
+    // shutdown preserves it). Flush if we restored any session OR had any
+    // failure — otherwise the next successful save would drop failed-restore
+    // entries. (serializeState() re-includes them from _failedRestores.)
+    if (firstId || anyFailure) this._flushPersist()
 
     return firstId
+  }
+
+  /**
+   * Register a failed-restore entry so its history is preserved on disk.
+   * Returns the synthetic session ID used for external reporting.
+   * @param {object} saved - The saved session payload from the state file
+   * @param {Error} err - The error thrown during restore
+   * @returns {string} sessionId
+   * @private
+   */
+  _registerFailedRestore(saved, err) {
+    // Reuse the saved id when present so the client-visible identity is
+    // stable across restart attempts; fall back to a random id otherwise.
+    const sessionId = saved.id || randomBytes(16).toString('hex')
+    this._failedRestores.set(sessionId, { saved, error: err })
+    return sessionId
+  }
+
+  /**
+   * Return the list of sessions that failed to restore at startup.
+   * UI uses this to show a "needs attention" state with a retry affordance.
+   * @returns {Array<{ sessionId, name, provider, errorCode, errorMessage, needsAttention, historyLength }>}
+   */
+  getFailedRestores() {
+    const list = []
+    for (const [sessionId, { saved, error }] of this._failedRestores) {
+      list.push({
+        sessionId,
+        name: saved.name,
+        provider: saved.provider || this._providerType,
+        cwd: saved.cwd,
+        model: saved.model || null,
+        permissionMode: saved.permissionMode || null,
+        errorCode: error?.code || 'RESTORE_FAILED',
+        errorMessage: error?.message || String(error),
+        needsAttention: true,
+        historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
+      })
+    }
+    return list
+  }
+
+  /**
+   * Clear a failed-restore entry. Called after a successful retry (or when
+   * the user dismisses the failed session so it stops reappearing).
+   * @param {string} sessionId
+   * @returns {boolean} true if an entry was cleared
+   */
+  clearFailedRestore(sessionId) {
+    if (!this._failedRestores.has(sessionId)) return false
+    this._failedRestores.delete(sessionId)
+    this._flushPersist()
+    return true
   }
 
   /**

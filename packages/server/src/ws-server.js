@@ -250,6 +250,8 @@ function _isSecureRequest(req) {
  *   { type: 'session_switched', sessionId, name, cwd, conversationId? } — switched active session
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
+ *   { type: 'session_restore_failed', sessionId, name, provider, errorCode, errorMessage, originalHistoryPreserved }
+ *     — session in persisted state could not be restored (e.g. missing env var); history kept on disk for retry
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
@@ -831,6 +833,13 @@ export class WsServer {
         // protocol version so version-gated broadcasts (e.g. #2849 tunnel
         // warming / ready via broadcastMinProtocolVersion) reach dev clients
         // instead of being silently filtered out.
+        //
+        // Assumption: a client connecting to a --no-auth dev server is built
+        // from the same checkout as the server and therefore speaks
+        // SERVER_PROTOCOL_VERSION (loopback bind enforces this in practice).
+        // Stale-build clients on a newer --no-auth server may receive v2-shape
+        // messages they can't parse — acceptable for dev, revisit if --no-auth
+        // ever broadens beyond loopback. See packages/server/CONFIG.md#--no-auth-trust-model.
         client.protocolVersion = SERVER_PROTOCOL_VERSION
         this._sendPostAuthInfo(ws)
         this._broadcastClientJoined(client, ws)
