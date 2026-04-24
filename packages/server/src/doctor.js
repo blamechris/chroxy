@@ -234,8 +234,10 @@ function checkProvider(providerName) {
  * `candidates` gives fallback absolute paths to try when the binary is not
  * on PATH — important for GUI-launched processes (e.g. Tauri) whose
  * inherited PATH excludes user-local install dirs.
+ *
+ * Exported for tests — callers in production should use `runDoctorChecks`.
  */
-function checkBinary(name, args, { parseVersion, required, installHint, candidates = [] }) {
+export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [] }) {
   const resolved = resolveBinary(name, candidates)
   try {
     const output = execFileSync(resolved, args, {
