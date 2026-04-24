@@ -5,7 +5,7 @@
  *          query_permission_audit, list_providers, set_permission_rules
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError } from '../handler-utils.js'
+import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
 import { createLogger } from '../logger.js'
 
@@ -250,7 +250,19 @@ function handlePermissionResponse(ws, client, msg, ctx) {
       })}`)
       // Don't consume the permissionSessionMap entry — let the legitimate
       // client still respond to it.
-      sendError(ws, requestId, 'SESSION_TOKEN_MISMATCH', 'Not authorized to respond to this permission request')
+      // Issue #2912: payload shape matches every other SESSION_TOKEN_MISMATCH
+      // emit site so the client can branch on `code` alone without worrying
+      // about which transport surface (type: 'error' vs 'session_error' vs
+      // 'web_task_error') produced it.
+      ctx.send(ws, {
+        type: 'error',
+        requestId: requestId ?? null,
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+          message: 'Not authorized to respond to this permission request',
+        }),
+      })
       return
     }
   }

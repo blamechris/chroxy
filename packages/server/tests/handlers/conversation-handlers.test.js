@@ -270,6 +270,24 @@ describe('conversation-handlers', () => {
       assert.equal(ctx._sent[0].type, 'session_context')
       assert.equal(ctx._sent[0].sessionId, 's1')
     })
+
+    // Issue #2912: request_session_context's SESSION_TOKEN_MISMATCH emit
+    // must carry the same unified payload shape as every other site.
+    it('includes boundSessionId and boundSessionName on bound-client rejection', async () => {
+      const sessions = new Map([
+        ['bound-1', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' }],
+      ])
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 'other', boundSessionId: 'bound-1' })
+
+      await conversationHandlers.request_session_context(makeWs(), client, { sessionId: 'other' }, ctx)
+
+      const [sent] = ctx._sent
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'bound-1')
+      assert.equal(sent.boundSessionName, 'BoundOne')
+    })
   })
 
   describe('request_cost_summary', () => {

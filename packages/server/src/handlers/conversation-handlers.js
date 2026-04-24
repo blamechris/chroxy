@@ -6,7 +6,7 @@
  */
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
 import { createLogger } from '../logger.js'
 
@@ -48,13 +48,15 @@ async function handleResumeConversation(ws, client, msg, ctx) {
   if (client.boundSessionId) {
     // See #2904 — include bound session name so the client can show an
     // actionable message instead of an opaque "Not authorized".
-    const boundEntry = ctx.sessionManager?.getSession?.(client.boundSessionId)
+    // Issue #2912: shape is shared with every other SESSION_TOKEN_MISMATCH
+    // emit site via buildSessionTokenMismatchPayload.
     ctx.send(ws, {
       type: 'session_error',
-      message: 'Not authorized: client is bound to a specific session',
-      code: 'SESSION_TOKEN_MISMATCH',
-      boundSessionId: client.boundSessionId,
-      boundSessionName: boundEntry?.name ?? null,
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+        message: 'Not authorized: client is bound to a specific session',
+      }),
     })
     return
   }
@@ -140,7 +142,13 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
 
   // Enforce session binding
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
     return
   }
 

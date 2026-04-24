@@ -305,6 +305,40 @@ describe('settings-handlers', () => {
       assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow'])
     })
 
+    // Issue #2912: permission_response rejection for a bound-client must use
+    // the same unified SESSION_TOKEN_MISMATCH payload (code + message +
+    // boundSessionId + boundSessionName) as every other emit site. The only
+    // wire-level difference is the outer envelope (`type: 'error'` with a
+    // `requestId`) so the client can correlate the failure with the original
+    // request.
+    it('sends unified SESSION_TOKEN_MISMATCH payload with boundSessionId and boundSessionName', () => {
+      const sessions = new Map([
+        ['bound-1', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' }],
+      ])
+      const ctx = makeCtx(sessions)
+      ctx.permissionSessionMap.set('req-mismatch', 'other-session')
+      const client = makeClient({
+        id: 'client-1',
+        activeSessionId: 'bound-1',
+        boundSessionId: 'bound-1',
+      })
+
+      settingsHandlers.permission_response(
+        makeWs(),
+        client,
+        { requestId: 'req-mismatch', decision: 'allow' },
+        ctx,
+      )
+
+      const sent = ctx._sent[ctx._sent.length - 1]
+      assert.equal(sent.type, 'error')
+      assert.equal(sent.requestId, 'req-mismatch')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.match(sent.message, /Not authorized/)
+      assert.equal(sent.boundSessionId, 'bound-1')
+      assert.equal(sent.boundSessionName, 'BoundOne')
+    })
+
     describe('session-binding reject diagnostic log (#2832)', () => {
       let currentListener = null
       afterEach(() => {

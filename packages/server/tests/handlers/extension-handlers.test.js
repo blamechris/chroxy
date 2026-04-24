@@ -74,6 +74,29 @@ describe('extension-handlers', () => {
       assert.deepEqual(payload.data, { content: 'pondering' })
     })
 
+    // Issue #2912: extension_message's SESSION_TOKEN_MISMATCH emit must
+    // carry the same unified payload shape as every other site.
+    it('includes boundSessionId and boundSessionName on bound-client rejection', () => {
+      const sessions = new Map([
+        ['bound-1', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' }],
+      ])
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 'other', boundSessionId: 'bound-1' })
+
+      extensionHandlers.extension_message(makeWs(), client, {
+        provider: 'gemini',
+        subtype: 'thinking',
+        data: {},
+        sessionId: 'other',
+      }, ctx)
+
+      const [sent] = ctx._sent
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'bound-1')
+      assert.equal(sent.boundSessionName, 'BoundOne')
+    })
+
     it('is a no-op when session lacks handleExtensionMessage', () => {
       const sessions = new Map()
       const session = createMockSession()
