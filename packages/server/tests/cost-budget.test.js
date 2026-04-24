@@ -28,7 +28,7 @@ describe('cost budget tracking', () => {
   let sm
 
   beforeEach(() => {
-    sm = new SessionManager({
+    sm = new SessionManager({ skipPreflight: true,
       costBudget: 5.00,
       providerType: 'test-cost',
       defaultCwd: process.cwd(),
@@ -134,7 +134,7 @@ describe('cost budget tracking', () => {
   })
 
   it('does not emit budget events when no budget configured', () => {
-    const smNoBudget = new SessionManager({
+    const smNoBudget = new SessionManager({ skipPreflight: true,
       providerType: 'test-cost',
       defaultCwd: process.cwd(),
       stateFilePath: '/tmp/test-cost-no-budget-state.json',

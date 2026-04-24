@@ -43,7 +43,7 @@ before(async () => {
 function makeMgr() {
   const tmpDir = mkdtempSync(join(tmpdir(), 'sm-naming-'))
   const stateFile = join(tmpDir, 'state.json')
-  const mgr = new SessionManager({
+  const mgr = new SessionManager({ skipPreflight: true,
     maxSessions: 10,
     defaultCwd: '/tmp',
     stateFilePath: stateFile,
