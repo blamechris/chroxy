@@ -93,17 +93,25 @@ describe('web-task-handlers', () => {
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.webTaskManager.launchTask.callCount, 0)
+      // Issue #2912: the web_task_error SESSION_TOKEN_MISMATCH payload shape
+      // matches the session_error payload — boundSessionId present,
+      // boundSessionName null when the binding is stale.
+      assert.equal(ctx._sent[0].boundSessionId, 'ghost')
+      assert.equal(ctx._sent[0].boundSessionName, null)
     })
 
     it('A10: bound client cannot override cwd away from session cwd', () => {
       const ctx = makeCtx()
-      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/Projects/chroxy' }) }
+      ctx.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/Projects/chroxy' }) }
       const client = makeClient({ boundSessionId: 'b1' })
       webTaskHandlers.launch_web_task(makeWs(), client,
         { prompt: 'hi', cwd: '/home/dev/Projects/other' }, ctx)
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.webTaskManager.launchTask.callCount, 0)
+      // Issue #2912: unified payload shape.
+      assert.equal(ctx._sent[0].boundSessionId, 'b1')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundOne')
     })
 
     it('A10: bound client using matching cwd forces launch in bound cwd', () => {
@@ -178,12 +186,15 @@ describe('web-task-handlers', () => {
       ctx.webTaskManager.getTask = (id) => id === 'task-x'
         ? { taskId: 'task-x', cwd: '/home/dev/other' }
         : null
-      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/ok' }) }
+      ctx.sessionManager = { getSession: () => ({ name: 'BoundOne', cwd: '/home/dev/ok' }) }
       const client = makeClient({ boundSessionId: 'b1' })
       webTaskHandlers.teleport_web_task(makeWs(), client, { taskId: 'task-x' }, ctx)
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.webTaskManager.teleportTask.callCount, 0)
+      // Issue #2912: unified payload shape.
+      assert.equal(ctx._sent[0].boundSessionId, 'b1')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundOne')
     })
 
     it('A10: rejects bound client when task id is unknown', () => {

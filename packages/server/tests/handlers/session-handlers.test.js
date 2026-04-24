@@ -129,6 +129,23 @@ describe('session-handlers', () => {
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
     })
+
+    // Issue #2912: switch_session's SESSION_TOKEN_MISMATCH payload must match
+    // the shape used by create_session / resume_conversation — clients that
+    // branch on `code` expect boundSessionId + boundSessionName to always be
+    // present.
+    it('includes boundSessionId and boundSessionName when rejecting a bound-client switch', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-a', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' })
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'sess-a')
+      assert.equal(sent.boundSessionName, 'BoundOne')
+    })
   })
 
   describe('create_session', () => {
@@ -211,6 +228,20 @@ describe('session-handlers', () => {
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.sessionManager.destroySession.callCount, 0)
     })
+
+    // Issue #2912: destroy_session rejection must carry the same unified
+    // SESSION_TOKEN_MISMATCH shape as every other emit site.
+    it('includes boundSessionId and boundSessionName in the rejection payload', async () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-a', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' })
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      await sessionHandlers.destroy_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.boundSessionId, 'sess-a')
+      assert.equal(sent.boundSessionName, 'BoundOne')
+    })
   })
 
   describe('rename_session — boundSessionId enforcement', () => {
@@ -224,6 +255,22 @@ describe('session-handlers', () => {
       const [, sent] = ctx.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+    })
+
+    // Issue #2912: rename_session rejection must carry the same unified
+    // SESSION_TOKEN_MISMATCH shape as every other emit site. The bound-client
+    // mismatch path in handleRenameSession calls ctx.send synchronously and
+    // returns before doRename() — no await is needed.
+    it('includes boundSessionId and boundSessionName in the rejection payload', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-a', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' })
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      sessionHandlers.rename_session(makeWs(), client, { sessionId: 'sess-b', name: 'NewName' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.boundSessionId, 'sess-a')
+      assert.equal(sent.boundSessionName, 'BoundOne')
     })
   })
 

@@ -7,6 +7,7 @@ import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider } from './providers.js'
+import { checkDependencies } from './utils/check-dependencies.js'
 
 // Resolve the server package root (the directory containing package.json
 // and node_modules) so dependency checks work regardless of where the
@@ -122,15 +123,29 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose } = {
   // sections group together in the output report.
   checks.push(configCheck)
 
-  // 6. node_modules
-  // Resolve relative to the server package, not process.cwd() — Tauri
+  // 6. Dependencies
+  // Resolve deps relative to the server package, not process.cwd() — Tauri
   // launches the server with cwd='/' under launchd, which would always
   // fail a `${process.cwd()}/node_modules` check.
-  const nodeModulesPath = join(SERVER_PKG_DIR, 'node_modules')
-  if (existsSync(nodeModulesPath)) {
-    checks.push({ name: 'Dependencies', status: 'pass', message: 'node_modules found' })
+  //
+  // Also handles npm workspace hoisting: deps may live in a parent
+  // node_modules/ (e.g. `<repo>/node_modules/commander`) when installed
+  // via `npm ci --workspace=@chroxy/server` at the workspace root. The
+  // helper walks up the tree and uses createRequire (CommonJS resolution)
+  // as a reliable proxy for whether deps are installed — close enough to
+  // ESM import behavior for plain package-name lookups used here.
+  const deps = checkDependencies({
+    startDir: SERVER_PKG_DIR,
+    probes: ['commander', 'ws', '@anthropic-ai/claude-agent-sdk'],
+  })
+  if (deps.ok) {
+    checks.push({ name: 'Dependencies', status: 'pass', message: `resolved via ${deps.foundAt}` })
   } else {
-    checks.push({ name: 'Dependencies', status: 'fail', message: `node_modules not found at ${nodeModulesPath} — run npm install` })
+    checks.push({
+      name: 'Dependencies',
+      status: 'fail',
+      message: `${deps.message || 'dependencies not found'} — run npm install`,
+    })
   }
 
   // 7. Port availability
@@ -219,8 +234,10 @@ function checkProvider(providerName) {
  * `candidates` gives fallback absolute paths to try when the binary is not
  * on PATH — important for GUI-launched processes (e.g. Tauri) whose
  * inherited PATH excludes user-local install dirs.
+ *
+ * Exported for tests — callers in production should use `runDoctorChecks`.
  */
-function checkBinary(name, args, { parseVersion, required, installHint, candidates = [] }) {
+export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [] }) {
   const resolved = resolveBinary(name, candidates)
   try {
     const output = execFileSync(resolved, args, {

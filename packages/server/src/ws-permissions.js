@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
 import { RateLimiter } from './rate-limiter.js'
+import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 
 const log = createLogger('ws')
 
@@ -274,20 +275,19 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       if (callerBoundSessionId) {
         if (!originSessionId || originSessionId !== callerBoundSessionId) {
           log.warn(`HTTP /permission-response rejected: token bound to ${callerBoundSessionId} tried to respond to ${requestId} with mapped session ${originSessionId ?? 'unmapped'}`)
-          // Enrich the error with the bound session's name so the mobile
-          // permission modal / notification retry path can show the same
-          // actionable "Device paired to session X" message that the WS
-          // create/resume paths do (#2911). Name is null if the bound id
-          // no longer maps to a live session (stale binding) — see #2914.
-          const smForLookup = getSessionManager()
-          const boundEntry = smForLookup?.getSession?.(callerBoundSessionId)
+          // Issue #2912: enrich HTTP body with the same fields as the WebSocket
+          // SESSION_TOKEN_MISMATCH payload so clients handle both surfaces
+          // identically. The legacy `error` key is preserved alongside the new
+          // unified `message` field for old-client compatibility.
+          // (#2911 enriched WS paths; #2914/#2936 added inline enrichment here;
+          // #2912 extracts the shared helper so the shape is guaranteed identical.)
           res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({
-            error: 'not authorized for this permission request',
-            code: 'SESSION_TOKEN_MISMATCH',
+          const unified = buildSessionTokenMismatchPayload({
+            sessionManager: getSessionManager(),
             boundSessionId: callerBoundSessionId,
-            boundSessionName: boundEntry?.name ?? null,
-          }))
+            message: 'not authorized for this permission request',
+          })
+          res.end(JSON.stringify({ error: unified.message, ...unified }))
           return
         }
       }

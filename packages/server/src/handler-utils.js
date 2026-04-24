@@ -423,3 +423,46 @@ export function sendError(ws, requestId, code, message) {
   if (!ws || ws.readyState !== 1) return
   ws.send(JSON.stringify({ type: 'error', requestId: requestId ?? null, code, message }))
 }
+
+// Issue #2912: every handler that rejects with SESSION_TOKEN_MISMATCH used to
+// build its own ad-hoc payload — some included boundSessionId/boundSessionName
+// (PR #2911 for create_session + resume_conversation), some included only
+// `code` and `message`. Clients branching on `code === 'SESSION_TOKEN_MISMATCH'`
+// therefore saw divergent shapes depending on which handler rejected them.
+// Centralise the shape here so every call site produces the same four fields.
+export const SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE = 'Not authorized to access this session'
+
+/**
+ * Build the canonical SESSION_TOKEN_MISMATCH error payload fields.
+ *
+ * Always returns `{ code, message, boundSessionId, boundSessionName }` so
+ * clients can rely on the shape regardless of which handler rejected. When
+ * the bound session is still resolvable via `sessionManager`, `boundSessionName`
+ * is the session's name; when the binding is stale or no sessionManager is
+ * available, it is `null`. When the client has no bound session at all (the
+ * HTTP fallback path), both `boundSessionId` and `boundSessionName` are `null`.
+ *
+ * @param {object} opts
+ * @param {object|null} [opts.sessionManager] - Session manager for name lookup (optional)
+ * @param {string|null|undefined} [opts.boundSessionId] - The client's bound session id
+ * @param {string} [opts.message] - Human-readable error message
+ * @returns {{code: string, message: string, boundSessionId: string|null, boundSessionName: string|null}}
+ */
+export function buildSessionTokenMismatchPayload({
+  sessionManager = null,
+  boundSessionId = null,
+  message = SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
+} = {}) {
+  const normalisedBoundId = typeof boundSessionId === 'string' && boundSessionId ? boundSessionId : null
+  let boundSessionName = null
+  if (normalisedBoundId && sessionManager && typeof sessionManager.getSession === 'function') {
+    const entry = sessionManager.getSession(normalisedBoundId)
+    boundSessionName = (entry && typeof entry.name === 'string') ? entry.name : null
+  }
+  return {
+    code: 'SESSION_TOKEN_MISMATCH',
+    message,
+    boundSessionId: normalisedBoundId,
+    boundSessionName,
+  }
+}
