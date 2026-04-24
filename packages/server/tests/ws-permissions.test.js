@@ -387,7 +387,13 @@ describe('createPermissionHandler', () => {
       const permissionSessionMap = new Map([['victim-req', 'session-B']])
       const respondToPermission = mock.fn()
       const sm = {
-        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+        // Issue #2912: name lookup for the unified payload uses sm.getSession
+        // with the caller's bound session id (session-A, not session-B).
+        getSession: mock.fn((id) =>
+          id === 'session-A'
+            ? { name: 'AttackerSession', session: { respondToPermission } }
+            : { session: { respondToPermission } }
+        ),
       }
       const pairingManager = {
         getSessionIdForToken: mock.fn((token) => token === 'attacker-token' ? 'session-A' : null),
@@ -410,6 +416,15 @@ describe('createPermissionHandler', () => {
       assert.equal(respondToPermission.mock.calls.length, 0, 'permission must NOT be resolved across sessions')
       // The mapping must remain so the legitimate bound client can still respond
       assert.ok(permissionSessionMap.has('victim-req'), 'permissionSessionMap entry must be preserved for the legit client')
+
+      // Issue #2912: the HTTP 403 body carries the same fields as the
+      // WebSocket session_error payload (`code`, `message`, `boundSessionId`,
+      // `boundSessionName`) so clients can treat both surfaces identically.
+      const parsed = JSON.parse(res.body)
+      assert.equal(parsed.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(parsed.boundSessionId, 'session-A')
+      assert.equal(parsed.boundSessionName, 'AttackerSession')
+      assert.equal(typeof parsed.message, 'string')
     })
 
     // Issue #2914: mirror the WS-path enrichment from PR #2911 on the HTTP

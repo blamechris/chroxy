@@ -29,6 +29,8 @@ import {
   resolveSession,
   enforceBoundSession,
   sendError,
+  buildSessionTokenMismatchPayload,
+  SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
 } from '../src/handler-utils.js'
 
 // -- Temp directory setup --
@@ -1103,5 +1105,71 @@ describe('enforceBoundSession', () => {
       assert.equal(err.code, 'SESSION_TOKEN_MISMATCH')
       assert.match(err.message, /bound to a different session/)
     }
+  })
+})
+
+// ============================================================
+// buildSessionTokenMismatchPayload — canonical payload shape (Issue #2912)
+// ============================================================
+
+describe('buildSessionTokenMismatchPayload', () => {
+  it('returns all four fields with defaults when given no arguments', () => {
+    const payload = buildSessionTokenMismatchPayload()
+    assert.deepEqual(Object.keys(payload).sort(), [
+      'boundSessionId', 'boundSessionName', 'code', 'message',
+    ])
+    assert.equal(payload.code, 'SESSION_TOKEN_MISMATCH')
+    assert.equal(payload.message, SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE)
+    assert.equal(payload.boundSessionId, null)
+    assert.equal(payload.boundSessionName, null)
+  })
+
+  it('looks up boundSessionName via sessionManager when binding is live', () => {
+    const sessionManager = {
+      getSession(id) { return id === 'sess-1' ? { name: 'MarchBorne' } : null },
+    }
+    const payload = buildSessionTokenMismatchPayload({
+      sessionManager, boundSessionId: 'sess-1',
+    })
+    assert.equal(payload.boundSessionId, 'sess-1')
+    assert.equal(payload.boundSessionName, 'MarchBorne')
+  })
+
+  it('returns null boundSessionName when binding is stale', () => {
+    const sessionManager = { getSession: () => null }
+    const payload = buildSessionTokenMismatchPayload({
+      sessionManager, boundSessionId: 'sess-gone',
+    })
+    assert.equal(payload.boundSessionId, 'sess-gone')
+    assert.equal(payload.boundSessionName, null)
+  })
+
+  it('tolerates missing sessionManager (null) and returns boundSessionName=null', () => {
+    const payload = buildSessionTokenMismatchPayload({
+      sessionManager: null, boundSessionId: 'sess-1',
+    })
+    assert.equal(payload.boundSessionId, 'sess-1')
+    assert.equal(payload.boundSessionName, null)
+  })
+
+  it('tolerates a session entry without a name field', () => {
+    const sessionManager = { getSession: () => ({ cwd: '/tmp' }) }
+    const payload = buildSessionTokenMismatchPayload({
+      sessionManager, boundSessionId: 'sess-1',
+    })
+    assert.equal(payload.boundSessionName, null)
+  })
+
+  it('uses a custom message when provided', () => {
+    const payload = buildSessionTokenMismatchPayload({
+      message: 'Not authorized to respond to this permission request',
+    })
+    assert.equal(payload.message, 'Not authorized to respond to this permission request')
+  })
+
+  it('normalises empty-string boundSessionId to null', () => {
+    const payload = buildSessionTokenMismatchPayload({ boundSessionId: '' })
+    assert.equal(payload.boundSessionId, null)
+    assert.equal(payload.boundSessionName, null)
   })
 })

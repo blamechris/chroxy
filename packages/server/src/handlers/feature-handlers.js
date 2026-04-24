@@ -10,7 +10,7 @@
  * reduce file fragmentation (each file had 1–4 small functions).
  */
 import { createLogger } from '../logger.js'
-import { validateCwdAllowed } from '../handler-utils.js'
+import { validateCwdAllowed, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 
@@ -33,7 +33,13 @@ function handleExtensionMessage(ws, client, msg, ctx) {
 
   // Enforce session binding
   if (client.boundSessionId && client.boundSessionId !== targetSessionId) {
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
     return
   }
 
@@ -92,8 +98,11 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
       ctx.send(ws, {
         type: 'web_task_error',
         taskId: null,
-        message: 'Not authorized to launch web tasks from this session',
-        code: 'SESSION_TOKEN_MISMATCH',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+          message: 'Not authorized to launch web tasks from this session',
+        }),
       })
       return
     }
@@ -101,8 +110,11 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
       ctx.send(ws, {
         type: 'web_task_error',
         taskId: null,
-        message: 'Bound clients may only launch web tasks inside the bound session cwd',
-        code: 'SESSION_TOKEN_MISMATCH',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+          message: 'Bound clients may only launch web tasks inside the bound session cwd',
+        }),
       })
       return
     }
@@ -155,8 +167,11 @@ function handleTeleportWebTask(ws, client, msg, ctx) {
       ctx.send(ws, {
         type: 'web_task_error',
         taskId: msg.taskId,
-        message: 'Not authorized to teleport this task',
-        code: 'SESSION_TOKEN_MISMATCH',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+          message: 'Not authorized to teleport this task',
+        }),
       })
       return
     }
