@@ -98,7 +98,7 @@ pub(crate) fn cloudflared_pids_to_kill(procs: &[(u32, String)], port: u16) -> Ve
 
 /// Parse one line of `ps -eo pid=,command=` output into (pid, full_command).
 /// Returns `None` for malformed lines.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn parse_ps_line(line: &str) -> Option<(u32, String)> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
@@ -426,32 +426,9 @@ impl ServerManager {
     /// sends SIGTERM / terminates. Waits briefly for them to exit.
     #[cfg(unix)]
     fn kill_orphan_cloudflared(port: u16, log_buf: &Arc<Mutex<VecDeque<String>>>) {
-        let output = match Command::new("ps").args(["-eo", "pid=,command="]).output() {
-            Ok(out) => out,
-            Err(err) => {
-                let msg = format!(
-                    "[cloudflared-cleanup] ps spawn failed: {} — skipping orphan cleanup on port {}",
-                    err, port
-                );
-                eprintln!("{}", msg);
-                Self::push_log_line(log_buf, msg);
-                return;
-            }
-        };
-
-        if !output.status.success() {
-            let stderr_snip = Self::stderr_snippet(&output.stderr);
-            let msg = format!(
-                "[cloudflared-cleanup] ps exited {} — skipping orphan cleanup on port {}: {}",
-                output.status, port, stderr_snip
-            );
-            eprintln!("{}", msg);
-            Self::push_log_line(log_buf, msg);
-            return;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let procs: Vec<(u32, String)> = stdout.lines().filter_map(parse_ps_line).collect();
+        let procs = Self::enumerate_unix_processes_with_runner(port, log_buf, &|| {
+            Command::new("ps").args(["-eo", "pid=,command="]).output()
+        });
 
         let pids = cloudflared_pids_to_kill(&procs, port);
         if pids.is_empty() {
@@ -507,6 +484,54 @@ impl ServerManager {
         thread::sleep(Duration::from_millis(500));
     }
 
+    /// Testable unix enumerator. Runs the injected process-listing command
+    /// via `runner`, logs any failure to `log_buf`, and returns the parsed
+    /// (pid, command_line) pairs (empty on failure).
+    ///
+    /// Production callers pass a runner that spawns `ps -eo pid=,command=`;
+    /// tests pass a closure that returns a synthetic `io::Error` or
+    /// non-success `Output` to exercise the failure-path diagnostics
+    /// added in #2868 (issue #2887).
+    ///
+    /// Available on unix (production) and in tests on any platform so the
+    /// failure paths can be exercised deterministically on dev hosts. The
+    /// `#[cfg(any(unix, test))]` gate matches `parse_ps_line` — both symbols
+    /// must be available together, and neither needs to exist in a Windows
+    /// release build where `kill_orphan_cloudflared` takes a different path.
+    #[cfg(any(unix, test))]
+    fn enumerate_unix_processes_with_runner(
+        port: u16,
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+        runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+    ) -> Vec<(u32, String)> {
+        let output = match runner() {
+            Ok(out) => out,
+            Err(err) => {
+                let msg = format!(
+                    "[cloudflared-cleanup] ps spawn failed: {} — skipping orphan cleanup on port {}",
+                    err, port
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(log_buf, msg);
+                return Vec::new();
+            }
+        };
+
+        if !output.status.success() {
+            let stderr_snip = Self::stderr_snippet(&output.stderr);
+            let msg = format!(
+                "[cloudflared-cleanup] ps exited {} — skipping orphan cleanup on port {}: {}",
+                output.status, port, stderr_snip
+            );
+            eprintln!("{}", msg);
+            Self::push_log_line(log_buf, msg);
+            return Vec::new();
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().filter_map(parse_ps_line).collect()
+    }
+
     /// Enumerate (pid, command_line) pairs on Windows.
     ///
     /// Primary: `wmic process get ProcessId,CommandLine /format:csv`
@@ -520,10 +545,44 @@ impl ServerManager {
     /// JSON on a single line.
     #[cfg(windows)]
     fn enumerate_windows_processes(log_buf: &Arc<Mutex<VecDeque<String>>>) -> Vec<(u32, String)> {
-        match Command::new("wmic")
-            .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
-            .output()
-        {
+        Self::enumerate_windows_processes_with_runners(
+            log_buf,
+            &|| {
+                Command::new("wmic")
+                    .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
+                    .output()
+            },
+            &|| {
+                Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+                    ])
+                    .output()
+            },
+        )
+    }
+
+    /// Testable windows enumerator. Accepts separate runners for the `wmic`
+    /// primary path and the PowerShell `Get-CimInstance` fallback so each
+    /// of the four failure modes (wmic spawn err, wmic non-success,
+    /// powershell spawn err, powershell non-success) can be exercised by
+    /// unit tests without a real Windows host (issue #2887).
+    ///
+    /// Logs exactly match the pre-refactor strings from #2868 so consumers
+    /// scraping the log buffer for diagnostics see no wire-format change.
+    ///
+    /// Available on windows (production) and in tests on any platform so
+    /// the failure paths can be exercised deterministically on dev hosts.
+    #[cfg(any(windows, test))]
+    fn enumerate_windows_processes_with_runners(
+        log_buf: &Arc<Mutex<VecDeque<String>>>,
+        wmic_runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+        powershell_runner: &dyn Fn() -> std::io::Result<std::process::Output>,
+    ) -> Vec<(u32, String)> {
+        match wmic_runner() {
             Ok(output) => {
                 if output.status.success() && !output.stdout.is_empty() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -565,15 +624,7 @@ impl ServerManager {
         }
 
         // wmic absent or returned nothing — fall back to PowerShell.
-        let output = match Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
-            ])
-            .output()
-        {
+        let output = match powershell_runner() {
             Ok(out) => out,
             Err(err) => {
                 let msg = format!(
@@ -1670,21 +1721,298 @@ mod tests {
         assert!(snip.contains("hi"));
     }
 
-    // -- kill_orphan_cloudflared: enumeration-failure logging (#2868) --
+    // -- kill_orphan_cloudflared: enumeration-failure logging (#2868, #2887) --
 
     #[cfg(unix)]
     #[test]
     fn kill_orphan_cloudflared_logs_when_ps_spawn_fails() {
-        // We can't easily force `ps` to be missing, but we can verify the
-        // happy path doesn't panic and the log buffer handle is threaded
-        // through correctly. Real-world spawn failure on systems without
-        // `ps` (e.g. stripped container) is covered by the manual
-        // `Command::new("ps")` substitution above.
+        // Smoke test: the real call path on a dev machine where `ps`
+        // exists — proves the signature compiles and the happy path
+        // does not panic. Deterministic failure-path coverage lives in
+        // the `enumerate_unix_processes_*` tests below (#2887).
         let mgr = ServerManager::new();
         // Call with an obviously-unused port so no PIDs match.
         ServerManager::kill_orphan_cloudflared(1, &mgr.log_buffer);
-        // No assertions on buffer contents — on dev machines `ps` exists,
-        // so this just verifies the signature compiles and does not panic.
+    }
+
+    // -- enumerate_unix_processes_with_runner: deterministic unix
+    //    failure-path coverage via injected command factory (#2887) --
+
+    /// Build a synthetic non-success `Output`. Uses
+    /// `ExitStatus::from_raw` with a non-zero code so `.success()` is
+    /// false across both unix (raw wait status) and windows (raw
+    /// exit code) targets.
+    fn fake_failed_output(stderr: &[u8]) -> std::process::Output {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            // Encode exit code 2 in the high byte of wait(2) status.
+            std::process::ExitStatus::from_raw(2 << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(2)
+        };
+        std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    fn fake_ok_output(stdout: &[u8]) -> std::process::Output {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        };
+        std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn log_buffer_contains(
+        buf: &Arc<Mutex<VecDeque<String>>>,
+        needle: &str,
+    ) -> bool {
+        lock_or_recover(buf).iter().any(|line| line.contains(needle))
+    }
+
+    #[test]
+    fn enumerate_unix_processes_logs_and_returns_empty_on_spawn_err() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_unix_processes_with_runner(
+            9876,
+            &mgr.log_buffer,
+            &|| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no ps here")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] ps spawn failed: "),
+            "expected ps-spawn-failed log line, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "no ps here"),
+            "expected io::Error message in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "port 9876"),
+            "expected port in log line, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_unix_processes_logs_and_returns_empty_on_non_zero_exit() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_unix_processes_with_runner(
+            4242,
+            &mgr.log_buffer,
+            &|| Ok(fake_failed_output(b"ps: permission denied")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] ps exited "),
+            "expected ps-exited log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "ps: permission denied"),
+            "expected stderr snippet in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "port 4242"),
+            "expected port in log line, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_unix_processes_returns_parsed_pairs_on_success() {
+        let mgr = ServerManager::new();
+        let stdout = b"  1234 /usr/bin/cloudflared tunnel --url http://localhost:8765\n  5678 /bin/bash\n";
+        let procs = ServerManager::enumerate_unix_processes_with_runner(
+            8765,
+            &mgr.log_buffer,
+            &|| Ok(fake_ok_output(stdout)),
+        );
+        assert_eq!(procs.len(), 2);
+        assert_eq!(procs[0].0, 1234);
+        assert!(procs[0].1.contains("cloudflared"));
+        assert!(
+            lock_or_recover(&mgr.log_buffer).is_empty(),
+            "success path must not emit any log lines"
+        );
+    }
+
+    // -- enumerate_windows_processes_with_runners: deterministic
+    //    windows failure-path coverage via injected command factories
+    //    (#2887). All four paths run on dev macOS/Linux via cross-
+    //    platform `cfg(any(windows, test))` gating. --
+
+    #[test]
+    fn enumerate_windows_processes_logs_wmic_spawn_err_then_falls_back() {
+        let mgr = ServerManager::new();
+        // wmic spawn fails, powershell returns empty JSON array.
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "blocked by policy")),
+            &|| Ok(fake_ok_output(b"[]")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] wmic spawn failed "),
+            "expected wmic-spawn-failed log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "blocked by policy"),
+            "expected io::Error message in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "falling back to powershell"),
+            "expected fallback notice in log, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_logs_wmic_non_success_then_falls_back() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Ok(fake_failed_output(b"wmic: access denied")),
+            &|| Ok(fake_ok_output(b"[]")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] wmic exited "),
+            "expected wmic-exited log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "wmic: access denied"),
+            "expected stderr snippet in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "falling back to powershell"),
+            "expected fallback notice in log, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_logs_powershell_spawn_err() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            // wmic fails too so we actually reach the powershell fallback.
+            &|| Ok(fake_failed_output(b"wmic broken")),
+            &|| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "powershell missing")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] powershell spawn failed: "),
+            "expected powershell-spawn-failed log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "powershell missing"),
+            "expected io::Error message in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "cannot enumerate processes"),
+            "expected terminal diagnostic, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_logs_powershell_non_success() {
+        let mgr = ServerManager::new();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Ok(fake_failed_output(b"wmic exit 1")),
+            &|| Ok(fake_failed_output(b"Get-CimInstance: The WMI provider returned an error")),
+        );
+        assert!(procs.is_empty());
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] powershell exited "),
+            "expected powershell-exited log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "Get-CimInstance: The WMI provider returned an error"),
+            "expected stderr snippet in log, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "cannot enumerate processes"),
+            "expected terminal diagnostic, got: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_wmic_success_skips_powershell() {
+        let mgr = ServerManager::new();
+        let wmic_stdout = b"Node,CommandLine,ProcessId\r\nWIN-HOST,cloudflared tunnel --url http://localhost:8765,4242\r\n";
+        let powershell_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ps_flag = powershell_called.clone();
+        let procs = ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Ok(fake_ok_output(wmic_stdout)),
+            &|| {
+                ps_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(fake_ok_output(b"[]"))
+            },
+        );
+        assert!(!procs.is_empty(), "wmic success should yield parsed procs");
+        assert_eq!(procs[0].0, 4242);
+        assert!(
+            !powershell_called.load(std::sync::atomic::Ordering::SeqCst),
+            "powershell fallback must not run when wmic returns usable rows"
+        );
+        assert!(
+            lock_or_recover(&mgr.log_buffer).is_empty(),
+            "wmic-success path must not emit any log lines"
+        );
+    }
+
+    #[test]
+    fn enumerate_windows_processes_wmic_not_found_uses_distinct_log() {
+        // ErrorKind::NotFound is special-cased to "wmic not present"
+        // rather than "wmic spawn failed" so the diagnostic matches
+        // the systemic case (Windows 11 22H2+ ships without wmic).
+        let mgr = ServerManager::new();
+        ServerManager::enumerate_windows_processes_with_runners(
+            &mgr.log_buffer,
+            &|| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "wmic not on PATH")),
+            &|| Ok(fake_ok_output(b"[]")),
+        );
+        assert!(
+            log_buffer_contains(&mgr.log_buffer, "[cloudflared-cleanup] wmic not present "),
+            "expected wmic-not-present log prefix, got: {:?}",
+            mgr.get_logs()
+        );
+        assert!(
+            !log_buffer_contains(&mgr.log_buffer, "wmic spawn failed"),
+            "spawn-failed log must not appear for NotFound errors"
+        );
     }
 
     #[test]
