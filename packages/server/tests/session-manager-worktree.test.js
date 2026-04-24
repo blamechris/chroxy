@@ -80,7 +80,7 @@ function makeGitRepo() {
  */
 function makeManager(gitRepo) {
   const stateFile = join(gitRepo, 'session-state.json')
-  const mgr = new SessionManager({
+  const mgr = new SessionManager({ skipPreflight: true,
     maxSessions: 5,
     stateFilePath: stateFile,
     providerType: 'stub-worktree',

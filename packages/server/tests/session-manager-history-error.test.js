@@ -25,7 +25,7 @@ describe('getFullHistoryAsync error handling', () => {
   let mgr
 
   beforeEach(() => {
-    mgr = new SessionManager({ maxSessions: 5 })
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5 })
   })
 
   it('falls back to ring buffer when JSONL path resolution throws', async () => {

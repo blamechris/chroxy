@@ -20,7 +20,7 @@ describe('SessionManager auto-labeling', () => {
   let mgr
 
   beforeEach(() => {
-    mgr = new SessionManager({ maxSessions: 5 })
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5 })
   })
 
   it('auto-renames session on first user_input when name matches default pattern', () => {

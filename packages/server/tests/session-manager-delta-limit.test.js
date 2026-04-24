@@ -16,7 +16,7 @@ function createFakeSession() {
 }
 
 function setupManager() {
-  const mgr = new SessionManager({ maxSessions: 5 })
+  const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5 })
   const session = createFakeSession()
   const sessionId = 'test-session-1'
   mgr._sessions.set(sessionId, { session, name: 'Test', cwd: '/tmp', createdAt: Date.now() })

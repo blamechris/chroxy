@@ -122,7 +122,12 @@ function handleCreateSession(ws, client, msg, ctx) {
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: err.message })
+    // Surface error code (e.g. PROVIDER_BINARY_NOT_FOUND,
+    // PROVIDER_CREDENTIAL_MISSING) so the client can render an actionable
+    // hint instead of an opaque message. See #2962.
+    const payload = { type: 'session_error', message: err.message }
+    if (err.code) payload.code = err.code
+    ctx.send(ws, payload)
   }
 }
 

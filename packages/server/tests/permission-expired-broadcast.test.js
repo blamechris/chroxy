@@ -140,7 +140,7 @@ describe('permission_expired end-to-end broadcast (#2831)', () => {
       registerProvider('fake-permexp', FakePermExpSession)
 
       const tmpState = `/tmp/chroxy-permexp-${Date.now()}-${Math.random()}.json`
-      const sm = new SessionManager({
+      const sm = new SessionManager({ skipPreflight: true,
         provider: 'fake-permexp',
         stateFilePath: tmpState,
         persistenceDebounceMs: 0,
