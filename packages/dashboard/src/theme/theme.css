@@ -78,8 +78,16 @@
   /* ---- Banner borders (subtle dividers for status/warning banners) ---- */
   --banner-border-subtle: #252540;
 
-  /* ---- Warning (amber-yellow, distinct from --accent-orange) ---- */
+  /* ---- Warning (amber-yellow, distinct from --accent-orange) ----
+   *
+   * Canonical warning tokens. Use these for any warning-tinted UI
+   * (text, icons, status dots, banner backgrounds). Previously this
+   * codebase had three fragmented references — `--warning`,
+   * `--status-warning`, `--warning-fg` — with divergent fallbacks.
+   * They have all been migrated to `--warning-fg` / `--warning-bg-subtle`.
+   */
   --warning-fg: #fbbf24;
+  --warning-bg-subtle: #fbbf2422;
 
   /* ---- Status indicators ---- */
   --status-connected: #22c55e;

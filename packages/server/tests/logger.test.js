@@ -376,6 +376,43 @@ describe('setLogLevel (#747)', () => {
   })
 })
 
+describe('getLogLevel (#2889)', () => {
+  afterEach(() => {
+    // Reset to a known level after each test — use the module's
+    // closeFileLogging() which also normalizes _logLevel to 'info'.
+    closeFileLogging()
+  })
+
+  it('is exported as a function', async () => {
+    const { getLogLevel } = await import('../src/logger.js')
+    assert.equal(typeof getLogLevel, 'function')
+  })
+
+  it('round-trips every supported level through setLogLevel', async () => {
+    const { getLogLevel, setLogLevel } = await import('../src/logger.js')
+    for (const level of ['debug', 'info', 'warn', 'error']) {
+      setLogLevel(level)
+      assert.equal(getLogLevel(), level, `expected getLogLevel()==='${level}' after setLogLevel('${level}')`)
+    }
+  })
+
+  it('lets tests restore a prior non-info level instead of clobbering it (#2889)', async () => {
+    const { getLogLevel, setLogLevel } = await import('../src/logger.js')
+    // Simulate a suite started with LOG_LEVEL=debug in the environment.
+    setLogLevel('debug')
+    const prior = getLogLevel()
+    assert.equal(prior, 'debug')
+
+    // Inside a test, a nested suite bumps the level (old pattern would have
+    // then restored 'info' and silently lost the debug setting).
+    setLogLevel('error')
+    // New pattern: round-trip the captured prior level.
+    setLogLevel(prior)
+    assert.equal(getLogLevel(), 'debug',
+      'prior level must be restored, not hard-coded to info')
+  })
+})
+
 describe('logger file write error handling (#746)', () => {
   let logDir
 
@@ -531,6 +568,87 @@ describe('redactSensitive (#1849)', () => {
 
     assert.equal(entries.length, 1)
     assert.ok(!entries[0].message.includes('supersecrettoken123456'))
+    assert.ok(entries[0].message.includes('[REDACTED]'))
+    setLogListener(null)
+  })
+})
+
+describe('redactSensitive API key patterns (#2961)', () => {
+  it('redacts OpenAI sk- keys (legacy format, 48+ chars after prefix)', () => {
+    const key = 'sk-' + 'a'.repeat(48)
+    const result = redactSensitive(`stderr: invalid key ${key} rejected`)
+    assert.ok(!result.includes(key), 'raw OpenAI key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts OpenAI sk-proj- scoped keys', () => {
+    const key = 'sk-proj-' + 'A1b2C3d4_E5f6-G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6'
+    const result = redactSensitive(`Error: Invalid API key ${key}`)
+    assert.ok(!result.includes(key), 'raw OpenAI project key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts Anthropic sk-ant-api03- keys', () => {
+    const key = 'sk-ant-api03-' + 'A1b2C3d4_E5f6-G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2'
+    const result = redactSensitive(`authentication_error: invalid x-api-key ${key}`)
+    assert.ok(!result.includes(key), 'raw Anthropic key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts Google AIza API keys (exactly 35 chars after prefix)', () => {
+    const key = 'AIza' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r' // 35 chars after AIza
+    const result = redactSensitive(`GeminiAPI: invalid key ${key}`)
+    assert.ok(!result.includes(key), 'raw Google key must not appear in output')
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts API keys embedded in JSON-like stderr output', () => {
+    const key = 'sk-ant-api03-' + 'Z1y2X3w4V5u6T7s8R9q0P1o2N3m4L5k6J7i8H9g0F1e2'
+    const stderr = `{"error":"invalid key","key":"${key}","hint":"use --api-key flag"}`
+    const result = redactSensitive(stderr)
+    assert.ok(!result.includes(key))
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('does NOT redact unrelated strings starting with "sk-" but too short', () => {
+    // sk-short is a typo/filler, not a real key — should pass through
+    const msg = 'fallback-sku-code and sk-demo are examples'
+    const result = redactSensitive(msg)
+    assert.equal(result, msg, 'short sk- strings should not be false-positively redacted')
+  })
+
+  it('does NOT redact the literal word "AIzawa" or non-key "AIza" prefixed names', () => {
+    // AIza-style prefix with fewer than 35 trailing chars should not match
+    const msg = 'AIza123 is too short to be a key'
+    const result = redactSensitive(msg)
+    assert.equal(result, msg, 'short AIza strings should not be false-positively redacted')
+  })
+
+  it('does NOT redact unrelated SKU identifiers', () => {
+    const msg = 'product SKU: ABC-1234 stock level OK'
+    const result = redactSensitive(msg)
+    assert.equal(result, msg)
+  })
+
+  it('redacts multiple API keys in the same message', () => {
+    const openai = 'sk-' + 'a'.repeat(48)
+    const google = 'AIza' + 'B'.repeat(35)
+    const msg = `keys found: ${openai} and ${google}`
+    const result = redactSensitive(msg)
+    assert.ok(!result.includes(openai))
+    assert.ok(!result.includes(google))
+  })
+
+  it('redacts API keys passed through createLogger output', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('provider-test')
+    const key = 'sk-ant-api03-' + 'L1e2a3k4_test_key-12345678901234567890123456789012'
+    log.error(`stderr: ${key}`)
+
+    assert.equal(entries.length, 1)
+    assert.ok(!entries[0].message.includes(key), 'key must be redacted in logger output')
     assert.ok(entries[0].message.includes('[REDACTED]'))
     setLogListener(null)
   })

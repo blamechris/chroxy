@@ -274,8 +274,20 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       if (callerBoundSessionId) {
         if (!originSessionId || originSessionId !== callerBoundSessionId) {
           log.warn(`HTTP /permission-response rejected: token bound to ${callerBoundSessionId} tried to respond to ${requestId} with mapped session ${originSessionId ?? 'unmapped'}`)
+          // Enrich the error with the bound session's name so the mobile
+          // permission modal / notification retry path can show the same
+          // actionable "Device paired to session X" message that the WS
+          // create/resume paths do (#2911). Name is null if the bound id
+          // no longer maps to a live session (stale binding) — see #2914.
+          const smForLookup = getSessionManager()
+          const boundEntry = smForLookup?.getSession?.(callerBoundSessionId)
           res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'not authorized for this permission request', code: 'SESSION_TOKEN_MISMATCH' }))
+          res.end(JSON.stringify({
+            error: 'not authorized for this permission request',
+            code: 'SESSION_TOKEN_MISMATCH',
+            boundSessionId: callerBoundSessionId,
+            boundSessionName: boundEntry?.name ?? null,
+          }))
           return
         }
       }

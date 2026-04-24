@@ -3,7 +3,7 @@ import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { createLogger } from './logger.js'
+import { createLogger, redactSensitive } from './logger.js'
 
 const log = createLogger('codex')
 
@@ -274,7 +274,7 @@ export class CodexSession extends BaseSession {
         this.emit('stream_end', { messageId: this._currentMessageId })
       }
       if (code !== 0 && code !== null) {
-        const detail = stderrBuf ? `: ${stderrBuf.slice(0, 500)}` : ''
+        const detail = stderrBuf ? `: ${redactSensitive(stderrBuf.slice(0, 500))}` : ''
         this.emit('error', { message: `Codex process exited with code ${code}${detail}` })
       }
       // Emit result only if turn.completed wasn't received

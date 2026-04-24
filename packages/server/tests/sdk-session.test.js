@@ -859,11 +859,48 @@ describe('SdkSession', () => {
       }
 
       const drift = entries.find(
-        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage contract drift')
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage partial drift')
       )
       assert.ok(drift, 'expected a drift debug log')
       assert.equal(drift.level, 'debug')
       assert.ok(drift.message.includes('claude-sonnet-4-6'))
+      assert.ok(drift.message.includes('inputTokens'))
+    })
+
+    it('logs partial drift when some entries carry contextWindow and others do not', async () => {
+      const { addLogListener, removeLogListener, setLogLevel } = await import(
+        '../src/logger.js'
+      )
+      setLogLevel('debug')
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await runWithModelUsage({
+          'claude-sonnet-4-6': { contextWindow: 200000 },
+          'claude-haiku-4-6': { inputTokens: 42, outputTokens: 17 },
+        })
+      } finally {
+        removeLogListener(listener)
+        setLogLevel('info')
+      }
+
+      const drift = entries.find(
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage partial drift')
+      )
+      assert.ok(drift, 'expected a partial drift debug log')
+      assert.equal(drift.level, 'debug')
+      // Only the entry missing contextWindow should be reported
+      assert.ok(
+        drift.message.includes('claude-haiku-4-6'),
+        'expected missing model id in log'
+      )
+      assert.ok(
+        !drift.message.includes('claude-sonnet-4-6'),
+        'entries that satisfied the contract should not appear in missingIds'
+      )
+      // Sample keys from the skipped entry should be present for diagnostics
       assert.ok(drift.message.includes('inputTokens'))
     })
 
@@ -886,7 +923,7 @@ describe('SdkSession', () => {
       }
 
       const drift = entries.find(
-        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage contract drift')
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage partial drift')
       )
       assert.equal(drift, undefined)
     })
@@ -908,7 +945,7 @@ describe('SdkSession', () => {
       }
 
       const drift = entries.find(
-        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage contract drift')
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage partial drift')
       )
       assert.equal(drift, undefined)
     })
