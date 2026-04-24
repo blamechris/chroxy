@@ -27,6 +27,7 @@ import {
   parseUserInputMessage,
   resolveStreamId,
   resolveSessionId,
+  isReplayDuplicate,
   handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
   handleAvailablePermissionModes as sharedAvailablePermissionModes,
@@ -60,6 +61,7 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
+  ProviderInfo,
   ConversationSummary,
   SearchResult,
   ToolResultImage,
@@ -770,6 +772,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
       } else {
         // No encryption — send post-auth messages immediately
+        wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: false });
@@ -802,6 +805,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred
+        wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
       }
@@ -1137,25 +1141,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // During any history replay, skip if an equivalent message is already in cache (dedup).
       // This prevents duplicates when the app already received messages via real-time
       // subscription before switching to the session (which triggers history replay).
+      // Shared helper lives in @chroxy/store-core (#2903).
       if (_ctx.receivingHistoryReplay) {
         const cached = getSessionMessages(targetId);
-        // For response messages with a stable server messageId, use ID-based dedup
-        // (timestamps differ between client stream_start and server stream_end)
-        if (stableMessageId && msgType === 'response') {
-          if (cached.some((m) => (m.id === stableMessageId && m.type === 'response') || m.id === `${stableMessageId}-response`)) break;
-        } else if (stableMessageId && msgType === 'user_input') {
-          // Issue #2902: server now stamps a stable messageId on user_input
-          // entries that matches the sender's optimistic ChatMessage.id.
-          if (cached.some((m) => m.id === stableMessageId)) break;
-        } else {
-          const isDuplicate = cached.some((m) => {
-            if (m.type !== msgType || m.content !== msg.content) return false;
-            if ((m.timestamp ?? null) !== ((msg.timestamp as number | undefined) ?? null)) return false;
-            if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
-            return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
-          });
-          if (isDuplicate) break;
-        }
+        if (isReplayDuplicate(cached, {
+          messageType: msgType,
+          messageId: stableMessageId,
+          content: msg.content,
+          timestamp: msg.timestamp as number | undefined,
+          tool: msg.tool as string | undefined,
+          options: msg.options as ChatMessage['options'],
+        })) break;
       }
       const newMsg: ChatMessage = {
         // Preserve the server-assigned messageId so future replays can still dedup by id.
@@ -2022,6 +2018,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (Array.isArray(msg.commands)) {
         set({ slashCommands: msg.commands as SlashCommand[] });
         useConversationStore.getState().setSlashCommands(msg.commands as SlashCommand[]);
+      }
+      break;
+    }
+
+    case 'provider_list': {
+      if (Array.isArray(msg.providers)) {
+        // Validate element shape before storing — guard against misbehaving
+        // servers / malicious endpoints that might send non-objects or
+        // objects without a string `name`.
+        const providers: ProviderInfo[] = msg.providers
+          .filter(
+            (p): p is { name: string; capabilities?: unknown } =>
+              !!p &&
+              typeof p === 'object' &&
+              typeof (p as { name?: unknown }).name === 'string',
+          )
+          .map((p) => {
+            const entry: ProviderInfo = { name: p.name };
+            if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
+              entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
+            }
+            return entry;
+          });
+        set({ availableProviders: providers });
       }
       break;
     }

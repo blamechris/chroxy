@@ -386,4 +386,49 @@ describe('message-handler', () => {
       }).not.toThrow();
     });
   });
+
+  // ---- provider_list (#2948) ----
+
+  describe('provider_list', () => {
+    it('stores providers array on availableProviders state', () => {
+      handleMessage({
+        type: 'provider_list',
+        providers: [
+          { name: 'claude-sdk', capabilities: { permissions: true, modelSwitch: true } },
+          { name: 'claude-cli', capabilities: { permissions: false } },
+          { name: 'codex', capabilities: {} },
+          { name: 'gemini', capabilities: {} },
+        ],
+      });
+
+      const state = store.getState() as any;
+      expect(state.availableProviders).toEqual([
+        { name: 'claude-sdk', capabilities: { permissions: true, modelSwitch: true } },
+        { name: 'claude-cli', capabilities: { permissions: false } },
+        { name: 'codex', capabilities: {} },
+        { name: 'gemini', capabilities: {} },
+      ]);
+    });
+
+    it('tolerates a single-provider response (Claude-only server)', () => {
+      handleMessage({
+        type: 'provider_list',
+        providers: [{ name: 'claude-sdk', capabilities: {} }],
+      });
+
+      const state = store.getState() as any;
+      expect(state.availableProviders).toHaveLength(1);
+      expect(state.availableProviders[0].name).toBe('claude-sdk');
+    });
+
+    it('ignores non-array providers payload', () => {
+      (store as any).setState({ availableProviders: [] });
+      expect(() => {
+        handleMessage({ type: 'provider_list', providers: 'not-an-array' });
+      }).not.toThrow();
+
+      const state = store.getState() as any;
+      expect(state.availableProviders).toEqual([]);
+    });
+  });
 });
