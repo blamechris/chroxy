@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
-import { dirname, join } from 'path'
+import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { homedir, platform } from 'os'
 import { createServer } from 'net'
@@ -53,9 +53,13 @@ function resolveProviders({ providers, configProvider }) {
  * @param {number} [options.port] - Port to test availability for
  * @param {string[]} [options.providers] - Override configured providers (mainly for tests)
  * @param {boolean} [options.verbose]
+ * @param {string} [options.pkgDir] - Override directory used to locate node_modules for the
+ *   Dependencies check. Defaults to the server package root. Relative paths are resolved to
+ *   absolute at call time so the check is fully decoupled from process.cwd(). Exposed so
+ *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose } = {}) {
+export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR } = {}) {
   const checks = []
   const isMac = platform() === 'darwin'
   const isLinux = platform() === 'linux'
@@ -126,16 +130,20 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose } = {
   // 6. Dependencies
   // Resolve deps relative to the server package, not process.cwd() — Tauri
   // launches the server with cwd='/' under launchd, which would always
-  // fail a `${process.cwd()}/node_modules` check.
+  // fail a `${process.cwd()}/node_modules` check. Tests may override
+  // `pkgDir` to point at a temp directory. Normalize to an absolute
+  // path so a relative `pkgDir` can't reintroduce cwd coupling.
   //
   // Also handles npm workspace hoisting: deps may live in a parent
-  // node_modules/ (e.g. `<repo>/node_modules/commander`) when installed
-  // via `npm ci --workspace=@chroxy/server` at the workspace root. The
-  // helper walks up the tree and uses createRequire (CommonJS resolution)
-  // as a reliable proxy for whether deps are installed — close enough to
-  // ESM import behavior for plain package-name lookups used here.
+  // node_modules/ when installed via `npm ci --workspace=@chroxy/server`.
+  // The helper walks up the tree and uses createRequire as a reliable
+  // proxy for whether deps are installed.
+  if (typeof pkgDir !== 'string' || pkgDir.length === 0) {
+    throw new TypeError(`pkgDir must be a non-empty string, got ${typeof pkgDir}`)
+  }
+  const absPkgDir = isAbsolute(pkgDir) ? pkgDir : resolve(pkgDir)
   const deps = checkDependencies({
-    startDir: SERVER_PKG_DIR,
+    startDir: absPkgDir,
     probes: ['commander', 'ws', '@anthropic-ai/claude-agent-sdk'],
   })
   if (deps.ok) {

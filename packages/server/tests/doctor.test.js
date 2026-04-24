@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parse as parsePath } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, parse as parsePath, relative } from 'node:path'
 import { runDoctorChecks, checkBinary } from '../src/doctor.js'
 
 /**
@@ -65,7 +67,10 @@ describe('runDoctorChecks', () => {
     const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const depsCheck = checks.find(c => c.name === 'Dependencies')
     assert.ok(depsCheck)
-    // Status depends on whether node_modules exists in cwd (may vary in CI)
+    // In the normal test environment, the server package's own node_modules
+    // installation should make this pass independent of the caller's cwd.
+    // We still allow 'fail' here as a soft assertion — some packaging
+    // contexts (e.g. a pruned bundle) may legitimately lack node_modules.
     assert.ok(['pass', 'fail'].includes(depsCheck.status))
   })
 
@@ -106,26 +111,60 @@ describe('runDoctorChecks', () => {
     assert.equal(passed, false)
   })
 
-  it('dependencies check resolves relative to server package, not process.cwd()', async () => {
+  it('dependencies check resolves relative to server package by default', async () => {
     // Regression: previously the check used join(process.cwd(), 'node_modules').
     // Tauri launches the server with cwd='/' under launchd, which always
     // failed this check and blocked server startup. The fix resolves
-    // node_modules relative to the server package itself.
-    const originalCwd = process.cwd()
-    // Use the filesystem root from the CURRENT cwd so the chdir works on
-    // any platform (POSIX root '/' or a Windows drive root like 'C:\\').
-    const fsRoot = parsePath(originalCwd).root
+    // node_modules relative to the server package itself. We no longer
+    // need to mutate process.cwd() — runDoctorChecks is self-contained
+    // and passes regardless of the caller's working directory.
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
+    const depsCheck = checks.find(c => c.name === 'Dependencies')
+    assert.ok(depsCheck)
+    // With node_modules installed in packages/server/, this must pass
+    // regardless of the caller's working directory.
+    assert.equal(depsCheck.status, 'pass', `expected pass, got ${depsCheck.status}: ${depsCheck.message}`)
+  })
+
+  it('dependencies check fails when pkgDir override has no node_modules', async () => {
+    // The pkgDir override lets tests aim the dependency check at an
+    // arbitrary directory without touching global process state. An empty
+    // temp dir has no node_modules, so the check must fail — proving the
+    // override is actually plumbed through to the node_modules lookup.
+    const emptyDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-'))
     try {
-      process.chdir(fsRoot)
-      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], pkgDir: emptyDir })
       const depsCheck = checks.find(c => c.name === 'Dependencies')
       assert.ok(depsCheck)
-      // With node_modules installed in packages/server/, this must pass
-      // even when process.cwd() is a directory with no node_modules.
-      assert.equal(depsCheck.status, 'pass', `expected pass, got ${depsCheck.status}: ${depsCheck.message}`)
+      assert.equal(depsCheck.status, 'fail', `expected fail, got ${depsCheck.status}: ${depsCheck.message}`)
+      assert.ok(depsCheck.message.includes(emptyDir), `message should reference temp dir: ${depsCheck.message}`)
     } finally {
-      process.chdir(originalCwd)
+      rmSync(emptyDir, { recursive: true, force: true })
     }
+  })
+
+  it('relative pkgDir is resolved to absolute, not reinterpreted against cwd later', async () => {
+    // A relative `pkgDir` must be normalized to an absolute path at call
+    // time. Otherwise a caller passing './foo' would reintroduce
+    // cwd-coupling — the very thing this API exists to avoid.
+    const emptyDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-rel-'))
+    try {
+      const relativePkgDir = relative(process.cwd(), emptyDir) || '.'
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], pkgDir: relativePkgDir })
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      assert.equal(depsCheck.status, 'fail', `expected fail, got ${depsCheck.status}: ${depsCheck.message}`)
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
+  })
+
+  it('throws TypeError when pkgDir is not a non-empty string', async () => {
+    // Defensive: an invalid pkgDir should fail loudly rather than silently
+    // falling back to process.cwd() via join() quirks.
+    await assert.rejects(() => runDoctorChecks({ pkgDir: null }), TypeError)
+    await assert.rejects(() => runDoctorChecks({ pkgDir: 123 }), TypeError)
+    await assert.rejects(() => runDoctorChecks({ pkgDir: '' }), TypeError)
   })
 
   it('finds binary via candidate paths when PATH omits the install dir', async () => {
