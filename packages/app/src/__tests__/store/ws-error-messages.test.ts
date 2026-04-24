@@ -52,7 +52,7 @@ jest.mock('../../store/message-handler', () => ({
   updateSession: jest.fn(),
   updateActiveSession: jest.fn(),
   saveConnection: jest.fn(),
-  clearConnection: jest.fn(),
+  clearSavedCredentials: jest.fn(),
   loadConnection: jest.fn().mockResolvedValue(null),
   drainMessageQueue: jest.fn(),
   CLIENT_PROTOCOL_VERSION: 1,

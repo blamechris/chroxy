@@ -11,7 +11,7 @@ Four first-party providers ship built-in:
 
 Two additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` (containerized wrappers of `claude-cli` / `claude-sdk`).
 
-The registry lives in [`packages/server/src/providers.js`](../packages/server/src/providers.js). Custom providers can be registered via `registerProvider(name, SessionClass)` — see the JSDoc in that file for the session interface contract.
+The registry lives in [`packages/server/src/providers.js`](../packages/server/src/providers.js) as a plain object literal mapping provider names to their session classes. To add a provider, edit that literal. Session classes must extend `EventEmitter` and expose `start`/`destroy`/`sendMessage`/`interrupt`/`setModel`/`setPermissionMode` plus a static `capabilities` getter — see [`sdk-session.js`](../packages/server/src/sdk-session.js) or [`cli-session.js`](../packages/server/src/cli-session.js) for a worked example.
 
 ## Provider table
 
@@ -258,4 +258,4 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - [`packages/server/CONFIG.md`](../packages/server/CONFIG.md) — full list of config keys and precedence rules.
 - [`docs/feature-matrix.md`](feature-matrix.md) — client-side feature availability across Mobile / Desktop / Server.
 - [`docs/troubleshooting.md`](troubleshooting.md) — connection, tunnel, and permission-hook issues.
-- [`packages/server/src/providers.js`](../packages/server/src/providers.js) — provider registry and custom-provider authoring guide.
+- [`packages/server/src/providers.js`](../packages/server/src/providers.js) — provider registry (literal map of built-ins).

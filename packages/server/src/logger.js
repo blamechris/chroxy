@@ -34,6 +34,26 @@ const SENSITIVE_PATTERNS = [
   /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{8,}["']?/gi,
 ]
 
+// Provider API key patterns (#2961). These run separately so we can emit a
+// bare "[REDACTED]" regardless of any surrounding key/value syntax — the raw
+// key often appears mid-sentence in stderr (e.g., "invalid api key sk-...").
+// Length floors are tuned to avoid false positives on short identifiers like
+// product SKUs or the literal word "AIzawa".
+const API_KEY_PATTERNS = [
+  // Anthropic: sk-ant-api03-... (checked before generic sk- so the longer
+  // prefix wins). Real keys are well over 40 trailing chars.
+  /\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{40,}/g,
+  // OpenAI project-scoped keys: sk-proj-... (typically 40+ chars after prefix)
+  /\bsk-proj-[A-Za-z0-9_-]{40,}/g,
+  // OpenAI legacy secret keys: sk- followed by 40+ chars. Must not match
+  // sk-ant- / sk-proj- (already handled above) — negative lookahead keeps
+  // them from being partially redacted.
+  /\bsk-(?!ant-|proj-)[A-Za-z0-9]{40,}/g,
+  // Google API keys: AIza + exactly 35 chars of [A-Za-z0-9_-].
+  // Trailing \b prevents matching into longer alphanumerics (e.g., AIzawa…).
+  /\bAIza[A-Za-z0-9_-]{35}\b/g,
+]
+
 /**
  * Redact sensitive data from a log message.
  * @param {string} msg
@@ -54,6 +74,9 @@ export function redactSensitive(msg) {
       if (match.startsWith('Bearer')) return 'Bearer [REDACTED]'
       return '[REDACTED]'
     })
+  }
+  for (const pattern of API_KEY_PATTERNS) {
+    result = result.replace(pattern, '[REDACTED]')
   }
   return result
 }
@@ -162,6 +185,20 @@ export function setLogLevel(level) {
   if (level in LOG_LEVELS) {
     _logLevel = LOG_LEVELS[level]
   }
+}
+
+/**
+ * Get the current minimum log level as a string.
+ * Useful for tests that need to round-trip the level across
+ * `beforeEach`/`afterEach` without clobbering a non-default
+ * `LOG_LEVEL` env configuration. (#2889)
+ * @returns {'debug' | 'info' | 'warn' | 'error'}
+ */
+export function getLogLevel() {
+  for (const [name, value] of Object.entries(LOG_LEVELS)) {
+    if (value === _logLevel) return name
+  }
+  return 'info'
 }
 
 /**

@@ -416,25 +416,27 @@ export class SdkSession extends BaseSession {
             // a value actually changed to avoid thrashy writes / UI churn.
             let contextWindowChanged = false
             if (msg.modelUsage && typeof msg.modelUsage === 'object') {
-              let sawContextWindow = false
-              const modelIds = Object.keys(msg.modelUsage)
+              const missingIds = []
               for (const [modelId, usage] of Object.entries(msg.modelUsage)) {
                 if (usage && typeof usage.contextWindow === 'number') {
-                  sawContextWindow = true
                   if (updateContextWindow(modelId, usage.contextWindow)) {
                     contextWindowChanged = true
                   }
+                } else {
+                  missingIds.push(modelId)
                 }
               }
-              // Drift signal: SDK emitted modelUsage entries but none carried a
-              // numeric contextWindow. Likely means the field was renamed or
-              // removed upstream. Log a redacted sample so a future regression
-              // is diagnosable without flooding info-level output.
-              if (!sawContextWindow && modelIds.length > 0) {
-                const sampleId = modelIds[0]
+              // Drift signal: at least one modelUsage entry was missing a
+              // numeric contextWindow. Catches both total drift (field renamed
+              // or removed upstream) and partial drift (schema updated for one
+              // model family before another). Log a redacted sample so a
+              // future regression is diagnosable without flooding info-level
+              // output.
+              if (missingIds.length > 0) {
+                const sampleId = missingIds[0]
                 const sampleKeys = Object.keys(msg.modelUsage[sampleId] || {})
                 log.debug(
-                  `modelUsage contract drift: expected numeric contextWindow; received modelIds=${JSON.stringify(modelIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
+                  `modelUsage partial drift: contextWindow missing for modelIds=${JSON.stringify(missingIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
                 )
               }
             }

@@ -63,7 +63,7 @@ describe('createStorageAdapter', () => {
     })
 
     adapter.saveConnection('wss://example.com', 'token123')
-    adapter.clearConnection()
+    adapter.clearSavedCredentials()
     expect(adapter.loadConnection()).toBeNull()
   })
 
@@ -76,7 +76,7 @@ describe('createStorageAdapter', () => {
 
     expect(() => adapter.saveConnection('url', 'token')).not.toThrow()
     expect(adapter.loadConnection()).toBeNull()
-    expect(() => adapter.clearConnection()).not.toThrow()
+    expect(() => adapter.clearSavedCredentials()).not.toThrow()
   })
 })
 
@@ -113,7 +113,7 @@ describe('createAsyncStorageAdapter', () => {
     })
 
     await adapter.saveConnection('wss://example.com', 'token123')
-    await adapter.clearConnection()
+    await adapter.clearSavedCredentials()
     expect(await adapter.loadConnection()).toBeNull()
   })
 
@@ -126,6 +126,6 @@ describe('createAsyncStorageAdapter', () => {
 
     await expect(adapter.saveConnection('url', 'token')).resolves.not.toThrow()
     expect(await adapter.loadConnection()).toBeNull()
-    await expect(adapter.clearConnection()).resolves.not.toThrow()
+    await expect(adapter.clearSavedCredentials()).resolves.not.toThrow()
   })
 })

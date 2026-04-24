@@ -116,6 +116,11 @@ const hackerTheme: ThemeDefinition = {
     'status-connecting': '#ccff00',
     'status-restarting': '#ccff00',
 
+    // Warning + banner tokens
+    'warning-fg': '#ccff00',
+    'warning-bg-subtle': '#ccff0022',
+    'banner-border-subtle': '#1a3a1a',
+
     // Syntax
     'syntax-keyword': '#00ff41',
     'syntax-string': '#33ff66',
@@ -222,6 +227,11 @@ const midnightTheme: ThemeDefinition = {
     'status-disconnected': '#f87171',
     'status-connecting': '#fbbf24',
     'status-restarting': '#fbbf24',
+
+    // Warning + banner tokens
+    'warning-fg': '#fbbf24',
+    'warning-bg-subtle': '#fbbf2422',
+    'banner-border-subtle': '#1e293b',
 
     // Syntax
     'syntax-keyword': '#c4b5fd',
@@ -330,6 +340,11 @@ const lightTheme: ThemeDefinition = {
     'status-connecting': '#d97706',
     'status-restarting': '#d97706',
 
+    // Warning + banner tokens
+    'warning-fg': '#d97706',
+    'warning-bg-subtle': '#d9770618',
+    'banner-border-subtle': '#cbd5e1',
+
     // Syntax
     'syntax-keyword': '#7c3aed',
     'syntax-string': '#16a34a',
@@ -436,6 +451,11 @@ const solarizedTheme: ThemeDefinition = {
     'status-disconnected': '#dc322f',
     'status-connecting': '#b58900',
     'status-restarting': '#b58900',
+
+    // Warning + banner tokens (Solarized yellow #b58900)
+    'warning-fg': '#b58900',
+    'warning-bg-subtle': '#b5890022',
+    'banner-border-subtle': '#073642',
 
     // Syntax — Solarized canonical assignments
     'syntax-keyword': '#859900',
@@ -544,6 +564,11 @@ const monokaiTheme: ThemeDefinition = {
     'status-connecting': '#fd971f',
     'status-restarting': '#fd971f',
 
+    // Warning + banner tokens (Monokai orange)
+    'warning-fg': '#fd971f',
+    'warning-bg-subtle': '#fd971f22',
+    'banner-border-subtle': '#3e3d32',
+
     // Syntax — Monokai canonical colors
     'syntax-keyword': '#f92672',
     'syntax-string': '#a6e22e',
@@ -651,6 +676,11 @@ const nordTheme: ThemeDefinition = {
     'status-connecting': '#ebcb8b',
     'status-restarting': '#ebcb8b',
 
+    // Warning + banner tokens (Nord nord13 yellow #ebcb8b)
+    'warning-fg': '#ebcb8b',
+    'warning-bg-subtle': '#ebcb8b22',
+    'banner-border-subtle': '#3b4252',
+
     // Syntax — Nord recommended
     'syntax-keyword': '#81a1c1',
     'syntax-string': '#a3be8c',
@@ -757,6 +787,11 @@ const highContrastTheme: ThemeDefinition = {
     'status-disconnected': '#ff3333',
     'status-connecting': '#ffaa00',
     'status-restarting': '#ffaa00',
+
+    // Warning + banner tokens
+    'warning-fg': '#ffaa00',
+    'warning-bg-subtle': '#ffaa0033',
+    'banner-border-subtle': '#444444',
 
     // Syntax — vivid, distinct colors for each token type
     'syntax-keyword': '#ff6699',

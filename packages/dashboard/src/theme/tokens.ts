@@ -78,6 +78,7 @@ export const colors = {
   },
   warning: {
     fg: '#fbbf24',
+    bgSubtle: '#fbbf2422',
   },
   status: {
     connected: '#22c55e',

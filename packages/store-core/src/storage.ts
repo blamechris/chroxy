@@ -42,7 +42,7 @@ export function createStorageAdapter(backend: {
       }
     },
 
-    clearConnection() {
+    clearSavedCredentials() {
       try {
         backend.removeItem(STORAGE_KEY_URL)
         backend.removeItem(STORAGE_KEY_TOKEN)
@@ -84,7 +84,7 @@ export function createAsyncStorageAdapter(backend: {
       }
     },
 
-    async clearConnection() {
+    async clearSavedCredentials() {
       try {
         await backend.removeItem(STORAGE_KEY_URL)
         await backend.removeItem(STORAGE_KEY_TOKEN)
