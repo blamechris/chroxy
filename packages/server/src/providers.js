@@ -35,6 +35,39 @@ for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
   registerProviderRegistry(name, ProviderClass)
 }
 
+/** Required methods every provider class prototype must expose. */
+const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
+
+/** Methods required when the provider handles permissions in-process. */
+const IN_PROCESS_PERMISSION_METHODS = ['respondToPermission', 'respondToQuestion']
+
+/**
+ * Validates that a provider class implements the ProviderSession interface.
+ * Checks the class prototype so no instance is created during registration.
+ * When `ProviderClass.capabilities.inProcessPermissions` is true, also validates
+ * that `respondToPermission` and `respondToQuestion` are present.
+ * @param {Function} ProviderClass - Session class to validate
+ * @param {string} name - Provider name for error messages
+ * @throws {Error} If any required method is missing from the prototype
+ */
+export function validateProviderClass(ProviderClass, name) {
+  if (typeof ProviderClass !== 'function' || !ProviderClass.prototype) {
+    throw new Error(`Provider '${name}' must be a constructable class`)
+  }
+  for (const method of REQUIRED_METHODS) {
+    if (typeof ProviderClass.prototype[method] !== 'function') {
+      throw new Error(`Provider '${name}' missing required method: ${method}`)
+    }
+  }
+  if (ProviderClass.capabilities?.inProcessPermissions) {
+    for (const method of IN_PROCESS_PERMISSION_METHODS) {
+      if (typeof ProviderClass.prototype[method] !== 'function') {
+        throw new Error(`Provider '${name}' has inProcessPermissions=true but is missing required method: ${method}`)
+      }
+    }
+  }
+}
+
 /**
  * Register a provider class by name.
  * @param {string} name - Provider identifier (e.g. 'claude-sdk')
@@ -48,6 +81,7 @@ export function registerProvider(name, ProviderClass, opts) {
   if (typeof ProviderClass !== 'function') {
     throw new Error(`Provider "${name}" must be a class/constructor`)
   }
+  validateProviderClass(ProviderClass, name)
   PROVIDERS[name] = ProviderClass
   if (opts?.alias) HIDDEN.add(name)
   // Expose the class to models.js so the per-provider model registry

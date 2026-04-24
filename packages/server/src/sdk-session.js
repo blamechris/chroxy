@@ -105,8 +105,12 @@ export class SdkSession extends BaseSession {
    * reuse the shared context-window heuristic. Used by the per-provider
    * registry for both lookup and validation (#2956).
    *
-   * @param {string} modelId - Either a short id ('sonnet') or a full id.
-   * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}}
+   * The registry calls this with the full model id as returned by the SDK
+   * (e.g. 'claude-sonnet-4-6'). Short alias resolution is intentionally
+   * left to the caller — the registry always has the fullId available.
+   *
+   * @param {string} modelId - Full model id (e.g. 'claude-sonnet-4-6').
+   * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
    */
   static getModelMetadata(modelId) {
     if (typeof modelId !== 'string' || modelId.length === 0) return null

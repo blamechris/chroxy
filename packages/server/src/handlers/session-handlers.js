@@ -5,6 +5,7 @@
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { getRegistryForProvider } from '../models.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -51,6 +52,12 @@ function handleSwitchSession(ws, client, msg, ctx) {
   ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
   ctx.sendSessionInfo(ws, targetId)
   ctx.replayHistory(ws, targetId)
+  // Re-send provider-scoped available_models so clients that switch from a
+  // Claude session to a Codex/Gemini session (or vice-versa) update their
+  // model dropdown immediately (#2956).
+  const switchProvider = entry.provider || null
+  const switchRegistry = getRegistryForProvider(switchProvider)
+  ctx.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
   broadcastFocusChanged(client, targetId, ctx)
 }
 

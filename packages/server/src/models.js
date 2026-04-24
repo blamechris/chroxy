@@ -150,9 +150,9 @@ function humanizeModelId(id) {
  *   to the registry's short id. Defaults to Claude's `claude-` strip.
  * @param {(fullId:string) => number} [hooks.resolveContextWindow] -
  *   Heuristic context-window resolver. Defaults to the Claude one.
- * @param {(id:string) => (Object|null)} [hooks.getModelMetadata] -
+ * @param {(fullId:string) => (Object|null)} [hooks.getModelMetadata] -
  *   Optional provider lookup that can return `{id,label,fullId,contextWindow}`
- *   for a known model id. When present it is consulted first during
+ *   for a known model fullId. When present it is consulted first during
  *   `updateModels()` to reuse provider-authoritative metadata.
  */
 export function createModelsRegistry(hooks = {}) {
