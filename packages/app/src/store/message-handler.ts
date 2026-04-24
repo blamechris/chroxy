@@ -2064,6 +2064,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'session_restore_failed': {
+      // Server couldn't restart a persisted session (e.g. missing API key).
+      // History is preserved on disk. Full UI (retry button, needs-attention
+      // marker) is a follow-up; for now just surface via console.
+      // eslint-disable-next-line no-console
+      console.warn('[session_restore_failed]', {
+        sessionId: msg.sessionId,
+        name: msg.name,
+        provider: msg.provider,
+        errorCode: msg.errorCode,
+        errorMessage: msg.errorMessage,
+      });
+      break;
+    }
+
     case 'checkpoint_created': {
       const cpSid = (msg.sessionId as string) || get().activeSessionId;
       if (cpSid !== get().activeSessionId) break;

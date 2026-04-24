@@ -2095,6 +2095,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'session_restore_failed': {
+      // Server couldn't restart a persisted session (e.g. missing API key).
+      // History is preserved on disk. Full UI is a follow-up; log for now.
+      // eslint-disable-next-line no-console
+      console.warn('[session_restore_failed]', {
+        sessionId: msg.sessionId,
+        name: msg.name,
+        provider: msg.provider,
+        errorCode: msg.errorCode,
+        errorMessage: msg.errorMessage,
+      });
+      break;
+    }
+
     case 'mcp_servers': {
       const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
       const servers = (msg.servers as McpServer[]) || [];
