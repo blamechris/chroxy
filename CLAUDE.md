@@ -53,6 +53,10 @@ brew install cloudflared
 npx chroxy tunnel setup
 ```
 
+### Triage Runbooks
+
+- [`docs/troubleshooting/session-token-mismatch.md`](docs/troubleshooting/session-token-mismatch.md) — how to enable the `[session-binding-*]` debug logs and correlate a `SESSION_TOKEN_MISMATCH` failure by `requestId` (active #2832 investigation path).
+
 ## Session Start Protocol
 
 **When user says "Resume" or "Let's start":**

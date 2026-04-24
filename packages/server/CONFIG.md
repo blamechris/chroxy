@@ -17,14 +17,29 @@ Configuration values are resolved in the following order (highest priority first
 |-----|------|----------|---------------------|-------------|
 | `apiToken` | string | - | `API_TOKEN` | Authentication token for clients |
 | `port` | number | - | `PORT` | Local WebSocket port (default: 8765) |
-| `tmuxSession` | string | - | `TMUX_SESSION` | tmux session name (PTY mode only) |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
 | `shell` | string | - | `SHELL_CMD` | Shell to use (default: `$SHELL` or `/bin/zsh`) |
 | `cwd` | string | `--cwd <path>` | `CHROXY_CWD` | Working directory (CLI mode) |
-| `model` | string | `--model <name>` | `CHROXY_MODEL` | Claude model to use (CLI mode) |
+| `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
 | `allowedTools` | array | `--allowed-tools <list>` | `CHROXY_ALLOWED_TOOLS` | Auto-approved tools (CLI mode) |
 | `resume` | boolean | `--resume` / `-r` | `CHROXY_RESUME` | Resume existing session |
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
 | `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. |
+
+### Provider selection
+
+The `provider` key picks which AI CLI backs a session by default:
+
+| Value | Backing binary / SDK | Required env |
+|-------|----------------------|--------------|
+| `claude-sdk` (default) | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
+| `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
+| `gemini` | `gemini -p` CLI | `GEMINI_API_KEY` |
+| `codex` | `codex exec` CLI | `OPENAI_API_KEY` |
+| `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
+
+Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
 
 ## Examples
 
@@ -84,12 +99,59 @@ Output example:
   cwd              = "/Users/me/project" (default)
 ```
 
+## `--no-auth` Trust Model
+
+`--no-auth` is a **dev-only** mode. It is intended for running Chroxy against
+loopback while iterating locally. When enabled:
+
+- The server binds to `127.0.0.1` only — tunnel startup is skipped (any
+  `--tunnel` flag is ignored, with an error logged if one was passed) and
+  mDNS/Bonjour advertisement is disabled.
+- Connecting clients are auto-authenticated immediately on WebSocket upgrade,
+  without presenting an API token or going through the pairing flow.
+- The token manager, pairing manager, and periodic token rotation are all
+  disabled.
+
+### Protocol-version assumption
+
+Because `--no-auth` skips the auth handshake, the client never advertises its
+protocol version. In that case the server pins the client's effective version
+to its own `SERVER_PROTOCOL_VERSION` so that version-gated broadcasts (for
+example the `server_status` tunnel-warming / ready events that require the
+`TUNNEL_STATUS_MIN_PROTOCOL_VERSION` floor) reach dev clients instead of being
+silently filtered out.
+
+**The assumption is: a client connecting to a `--no-auth` dev server is built
+from the same commit as the server and therefore speaks
+`SERVER_PROTOCOL_VERSION`.** The server trusts itself and its local clients.
+This is correct for the intended use — a freshly-built dashboard, app, or
+`test-client.js` on the same developer machine.
+
+**Known limitation:** if a stale-build client (shipped before a protocol
+version bump) connects to a newer `--no-auth` dev server, it will receive
+message shapes it cannot parse and may mis-render them. Rebuild the client
+against the same commit as the server when you hit this. This is why
+`--no-auth` is gated to loopback and why it must **not** be broadened to
+remote fleets (CI runners, containerised test rigs reachable off-host, shared
+dev hosts) without first reintroducing a protocol-version negotiation step
+for un-authenticated clients.
+
+### Operational guardrails
+
+- `--no-auth` forces loopback-only binding and skips tunnel startup, so the
+  server cannot be accidentally exposed to the public internet while auth is
+  off. A warning is logged at startup, and an additional error is logged if
+  a `--tunnel` flag was also passed.
+- `chroxy dev` refuses to start with `noAuth: true` — the supervised dev
+  workflow always requires a token.
+
 ## Best Practices
 
 1. **Keep secrets in config file or environment variables** - Don't pass `--api-token` as a CLI flag (it would be visible in process lists)
 2. **Use environment variables for deployment-specific values** - port, working directory, model selection
 3. **Use CLI flags for one-off overrides** - testing different models, changing working directory temporarily
 4. **Run `npx chroxy config`** to see your current config file contents
+5. **Treat `--no-auth` as dev-only** - see the [`--no-auth` Trust Model](#--no-auth-trust-model) section above. Never pair `--no-auth` with a tunnel or a non-loopback bind.
 
 ## Troubleshooting
 
