@@ -156,12 +156,17 @@ export class SessionManager extends EventEmitter {
     // Message history
     maxMessages,
     maxHistory,
+
+    // Test-only: skip preflight checks (binary + credential). Production must
+    // leave this false so missing providers surface cleanly at createSession.
+    skipPreflight = false,
   } = {}) {
     super()
 
     // Server identity
     this._port = port || null
     this._apiToken = apiToken || null
+    this._skipPreflight = skipPreflight
 
     // Session defaults
     this.maxSessions = maxSessions
@@ -322,7 +327,9 @@ export class SessionManager extends EventEmitter {
     // doesn't leave an orphan worktree behind. (#2962)
     const resolvedProviderType = provider || this._providerType
     const PreflightProviderClass = getProvider(resolvedProviderType)
-    runProviderPreflight(PreflightProviderClass)
+    if (!this._skipPreflight) {
+      runProviderPreflight(PreflightProviderClass)
+    }
 
     // Worktree isolation — create a detached git worktree for this session
     let resolvedCwd = baseCwd
