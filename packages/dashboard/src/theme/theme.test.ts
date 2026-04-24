@@ -244,6 +244,30 @@ describe('TypeScript tokens', () => {
 })
 
 // ---------------------------------------------------------------------------
+// CSS Custom Properties — Warning + banner tokens (#2886)
+// ---------------------------------------------------------------------------
+describe('CSS custom properties — warning + banner', () => {
+  it('defines --warning-fg', () => {
+    expect(computed.getPropertyValue('--warning-fg').trim()).toBe('#fbbf24')
+  })
+
+  it('defines --warning-bg-subtle', () => {
+    expect(computed.getPropertyValue('--warning-bg-subtle').trim()).toBe('#fbbf2422')
+  })
+
+  it('defines --banner-border-subtle', () => {
+    expect(computed.getPropertyValue('--banner-border-subtle').trim()).toBe('#252540')
+  })
+
+  it('CSS and TypeScript token values stay in sync', () => {
+    // Prevents drift between theme.css and tokens.ts (regenerated via generate-theme-tokens.mjs)
+    expect(colors.warning.fg).toBe(computed.getPropertyValue('--warning-fg').trim())
+    expect(colors.warning.bgSubtle).toBe(computed.getPropertyValue('--warning-bg-subtle').trim())
+    expect(colors.banner.borderSubtle).toBe(computed.getPropertyValue('--banner-border-subtle').trim())
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Extended color tokens
 // ---------------------------------------------------------------------------
 describe('extended color tokens', () => {

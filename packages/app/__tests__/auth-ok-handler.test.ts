@@ -326,7 +326,7 @@ describe('auth_ok handler', () => {
   });
 
   describe('post-auth messages', () => {
-    it('sends list_slash_commands and list_agents when no encryption', () => {
+    it('sends list_providers, list_slash_commands, and list_agents when no encryption', () => {
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
       handleMessage(createAuthOkMessage(), ctx as any);
 
@@ -334,6 +334,7 @@ describe('auth_ok handler', () => {
         (c: unknown[]) => JSON.parse(c[0] as string)
       );
       const types = sends.map((s: Record<string, unknown>) => s.type);
+      expect(types).toContain('list_providers');
       expect(types).toContain('list_slash_commands');
       expect(types).toContain('list_agents');
     });
@@ -346,8 +347,9 @@ describe('auth_ok handler', () => {
         (c: unknown[]) => JSON.parse(c[0] as string)
       );
       const types = sends.map((s: Record<string, unknown>) => s.type);
-      // Should send key_exchange but NOT list_slash_commands/list_agents yet
+      // Should send key_exchange but NOT list_providers/list_slash_commands/list_agents yet
       expect(types).toContain('key_exchange');
+      expect(types).not.toContain('list_providers');
       expect(types).not.toContain('list_slash_commands');
       expect(types).not.toContain('list_agents');
     });

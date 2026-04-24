@@ -21,6 +21,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useConnectionStore, isRuleEligibleTool } from '../store/connection'
 import type { PermissionDecision } from '../store/types'
+import { isMacPlatform } from '../utils/platform'
 
 export interface PermissionPromptProps {
   requestId: string
@@ -35,16 +36,6 @@ function formatCountdown(ms: number): string {
   const mins = Math.floor(totalSecs / 60)
   const secs = totalSecs % 60
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`
-}
-
-/**
- * #2840: detect Mac vs non-Mac for keyboard hint rendering. Falls back to
- * non-Mac shortcut label when `navigator` is unavailable (SSR / tests).
- */
-function isMacPlatform(): boolean {
-  if (typeof navigator === 'undefined') return false
-  const ua = navigator.userAgent || ''
-  return /Mac|iPod|iPhone|iPad/.test(ua)
 }
 
 export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond }: PermissionPromptProps) {
