@@ -73,7 +73,7 @@ export function getProvider(name) {
  */
 export function resolveProviderLabel(name) {
   if (!name || typeof name !== 'string') return 'unknown'
-  const ProviderClass = providers.get(name)
+  const ProviderClass = PROVIDERS[name]
   if (ProviderClass && typeof ProviderClass.displayLabel === 'string' && ProviderClass.displayLabel.length > 0) {
     return ProviderClass.displayLabel
   }
