@@ -85,7 +85,7 @@ export function formatSkillsForPrompt(skills) {
   return [
     '# User skills',
     '',
-    'The following skills have been shared from the user\'s ~/.chroxy/skills directory. Apply them when relevant to the task at hand.',
+    'The following skills have been shared from the user\'s skills directory. Apply them when relevant to the task at hand.',
     '',
     sections.join('\n\n---\n\n'),
   ].join('\n')
