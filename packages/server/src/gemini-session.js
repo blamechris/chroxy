@@ -1,4 +1,6 @@
 import { spawn } from 'child_process'
+import { homedir } from 'os'
+import { join } from 'path'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
@@ -30,10 +32,16 @@ const log = createLogger('gemini')
 
 const DEFAULT_MODEL = 'gemini-2.5-pro'
 
+// Resolve the gemini binary once at module load. Under a GUI launch
+// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's
+// install dir — fall through to known locations so `spawn()` succeeds.
+// Covers curl|sh installers (~/.local/bin) and `npm install -g` without
+// sudo (~/.npm-global/bin).
 const GEMINI = resolveBinary('gemini', [
+  join(homedir(), '.local/bin/gemini'),
   '/opt/homebrew/bin/gemini',
   '/usr/local/bin/gemini',
-  '/usr/bin/gemini',
+  join(homedir(), '.npm-global/bin/gemini'),
 ])
 
 // Per-provider model allowlist — #2946.
@@ -92,9 +100,10 @@ export class GeminiSession extends BaseSession {
         name: 'gemini',
         args: ['--version'],
         candidates: [
+          join(homedir(), '.local/bin/gemini'),
           '/opt/homebrew/bin/gemini',
           '/usr/local/bin/gemini',
-          '/usr/bin/gemini',
+          join(homedir(), '.npm-global/bin/gemini'),
         ],
         installHint: 'install Gemini CLI (see https://github.com/google-gemini/generative-ai-cli)',
       },

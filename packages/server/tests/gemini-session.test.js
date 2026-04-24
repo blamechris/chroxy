@@ -173,4 +173,43 @@ describe('GeminiSession', () => {
       session.destroy()
     })
   })
+
+  describe('binary candidate list', () => {
+    // Regression: the Tauri GUI launch path bug that bit claude (#2891) also
+    // affects gemini when installed via curl|sh to ~/.local/bin or via
+    // `npm install -g` to ~/.npm-global. Candidate list must cover both.
+    it('includes ~/.local/bin/gemini, Homebrew, /usr/local, and ~/.npm-global/bin', async () => {
+      const { readFileSync } = await import('node:fs')
+      const { dirname, join } = await import('node:path')
+      const { fileURLToPath } = await import('node:url')
+      const dir = dirname(fileURLToPath(import.meta.url))
+      const source = readFileSync(join(dir, '../src/gemini-session.js'), 'utf-8')
+
+      const match = source.match(/resolveBinary\(\s*'gemini'\s*,\s*\[([\s\S]*?)\]\s*\)/)
+      assert.ok(match, 'gemini candidate array should be defined via resolveBinary')
+      const block = match[1]
+
+      assert.ok(block.includes("'.local/bin/gemini'") || block.includes('.local/bin/gemini'),
+        'candidate list must include ~/.local/bin/gemini')
+      assert.ok(block.includes("'/opt/homebrew/bin/gemini'"),
+        'candidate list must include /opt/homebrew/bin/gemini')
+      assert.ok(block.includes("'/usr/local/bin/gemini'"),
+        'candidate list must include /usr/local/bin/gemini')
+      assert.ok(block.includes("'.npm-global/bin/gemini'"),
+        'candidate list must include ~/.npm-global/bin/gemini')
+    })
+
+    it('uses homedir() for user-local candidate paths', async () => {
+      const { readFileSync } = await import('node:fs')
+      const { dirname, join } = await import('node:path')
+      const { fileURLToPath } = await import('node:url')
+      const dir = dirname(fileURLToPath(import.meta.url))
+      const source = readFileSync(join(dir, '../src/gemini-session.js'), 'utf-8')
+
+      assert.ok(/import\s*\{[^}]*homedir[^}]*\}\s*from\s*'os'/.test(source),
+        'gemini-session.js must import homedir from os')
+      assert.ok(/import\s*\{[^}]*join[^}]*\}\s*from\s*'path'/.test(source),
+        'gemini-session.js must import join from path')
+    })
+  })
 })

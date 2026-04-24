@@ -1,4 +1,6 @@
 import { spawn } from 'child_process'
+import { homedir } from 'os'
+import { join } from 'path'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
@@ -42,10 +44,16 @@ const log = createLogger('codex')
  */
 const DEFAULT_MODEL = null
 
+// Resolve the codex binary once at module load. Under a GUI launch
+// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's
+// install dir — fall through to known locations so `spawn()` succeeds.
+// Covers curl|sh installers (~/.local/bin) and `npm install -g` without
+// sudo (~/.npm-global/bin).
 const CODEX = resolveBinary('codex', [
+  join(homedir(), '.local/bin/codex'),
   '/opt/homebrew/bin/codex',
   '/usr/local/bin/codex',
-  '/usr/bin/codex',
+  join(homedir(), '.npm-global/bin/codex'),
 ])
 
 /**
@@ -120,9 +128,10 @@ export class CodexSession extends BaseSession {
         name: 'codex',
         args: ['--version'],
         candidates: [
+          join(homedir(), '.local/bin/codex'),
           '/opt/homebrew/bin/codex',
           '/usr/local/bin/codex',
-          '/usr/bin/codex',
+          join(homedir(), '.npm-global/bin/codex'),
         ],
         installHint: 'install Codex CLI',
       },
