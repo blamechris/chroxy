@@ -233,6 +233,8 @@ export async function startCliServer(config) {
   // Register optional providers (e.g. docker) based on config
   await registerDockerProvider(config)
 
+  const providerType = config.provider || 'claude-sdk'
+
   // Create environment manager for persistent container environments (optional)
   let environmentManager = null
   if (config?.environments?.enabled) {
