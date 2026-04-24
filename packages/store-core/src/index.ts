@@ -68,6 +68,14 @@ export {
 } from './user-input-handler'
 
 export type {
+  IncomingReplayEntry,
+} from './replay-dedup'
+
+export {
+  isReplayDuplicate,
+} from './replay-dedup'
+
+export type {
   TokenType,
   Token,
   SyntaxRule,
