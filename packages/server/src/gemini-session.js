@@ -96,10 +96,13 @@ export class GeminiSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode } = {}) {
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto' })
+  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto', skillsDir })
     this.resumeSessionId = null
     this._process = null
+    // Skills MVP (#2957) — Gemini CLI has no system-prompt flag, so prepend
+    // skills to the first user message only.
+    this._skillsPrepended = false
   }
 
   start() {
@@ -153,7 +156,18 @@ export class GeminiSession extends BaseSession {
     this._isBusy = true
     this._currentMessageId = `gemini-msg-${++this._messageCounter}`
 
-    const args = ['-p', text, '--output-format', 'stream-json', '-y']
+    // Skills MVP (#2957) — prepend skills to the first user message of the
+    // session (Gemini CLI has no system-prompt flag).
+    let effectiveText = text
+    if (!this._skillsPrepended) {
+      const skillsText = this._buildSystemPrompt()
+      if (skillsText) {
+        effectiveText = `${skillsText}\n\n---\n\n${text}`
+      }
+      this._skillsPrepended = true
+    }
+
+    const args = ['-p', effectiveText, '--output-format', 'stream-json', '-y']
     if (this.model) {
       args.push('-m', this.model)
     }

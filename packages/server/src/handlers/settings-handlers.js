@@ -7,6 +7,7 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
+import { loadActiveSkills, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -319,6 +320,21 @@ function handleListProviders(ws, client, msg, ctx) {
   ctx.send(ws, { type: 'provider_list', providers: listProviders() })
 }
 
+/**
+ * Shared skills system MVP (#2957) — return the list of active skills found
+ * in `~/.chroxy/skills/`. The payload includes each skill's filename and a
+ * short description (first non-empty line of the body) so the client can
+ * display them informationally. v1 has no enable/disable UI — disabling is
+ * done by renaming the file to `*.disabled.md`.
+ */
+function handleListSkills(ws, client, msg, ctx) {
+  const skills = loadActiveSkills(DEFAULT_SKILLS_DIR).map((s) => ({
+    name: s.name,
+    description: s.description,
+  }))
+  ctx.send(ws, { type: 'skills_list', skills })
+}
+
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
@@ -418,6 +434,7 @@ export const settingsHandlers = {
   permission_response: handlePermissionResponse,
   query_permission_audit: handleQueryPermissionAudit,
   list_providers: handleListProviders,
+  list_skills: handleListSkills,
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
 }

@@ -98,8 +98,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms } = {}) {
-    super({ cwd, model, permissionMode })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir } = {}) {
+    super({ cwd, model, permissionMode, skillsDir })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -167,6 +167,12 @@ export class CliSession extends BaseSession {
 
     if (this.allowedTools.length > 0) {
       args.push('--allowedTools', this.allowedTools.join(','))
+    }
+
+    // Skills MVP (#2957) — append shared skills to the Claude CLI system prompt.
+    const skillsText = this._buildSystemPrompt()
+    if (skillsText) {
+      args.push('--append-system-prompt', skillsText)
     }
 
     log.info(`Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})`)

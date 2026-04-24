@@ -130,4 +130,30 @@ describe('BaseSession', () => {
       assert.equal(typeof session.emit, 'function')
     })
   })
+
+  describe('_buildSystemPrompt', () => {
+    it('returns empty string when no skills are loaded', () => {
+      session._skillsText = ''
+      assert.equal(session._buildSystemPrompt(), '')
+    })
+
+    it('returns formatted skills text when skills are loaded', () => {
+      session._skillsText = '# Skill: foo\n\nbody text'
+      const out = session._buildSystemPrompt()
+      assert.ok(out.includes('body text'))
+    })
+  })
+
+  describe('_getSkills', () => {
+    it('returns empty array by default (no skills loaded)', () => {
+      assert.deepEqual(session._getSkills(), [])
+    })
+
+    it('returns cached skills when set', () => {
+      session._skills = [{ name: 'a', body: 'x', description: 'x' }]
+      const out = session._getSkills()
+      assert.equal(out.length, 1)
+      assert.equal(out[0].name, 'a')
+    })
+  })
 })

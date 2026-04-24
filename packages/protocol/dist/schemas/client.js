@@ -277,6 +277,9 @@ export const UnsubscribeSessionsSchema = z.object({
 export const ListProvidersSchema = z.object({
     type: z.literal('list_providers'),
 });
+export const ListSkillsSchema = z.object({
+    type: z.literal('list_skills'),
+});
 export const ListReposSchema = z.object({
     type: z.literal('list_repos'),
 });
@@ -372,6 +375,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SubscribeSessionsSchema,
     UnsubscribeSessionsSchema,
     ListProvidersSchema,
+    ListSkillsSchema,
     ListReposSchema,
     AddRepoSchema,
     RemoveRepoSchema,

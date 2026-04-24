@@ -8,6 +8,7 @@
  */
 import { EventEmitter } from 'events'
 import { resolveModelId } from './models.js'
+import { loadActiveSkills, formatSkillsForPrompt, DEFAULT_SKILLS_DIR } from './skills-loader.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
@@ -26,7 +27,7 @@ export class BaseSession extends EventEmitter {
     return []
   }
 
-  constructor({ cwd, model, permissionMode } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
@@ -39,6 +40,12 @@ export class BaseSession extends EventEmitter {
     this._destroying = false
     this._activeAgents = new Map()
     this._resultTimeout = null
+
+    // Skills MVP (#2957) — scanned once at construction.
+    // skillsDir is injectable for tests; defaults to ~/.chroxy/skills.
+    this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
+    this._skills = loadActiveSkills(this._skillsDir)
+    this._skillsText = formatSkillsForPrompt(this._skills)
   }
 
   get isRunning() {
@@ -105,6 +112,31 @@ export class BaseSession extends EventEmitter {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Shared skills system MVP (#2957).
+   *
+   * Returns the list of active skills discovered at construction. Providers
+   * that want a summary for `list_skills` can use this; providers that want
+   * the injection-ready text should use `_buildSystemPrompt()`.
+   *
+   * @returns {Array<{ name: string, body: string, description: string }>}
+   */
+  _getSkills() {
+    return Array.isArray(this._skills) ? this._skills : []
+  }
+
+  /**
+   * Return the formatted skills text for injection into the provider's
+   * system prompt (Claude SDK `systemPrompt.append`, CLI
+   * `--append-system-prompt`) or prefixed to the first user message
+   * (Codex, Gemini). Returns an empty string when no skills are active.
+   *
+   * @returns {string}
+   */
+  _buildSystemPrompt() {
+    return typeof this._skillsText === 'string' ? this._skillsText : ''
   }
 
   _clearMessageState() {
