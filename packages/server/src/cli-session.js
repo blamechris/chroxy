@@ -11,6 +11,7 @@ import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('cli-session')
@@ -65,6 +66,35 @@ export class CliSession extends BaseSession {
       resume: false,
       terminal: false,
       thinkingLevel: false,
+    }
+  }
+
+  /**
+   * Preflight dependency spec used by `chroxy doctor`.
+   * Declares the binary and credential requirements for this provider so
+   * doctor.js can check only the binaries the configured provider actually
+   * needs (see issue #2951).
+   */
+  static get preflight() {
+    return {
+      label: 'Claude CLI',
+      binary: {
+        name: 'claude',
+        args: ['--version'],
+        candidates: [
+          join(homedir(), '.local/bin/claude'),
+          '/opt/homebrew/bin/claude',
+          '/usr/local/bin/claude',
+          join(homedir(), '.claude/local/node_modules/.bin/claude'),
+          join(homedir(), '.npm-global/bin/claude'),
+        ],
+        installHint: 'install Claude Code CLI',
+      },
+      credentials: {
+        envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+        hint: 'run `claude login` or set ANTHROPIC_API_KEY',
+        optional: true,
+      },
     }
   }
 
@@ -145,22 +175,25 @@ export class CliSession extends BaseSession {
 
   /**
    * Spawn the persistent claude process and wire up event handlers.
+   *
+   * Uses buildSpawnEnv('claude') which strips ANTHROPIC_API_KEY from the
+   * parent env (so the CLI uses OAuth/subscription auth instead of burning
+   * API credits) while still forwarding the rest of the user's environment
+   * — Claude Code tools expect the full shell env to be available.
    */
   _buildChildEnv() {
-    // Strip ANTHROPIC_API_KEY so CLI uses OAuth/subscription auth instead of API credits
-    const { ANTHROPIC_API_KEY: _, ...parentEnv } = process.env
-    return {
-      ...parentEnv,
+    const extras = {
       CI: '1',
       CLAUDE_HEADLESS: '1',
       CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+      CHROXY_PERMISSION_MODE: this.permissionMode,
       ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
       // Pass a short-lived per-session secret instead of the primary API token.
       // This limits the blast radius if a tool reads process.env — the hook secret
       // only authorises POST /permission, not the WebSocket API.
       ...(this._port ? { CHROXY_HOOK_SECRET: this._hookSecret } : {}),
-      CHROXY_PERMISSION_MODE: this.permissionMode,
     }
+    return buildSpawnEnv('claude', extras)
   }
 
   _spawnPersistentProcess(args) {

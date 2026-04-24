@@ -6,7 +6,7 @@
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError } from '../handler-utils.js'
-import { listProviders } from '../providers.js'
+import { listProviders, getProvider } from '../providers.js'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -18,22 +18,91 @@ const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
 
 const log = createLogger('ws')
 
+/**
+ * Resolve the allowed model IDs for a specific provider — #2946.
+ *
+ * Providers opt in to per-provider validation by exposing a static
+ * `getAllowedModels()` returning an array of accepted IDs. Providers that
+ * don't (claude-sdk/claude-cli/docker-*) fall back to the dynamic global
+ * `ALLOWED_MODEL_IDS`, which is fed by the Claude Agent SDK's supported-
+ * models list and is the historical source of truth for Claude sessions.
+ *
+ * Returning `null` means "no per-provider list available — use the global
+ * allowlist." Returning an array means the provider has opted in and the
+ * array is authoritative.
+ *
+ * @param {string|undefined} providerName - Session's registered provider name
+ * @returns {string[]|null}
+ */
+function getProviderAllowedModels(providerName) {
+  if (!providerName) return null
+  let ProviderClass
+  try {
+    ProviderClass = getProvider(providerName)
+  } catch {
+    // Unknown provider — can't validate, defer to global list.
+    return null
+  }
+  if (typeof ProviderClass.getAllowedModels !== 'function') return null
+  try {
+    const list = ProviderClass.getAllowedModels()
+    return Array.isArray(list) ? list : null
+  } catch {
+    return null
+  }
+}
+
 function handleSetModel(ws, client, msg, ctx) {
-  if (
-    typeof msg.model === 'string' &&
-    ALLOWED_MODEL_IDS.has(msg.model)
-  ) {
-    const modelSessionId = msg.sessionId || client.activeSessionId
-    const entry = resolveSession(ctx, msg, client)
+  if (typeof msg.model !== 'string') {
+    log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
+    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+    return
+  }
+
+  const modelSessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+
+  // Per-provider allowlist: the global ALLOWED_MODEL_IDS is Claude-only, so
+  // accepting any Claude model ID on a Gemini/Codex session and forwarding
+  // it to setModel() would respawn the CLI with an unknown `-m` arg and
+  // crash opaquely (see issue #2946). Consult the session's provider first.
+  if (entry) {
+    const providerAllowed = getProviderAllowedModels(entry.provider)
+    if (providerAllowed) {
+      if (!providerAllowed.includes(msg.model)) {
+        log.warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        sendError(
+          ws,
+          msg?.requestId,
+          'MODEL_NOT_SUPPORTED_BY_PROVIDER',
+          `Model '${msg.model}' is not supported by the active provider '${entry.provider}'. Supported models: ${providerAllowed.join(', ')}`,
+        )
+        return
+      }
+      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      entry.session.setModel(msg.model)
+      // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
+      // broadcast them verbatim. toShortModelId() is a Claude-specific
+      // alias collapse (claude-sonnet-4-6 → sonnet) and returns the input
+      // unchanged for non-Claude IDs, so applying it uniformly is safe.
+      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      return
+    }
+    // Fall through to the legacy global allowlist when the provider hasn't
+    // opted in (e.g. claude-sdk, claude-cli, docker-* inherit from it).
+  }
+
+  if (ALLOWED_MODEL_IDS.has(msg.model)) {
     if (entry) {
       log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
-  } else {
-    log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
-    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+    return
   }
+
+  log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
+  sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
 }
 
 function handleSetPermissionMode(ws, client, msg, ctx) {

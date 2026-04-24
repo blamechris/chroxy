@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, withEnv } from './test-helpers.js'
 import { EventEmitter } from 'node:events'
 
 describe('createSpy', () => {
@@ -191,5 +191,81 @@ describe('createMockSessionManager', () => {
     manager.on('test', (data) => { received = data })
     manager.emit('test', 'payload')
     assert.equal(received, 'payload')
+  })
+})
+
+describe('withEnv', () => {
+  const TEST_KEY = 'CHROXY_TEST_WITH_ENV_KEY'
+
+  it('applies overrides inside fn and restores afterwards (sync)', () => {
+    delete process.env[TEST_KEY]
+    const result = withEnv({ [TEST_KEY]: 'inside' }, () => {
+      assert.equal(process.env[TEST_KEY], 'inside')
+      return 42
+    })
+    assert.equal(result, 42)
+    assert.equal(process.env[TEST_KEY], undefined)
+  })
+
+  it('restores the prior value (not just deletes) when key pre-existed', () => {
+    process.env[TEST_KEY] = 'original'
+    try {
+      withEnv({ [TEST_KEY]: 'override' }, () => {
+        assert.equal(process.env[TEST_KEY], 'override')
+      })
+      assert.equal(process.env[TEST_KEY], 'original')
+    } finally {
+      delete process.env[TEST_KEY]
+    }
+  })
+
+  it('deletes the key when override is undefined', () => {
+    process.env[TEST_KEY] = 'start'
+    try {
+      withEnv({ [TEST_KEY]: undefined }, () => {
+        assert.equal(process.env[TEST_KEY], undefined)
+      })
+      assert.equal(process.env[TEST_KEY], 'start')
+    } finally {
+      delete process.env[TEST_KEY]
+    }
+  })
+
+  it('restores env after sync fn throws', () => {
+    delete process.env[TEST_KEY]
+    assert.throws(() => {
+      withEnv({ [TEST_KEY]: 'boom' }, () => {
+        assert.equal(process.env[TEST_KEY], 'boom')
+        throw new Error('sync boom')
+      })
+    }, /sync boom/)
+    assert.equal(process.env[TEST_KEY], undefined)
+  })
+
+  it('awaits async fn before restoring env', async () => {
+    delete process.env[TEST_KEY]
+    const p = withEnv({ [TEST_KEY]: 'async-inside' }, async () => {
+      await new Promise(r => setTimeout(r, 5))
+      // still inside the async fn — env must still be set
+      assert.equal(process.env[TEST_KEY], 'async-inside')
+      return 'async-result'
+    })
+    // before awaiting, env should still be set (Promise not yet resolved)
+    assert.equal(process.env[TEST_KEY], 'async-inside')
+    const result = await p
+    assert.equal(result, 'async-result')
+    assert.equal(process.env[TEST_KEY], undefined)
+  })
+
+  it('restores env after async fn rejects', async () => {
+    delete process.env[TEST_KEY]
+    await assert.rejects(
+      withEnv({ [TEST_KEY]: 'reject-inside' }, async () => {
+        await new Promise(r => setTimeout(r, 5))
+        throw new Error('async boom')
+      }),
+      /async boom/,
+    )
+    assert.equal(process.env[TEST_KEY], undefined)
   })
 })

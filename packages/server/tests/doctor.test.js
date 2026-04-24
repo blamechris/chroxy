@@ -6,18 +6,24 @@ import { runDoctorChecks } from '../src/doctor.js'
 /**
  * Integration tests for doctor.js.
  * Tests run against the real system — binaries are resolved via PATH.
+ *
+ * Most tests pin an explicit `providers` array so results do NOT depend
+ * on whichever provider is configured in the developer's local
+ * ~/.chroxy/config.json (which would otherwise make the suite flaky).
  */
 
 describe('runDoctorChecks', () => {
-  it('returns checks array and passed boolean', async () => {
-    const result = await runDoctorChecks()
+  it('returns checks array, passed boolean, and providers list', async () => {
+    const result = await runDoctorChecks({ providers: ['claude-sdk'] })
     assert.ok(Array.isArray(result.checks))
     assert.equal(typeof result.passed, 'boolean')
+    assert.ok(Array.isArray(result.providers))
+    assert.ok(result.providers.includes('claude-sdk'))
     assert.ok(result.checks.length >= 6, 'Should have at least 6 checks')
   })
 
   it('each check has name, status, and message', async () => {
-    const { checks } = await runDoctorChecks()
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     for (const check of checks) {
       assert.equal(typeof check.name, 'string')
       assert.ok(['pass', 'warn', 'fail'].includes(check.status), `Invalid status: ${check.status}`)
@@ -26,7 +32,7 @@ describe('runDoctorChecks', () => {
   })
 
   it('Node.js version check is present', async () => {
-    const { checks } = await runDoctorChecks()
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const nodeCheck = checks.find(c => c.name === 'Node.js')
     assert.ok(nodeCheck)
     assert.ok(nodeCheck.message.includes('v'))
@@ -35,27 +41,28 @@ describe('runDoctorChecks', () => {
   })
 
   it('cloudflared check is present', async () => {
-    const { checks } = await runDoctorChecks()
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const cfCheck = checks.find(c => c.name === 'cloudflared')
     assert.ok(cfCheck)
     // Status depends on whether cloudflared is in PATH
     assert.ok(['pass', 'fail'].includes(cfCheck.status))
   })
 
-  it('claude CLI check is present', async () => {
-    const { checks } = await runDoctorChecks()
+  it('claude CLI check is present when a claude provider is configured', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['claude-cli'] })
     const claudeCheck = checks.find(c => c.name === 'claude')
     assert.ok(claudeCheck)
+    assert.equal(claudeCheck.provider, 'claude-cli')
   })
 
   it('config check is present', async () => {
-    const { checks } = await runDoctorChecks()
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const configCheck = checks.find(c => c.name === 'Config')
     assert.ok(configCheck)
   })
 
   it('dependencies check is present', async () => {
-    const { checks } = await runDoctorChecks()
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const depsCheck = checks.find(c => c.name === 'Dependencies')
     assert.ok(depsCheck)
     // Status depends on whether node_modules exists in cwd (may vary in CI)
@@ -63,14 +70,14 @@ describe('runDoctorChecks', () => {
   })
 
   it('port check is present', async () => {
-    const { checks } = await runDoctorChecks()
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
   })
 
   it('accepts custom port', async () => {
     // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123 })
+    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
     assert.ok(portCheck.message.includes('59123'))
@@ -78,7 +85,7 @@ describe('runDoctorChecks', () => {
   })
 
   it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124 })
+    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
@@ -110,7 +117,7 @@ describe('runDoctorChecks', () => {
     const fsRoot = parsePath(originalCwd).root
     try {
       process.chdir(fsRoot)
-      const { checks } = await runDoctorChecks()
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
       const depsCheck = checks.find(c => c.name === 'Dependencies')
       assert.ok(depsCheck)
       // With node_modules installed in packages/server/, this must pass
@@ -129,7 +136,7 @@ describe('runDoctorChecks', () => {
     const originalPath = process.env.PATH
     try {
       process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
-      const { checks } = await runDoctorChecks()
+      const { checks } = await runDoctorChecks({ providers: ['claude-cli'] })
       const claudeCheck = checks.find(c => c.name === 'claude')
       assert.ok(claudeCheck)
       if (claudeCheck.status === 'pass') {
@@ -141,6 +148,123 @@ describe('runDoctorChecks', () => {
       // that's a valid outcome, not a regression of the fallback logic.
     } finally {
       process.env.PATH = originalPath
+    }
+  })
+})
+
+describe('runDoctorChecks — provider awareness (issue #2951)', () => {
+  it('gemini-only config does not include claude binary check', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['gemini'] })
+    const claudeCheck = checks.find(c => c.name === 'claude')
+    assert.equal(claudeCheck, undefined, 'claude check must not run when provider is gemini')
+  })
+
+  it('gemini-only config does not include codex binary check', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['gemini'] })
+    const codexCheck = checks.find(c => c.name === 'codex')
+    assert.equal(codexCheck, undefined, 'codex check must not run when provider is gemini')
+  })
+
+  it('claude-only config does not include codex or gemini binary checks', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
+    const codexCheck = checks.find(c => c.name === 'codex')
+    const geminiCheck = checks.find(c => c.name === 'gemini')
+    assert.equal(codexCheck, undefined, 'codex check must not run for claude-only')
+    assert.equal(geminiCheck, undefined, 'gemini check must not run for claude-only')
+  })
+
+  it('gemini-only config does not fail because claude is missing from PATH', async () => {
+    // Strip PATH so `claude` cannot be resolved. The doctor result must
+    // still pass its provider checks — that is the whole point of #2951.
+    const originalPath = process.env.PATH
+    try {
+      process.env.PATH = '/nonexistent-bin-dir'
+      const { checks } = await runDoctorChecks({ providers: ['gemini'] })
+      // No check named 'claude' should contribute a failure.
+      const claudeFail = checks.find(c => c.name === 'claude' && c.status === 'fail')
+      assert.equal(claudeFail, undefined, 'claude-not-found must not be reported for gemini config')
+    } finally {
+      process.env.PATH = originalPath
+    }
+  })
+
+  it('multiple providers in the same config each contribute their own checks', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['claude-cli', 'gemini'] })
+    const claudeCheck = checks.find(c => c.name === 'claude')
+    const geminiCheck = checks.find(c => c.name === 'gemini')
+    assert.ok(claudeCheck, 'claude check expected for claude-cli provider')
+    assert.ok(geminiCheck, 'gemini check expected for gemini provider')
+    assert.equal(claudeCheck.provider, 'claude-cli')
+    assert.equal(geminiCheck.provider, 'gemini')
+  })
+
+  it('gemini provider reports credential status via GEMINI_API_KEY', async () => {
+    const originalKey = process.env.GEMINI_API_KEY
+    try {
+      delete process.env.GEMINI_API_KEY
+      const { checks } = await runDoctorChecks({ providers: ['gemini'] })
+      const credCheck = checks.find(c => c.provider === 'gemini' && c.name.toLowerCase().includes('credentials'))
+      assert.ok(credCheck, 'gemini credentials check must exist')
+      assert.equal(credCheck.status, 'fail', 'missing GEMINI_API_KEY must fail (required)')
+      assert.ok(credCheck.message.includes('GEMINI_API_KEY'))
+
+      process.env.GEMINI_API_KEY = 'test-key-value'
+      const { checks: checks2 } = await runDoctorChecks({ providers: ['gemini'] })
+      const credCheck2 = checks2.find(c => c.provider === 'gemini' && c.name.toLowerCase().includes('credentials'))
+      assert.equal(credCheck2.status, 'pass')
+    } finally {
+      if (originalKey === undefined) delete process.env.GEMINI_API_KEY
+      else process.env.GEMINI_API_KEY = originalKey
+    }
+  })
+
+  it('codex provider reports credential status via OPENAI_API_KEY', async () => {
+    const originalKey = process.env.OPENAI_API_KEY
+    try {
+      delete process.env.OPENAI_API_KEY
+      const { checks } = await runDoctorChecks({ providers: ['codex'] })
+      const credCheck = checks.find(c => c.provider === 'codex' && c.name.toLowerCase().includes('credentials'))
+      assert.ok(credCheck)
+      assert.equal(credCheck.status, 'fail')
+      assert.ok(credCheck.message.includes('OPENAI_API_KEY'))
+    } finally {
+      if (originalKey === undefined) delete process.env.OPENAI_API_KEY
+      else process.env.OPENAI_API_KEY = originalKey
+    }
+  })
+
+  it('claude credential check is optional (warn, not fail)', async () => {
+    const originalAnthropic = process.env.ANTHROPIC_API_KEY
+    const originalOauth = process.env.CLAUDE_CODE_OAUTH_TOKEN
+    try {
+      delete process.env.ANTHROPIC_API_KEY
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
+      const credCheck = checks.find(c => c.provider === 'claude-sdk' && c.name.toLowerCase().includes('credentials'))
+      assert.ok(credCheck)
+      // Optional: user may be logged in via `claude login` instead.
+      assert.equal(credCheck.status, 'warn', `expected warn, got ${credCheck.status}`)
+    } finally {
+      if (originalAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = originalAnthropic
+      if (originalOauth === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = originalOauth
+    }
+  })
+
+  it('unknown provider yields a fail check rather than silently dropping it', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['nonexistent-provider'] })
+    const providerCheck = checks.find(c => c.name.startsWith('Provider:') || c.provider === 'nonexistent-provider')
+    assert.ok(providerCheck)
+    assert.equal(providerCheck.status, 'fail')
+  })
+
+  it('provider check entries include a `provider` field for per-provider output grouping', async () => {
+    const { checks } = await runDoctorChecks({ providers: ['gemini'] })
+    const providerChecks = checks.filter(c => c.provider === 'gemini')
+    assert.ok(providerChecks.length > 0, 'expected at least one gemini-tagged check')
+    for (const c of providerChecks) {
+      assert.equal(c.provider, 'gemini')
     }
   })
 })
