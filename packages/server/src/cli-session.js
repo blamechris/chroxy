@@ -6,6 +6,7 @@ import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
+import { FALLBACK_MODELS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -105,6 +106,40 @@ export class CliSession extends BaseSession {
         hint: 'run `claude login` or set ANTHROPIC_API_KEY',
         optional: true,
       },
+    }
+  }
+
+  /**
+   * Per-provider fallback model list (#2956). Shared with SdkSession via
+   * the module-level `FALLBACK_MODELS`. The default Claude registry is
+   * what this provider uses at runtime — this static exists so
+   * `getRegistryForProvider('claude-cli')` and the per-provider tests
+   * can discover the Claude defaults through the same hook shape used
+   * by Codex/Gemini.
+   *
+   * @returns {ReadonlyArray<{id:string,label:string,fullId:string,contextWindow:number}>}
+   */
+  static getFallbackModels() {
+    return FALLBACK_MODELS
+  }
+
+  /**
+   * Claude-style metadata: strip the `claude-` prefix for the short id,
+   * reuse the shared context-window heuristic. Mirrors SdkSession (#2956).
+   *
+   * @param {string} modelId
+   * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
+   */
+  static getModelMetadata(modelId) {
+    if (typeof modelId !== 'string' || modelId.length === 0) return null
+    const fullId = modelId
+    const id = claudeDeriveId(fullId)
+    return {
+      id,
+      label: id,
+      fullId,
+      contextWindow: resolveClaudeContextWindow(fullId),
+      description: '',
     }
   }
 

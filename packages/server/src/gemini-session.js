@@ -44,18 +44,31 @@ const GEMINI = resolveBinary('gemini', [
   join(homedir(), '.npm-global/bin/gemini'),
 ])
 
-// Per-provider model allowlist — #2946.
-// `set_model` must reject a Claude model on a Gemini session (the CLI would
-// exit opaquely). Keep this list small and explicit; issue #2956 tracks a
-// proper registry fed by `gemini models list` or similar.
-const GEMINI_ALLOWED_MODELS = Object.freeze([
-  'gemini-2.5-pro',
-  'gemini-2.5-flash',
-  'gemini-2.0-pro',
-  'gemini-2.0-flash',
-  'gemini-1.5-pro',
-  'gemini-1.5-flash',
-])
+// Per-provider model metadata — #2956.
+// Context windows come from the Gemini model docs. Kept explicit here so the
+// per-provider registry (models.js#getRegistryForProvider) can surface
+// accurate values in the dashboard without the generic 200k heuristic that
+// ships with the Claude default registry.
+const GEMINI_MODEL_METADATA = Object.freeze({
+  'gemini-2.5-pro':   { label: 'Gemini 2.5 Pro',   contextWindow: 2_000_000 },
+  'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', contextWindow: 1_000_000 },
+  'gemini-2.0-pro':   { label: 'Gemini 2.0 Pro',   contextWindow: 2_000_000 },
+  'gemini-2.0-flash': { label: 'Gemini 2.0 Flash', contextWindow: 1_000_000 },
+  'gemini-1.5-pro':   { label: 'Gemini 1.5 Pro',   contextWindow: 2_000_000 },
+  'gemini-1.5-flash': { label: 'Gemini 1.5 Flash', contextWindow: 1_000_000 },
+})
+
+const GEMINI_ALLOWED_MODELS = Object.freeze(Object.keys(GEMINI_MODEL_METADATA))
+
+const GEMINI_FALLBACK_MODELS = Object.freeze(GEMINI_ALLOWED_MODELS.map(id => {
+  const meta = GEMINI_MODEL_METADATA[id]
+  return Object.freeze({
+    id,
+    label: meta.label,
+    fullId: id,
+    contextWindow: meta.contextWindow,
+  })
+}))
 
 export class GeminiSession extends BaseSession {
   /**
@@ -88,6 +101,36 @@ export class GeminiSession extends BaseSession {
    */
   static getAllowedModels() {
     return GEMINI_ALLOWED_MODELS
+  }
+
+  /**
+   * Minimal model list shown in the dashboard when the SDK has not pushed
+   * a dynamic update for this provider. Same shape as the Claude registry
+   * so `getRegistryForProvider('gemini')` can serve it directly (#2956).
+   *
+   * @returns {ReadonlyArray<{id:string,label:string,fullId:string,contextWindow:number}>}
+   */
+  static getFallbackModels() {
+    return GEMINI_FALLBACK_MODELS
+  }
+
+  /**
+   * Lookup metadata for a known Gemini model. Returns null for unknown
+   * ids so the registry can fall back to a generic heuristic.
+   *
+   * @param {string} modelId
+   * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
+   */
+  static getModelMetadata(modelId) {
+    const meta = GEMINI_MODEL_METADATA[modelId]
+    if (!meta) return null
+    return {
+      id: modelId,
+      label: meta.label,
+      fullId: modelId,
+      contextWindow: meta.contextWindow,
+      description: meta.description || '',
+    }
   }
 
   /**

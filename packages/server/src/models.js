@@ -15,11 +15,26 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000
  * authoritative values in `SDKResultSuccess.modelUsage[*].contextWindow`
  * after each turn — registries opportunistically correct themselves via
  * `updateContextWindow()` so wrong guesses only surface for the first turn.
+ *
+ * Exported so Claude providers (SdkSession/CliSession) can reuse it in
+ * their `getModelMetadata()` implementations.
  */
-function resolveContextWindow(fullId) {
+export function resolveClaudeContextWindow(fullId) {
   if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
   if (fullId.includes('opus-4-7') || fullId.includes('opus-4.7')) return 1_000_000
   return DEFAULT_CONTEXT_WINDOW
+}
+
+// Back-compat alias used internally by the default registry.
+const resolveContextWindow = resolveClaudeContextWindow
+
+/**
+ * Default Claude ID converter: strips the `claude-` prefix to produce the
+ * short id while keeping the full id as-is. Exported so provider classes
+ * can compose it in their own `getModelMetadata()`.
+ */
+export function claudeDeriveId(fullId) {
+  return typeof fullId === 'string' && fullId.startsWith('claude-') ? fullId.slice(7) : fullId
 }
 
 // Minimal fallback used only when the SDK has never responded and no disk
@@ -31,9 +46,9 @@ function resolveContextWindow(fullId) {
 // Deep-frozen so callers of getModels() can't mutate the module-level constant
 // via the returned array reference.
 export const FALLBACK_MODELS = Object.freeze([
-  Object.freeze({ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveContextWindow('claude-sonnet-4-6') }),
-  Object.freeze({ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveContextWindow('claude-opus-4-7') }),
-  Object.freeze({ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveContextWindow('claude-haiku-4-5') }),
+  Object.freeze({ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveClaudeContextWindow('claude-sonnet-4-6') }),
+  Object.freeze({ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveClaudeContextWindow('claude-opus-4-7') }),
+  Object.freeze({ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveClaudeContextWindow('claude-haiku-4-5') }),
 ])
 
 function getDefaultCachePath() {
@@ -123,9 +138,34 @@ function humanizeModelId(id) {
 /**
  * Factory function that creates an isolated models registry.
  * Each instance has its own mutable state, preventing test pollution.
+ *
+ * Accepts optional provider-specific hooks so non-Claude providers (Codex,
+ * Gemini, …) can drive their own fallback list, ID derivation and context-
+ * window heuristic without the registry hard-coding Claude conventions. When
+ * no hooks are supplied the registry defaults to the Claude behaviour so all
+ * existing callers (sdk-session, server-cli, test suites) keep working.
+ *
+ * @param {Object} [hooks]
+ * @param {ReadonlyArray<Object>} [hooks.fallbackModels] - Provider's minimal
+ *   fallback list. Defaults to Claude's `FALLBACK_MODELS`.
+ * @param {(fullId:string) => string} [hooks.deriveId] - Maps an SDK `fullId`
+ *   to the registry's short id. Defaults to Claude's `claude-` strip.
+ * @param {(fullId:string) => number} [hooks.resolveContextWindow] -
+ *   Heuristic context-window resolver. Defaults to the Claude one.
+ * @param {(id:string) => (Object|null)} [hooks.getModelMetadata] -
+ *   Optional provider lookup that can return `{id,label,fullId,contextWindow}`
+ *   for a known model id. When present it is consulted first during
+ *   `updateModels()` to reuse provider-authoritative metadata.
  */
-export function createModelsRegistry() {
-  let activeModels = FALLBACK_MODELS
+export function createModelsRegistry(hooks = {}) {
+  const fallbackModels = hooks.fallbackModels ?? FALLBACK_MODELS
+  const deriveIdFn = typeof hooks.deriveId === 'function' ? hooks.deriveId : claudeDeriveId
+  const resolveContextWindowFn = typeof hooks.resolveContextWindow === 'function'
+    ? hooks.resolveContextWindow
+    : resolveClaudeContextWindow
+  const getModelMetadataFn = typeof hooks.getModelMetadata === 'function' ? hooks.getModelMetadata : null
+
+  let activeModels = fallbackModels
   let defaultModelId = null
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
@@ -160,8 +200,8 @@ export function createModelsRegistry() {
       }
     }
 
-    seed(FALLBACK_MODELS)
-    if (models !== FALLBACK_MODELS) seed(models)
+    seed(fallbackModels)
+    if (models !== fallbackModels) seed(models)
   }
 
   function applyModels(models, nextDefault) {
@@ -174,7 +214,7 @@ export function createModelsRegistry() {
     return canonicalStringify({ models: activeModels, defaultModelId })
   }
 
-  rebuildLookups(FALLBACK_MODELS)
+  rebuildLookups(fallbackModels)
 
   return {
     getModels() {
@@ -204,21 +244,30 @@ export function createModelsRegistry() {
         })
         .map(m => {
           const fullId = m.value
-          const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
+          // Prefer the provider's own metadata lookup when it recognises
+          // the id — that keeps the short id / label / context window in
+          // sync with whatever the provider exposes via `getAllowedModels()`
+          // and `getFallbackModels()`. When the provider has no entry for
+          // this id (new release, custom deploy, …) fall back to the
+          // registry's deriveId/resolveContextWindow hooks.
+          const providerMeta = getModelMetadataFn ? getModelMetadataFn(fullId) : null
+          const derivedId = providerMeta?.id ?? deriveIdFn(fullId)
           let label = m.displayName || ''
           if (typeof m.displayName === 'string' && /^default\b/i.test(m.displayName)) {
-            nextDefault = id
+            nextDefault = derivedId
             const match = label.match(/^Default\s*\((.+)\)$/)
             if (match) label = match[1]
           }
           if (!label || /^recommended$/i.test(label)) {
-            label = humanizeModelId(id)
+            label = providerMeta?.label || humanizeModelId(derivedId)
           }
           // Prefer an authoritative value observed from SDK modelUsage
           // over the static heuristic, so a learned contextWindow isn't
           // lost when _fetchSupportedModels() fires on every init.
-          const contextWindow = contextWindowOverrides.get(fullId) ?? resolveContextWindow(fullId)
-          return { id, label, fullId, contextWindow }
+          const contextWindow = contextWindowOverrides.get(fullId)
+            ?? providerMeta?.contextWindow
+            ?? resolveContextWindowFn(fullId)
+          return { id: derivedId, label, fullId, contextWindow }
         })
 
       if (droppedCount > 0) {
@@ -271,7 +320,7 @@ export function createModelsRegistry() {
 
     resetModels() {
       contextWindowOverrides.clear()
-      applyModels(FALLBACK_MODELS, null)
+      applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
 
@@ -311,7 +360,7 @@ export function createModelsRegistry() {
             label: typeof m.label === 'string' && m.label.length > 0 ? m.label : humanizeModelId(m.id),
             contextWindow: typeof m.contextWindow === 'number' && m.contextWindow > 0
               ? m.contextWindow
-              : resolveContextWindow(m.fullId),
+              : resolveContextWindowFn(m.fullId),
           }))
         if (models.length === 0) return false
         applyModels(models, parsed.defaultModelId || null)
@@ -367,6 +416,97 @@ export function createModelsRegistry() {
 
 // Default instance — preserves backward compatibility for all existing imports
 const defaultRegistry = createModelsRegistry()
+
+/**
+ * Per-provider registries. Providers that expose static
+ * `getFallbackModels()` and `getModelMetadata(id)` get a dedicated, isolated
+ * registry so a Codex or Gemini session never sees Claude-only models. The
+ * cache is lazy and keyed by provider name.
+ *
+ * The default Claude providers (`claude-sdk`, `claude-cli`, any docker alias
+ * thereof) continue to share the module-level `defaultRegistry` so that the
+ * existing cache-warming path (`loadModelsCache`) and the live
+ * `updateModels()` feed from the Agent SDK still have one source of truth.
+ */
+const providerRegistryCache = new Map()
+
+const CLAUDE_PROVIDER_NAMES = new Set([
+  'claude-sdk',
+  'claude-cli',
+  'docker',
+  'docker-sdk',
+  'docker-cli',
+])
+
+// Populated by providers.js at module load so models.js can resolve a
+// provider name to its ProviderClass without creating a circular import.
+// Keeping this module-local + async-free keeps `getRegistryForProvider()`
+// synchronous for the ws-history.js hot path (post-auth handshake).
+const nameToProviderClass = new Map()
+
+/**
+ * Called by providers.js after `registerProvider(name, ProviderClass)` so
+ * models.js can build a per-provider registry on demand. Noop for Claude
+ * providers — they share the default registry.
+ *
+ * @param {string} providerName
+ * @param {Function} ProviderClass
+ */
+export function registerProviderRegistry(providerName, ProviderClass) {
+  if (!providerName || typeof providerName !== 'string') return
+  if (typeof ProviderClass !== 'function') return
+  nameToProviderClass.set(providerName, ProviderClass)
+  // Purge any previously-cached registry so a re-registration picks up
+  // the new class (useful for tests and hot-reload).
+  providerRegistryCache.delete(providerName)
+}
+
+/**
+ * Lazily create and cache a provider-scoped registry.
+ *
+ * Claude providers (including docker-based variants) share the module-level
+ * default registry so the live SDK feed keeps updating a single source of
+ * truth. Non-Claude providers get their own registry driven by
+ * `ProviderClass.getFallbackModels()` and `ProviderClass.getModelMetadata()`.
+ *
+ * Unknown or unregistered provider names fall back to the Claude registry
+ * (safe default — matches the legacy global behaviour).
+ *
+ * @param {string} providerName
+ * @returns {ReturnType<typeof createModelsRegistry>}
+ */
+export function getRegistryForProvider(providerName) {
+  if (!providerName || CLAUDE_PROVIDER_NAMES.has(providerName)) {
+    return defaultRegistry
+  }
+
+  const cached = providerRegistryCache.get(providerName)
+  if (cached) return cached
+
+  const ProviderClass = nameToProviderClass.get(providerName)
+  if (!ProviderClass || typeof ProviderClass.getFallbackModels !== 'function') {
+    return defaultRegistry
+  }
+
+  const registry = createModelsRegistry({
+    fallbackModels: ProviderClass.getFallbackModels(),
+    getModelMetadata: typeof ProviderClass.getModelMetadata === 'function'
+      ? (id) => ProviderClass.getModelMetadata(id)
+      : null,
+    // Non-Claude providers typically use opaque full ids (no prefix to
+    // strip) — identity is the safest default. Providers can override via
+    // `getModelMetadata()` when they want a different short id.
+    deriveId: (fullId) => fullId,
+    resolveContextWindow: (fullId) => {
+      const meta = typeof ProviderClass.getModelMetadata === 'function'
+        ? ProviderClass.getModelMetadata(fullId)
+        : null
+      return meta?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+    },
+  })
+  providerRegistryCache.set(providerName, registry)
+  return registry
+}
 
 // Accept both short ids and full model IDs in set_model.
 // Proxy delegates to the default registry's live Set so mutations

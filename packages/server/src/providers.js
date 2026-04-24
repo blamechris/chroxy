@@ -17,6 +17,7 @@ import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
+import { registerProviderRegistry } from './models.js'
 
 const PROVIDERS = {
   'claude-cli': CliSession,
@@ -27,6 +28,12 @@ const PROVIDERS = {
 
 // Names hidden from listProviders() (backward-compat aliases, etc.)
 const HIDDEN = new Set()
+
+// Seed per-provider registries for built-in providers so models.js can
+// resolve provider-scoped model metadata without waiting for registerProvider.
+for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+  registerProviderRegistry(name, ProviderClass)
+}
 
 /**
  * Register a provider class by name.
@@ -43,6 +50,10 @@ export function registerProvider(name, ProviderClass, opts) {
   }
   PROVIDERS[name] = ProviderClass
   if (opts?.alias) HIDDEN.add(name)
+  // Expose the class to models.js so the per-provider model registry
+  // (#2956) can source its fallback list and ID convention from the
+  // provider itself instead of hard-coding Claude behaviour globally.
+  registerProviderRegistry(name, ProviderClass)
 }
 
 /**
