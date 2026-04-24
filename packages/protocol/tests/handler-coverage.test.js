@@ -46,6 +46,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'discovered_sessions', // multi-server discovery, handled at connection layer
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
+  'skills_list',        // MVP (#2957) — no client UI yet; client-side display planned for v2 (#2958)
 ])
 
 // ---------------------------------------------------------------------------
