@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { registerProvider, getProvider, listProviders, registerDockerProvider } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
+import { CodexSession } from '../src/codex-session.js'
+import { GeminiSession } from '../src/gemini-session.js'
 
 describe('Provider Registry', () => {
   it('has claude-cli and claude-sdk pre-registered', () => {
@@ -138,5 +140,75 @@ describe('Provider Capabilities', () => {
     assert.equal(caps.planMode, false)
     assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
+  })
+})
+
+describe('Provider displayLabel (#2953)', () => {
+  it('CliSession exposes a human-readable displayLabel', () => {
+    assert.equal(CliSession.displayLabel, 'Claude Code (CLI)')
+  })
+
+  it('SdkSession exposes a human-readable displayLabel', () => {
+    assert.equal(SdkSession.displayLabel, 'Claude Code (SDK)')
+  })
+
+  it('CodexSession exposes a human-readable displayLabel', () => {
+    assert.equal(CodexSession.displayLabel, 'OpenAI Codex')
+  })
+
+  it('GeminiSession exposes a human-readable displayLabel', () => {
+    assert.equal(GeminiSession.displayLabel, 'Google Gemini')
+  })
+
+  it('Docker session variants inherit a displayLabel from their base', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    // Docker variants derive their label from the underlying provider so the
+    // banner stays meaningful without requiring a bespoke override.
+    assert.equal(typeof DockerSession.displayLabel, 'string')
+    assert.ok(DockerSession.displayLabel.length > 0)
+    assert.equal(typeof DockerSdkSession.displayLabel, 'string')
+    assert.ok(DockerSdkSession.displayLabel.length > 0)
+  })
+
+  it('every built-in provider exposes a non-empty displayLabel', () => {
+    // Only assert on the providers shipped with the server — tests earlier in
+    // this file register ad-hoc providers that don't need displayLabel.
+    const BUILT_IN = ['claude-cli', 'claude-sdk', 'codex', 'gemini']
+    for (const name of BUILT_IN) {
+      const ProviderClass = getProvider(name)
+      assert.equal(
+        typeof ProviderClass.displayLabel,
+        'string',
+        `Provider "${name}" must expose static get displayLabel()`
+      )
+      assert.ok(
+        ProviderClass.displayLabel.length > 0,
+        `Provider "${name}" displayLabel must be non-empty`
+      )
+    }
+  })
+})
+
+describe('resolveProviderLabel helper (#2953)', () => {
+  it('returns the provider class displayLabel for known providers', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    assert.equal(resolveProviderLabel('claude-cli'), 'Claude Code (CLI)')
+    assert.equal(resolveProviderLabel('claude-sdk'), 'Claude Code (SDK)')
+    assert.equal(resolveProviderLabel('codex'), 'OpenAI Codex')
+    assert.equal(resolveProviderLabel('gemini'), 'Google Gemini')
+  })
+
+  it('falls back to the raw provider name for unknown providers', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    // Unknown providers should not throw — server-cli should still boot.
+    assert.equal(resolveProviderLabel('not-registered-xyz'), 'not-registered-xyz')
+  })
+
+  it('handles empty/undefined input without throwing', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    assert.equal(resolveProviderLabel(undefined), 'unknown')
+    assert.equal(resolveProviderLabel(null), 'unknown')
+    assert.equal(resolveProviderLabel(''), 'unknown')
   })
 })

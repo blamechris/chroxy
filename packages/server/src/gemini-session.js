@@ -50,6 +50,16 @@ const GEMINI_ALLOWED_MODELS = Object.freeze([
 ])
 
 export class GeminiSession extends BaseSession {
+  /**
+   * Human-readable label shown in the startup banner and anywhere else the
+   * server needs to name this provider (#2953). Each provider owns its own
+   * display name so `server-cli.js` no longer has to maintain a hardcoded
+   * `PROVIDER_LABELS` map that drifts every time a new provider lands.
+   */
+  static get displayLabel() {
+    return 'Google Gemini'
+  }
+
   static get capabilities() {
     return {
       permissions: false,

@@ -41,6 +41,16 @@ const log = createLogger('sdk')
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 
 export class SdkSession extends BaseSession {
+  /**
+   * Human-readable label shown in the startup banner and anywhere else the
+   * server needs to name this provider (#2953). Each provider owns its own
+   * display name so `server-cli.js` no longer has to maintain a hardcoded
+   * `PROVIDER_LABELS` map that drifts every time a new provider lands.
+   */
+  static get displayLabel() {
+    return 'Claude Code (SDK)'
+  }
+
   static get capabilities() {
     return {
       permissions: true,
