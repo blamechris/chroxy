@@ -25,8 +25,6 @@ export function resolveClaudeContextWindow(fullId) {
   return DEFAULT_CONTEXT_WINDOW
 }
 
-// Back-compat alias used internally by the default registry.
-const resolveContextWindow = resolveClaudeContextWindow
 
 /**
  * Default Claude ID converter: strips the `claude-` prefix to produce the
