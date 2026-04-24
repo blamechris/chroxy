@@ -36,8 +36,14 @@ function makeClient(overrides = {}) {
 }
 
 function makeWs() {
-  return {}
+  const messages = []
+  return {
+    readyState: 1,
+    send: createSpy((raw) => { messages.push(JSON.parse(raw)) }),
+    _messages: messages,
+  }
 }
+
 
 describe('settings-handlers', () => {
   describe('set_model', () => {
@@ -79,6 +85,105 @@ describe('settings-handlers', () => {
 
       assert.equal(session.setModel.callCount, 0)
       assert.equal(ctx.send.callCount, 0)
+    })
+
+    // #2946 — set_model must consult the session's provider, not a global
+    // Claude-only allowlist. Tapping a Claude model chip while a Gemini or
+    // Codex session is active used to pass the global check and crash the
+    // provider CLI with an opaque error.
+    describe('per-provider allowlist (#2946)', () => {
+      it('rejects a Claude model on a Gemini session with MODEL_NOT_SUPPORTED_BY_PROVIDER', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Gem', cwd: '/tmp', provider: 'gemini' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'claude-sonnet-4-6', requestId: 'r1' }, ctx)
+
+        assert.equal(session.setModel.callCount, 0)
+        assert.equal(ws._messages.length, 1)
+        const err = ws._messages[0]
+        assert.equal(err.type, 'error')
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        assert.match(err.message, /gemini/i)
+      })
+
+      it('accepts a Gemini model on a Gemini session', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Gem', cwd: '/tmp', provider: 'gemini' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'gemini-2.5-pro' }, ctx)
+
+        assert.equal(session.setModel.callCount, 1)
+        assert.equal(session.setModel.lastCall[0], 'gemini-2.5-pro')
+        assert.equal(ctx.broadcastToSession.callCount, 1)
+      })
+
+      it('rejects a Gemini model on a Codex session', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'gemini-2.5-pro', requestId: 'r2' }, ctx)
+
+        assert.equal(session.setModel.callCount, 0)
+        assert.equal(ws._messages.length, 1)
+        const err = ws._messages[0]
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        assert.match(err.message, /codex/i)
+      })
+
+      it('accepts a Codex model on a Codex session', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'gpt-5-codex' }, ctx)
+
+        assert.equal(session.setModel.callCount, 1)
+        assert.equal(session.setModel.lastCall[0], 'gpt-5-codex')
+      })
+
+      it('still accepts Claude models on a claude-sdk session', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Cl', cwd: '/tmp', provider: 'claude-sdk' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'sonnet' }, ctx)
+
+        assert.equal(session.setModel.callCount, 1)
+        assert.equal(session.setModel.lastCall[0], 'sonnet')
+      })
+
+      it('falls back to global allowlist when entry.provider is absent (legacy entry)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        // Legacy entry has no `provider` field — handler should still accept
+        // valid Claude model IDs to avoid breaking older serialized state.
+        sessions.set('s1', { session, name: 'Legacy', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'haiku' }, ctx)
+
+        assert.equal(session.setModel.callCount, 1)
+      })
     })
   })
 
