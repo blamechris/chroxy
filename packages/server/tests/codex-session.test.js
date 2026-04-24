@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { CodexSession } from '../src/codex-session.js'
+import { CodexSession, buildCodexArgs } from '../src/codex-session.js'
 import { waitFor } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -193,9 +193,14 @@ describe('CodexSession', () => {
   })
 
   describe('constructor', () => {
-    it('uses default model when none supplied', () => {
+    it('defers to Codex CLI default when no model is supplied (no hallucinated ID)', () => {
       const session = new CodexSession({ cwd: '/tmp' })
-      assert.equal(session.model, 'gpt-5.4')
+      // We deliberately do NOT ship a hard-coded default like 'gpt-5.4' —
+      // that was a hallucinated ID and pins the server to a specific Codex
+      // release. A null model signals `sendMessage` to omit the `-m`/`-c
+      // model=` flag, so Codex CLI picks its own configured default.
+      assert.equal(session.model, null)
+      assert.notEqual(session.model, 'gpt-5.4')
     })
 
     it('accepts a model override', () => {
@@ -227,7 +232,7 @@ describe('CodexSession', () => {
 
   describe('start()', () => {
     it('emits ready on the next tick', async () => {
-      const session = new CodexSession({ cwd: '/tmp' })
+      const session = new CodexSession({ cwd: '/tmp', model: 'o3' })
       const events = []
       session.on('ready', (d) => events.push(d))
 
@@ -236,7 +241,17 @@ describe('CodexSession', () => {
 
       await waitFor(() => events.length >= 1, { label: 'ready event' })
       assert.equal(events.length, 1)
-      assert.ok(events[0].model, 'ready payload should include model')
+      assert.equal(events[0].model, 'o3', 'ready payload should include model')
+    })
+
+    it('emits ready with null model when no model was supplied (Codex CLI picks default)', async () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const events = []
+      session.on('ready', (d) => events.push(d))
+
+      session.start()
+      await waitFor(() => events.length >= 1, { label: 'ready event' })
+      assert.equal(events[0].model, null)
     })
 
     it('sets _processReady so isReady becomes true', async () => {
@@ -299,11 +314,11 @@ describe('CodexSession', () => {
     })
 
     it('does not update the model when busy', () => {
-      const session = new CodexSession({ cwd: '/tmp' })
+      const session = new CodexSession({ cwd: '/tmp', model: 'o3' })
       session._isBusy = true
-      session.setModel('o3')
+      session.setModel('gpt-5-codex')
       // Model should remain unchanged because base class guards on _isBusy
-      assert.equal(session.model, 'gpt-5.4')
+      assert.equal(session.model, 'o3')
     })
 
     it('model remains the same when setting the same value', () => {
@@ -658,6 +673,42 @@ describe('CodexSession', () => {
       session.start()
       assert.equal(session._processReady, true)
       session.destroy()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // Argv construction — verifies we never spawn `codex` with a hallucinated
+  // `-m` / `-c model=...` flag when no model was supplied.
+  // ---------------------------------------------------------------------------
+  describe('buildCodexArgs()', () => {
+    it('always emits `exec <text> --json` as the first three args', () => {
+      const args = buildCodexArgs('hello', null)
+      assert.deepEqual(args.slice(0, 3), ['exec', 'hello', '--json'])
+    })
+
+    it('omits the -c model=... override when model is null', () => {
+      const args = buildCodexArgs('hi', null)
+      assert.ok(!args.includes('-c'), `unexpected -c in args: ${JSON.stringify(args)}`)
+      const hasModelOverride = args.some((a) => typeof a === 'string' && a.startsWith('model='))
+      assert.ok(!hasModelOverride, `unexpected model override: ${JSON.stringify(args)}`)
+    })
+
+    it('omits the -c model=... override when model is an empty string', () => {
+      const args = buildCodexArgs('hi', '')
+      assert.ok(!args.includes('-c'))
+    })
+
+    it('never references the hallucinated `gpt-5.4` when given no model', () => {
+      const args = buildCodexArgs('hi', null)
+      assert.ok(!args.some((a) => typeof a === 'string' && a.includes('gpt-5.4')),
+        `args must not reference hallucinated model: ${JSON.stringify(args)}`)
+    })
+
+    it('appends -c model="X" when an explicit model is provided', () => {
+      const args = buildCodexArgs('hi', 'o3')
+      const idx = args.indexOf('-c')
+      assert.ok(idx >= 0, '-c flag should be present when model is set')
+      assert.equal(args[idx + 1], 'model="o3"')
     })
   })
 })

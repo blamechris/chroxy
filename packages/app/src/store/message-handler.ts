@@ -61,6 +61,7 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
+  ProviderInfo,
   ConversationSummary,
   SearchResult,
   ToolResultImage,
@@ -771,6 +772,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
       } else {
         // No encryption — send post-auth messages immediately
+        wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: false });
@@ -803,6 +805,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred
+        wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
       }
@@ -2015,6 +2018,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (Array.isArray(msg.commands)) {
         set({ slashCommands: msg.commands as SlashCommand[] });
         useConversationStore.getState().setSlashCommands(msg.commands as SlashCommand[]);
+      }
+      break;
+    }
+
+    case 'provider_list': {
+      if (Array.isArray(msg.providers)) {
+        // Validate element shape before storing — guard against misbehaving
+        // servers / malicious endpoints that might send non-objects or
+        // objects without a string `name`.
+        const providers: ProviderInfo[] = msg.providers
+          .filter(
+            (p): p is { name: string; capabilities?: unknown } =>
+              !!p &&
+              typeof p === 'object' &&
+              typeof (p as { name?: unknown }).name === 'string',
+          )
+          .map((p) => {
+            const entry: ProviderInfo = { name: p.name };
+            if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
+              entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
+            }
+            return entry;
+          });
+        set({ availableProviders: providers });
       }
       break;
     }

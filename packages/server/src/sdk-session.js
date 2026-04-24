@@ -54,6 +54,32 @@ export class SdkSession extends BaseSession {
     }
   }
 
+  /**
+   * Preflight dependency spec used by `chroxy doctor`.
+   * SDK mode spawns the `claude` binary under the hood, so the same
+   * binary check applies. Credentials can come from ANTHROPIC_API_KEY,
+   * CLAUDE_CODE_OAUTH_TOKEN, or a prior `claude login` subscription.
+   */
+  static get preflight() {
+    return {
+      label: 'Claude SDK',
+      binary: {
+        name: 'claude',
+        args: ['--version'],
+        candidates: [
+          '/opt/homebrew/bin/claude',
+          '/usr/local/bin/claude',
+        ],
+        installHint: 'install Claude Code CLI (required by the Agent SDK)',
+      },
+      credentials: {
+        envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+        hint: 'run `claude login` or set ANTHROPIC_API_KEY',
+        optional: true,
+      },
+    }
+  }
+
   /** Token budgets for thinking levels. null = adaptive (SDK default). */
   static THINKING_BUDGETS = { default: null, high: 32000, max: 128000 }
 
