@@ -140,11 +140,36 @@ export const ServerSessionListSchema = z.object({
     type: z.literal('session_list'),
     sessions: z.array(z.any()),
 });
+/**
+ * Emitted when a session in the persisted state file could not be restored
+ * at server startup (e.g. missing env var for a Codex/Gemini provider).
+ *
+ * History on disk is preserved (`originalHistoryPreserved: true`) so the user
+ * can retry after fixing the underlying issue. Dashboards / mobile UIs should
+ * surface the failed session in a "needs attention" state with the reported
+ * error and a retry affordance. See issue #2954 (Guardian FM-01).
+ */
+export const ServerSessionRestoreFailedSchema = z.object({
+    type: z.literal('session_restore_failed'),
+    sessionId: z.string(),
+    name: z.string(),
+    provider: z.string(),
+    errorCode: z.string(),
+    errorMessage: z.string(),
+    originalHistoryPreserved: z.boolean(),
+});
 export const ServerProviderListSchema = z.object({
     type: z.literal('provider_list'),
     providers: z.array(z.object({
         name: z.string(),
         capabilities: z.record(z.string(), z.boolean()).optional(),
+    })),
+});
+export const ServerSkillsListSchema = z.object({
+    type: z.literal('skills_list'),
+    skills: z.array(z.object({
+        name: z.string(),
+        description: z.string().optional(),
     })),
 });
 export const ServerErrorSchema = z.object({

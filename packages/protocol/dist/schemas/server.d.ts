@@ -147,11 +147,36 @@ export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
     sessions: z.ZodArray<z.ZodAny>;
 }, z.core.$strip>;
+/**
+ * Emitted when a session in the persisted state file could not be restored
+ * at server startup (e.g. missing env var for a Codex/Gemini provider).
+ *
+ * History on disk is preserved (`originalHistoryPreserved: true`) so the user
+ * can retry after fixing the underlying issue. Dashboards / mobile UIs should
+ * surface the failed session in a "needs attention" state with the reported
+ * error and a retry affordance. See issue #2954 (Guardian FM-01).
+ */
+export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_restore_failed">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    provider: z.ZodString;
+    errorCode: z.ZodString;
+    errorMessage: z.ZodString;
+    originalHistoryPreserved: z.ZodBoolean;
+}, z.core.$strip>;
 export declare const ServerProviderListSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_list">;
     providers: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const ServerSkillsListSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skills_list">;
+    skills: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        description: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{
@@ -273,3 +298,4 @@ export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequ
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>;
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
+export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
