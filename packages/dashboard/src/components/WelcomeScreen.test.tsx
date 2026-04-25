@@ -8,7 +8,25 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { WelcomeScreen, type WelcomeScreenProps } from './WelcomeScreen'
 
-afterEach(cleanup)
+const ORIGINAL_NAVIGATOR = globalThis.navigator
+
+afterEach(() => {
+  cleanup()
+  Object.defineProperty(globalThis, 'navigator', {
+    value: ORIGINAL_NAVIGATOR,
+    configurable: true,
+    writable: true,
+  })
+  vi.restoreAllMocks()
+})
+
+function setUserAgent(ua: string) {
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { userAgent: ua },
+    configurable: true,
+    writable: true,
+  })
+}
 
 const noop = () => {}
 
@@ -43,9 +61,16 @@ describe('WelcomeScreen', () => {
     expect(onNewSession).toHaveBeenCalledOnce()
   })
 
-  it('shows keyboard shortcut hints', () => {
+  it('shows Cmd+K shortcut hint on Mac', () => {
+    setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
     renderWelcome()
     expect(screen.getByText(/Cmd\+K/)).toBeInTheDocument()
+  })
+
+  it('shows Ctrl+K shortcut hint on non-Mac', () => {
+    setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    renderWelcome()
+    expect(screen.getByText(/Ctrl\+K/)).toBeInTheDocument()
   })
 
   it('renders nothing when no recent sessions', () => {

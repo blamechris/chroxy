@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
+import { registerProviderRegistry, getRegistryForProvider, updateModels, resetModels } from '../src/models.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -11,6 +12,7 @@ import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../
  * Tests cover:
  * - onFlush wiring: normalizer delta flush → broadcast
  * - models_updated: broadcasts available_models to ALL clients
+ * - models_updated: provider-aware registry lookup (#2993)
  * - stream_start: broadcasts session_activity with isBusy=true
  * - result: broadcasts session_activity with isBusy=false + cost
  * - session_updated: broadcasts session name change
@@ -94,6 +96,91 @@ describe('setupForwarding', () => {
       assert.deepEqual(msg.models, [{ id: 'claude-opus-4-6' }])
       // Must NOT call broadcastToSession (session-specific) for models
       assert.equal(ctx.broadcastToSession.mock.calls.length, 0)
+    })
+
+    it('uses provider-scoped registry defaultModel for a non-Claude provider session (#2993)', () => {
+      // Seed the global Claude registry with a known non-null default so the
+      // assertion can distinguish "used codex registry" from "used Claude global".
+      updateModels([{ value: 'claude-sonnet-4-6', displayName: 'Default (Claude Sonnet)' }])
+
+      // Register a fake non-Claude provider with its own fallback models
+      const FakeProvider = class {
+        static getFallbackModels() {
+          return [
+            { id: 'codex-mini', label: 'Codex Mini', fullId: 'codex-mini-latest', contextWindow: 100_000 },
+          ]
+        }
+        static getModelMetadata(fullId) {
+          if (fullId === 'codex-mini-latest') {
+            return { id: 'codex-mini', label: 'Codex Mini', fullId: 'codex-mini-latest', contextWindow: 100_000 }
+          }
+          return null
+        }
+      }
+      registerProviderRegistry('codex-sdk', FakeProvider)
+      const codexRegistry = getRegistryForProvider('codex-sdk')
+
+      // Codex registry has no SDK-reported default — getDefaultModelId() returns null.
+      // The broadcast must use the codex registry value (null), NOT the Claude global (sonnet-4-6).
+      const ctx = makeCtx()
+      // Make getSession return an entry whose provider is 'codex-sdk'
+      ctx.sessionManager.getSession = mock.fn(() => ({ provider: 'codex-sdk' }))
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-codex',
+        event: 'models_updated',
+        data: { models: [{ id: 'codex-mini-latest' }] },
+      })
+
+      assert.equal(ctx.broadcast.mock.calls.length, 1)
+      const msg = ctx.broadcast.mock.calls[0].arguments[0]
+      assert.equal(msg.type, 'available_models')
+      // defaultModel must come from the codex provider's registry (null — no SDK default yet),
+      // not the Claude global (which is now 'sonnet-4-6'). This ensures the test is non-vacuous.
+      assert.equal(msg.defaultModel, codexRegistry.getDefaultModelId())
+      assert.notEqual(msg.defaultModel, 'sonnet-4-6')
+
+      // Restore global registry state so this test doesn't bleed into others
+      resetModels()
+    })
+
+    it('falls back to global Claude registry when session lookup returns null (#2993)', () => {
+      const ctx = makeCtx()
+      // getSession returning null simulates an already-destroyed session
+      ctx.sessionManager.getSession = mock.fn(() => null)
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-gone',
+        event: 'models_updated',
+        data: { models: [{ id: 'claude-sonnet-4-6' }] },
+      })
+
+      assert.equal(ctx.broadcast.mock.calls.length, 1)
+      const msg = ctx.broadcast.mock.calls[0].arguments[0]
+      assert.equal(msg.type, 'available_models')
+      // Falls back to Claude default — must still produce a valid broadcast
+      assert.ok('defaultModel' in msg)
+      // provider must be resolved to 'claude-sdk' (not null) so clients can
+      // route consistently when the fallback path is taken (#2993)
+      assert.equal(msg.provider, 'claude-sdk')
+    })
+
+    it('includes provider field in available_models broadcast so clients can route correctly (#2993)', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager.getSession = mock.fn(() => ({ provider: 'claude-sdk' }))
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-claude',
+        event: 'models_updated',
+        data: { models: [{ id: 'claude-sonnet-4-6' }] },
+      })
+
+      const msg = ctx.broadcast.mock.calls[0].arguments[0]
+      assert.equal(msg.type, 'available_models')
+      assert.equal(msg.provider, 'claude-sdk')
     })
   })
 
@@ -282,6 +369,9 @@ describe('setupCliForwarding', () => {
     assert.ok(modelsMsg, 'expected available_models broadcast')
     assert.deepEqual(modelsMsg.models, [{ id: 'claude-opus-4-6', label: 'Claude Opus' }])
     assert.ok('defaultModel' in modelsMsg, 'expected defaultModel field')
+    // CLI mode is always Claude — provider field should be present (#2993)
+    assert.ok('provider' in modelsMsg, 'expected provider field in available_models (#2993)')
+    assert.equal(modelsMsg.provider, 'claude-cli')
   })
 
   it('does not broadcast available_models when models_updated has no models field', () => {

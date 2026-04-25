@@ -193,6 +193,14 @@ export const ServerProviderListSchema = z.object({
   })),
 })
 
+export const ServerSkillsListSchema = z.object({
+  type: z.literal('skills_list'),
+  skills: z.array(z.object({
+    name: z.string(),
+    description: z.string().optional(),
+  })),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),
@@ -297,3 +305,4 @@ export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequ
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
+export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>

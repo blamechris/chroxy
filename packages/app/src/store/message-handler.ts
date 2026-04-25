@@ -2248,7 +2248,36 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           ),
         }));
       }
-      // Show error as system message in chat
+      // For bound-session mismatches, surface the same actionable Alert used
+      // by session_error (#2944). When boundSessionName is present the user
+      // needs to know why the action was rejected and how to fix it.
+      if (
+        msg.code === 'SESSION_TOKEN_MISMATCH' &&
+        typeof msg.boundSessionName === 'string' &&
+        msg.boundSessionName.length > 0
+      ) {
+        Alert.alert(
+          'Device paired to one session',
+          `This device is paired to session "${msg.boundSessionName}" and can only perform web tasks in that session. To use other sessions, disconnect and scan a fresh QR code from the desktop.`,
+          [
+            { text: 'OK', style: 'cancel' },
+            {
+              text: 'Disconnect',
+              style: 'destructive',
+              onPress: () => {
+                const s = getStore().getState();
+                try { s.disconnect(); } catch { /* best-effort */ }
+                const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
+                if (typeof clearSaved === 'function') {
+                  clearSaved.call(s).catch(() => {});
+                }
+              },
+            },
+          ],
+        );
+        break;
+      }
+      // Otherwise show the error as a system message in chat
       const errorMsg: ChatMessage = {
         id: nextMessageId('web'),
         type: 'system',

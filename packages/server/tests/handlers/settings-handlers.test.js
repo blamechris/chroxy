@@ -201,6 +201,74 @@ describe('settings-handlers', () => {
       assert.equal(session.setPermissionMode.lastCall[0], 'approve')
     })
 
+    // #2963 — capability gate: set_permission_mode on a Gemini session must
+    // be rejected with CAPABILITY_NOT_SUPPORTED, not silently accepted.
+    describe('capability gate (#2963)', () => {
+      it('rejects set_permission_mode on a Gemini session with CAPABILITY_NOT_SUPPORTED', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Gem', cwd: '/tmp', provider: 'gemini' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_permission_mode(ws, client, { mode: 'approve', requestId: 'r1' }, ctx)
+
+        assert.equal(session.setPermissionMode.callCount, 0)
+        assert.equal(ws._messages.length, 1)
+        const err = ws._messages[0]
+        assert.equal(err.type, 'error')
+        assert.equal(err.code, 'CAPABILITY_NOT_SUPPORTED')
+        assert.match(err.message, /gemini/i)
+      })
+
+      it('rejects set_permission_mode on a Codex session with CAPABILITY_NOT_SUPPORTED', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_permission_mode(ws, client, { mode: 'approve', requestId: 'r2' }, ctx)
+
+        assert.equal(session.setPermissionMode.callCount, 0)
+        assert.equal(ws._messages.length, 1)
+        const err = ws._messages[0]
+        assert.equal(err.type, 'error')
+        assert.equal(err.code, 'CAPABILITY_NOT_SUPPORTED')
+        assert.match(err.message, /codex/i)
+      })
+
+      it('accepts set_permission_mode on a claude-sdk session', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Cl', cwd: '/tmp', provider: 'claude-sdk' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_permission_mode(ws, client, { mode: 'approve' }, ctx)
+
+        assert.equal(session.setPermissionMode.callCount, 1)
+        assert.equal(ws._messages.length, 0)
+      })
+
+      it('accepts set_permission_mode when no provider is set (legacy session)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Legacy', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_permission_mode(ws, client, { mode: 'approve' }, ctx)
+
+        assert.equal(session.setPermissionMode.callCount, 1)
+        assert.equal(ws._messages.length, 0)
+      })
+    })
+
     it('sends confirm_permission_mode for auto mode without confirmation', () => {
       const sessions = new Map()
       const session = createMockSession()

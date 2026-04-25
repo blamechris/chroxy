@@ -925,7 +925,19 @@ export class EnvironmentManager extends EventEmitter {
           if (e && e.code !== 'ENOENT') log.error(`Failed to remove existing state file: ${e.message}`)
         }
       }
-      renameSync(tmpPath, this._statePath)
+      try {
+        renameSync(tmpPath, this._statePath)
+      } catch (renameErr) {
+        // Clean up the orphaned .tmp so it doesn't leak across retries.
+        // Suppress ENOENT (nothing to clean up). Log but do not re-throw any
+        // secondary unlink error — the original rename error is what matters.
+        try { unlinkSync(tmpPath) } catch (cleanupErr) {
+          if (cleanupErr && cleanupErr.code !== 'ENOENT') {
+            log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
+          }
+        }
+        throw renameErr
+      }
     } catch (err) {
       log.error(`Failed to persist environment state: ${err.message}`)
     }
