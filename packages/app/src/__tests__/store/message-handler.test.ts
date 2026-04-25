@@ -2725,4 +2725,108 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
     expect(alertSpy).toHaveBeenCalledTimes(1);
     expect(alertSpy.mock.calls[0][0]).toBe('Server Error');
   });
+
+  // Out-of-order rejection guard: when the user taps A → B → C in rapid
+  // succession, the connection-store action drops superseded pending entries
+  // before registering each new one. If the (already-cleared) earlier
+  // rejection somehow still arrives, the message-handler's
+  // requestedMode-match guard prevents it from clobbering the latest
+  // optimistic state.
+  it('does not revert when a stale rejection arrives after a newer optimistic mode is applied', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const session = { ...createEmptySessionState(), permissionMode: 'plan' };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: session },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Tap #1: plan → auto (request A in flight)
+    registerPendingPermissionModeRequest('perm-mode-req-A', {
+      sessionId: 's1',
+      previousMode: 'plan',
+      requestedMode: 'auto',
+    });
+    store.setState((s) => ({
+      sessionStates: { ...s.sessionStates, s1: { ...s.sessionStates.s1, permissionMode: 'auto' } },
+    }));
+
+    // Tap #2 (simulating the connection-store action): supersedes A. The
+    // latest optimistic mode is now 'acceptEdits'.
+    _testClearPendingPermissionModeRequests();
+    registerPendingPermissionModeRequest('perm-mode-req-B', {
+      sessionId: 's1',
+      previousMode: 'auto',
+      requestedMode: 'acceptEdits',
+    });
+    store.setState((s) => ({
+      sessionStates: { ...s.sessionStates, s1: { ...s.sessionStates.s1, permissionMode: 'acceptEdits' } },
+    }));
+
+    // Stale rejection for A arrives: pending map no longer has entry A
+    // (cleared when B was registered) → falls through to generic alert,
+    // does NOT revert state.
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'CAPABILITY_NOT_SUPPORTED',
+      requestId: 'perm-mode-req-A',
+      message: 'Stale rejection for A',
+    });
+    expect(store.getState().sessionStates['s1'].permissionMode).toBe('acceptEdits');
+
+    // Now reject B properly — current mode still matches B's requestedMode,
+    // so the revert proceeds and restores 'auto' (the value before B).
+    alertSpy.mockClear();
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'CAPABILITY_NOT_SUPPORTED',
+      requestId: 'perm-mode-req-B',
+      message: "The active provider 'gemini' does not support permission mode switching.",
+    });
+    expect(store.getState().sessionStates['s1'].permissionMode).toBe('auto');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toBe('Permission Mode Unavailable');
+  });
+
+  // Defense-in-depth: even if a stale pending entry survives (e.g. the
+  // connection-store guard is bypassed in some future code path), the
+  // message-handler's requestedMode-match check still prevents the stale
+  // revert from firing.
+  it('skips revert when current mode no longer matches the rejected requestedMode', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const session = { ...createEmptySessionState(), permissionMode: 'acceptEdits' };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: session },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Pending request is for 'auto' but the current mode has already moved
+    // on to 'acceptEdits' (e.g. a later request landed first).
+    registerPendingPermissionModeRequest('perm-mode-req-stale', {
+      sessionId: 's1',
+      previousMode: 'plan',
+      requestedMode: 'auto',
+    });
+
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'CAPABILITY_NOT_SUPPORTED',
+      requestId: 'perm-mode-req-stale',
+      message: "The active provider 'gemini' does not support permission mode switching.",
+    });
+
+    // Mode stays at 'acceptEdits' (NOT reverted to 'plan') because the
+    // current mode no longer matches the rejected request's requestedMode.
+    expect(store.getState().sessionStates['s1'].permissionMode).toBe('acceptEdits');
+    // Targeted alert still surfaces — user is informed the rejection
+    // happened, even if no revert was needed.
+    expect(alertSpy.mock.calls[0][0]).toBe('Permission Mode Unavailable');
+  });
 });

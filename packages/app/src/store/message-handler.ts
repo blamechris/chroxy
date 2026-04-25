@@ -1487,8 +1487,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
         // Server doesn't echo back the originating requestId on
         // permission_mode_changed broadcasts (multi-client safe), so clear any
-        // pending tracker entries for this session — the change has landed.
-        clearPendingPermissionModeRequestsForSession(effectiveId);
+        // pending tracker entries for the message's resolved target. Use
+        // `targetId` (the session the broadcast is *for*) rather than
+        // `effectiveId`, which can fall back to `activeSessionId` and would
+        // wrongly clear pending entries on a different session if the broadcast
+        // arrived for a session that isn't currently in `sessionStates`.
+        if (targetId) {
+          clearPendingPermissionModeRequestsForSession(targetId);
+        }
       }
       // Clear pending confirm if mode change arrived (confirmation was accepted)
       set({ pendingPermissionConfirm: null });
@@ -2495,8 +2501,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (errRequestId) {
         const pending = takePendingPermissionModeRequest(errRequestId);
         if (pending) {
-          if (pending.sessionId && get().sessionStates[pending.sessionId]) {
-            updateSession(pending.sessionId, () => ({ permissionMode: pending.previousMode }));
+          // Only revert when the current mode still matches what THIS
+          // request optimistically applied. Guards against out-of-order
+          // rejections clobbering a newer optimistic selection (e.g. user
+          // taps A→B→C, A's rejection arrives after C's optimistic apply —
+          // we must not revert C's state to A's previousMode).
+          if (pending.sessionId) {
+            const currentSession = get().sessionStates[pending.sessionId];
+            if (
+              currentSession &&
+              currentSession.permissionMode === pending.requestedMode
+            ) {
+              updateSession(pending.sessionId, () => ({ permissionMode: pending.previousMode }));
+            }
           }
           // Always clear any visible confirmation prompt so the UI doesn't
           // leave an orphaned "Are you sure?" sheet open after rejection.

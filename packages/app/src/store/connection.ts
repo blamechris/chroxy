@@ -113,6 +113,7 @@ import {
   loadConnection,
   drainMessageQueue,
   registerPendingPermissionModeRequest,
+  clearPendingPermissionModeRequestsForSession,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
@@ -1010,6 +1011,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const previousMode = targetSessionId
         ? sessionStates[targetSessionId]?.permissionMode ?? null
         : null;
+      // Drop any superseded pending entries for this session — only the
+      // latest tap should be allowed to revert state on rejection. This
+      // prevents stale rejections from overwriting a newer optimistic mode
+      // when the user taps multiple modes in rapid succession.
+      clearPendingPermissionModeRequestsForSession(targetSessionId);
       registerPendingPermissionModeRequest(requestId, {
         sessionId: targetSessionId,
         previousMode,
@@ -1044,6 +1050,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const previousMode = targetSessionId
         ? sessionStates[targetSessionId]?.permissionMode ?? null
         : null;
+      // Drop any superseded pending entries (see setPermissionMode for
+      // rationale).
+      clearPendingPermissionModeRequestsForSession(targetSessionId);
       registerPendingPermissionModeRequest(requestId, {
         sessionId: targetSessionId,
         previousMode,
