@@ -313,4 +313,57 @@ describe('listAgents with multiple provider agentsDirs (#2965)', () => {
     assert.equal(agents.length, 1, 'shared-agent must appear only once')
     assert.equal(agents[0].description, 'Claude version', 'first dir wins on dedup')
   })
+
+  it('listAgents preserves first-wins order even when later dirs resolve faster (#3024)', async () => {
+    // Parallel scanning must not let a faster dir leapfrog earlier dirs.
+    // We simulate this by giving the first dir many more files than the
+    // second dir — readdir on the larger dir is naturally slower, so any
+    // implementation that races and accepts the first responder would
+    // incorrectly let codex (smaller dir) win.
+    const { createBrowserOps } = await import('../src/ws-file-ops/browser.js')
+
+    const claudeAgents = join(claudeDir, 'agents')
+    const codexAgents = join(codexDir, 'agents')
+
+    // Create many files in claude dir, plus the shared-agent
+    for (let i = 0; i < 50; i++) {
+      makeAgentFile(claudeAgents, `claude-filler-${i}`, `Claude filler ${i}`)
+    }
+    makeAgentFile(claudeAgents, 'shared-agent', 'Claude version')
+
+    // Codex has just the shared-agent
+    makeAgentFile(codexAgents, 'shared-agent', 'Codex version')
+
+    const received = []
+    const sendFn = (_ws, msg) => received.push(msg)
+
+    const browser = createBrowserOps(sendFn, async () => null, async () => null)
+    await browser.listAgents(null, tempCwd, null, {
+      userAgentsDirs: [claudeAgents, codexAgents],
+    })
+
+    const [response] = received
+    const shared = response.agents.find(a => a.name === 'shared-agent')
+    assert.ok(shared, 'shared-agent must be present')
+    assert.equal(shared.description, 'Claude version', 'first dir must win regardless of scan completion order')
+  })
+
+  it('listAgents tolerates a missing dir and returns results from the others (#3024)', async () => {
+    const { createBrowserOps } = await import('../src/ws-file-ops/browser.js')
+
+    const claudeAgents = join(claudeDir, 'agents')
+    makeAgentFile(claudeAgents, 'claude-agent', 'An agent from Claude')
+
+    const received = []
+    const sendFn = (_ws, msg) => received.push(msg)
+
+    const browser = createBrowserOps(sendFn, async () => null, async () => null)
+    await browser.listAgents(null, tempCwd, null, {
+      userAgentsDirs: [claudeAgents, '/nonexistent/path/agents'],
+    })
+
+    const [response] = received
+    const names = response.agents.map(a => a.name)
+    assert.ok(names.includes('claude-agent'), 'must include agent from existing dir')
+  })
 })
