@@ -114,6 +114,29 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
     const permModeSessionId = msg.sessionId || client.activeSessionId
     const entry = resolveSession(ctx, msg, client)
     if (entry) {
+      // #2963 — capability gate: providers that don't support permission mode
+      // (Gemini, Codex) must be rejected here rather than silently accepting
+      // the change, which would let the UI show visual confirmation of a mode
+      // that has no effect on the session.
+      if (entry.provider) {
+        let ProviderClass
+        try {
+          ProviderClass = getProvider(entry.provider)
+        } catch {
+          // Unknown provider — allow through (fail open for forward-compat).
+        }
+        if (ProviderClass && ProviderClass.capabilities?.permissionModeSwitch === false) {
+          log.warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
+          sendError(
+            ws,
+            msg?.requestId,
+            'CAPABILITY_NOT_SUPPORTED',
+            `The active provider '${entry.provider}' does not support permission mode switching.`,
+          )
+          return
+        }
+      }
+
       if (msg.mode === 'plan' && !entry.session.constructor.capabilities?.planMode) {
         ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
         return
