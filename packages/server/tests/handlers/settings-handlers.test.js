@@ -267,6 +267,33 @@ describe('settings-handlers', () => {
         assert.equal(session.setPermissionMode.callCount, 1)
         assert.equal(ws._messages.length, 0)
       })
+
+      // #3027 — fail-open guard for forward compatibility. When entry.provider
+      // is set to a string that isn't in the provider registry, getProvider()
+      // throws and the handler must swallow the error and let the mode change
+      // proceed. This protects sessions persisted under a future provider name
+      // from being locked out of permission mode after a downgrade. If the
+      // try/catch around getProvider is ever removed, this test will fail
+      // with an "Unknown provider" exception instead of a clean call-through.
+      it('falls open and accepts set_permission_mode when entry.provider is unregistered', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Future', cwd: '/tmp', provider: 'totally-unknown-provider-xyz' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_permission_mode(ws, client, { mode: 'approve', requestId: 'r-unknown' }, ctx)
+
+        // No CAPABILITY_NOT_SUPPORTED error sent — the unknown provider
+        // branch must not reject.
+        assert.equal(ws._messages.length, 0, 'no error message should be sent for unknown provider')
+        assert.equal(ctx._sent.length, 0, 'no session-level error should be sent for unknown provider')
+
+        // Mode change proceeds through to the underlying session.
+        assert.equal(session.setPermissionMode.callCount, 1)
+        assert.equal(session.setPermissionMode.lastCall[0], 'approve')
+      })
     })
 
     it('sends confirm_permission_mode for auto mode without confirmation', () => {
