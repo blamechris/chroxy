@@ -565,6 +565,14 @@ function handleCheckpointRestored(_msg: Record<string, unknown>, _get: MsgGet, _
   // The session_list update will follow from the server — nothing to do here.
 }
 
+/**
+ * Server emits pairing_refreshed after a pairing ID is consumed (#2916).
+ * Increment the counter so App.tsx can auto-refresh the displayed QR code.
+ */
+function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  set(state => ({ pairingRefreshedCount: (state.pairingRefreshedCount ?? 0) + 1 }));
+}
+
 function handleWebFeatureStatus(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   set({
     webFeatures: {
@@ -1136,6 +1144,7 @@ const HANDLERS: Record<string, Handler> = {
   raw: handleRaw,
   raw_background: handleRawBackground,
   token_rotated: handleTokenRotated,
+  pairing_refreshed: handlePairingRefreshed,
   checkpoint_restored: handleCheckpointRestored,
   web_feature_status: handleWebFeatureStatus,
   web_task_list: handleWebTaskList,

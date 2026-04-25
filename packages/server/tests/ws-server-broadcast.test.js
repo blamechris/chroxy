@@ -1457,3 +1457,101 @@ describe('broadcast backpressure', () => {
     server.close()
   })
 })
+
+// ---------------------------------------------------------------------------
+// pairing_refreshed broadcast (#2916)
+// ---------------------------------------------------------------------------
+
+describe('pairing_refreshed broadcast (#2916)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('broadcasts pairing_refreshed to authenticated clients when pairingManager emits', async () => {
+    const { EventEmitter } = await import('node:events')
+    const mockSession = createMockSession()
+
+    // Create a minimal mock PairingManager that is an EventEmitter
+    const pairingManager = new EventEmitter()
+    pairingManager.isSessionTokenValid = () => false
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      pairingManager,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    // Simulate pairingManager emitting pairing_refreshed (e.g. after consumption)
+    pairingManager.emit('pairing_refreshed', { pairingId: 'new-id-xyz' })
+
+    const msg = await waitForMessage(messages, 'pairing_refreshed', 1000)
+    assert.ok(msg, 'Should receive pairing_refreshed broadcast')
+    assert.equal(msg.type, 'pairing_refreshed')
+
+    ws.close()
+  })
+
+  it('does not broadcast pairing_refreshed to unauthenticated clients', async () => {
+    const { EventEmitter } = await import('node:events')
+    const mockSession = createMockSession()
+
+    const pairingManager = new EventEmitter()
+    pairingManager.isSessionTokenValid = () => false
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+      pairingManager,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect WITHOUT authenticating
+    const { ws, messages } = await createClient(port, false)
+
+    pairingManager.emit('pairing_refreshed', { pairingId: 'new-id-abc' })
+    await new Promise(r => setTimeout(r, 200))
+
+    const msg = messages.find(m => m.type === 'pairing_refreshed')
+    assert.ok(!msg, 'Unauthenticated client should NOT receive pairing_refreshed')
+
+    ws.close()
+  })
+
+  it('removes pairing_refreshed listener on close()', async () => {
+    const { EventEmitter } = await import('node:events')
+    const mockSession = createMockSession()
+    const pairingManager = new EventEmitter()
+    pairingManager.isSessionTokenValid = () => false
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      pairingManager,
+    })
+    await startServerAndGetPort(server)
+
+    const beforeListeners = pairingManager.listenerCount('pairing_refreshed')
+    assert.equal(beforeListeners, 1, 'Should have 1 listener before close')
+
+    server.close()
+    server = null
+
+    const afterListeners = pairingManager.listenerCount('pairing_refreshed')
+    assert.equal(afterListeners, 0, 'Should remove pairing_refreshed listener on close')
+  })
+})

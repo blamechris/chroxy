@@ -235,6 +235,7 @@ export function App() {
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const connectedClients = useConnectionStore(s => s.connectedClients)
+  const pairingRefreshedCount = useConnectionStore(s => s.pairingRefreshedCount)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
@@ -774,6 +775,15 @@ export function App() {
       setQrLoading(false)
     }
   }, [])
+
+  // Auto-refresh QR when the server regenerates the pairing ID after consumption (#2916).
+  // Only refresh when the modal is open or a QR was previously displayed (stale QR visible).
+  useEffect(() => {
+    if (pairingRefreshedCount === 0) return
+    if (!qrModalOpen && qrSvg === null) return
+    handleShowQr()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairingRefreshedCount])
 
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
     sendPermissionResponse(requestId, 'allow')

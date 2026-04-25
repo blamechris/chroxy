@@ -595,6 +595,17 @@ export class WsServer {
       })
     }
 
+    // Wire PairingManager refresh events — broadcast pairing_refreshed to all
+    // authenticated dashboard clients so they can auto-refresh the QR code (#2916).
+    this._pairingRefreshedHandler = null
+    if (this._pairingManager) {
+      this._pairingRefreshedHandler = () => {
+        this._broadcast({ type: 'pairing_refreshed' })
+        log.debug('Broadcasted pairing_refreshed to all clients')
+      }
+      this._pairingManager.on('pairing_refreshed', this._pairingRefreshedHandler)
+    }
+
     // Wire TokenManager rotation events — broadcast new token to all clients
     this._tokenRotatedHandler = null
     if (this._tokenManager) {
@@ -1308,6 +1319,12 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
+    // Remove PairingManager listener to prevent post-shutdown broadcasts
+    if (this._pairingManager && this._pairingRefreshedHandler) {
+      this._pairingManager.off('pairing_refreshed', this._pairingRefreshedHandler)
+      this._pairingRefreshedHandler = null
+    }
+
     // Remove TokenManager listener to prevent post-shutdown broadcasts
     if (this._tokenManager && this._tokenRotatedHandler) {
       this._tokenManager.off('token_rotated', this._tokenRotatedHandler)

@@ -397,6 +397,10 @@ export interface ConnectionState {
   // Environments
   environments: EnvironmentInfo[];
 
+  // Pairing refresh counter — incremented each time the server broadcasts
+  // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
+  pairingRefreshedCount: number;
+
   // View mode
   viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments';
 
