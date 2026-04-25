@@ -3691,6 +3691,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .tunnel-warming-banner { transition: none; }
+
   .skeleton-line,
   .sidebar-busy-dot,
   .sidebar-idle-dot,

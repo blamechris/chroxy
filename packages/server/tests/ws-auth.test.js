@@ -867,6 +867,120 @@ describe('handlePairMessage', () => {
       }
       assert.equal(authFailures.size, 3, 'should have one failure entry per IP')
     })
+
+    // --- #2917: already_used / expired must NOT trip the brute-force limiter ---
+
+    it('does NOT increment authFailures for already_used pair failure (#2917)', () => {
+      const authFailures = new Map()
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'already_used' })) }
+      const { ctx, ws } = makePairCtx({ pairingManager, authFailures })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'stale-id' })
+      assert.equal(ws.lastSent().type, 'pair_fail')
+      assert.equal(ws.lastSent().reason, 'already_used')
+      assert.equal(ws.closed, true)
+      // Key assertion: no failure recorded — bucket stays empty
+      assert.equal(authFailures.size, 0, 'already_used must NOT add an entry to authFailures')
+    })
+
+    it('does NOT increment authFailures for expired pair failure (#2917)', () => {
+      const authFailures = new Map()
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'expired' })) }
+      const { ctx, ws } = makePairCtx({ pairingManager, authFailures })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'old-id' })
+      assert.equal(ws.lastSent().type, 'pair_fail')
+      assert.equal(ws.lastSent().reason, 'expired')
+      assert.equal(ws.closed, true)
+      assert.equal(authFailures.size, 0, 'expired must NOT add an entry to authFailures')
+    })
+
+    it('repeated already_used attempts do NOT block subsequent legitimate pairing (#2917)', () => {
+      // Simulate the symptom from the issue: user rescans a consumed QR many
+      // times. With the bug, they get locked out; after the fix, the fresh
+      // valid pair succeeds.
+      const authFailures = new Map()
+
+      // Simulate 6 already_used failures (user bouncing the scanner)
+      for (let i = 0; i < 6; i++) {
+        const w = makeMockWs()
+        const c = makeMockClient({ ip: '1.2.3.4' })
+        const pm = { validatePairing: createSpy(() => ({ valid: false, reason: 'already_used' })) }
+        const ctx = {
+          clients: new Map([[w, c]]),
+          pairingManager: pm,
+          authFailures,
+          send: (s, m) => s.send(JSON.stringify(m)),
+          onAuthSuccess: createSpy(),
+          minProtocolVersion: 1,
+          serverProtocolVersion: 3,
+        }
+        handlePairMessage(ctx, w, { type: 'pair', pairingId: 'consumed-id' })
+      }
+
+      // Now the user scans the fresh QR — should succeed, NOT be blocked
+      const freshWs = makeMockWs()
+      const freshClient = makeMockClient({ ip: '1.2.3.4' })
+      const onAuthSuccess = createSpy()
+      const freshPm = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'new-tok' })) }
+      const freshCtx = {
+        clients: new Map([[freshWs, freshClient]]),
+        pairingManager: freshPm,
+        authFailures,
+        send: (s, m) => s.send(JSON.stringify(m)),
+        onAuthSuccess,
+        minProtocolVersion: 1,
+        serverProtocolVersion: 3,
+      }
+      handlePairMessage(freshCtx, freshWs, { type: 'pair', pairingId: 'fresh-id' })
+      assert.equal(freshClient.authenticated, true, 'fresh pair must succeed after many already_used — user must not be blocked')
+      assert.equal(onAuthSuccess.callCount, 1)
+      assert.equal(freshWs.closed, false)
+    })
+
+    it('mixed already_used + invalid_pairing_id: only invalid_pairing_id counts toward rate limit (#2917)', () => {
+      // Two complementary sub-scenarios:
+      //
+      // A) Same IP interleaves already_used and invalid_pairing_id: only the
+      //    invalid_pairing_id attempts must increment the shared bucket.
+      //
+      // B) IP with only already_used: produces no entry at all.
+      const authFailures = new Map()
+
+      const attemptWithIp = (ip, reason) => {
+        const w = makeMockWs()
+        const c = makeMockClient({ ip })
+        const pm = { validatePairing: createSpy(() => ({ valid: false, reason })) }
+        const ctx = {
+          clients: new Map([[w, c]]),
+          pairingManager: pm,
+          authFailures,
+          send: (s, m) => s.send(JSON.stringify(m)),
+          onAuthSuccess: createSpy(),
+          minProtocolVersion: 1,
+          serverProtocolVersion: 3,
+          activeSessionId: null,
+        }
+        handlePairMessage(ctx, w, { type: 'pair', pairingId: 'any-id' })
+      }
+
+      // Scenario A: same IP mixes both reasons.
+      // already_used before and after the invalid attempt must not change count.
+      attemptWithIp('10.0.0.3', 'already_used')    // benign — should not count
+      attemptWithIp('10.0.0.3', 'invalid_pairing_id') // brute-force signal — count=1
+      attemptWithIp('10.0.0.3', 'already_used')    // benign — count must stay 1
+
+      const mixedEntry = authFailures.get('10.0.0.3')
+      assert.ok(mixedEntry, 'same IP with mixed reasons must have a rate-limit entry')
+      assert.equal(mixedEntry.count, 1,
+        'only the one invalid_pairing_id attempt should increment the counter — already_used must not')
+
+      // Scenario B: IP with only already_used failures — must produce no entry.
+      attemptWithIp('10.0.0.1', 'already_used')
+      attemptWithIp('10.0.0.1', 'already_used')
+      attemptWithIp('10.0.0.1', 'already_used')
+
+      assert.equal(authFailures.has('10.0.0.1'), false,
+        'IP that only sent already_used must have no rate-limit entry')
+    })
   })
 
   describe('session binding (#2693)', () => {

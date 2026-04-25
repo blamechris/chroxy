@@ -64,6 +64,7 @@ const PLATFORM_SPECIFIC = {
   'git_commit_result': 'app',   // app git UI
 
   // Dashboard only
+  'pairing_refreshed': 'dashboard',  // QR display and auto-refresh is dashboard-only (#2916)
   'log_entry': 'dashboard',          // console page is dashboard-only
   'file_list': 'dashboard',          // file explorer sidebar is dashboard-only
   'environment_created': 'dashboard', // environment panel is dashboard-only

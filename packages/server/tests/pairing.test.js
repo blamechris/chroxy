@@ -334,4 +334,46 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
   })
+
+  describe('auto-regen on consumption (#2916)', () => {
+    it('emits pairing_refreshed after a pairing ID is consumed', () => {
+      const pm = new PairingManager({})
+      const id = pm.currentPairingId
+      let emitted = null
+      pm.on('pairing_refreshed', (event) => { emitted = event })
+      pm.validatePairing(id)
+      assert.ok(emitted, 'should emit pairing_refreshed after consumption')
+      assert.ok(emitted.pairingId, 'event should contain new pairing ID')
+      assert.notEqual(emitted.pairingId, id, 'new ID should differ from consumed one')
+      pm.destroy()
+    })
+
+    it('new pairing ID is valid after consumption regeneration', () => {
+      const pm = new PairingManager({})
+      const oldId = pm.currentPairingId
+      pm.validatePairing(oldId)
+      const newId = pm.currentPairingId
+      assert.notEqual(newId, oldId, 'pairing ID should change after consumption')
+      const result = pm.validatePairing(newId)
+      assert.equal(result.valid, true, 'new ID should be valid')
+      assert.ok(result.sessionToken)
+      pm.destroy()
+    })
+
+    it('does NOT regen when validation fails (already_used, expired, invalid)', () => {
+      const pm = new PairingManager({})
+      const id = pm.currentPairingId
+      // Consume successfully — this WILL regen
+      pm.validatePairing(id)
+      const idAfterFirstConsume = pm.currentPairingId
+      let extraEmit = 0
+      pm.on('pairing_refreshed', () => { extraEmit++ })
+      // Failing attempts should not trigger another regen
+      pm.validatePairing(id) // already_used
+      pm.validatePairing('bogus') // invalid
+      assert.equal(extraEmit, 0, 'failed validations must not trigger pairing_refreshed')
+      assert.equal(pm.currentPairingId, idAfterFirstConsume, 'ID should remain stable on failures')
+      pm.destroy()
+    })
+  })
 })
