@@ -566,8 +566,10 @@ function handleCheckpointRestored(_msg: Record<string, unknown>, _get: MsgGet, _
 }
 
 /**
- * Server emits pairing_refreshed after a pairing ID is consumed (#2916).
- * Increment the counter so App.tsx can auto-refresh the displayed QR code.
+ * Server emits pairing_refreshed whenever the pairing ID changes: after a
+ * pairing ID is consumed, on periodic auto-rotation, or on an explicit
+ * refresh() call (#2916). Increment the counter so App.tsx can auto-refresh
+ * the QR code while the modal is open.
  */
 function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   set(state => ({ pairingRefreshedCount: (state.pairingRefreshedCount ?? 0) + 1 }));

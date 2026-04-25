@@ -1473,7 +1473,6 @@ describe('pairing_refreshed broadcast (#2916)', () => {
   })
 
   it('broadcasts pairing_refreshed to authenticated clients when pairingManager emits', async () => {
-    const { EventEmitter } = await import('node:events')
     const mockSession = createMockSession()
 
     // Create a minimal mock PairingManager that is an EventEmitter
@@ -1503,7 +1502,6 @@ describe('pairing_refreshed broadcast (#2916)', () => {
   })
 
   it('does not broadcast pairing_refreshed to unauthenticated clients', async () => {
-    const { EventEmitter } = await import('node:events')
     const mockSession = createMockSession()
 
     const pairingManager = new EventEmitter()
@@ -1531,7 +1529,6 @@ describe('pairing_refreshed broadcast (#2916)', () => {
   })
 
   it('removes pairing_refreshed listener on close()', async () => {
-    const { EventEmitter } = await import('node:events')
     const mockSession = createMockSession()
     const pairingManager = new EventEmitter()
     pairingManager.isSessionTokenValid = () => false

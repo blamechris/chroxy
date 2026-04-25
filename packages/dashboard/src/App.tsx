@@ -776,11 +776,12 @@ export function App() {
     }
   }, [])
 
-  // Auto-refresh QR when the server regenerates the pairing ID after consumption (#2916).
-  // Only refresh when the modal is open or a QR was previously displayed (stale QR visible).
+  // Auto-refresh QR when the server regenerates the pairing ID (#2916).
+  // Only refresh while the modal is open — guarding on qrSvg would reopen
+  // the modal after the user closes it if qrSvg was not cleared on close.
   useEffect(() => {
     if (pairingRefreshedCount === 0) return
-    if (!qrModalOpen && qrSvg === null) return
+    if (!qrModalOpen) return
     handleShowQr()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairingRefreshedCount])
