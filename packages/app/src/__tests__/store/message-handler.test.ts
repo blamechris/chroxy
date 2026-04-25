@@ -5,7 +5,17 @@
  * with a mock Zustand store.
  */
 import { Alert } from 'react-native';
-import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers, resetReplayFlags } from '../../store/message-handler';
+import {
+  _testMessageHandler,
+  setStore,
+  CLIENT_PROTOCOL_VERSION,
+  SUBSCRIBE_SESSIONS_CHUNK_SIZE,
+  clearPermissionSplits,
+  clearDeltaBuffers,
+  resetReplayFlags,
+  registerPendingPermissionModeRequest,
+  _testClearPendingPermissionModeRequests,
+} from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
@@ -2600,5 +2610,119 @@ describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
     const state = store.getState();
     const messages = state.sessionStates['s1']?.messages ?? [];
     expect(messages.some((m) => m.type === 'system')).toBe(true);
+  });
+});
+
+// Issue #3026: when the server rejects set_permission_mode on a provider that
+// doesn't support permission mode switching (Gemini, Codex), the app must
+// match the rejection back to the originating request via requestId, revert
+// the optimistic UI state, and surface a targeted message instead of the
+// generic "Server Error" alert.
+describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
+  afterEach(() => {
+    _testClearPendingPermissionModeRequests();
+  });
+
+  it('reverts optimistic mode and shows a targeted alert on CAPABILITY_NOT_SUPPORTED', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const session = { ...createEmptySessionState(), permissionMode: 'plan' };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: session },
+      pendingPermissionConfirm: { mode: 'auto', warning: 'Are you sure?' } as any,
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Simulate the connection-store action: optimistically apply 'auto' and
+    // register the pending request with the previous mode 'plan'.
+    registerPendingPermissionModeRequest('perm-mode-req-1-1700000000000', {
+      sessionId: 's1',
+      previousMode: 'plan',
+      requestedMode: 'auto',
+    });
+    store.setState((s) => ({
+      sessionStates: {
+        ...s.sessionStates,
+        s1: { ...s.sessionStates.s1, permissionMode: 'auto' },
+      },
+    }));
+
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'CAPABILITY_NOT_SUPPORTED',
+      requestId: 'perm-mode-req-1-1700000000000',
+      message: "The active provider 'gemini' does not support permission mode switching.",
+    });
+
+    expect(store.getState().sessionStates['s1'].permissionMode).toBe('plan');
+    expect(store.getState().pendingPermissionConfirm).toBeNull();
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toBe('Permission Mode Unavailable');
+    expect(alertSpy.mock.calls[0][1]).toContain('gemini');
+  });
+
+  it('falls back to generic Server Error alert for other error codes', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'INVALID_MODEL',
+      requestId: 'unrelated-req',
+      message: 'Invalid model',
+    });
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toBe('Server Error');
+  });
+
+  it('clears pending requests for a session when permission_mode_changed arrives', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    registerPendingPermissionModeRequest('perm-mode-req-2', {
+      sessionId: 's1',
+      previousMode: 'plan',
+      requestedMode: 'auto',
+    });
+
+    _testMessageHandler.handle({
+      type: 'permission_mode_changed',
+      mode: 'auto',
+      sessionId: 's1',
+    });
+
+    // After the broadcast lands, a subsequent unrelated error with the same
+    // requestId must NOT revert the (now-confirmed) mode. Use a brand-new
+    // alert to confirm the pending entry was cleared.
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    _testMessageHandler.handle({
+      type: 'error',
+      code: 'CAPABILITY_NOT_SUPPORTED',
+      requestId: 'perm-mode-req-2',
+      message: 'Stale rejection',
+    });
+
+    // Pending entry was cleared on permission_mode_changed, so this falls
+    // through to the generic Server Error alert (no revert).
+    expect(store.getState().sessionStates['s1'].permissionMode).toBe('auto');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toBe('Server Error');
   });
 });

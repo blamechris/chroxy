@@ -185,6 +185,7 @@ export function resetAllHandlerState(): void {
   if (_ctx.pongTimeout) clearTimeout(_ctx.pongTimeout);
   if (_ctx.deltaFlushTimer) clearTimeout(_ctx.deltaFlushTimer);
   _ctx = createDefaultContext();
+  _pendingPermissionModeRequests.clear();
   // Reset connection-attempt tracking (kept as export let for live-binding semantics)
   connectionAttemptId = 0;
   disconnectedAttemptId = -1;
@@ -247,6 +248,48 @@ function showBoundSessionMismatchAlert(bodyText: string): void {
       },
     ],
   );
+}
+
+// ---------------------------------------------------------------------------
+// Pending set_permission_mode requests
+//
+// Tracks in-flight `set_permission_mode` requests by `requestId` so that a
+// `CAPABILITY_NOT_SUPPORTED` rejection from the server can be matched back to
+// the originating call and used to revert the optimistic UI state. Entries
+// are cleared when the matching `permission_mode_changed` broadcast arrives
+// or when the rejection is processed in the `error` case below.
+// ---------------------------------------------------------------------------
+interface PendingPermissionModeRequest {
+  sessionId: string | null;
+  previousMode: string | null;
+  requestedMode: string;
+}
+const _pendingPermissionModeRequests = new Map<string, PendingPermissionModeRequest>();
+
+export function registerPendingPermissionModeRequest(
+  requestId: string,
+  entry: PendingPermissionModeRequest,
+): void {
+  _pendingPermissionModeRequests.set(requestId, entry);
+}
+
+export function takePendingPermissionModeRequest(
+  requestId: string,
+): PendingPermissionModeRequest | undefined {
+  const entry = _pendingPermissionModeRequests.get(requestId);
+  if (entry) _pendingPermissionModeRequests.delete(requestId);
+  return entry;
+}
+
+export function clearPendingPermissionModeRequestsForSession(sessionId: string | null): void {
+  for (const [reqId, entry] of _pendingPermissionModeRequests) {
+    if (entry.sessionId === sessionId) _pendingPermissionModeRequests.delete(reqId);
+  }
+}
+
+/** @internal Exposed for testing only */
+export function _testClearPendingPermissionModeRequests(): void {
+  _pendingPermissionModeRequests.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,6 +1485,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (effectiveId && get().sessionStates[effectiveId]) {
           updateSession(effectiveId, () => ({ permissionMode: mode }));
         }
+        // Server doesn't echo back the originating requestId on
+        // permission_mode_changed broadcasts (multi-client safe), so clear any
+        // pending tracker entries for this session — the change has landed.
+        clearPendingPermissionModeRequestsForSession(effectiveId);
       }
       // Clear pending confirm if mode change arrived (confirmation was accepted)
       set({ pendingPermissionConfirm: null });
@@ -2439,7 +2486,35 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const errMsg = typeof msg.message === 'string'
         ? (stripAnsi(msg.message as string).trim() || 'An unexpected server error occurred')
         : 'An unexpected server error occurred';
+      const errRequestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+
+      // Match against an in-flight set_permission_mode request — if the
+      // requestId lines up, revert the optimistic UI state and show a
+      // targeted message instead of the generic "Server Error" alert.
+      if (errRequestId) {
+        const pending = takePendingPermissionModeRequest(errRequestId);
+        if (pending) {
+          if (pending.sessionId && get().sessionStates[pending.sessionId]) {
+            updateSession(pending.sessionId, () => ({ permissionMode: pending.previousMode }));
+          }
+          // Always clear any visible confirmation prompt so the UI doesn't
+          // leave an orphaned "Are you sure?" sheet open after rejection.
+          set({ pendingPermissionConfirm: null });
+
+          if (errCode === 'CAPABILITY_NOT_SUPPORTED') {
+            Alert.alert(
+              'Permission Mode Unavailable',
+              errMsg || 'This provider does not support permission mode switching.',
+            );
+            break;
+          }
+          // Other error codes targeting the same in-flight request still
+          // need to surface — fall through to the generic alert below so
+          // the user knows the mode change failed.
+        }
+      }
+
       Alert.alert('Server Error', errMsg);
       break;
     }

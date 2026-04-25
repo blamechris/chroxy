@@ -112,6 +112,7 @@ import {
   clearSavedCredentials,
   loadConnection,
   drainMessageQueue,
+  registerPendingPermissionModeRequest,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
@@ -1002,9 +1003,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setPermissionMode: (mode: string) => {
-    const { socket, activeSessionId } = get();
+    const { socket, activeSessionId, sessionStates } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
+      const requestId = nextMessageId('perm-mode-req');
+      const targetSessionId = activeSessionId ?? null;
+      const previousMode = targetSessionId
+        ? sessionStates[targetSessionId]?.permissionMode ?? null
+        : null;
+      registerPendingPermissionModeRequest(requestId, {
+        sessionId: targetSessionId,
+        previousMode,
+        requestedMode: mode,
+      });
+      // Optimistically apply locally so the selector reflects the user's
+      // choice immediately. Reverted by the error handler if the server
+      // rejects with CAPABILITY_NOT_SUPPORTED.
+      if (targetSessionId && sessionStates[targetSessionId]) {
+        updateSession(targetSessionId, () => ({ permissionMode: mode }));
+      }
+      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, requestId };
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
     }
@@ -1020,9 +1037,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   confirmPermissionMode: (mode: string) => {
-    const { socket, activeSessionId } = get();
+    const { socket, activeSessionId, sessionStates } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true };
+      const requestId = nextMessageId('perm-mode-req');
+      const targetSessionId = activeSessionId ?? null;
+      const previousMode = targetSessionId
+        ? sessionStates[targetSessionId]?.permissionMode ?? null
+        : null;
+      registerPendingPermissionModeRequest(requestId, {
+        sessionId: targetSessionId,
+        previousMode,
+        requestedMode: mode,
+      });
+      if (targetSessionId && sessionStates[targetSessionId]) {
+        updateSession(targetSessionId, () => ({ permissionMode: mode }));
+      }
+      const payload: Record<string, unknown> = {
+        type: 'set_permission_mode',
+        mode,
+        confirmed: true,
+        requestId,
+      };
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
     }
