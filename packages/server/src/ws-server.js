@@ -303,6 +303,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_updated', sessionId, name }        — session metadata updated
  *   { type: 'discovered_sessions', sessions }           — discovered local Claude sessions
  *   { type: 'pair_fail', reason }                       — pairing failed
+ *   { type: 'pairing_refreshed' }                       — pairing ID consumed; clients should re-fetch /qr (#2916)
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
