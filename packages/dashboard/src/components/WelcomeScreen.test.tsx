@@ -8,8 +8,15 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { WelcomeScreen, type WelcomeScreenProps } from './WelcomeScreen'
 
+const ORIGINAL_NAVIGATOR = globalThis.navigator
+
 afterEach(() => {
   cleanup()
+  Object.defineProperty(globalThis, 'navigator', {
+    value: ORIGINAL_NAVIGATOR,
+    configurable: true,
+    writable: true,
+  })
   vi.restoreAllMocks()
 })
 
