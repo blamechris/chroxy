@@ -367,22 +367,6 @@ export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
 }
 
 /**
- * Enforce that a bound client is only accessing its bound session.
- * Throws if the client has a boundSessionId that doesn't match the target.
- *
- * @param {object} client - Connected client state
- * @param {string} targetSessionId - The session ID being accessed
- * @throws {Error} if the client is bound to a different session
- */
-export function enforceBoundSession(client, targetSessionId) {
-  if (client.boundSessionId && client.boundSessionId !== targetSessionId) {
-    const err = new Error('Access denied: client is bound to a different session')
-    err.code = 'SESSION_TOKEN_MISMATCH'
-    throw err
-  }
-}
-
-/**
  * Resolve a session from a message and client context.
  * Prefers msg.sessionId, falls back to client.activeSessionId.
  * Returns the session entry, or null if not found.
