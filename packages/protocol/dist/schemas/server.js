@@ -249,18 +249,27 @@ export const ServerWebTaskUpdatedSchema = z.object({
  *    can carry SESSION_TOKEN_MISMATCH (`session_error`, `error`, this schema,
  *    and the HTTP 403 body) and originate from
  *    `buildSessionTokenMismatchPayload()` in `packages/server/src/handler-utils.js`.
+ *
+ * Note that `code` is generic — it may also be populated for non-bound-session
+ * web-task failures (e.g. `WEB_TASK_PROMPT_TOO_LARGE`). The two fields that
+ * are *only* populated on SESSION_TOKEN_MISMATCH are `boundSessionId` and
+ * `boundSessionName`.
  */
 export const ServerWebTaskErrorSchema = z.object({
     type: z.literal('web_task_error'),
     taskId: z.string().nullable().optional(),
     message: z.string(),
     /**
-     * Machine-readable error code. Currently only `'SESSION_TOKEN_MISMATCH'` is
-     * emitted on this envelope; absent for generic task failures. Clients
-     * branch on this field to drive bound-session recovery flows. See
-     * `docs/error-taxonomy.md` § SESSION_TOKEN_MISMATCH.
+     * Machine-readable error code. May be set for specific web-task failures
+     * — e.g. `'SESSION_TOKEN_MISMATCH'` (bound-session rejections, paired with
+     * `boundSessionId`/`boundSessionName`) or `'WEB_TASK_PROMPT_TOO_LARGE'`
+     * (prompt-size guard in `feature-handlers.js`) — and absent for generic
+     * task failures. Clients may branch on this field; the bound-session
+     * recovery context is carried in `boundSessionId`/`boundSessionName`. See
+     * `docs/error-taxonomy.md` § SESSION_TOKEN_MISMATCH. Bounded to 64 chars
+     * to mirror `ServerMessageSchema.code`.
      */
-    code: z.string().optional(),
+    code: z.string().max(64).optional(),
     /**
      * The session ID the client's auth token is bound to. Populated on
      * `SESSION_TOKEN_MISMATCH` rejections so the client can surface which

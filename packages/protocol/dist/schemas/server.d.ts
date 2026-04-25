@@ -276,6 +276,11 @@ export declare const ServerWebTaskUpdatedSchema: z.ZodObject<{
  *    can carry SESSION_TOKEN_MISMATCH (`session_error`, `error`, this schema,
  *    and the HTTP 403 body) and originate from
  *    `buildSessionTokenMismatchPayload()` in `packages/server/src/handler-utils.js`.
+ *
+ * Note that `code` is generic — it may also be populated for non-bound-session
+ * web-task failures (e.g. `WEB_TASK_PROMPT_TOO_LARGE`). The two fields that
+ * are *only* populated on SESSION_TOKEN_MISMATCH are `boundSessionId` and
+ * `boundSessionName`.
  */
 export declare const ServerWebTaskErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"web_task_error">;

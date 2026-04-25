@@ -349,7 +349,7 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.boundSessionName, 'My Project')
   })
 
-  it('validates ServerWebTaskErrorSchema with null bound session fields (HTTP fallback path)', async () => {
+  it('validates ServerWebTaskErrorSchema with null boundSessionId/boundSessionName', async () => {
     const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
     const result = ServerWebTaskErrorSchema.safeParse({
       type: 'web_task_error',
@@ -362,5 +362,16 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(result.success, 'Should validate SESSION_TOKEN_MISMATCH with null bound fields')
     assert.equal(result.data.boundSessionId, null)
     assert.equal(result.data.boundSessionName, null)
+  })
+
+  it('rejects ServerWebTaskErrorSchema when code exceeds 64 chars', async () => {
+    const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: 'task-1',
+      message: 'oops',
+      code: 'X'.repeat(65),
+    })
+    assert.ok(!result.success, 'Should reject web_task_error code longer than 64 chars')
   })
 })
