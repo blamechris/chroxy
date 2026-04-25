@@ -82,10 +82,13 @@ export class JsonlSubprocessSession extends BaseSession {
   // Lifecycle
   // ------------------------------------------------------------------
 
-  constructor({ cwd, model, permissionMode } = {}) {
-    super({ cwd, model, permissionMode: permissionMode || 'auto' })
+  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
+    super({ cwd, model, permissionMode: permissionMode || 'auto', skillsDir })
     this.resumeSessionId = null
     this._process = null
+    // Skills MVP (#2957) — providers without a system-prompt flag (Codex,
+    // Gemini) prepend skills text to the first user message only.
+    this._skillsPrepended = false
   }
 
   start() {
@@ -192,7 +195,19 @@ export class JsonlSubprocessSession extends BaseSession {
     this._isBusy = true
     this._currentMessageId = `${Klass.messageIdPrefix}-msg-${++this._messageCounter}`
 
-    const args = this._buildArgs(text)
+    // Skills MVP (#2957) — prepend skills text to the first user message when
+    // the provider has no system-prompt flag (Codex, Gemini). Only done once
+    // per session; subsequent messages flow through unmodified.
+    let effectiveText = text
+    if (!this._skillsPrepended) {
+      const skillsText = this._buildSystemPrompt()
+      if (skillsText) {
+        effectiveText = `${skillsText}\n\n---\n\n${text}`
+      }
+      this._skillsPrepended = true
+    }
+
+    const args = this._buildArgs(effectiveText)
     const proc = spawn(Klass.resolvedBinary, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
