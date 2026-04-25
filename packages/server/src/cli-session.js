@@ -67,6 +67,16 @@ export class CliSession extends BaseSession {
     return 'Claude Code (CLI)'
   }
 
+  /**
+   * Root data directory for this provider (#2965).
+   * Consumers (conversation-scanner, ws-file-ops) use this to locate
+   * provider-specific subdirs (projects/, agents/, commands/) without
+   * hardcoding the path.
+   */
+  static get dataDir() {
+    return join(homedir(), '.claude')
+  }
+
   static get capabilities() {
     return {
       permissions: true,

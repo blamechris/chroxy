@@ -71,7 +71,8 @@ function handleListSlashCommands(ws, client, msg, ctx) {
 function handleListAgents(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.listAgents(ws, entry?.cwd || null, sid)
+  const opts = ctx.userAgentsDirs ? { userAgentsDirs: ctx.userAgentsDirs } : {}
+  ctx.fileOps.listAgents(ws, entry?.cwd || null, sid, opts)
 }
 
 export const fileHandlers = {

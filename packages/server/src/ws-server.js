@@ -25,6 +25,7 @@ import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
+import { getProviderDataDirs } from './providers.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -465,6 +466,10 @@ export class WsServer {
       // etc. Late-bound so test harnesses that mutate this.config after
       // construction still see the updated value.
       get config() { return self.config },
+      // Multi-provider data dirs (#2965): computed fresh each access so new
+      // provider registrations are reflected without restarting the server.
+      get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
+      get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
     }
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)

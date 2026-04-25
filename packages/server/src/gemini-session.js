@@ -99,6 +99,16 @@ export class GeminiSession extends JsonlSubprocessSession {
     return 'Google Gemini'
   }
 
+  /**
+   * Root data directory for this provider (#2965).
+   * Consumers (conversation-scanner, ws-file-ops) use this to locate
+   * provider-specific subdirs (projects/, agents/, commands/) without
+   * hardcoding the path.
+   */
+  static get dataDir() {
+    return join(homedir(), '.gemini')
+  }
+
   static get messageIdPrefix() {
     return 'gemini'
   }

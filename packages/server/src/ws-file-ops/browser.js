@@ -419,8 +419,17 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     sendFn(ws, response)
   }
 
-  /** List custom agents from project and user agent directories */
-  async function listAgents(ws, cwd, sessionId) {
+  /**
+   * List custom agents from project and user agent directories.
+   *
+   * @param {*} ws - WebSocket client
+   * @param {string|null} cwd - Session working directory (scanned for .claude/agents)
+   * @param {string|null} sessionId - Session ID to include in the response
+   * @param {Object} [opts] - Options
+   * @param {string[]} [opts.userAgentsDirs] - Override the list of user-level agent directories
+   *   to scan (#2965). When omitted, defaults to [~/.claude/agents].
+   */
+  async function listAgents(ws, cwd, sessionId, opts = {}) {
     const agents = []
     const seen = new Set()
 
@@ -458,7 +467,16 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     if (cwd) {
       await scanDir(join(cwd, '.claude', 'agents'), 'project')
     }
-    await scanDir(join(homedir(), '.claude', 'agents'), 'user')
+
+    // Scan user-level agent directories — default ~/.claude/agents, or
+    // the caller-supplied list when multiple providers are active (#2965).
+    const userAgentsDirs = (Array.isArray(opts.userAgentsDirs) && opts.userAgentsDirs.length > 0)
+      ? opts.userAgentsDirs
+      : [join(homedir(), '.claude', 'agents')]
+
+    for (const dir of userAgentsDirs) {
+      await scanDir(dir, 'user')
+    }
 
     agents.sort((a, b) => a.name.localeCompare(b.name))
 

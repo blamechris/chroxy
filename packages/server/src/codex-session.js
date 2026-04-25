@@ -131,6 +131,16 @@ export class CodexSession extends JsonlSubprocessSession {
     return 'OpenAI Codex'
   }
 
+  /**
+   * Root data directory for this provider (#2965).
+   * Consumers (conversation-scanner, ws-file-ops) use this to locate
+   * provider-specific subdirs (projects/, agents/, commands/) without
+   * hardcoding the path.
+   */
+  static get dataDir() {
+    return join(homedir(), '.codex')
+  }
+
   static get messageIdPrefix() {
     return 'codex'
   }

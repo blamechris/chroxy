@@ -217,5 +217,28 @@ describe('file-handlers', () => {
       assert.equal(callCwd, '/proj')
       assert.equal(callSid, 's1')
     })
+
+    it('list_agents passes userAgentsDirs from ctx to listAgents opts (#2965)', () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/proj' })
+      const userAgentsDirs = ['/tmp/claude/agents', '/tmp/codex/agents']
+      const ctx = makeCtx(sessions, { userAgentsDirs })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      fileHandlers.list_agents(makeWs(), client, { sessionId: 's1' }, ctx)
+
+      const [, , , callOpts] = ctx.fileOps.listAgents.lastCall
+      assert.ok(callOpts, 'opts argument must be passed')
+      assert.deepEqual(callOpts.userAgentsDirs, userAgentsDirs)
+    })
+
+    it('list_agents passes empty opts when ctx has no userAgentsDirs', () => {
+      const ctx = makeCtx()
+      fileHandlers.list_agents(makeWs(), makeClient(), {}, ctx)
+
+      const [, , , callOpts] = ctx.fileOps.listAgents.lastCall
+      assert.ok(callOpts, 'opts argument must be passed')
+      assert.ok(!callOpts.userAgentsDirs, 'userAgentsDirs must not be set when ctx lacks it')
+    })
   })
 })

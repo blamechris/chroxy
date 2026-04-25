@@ -10,11 +10,13 @@ const MIN_FILE_SIZE = 100       // skip tiny/empty files
 const CONCURRENCY = 15          // max parallel file reads
 const CACHE_TTL_MS = 5000       // cache results for 5 seconds
 
-// Simple TTL cache keyed by projectsDir
+// Simple TTL cache keyed by sorted projectsDirs joined as a string
 let _cache = null
 let _cacheKey = null
 let _cacheTime = 0
+// In-flight scan promise — only reused when the requested cacheKey matches.
 let _pendingScan = null
+let _pendingScanKey = null
 
 /**
  * Clear the scan results cache. Useful for testing or forcing a fresh scan.
@@ -24,6 +26,7 @@ export function clearScanCache() {
   _cacheKey = null
   _cacheTime = 0
   _pendingScan = null
+  _pendingScanKey = null
 }
 
 /**
@@ -165,13 +168,16 @@ async function performScan(projectsDir) {
 }
 
 /**
- * Scan ~/.claude/projects/ for JSONL conversation files.
+ * Scan one or more provider projects directories for JSONL conversation files.
  * Returns metadata for each conversation, sorted by most recently modified.
  * Results are cached for 5 seconds to avoid redundant scans.
  *
  * @param {Object} [opts] - Options controlling the scan behavior.
- * @param {string} [opts.projectsDir] - Root directory to scan. Defaults to the Claude projects directory.
- * @param {number} [opts.maxResults] - Maximum number of conversations to return. If 0 or omitted, returns all conversations.
+ * @param {string} [opts.projectsDir] - Single directory to scan (legacy; use projectsDirs for multi-provider).
+ * @param {string[]} [opts.projectsDirs] - List of projects directories to scan and merge (#2965).
+ *   When both opts.projectsDir and opts.projectsDirs are provided, projectsDirs takes precedence.
+ *   Defaults to [PROJECTS_DIR] (~/.claude/projects) when neither is supplied.
+ * @param {number} [opts.maxResults] - Maximum number of conversations to return. If 0 or omitted, returns all.
  * @returns {Promise<Array<{
  *   conversationId: string,
  *   project: string|null,
@@ -184,32 +190,54 @@ async function performScan(projectsDir) {
  * }>>}
  */
 export async function scanConversations(opts = {}) {
-  const projectsDir = opts.projectsDir || PROJECTS_DIR
+  // Build the canonical list of directories to scan, deduplicated and ordered.
+  let dirs
+  if (Array.isArray(opts.projectsDirs) && opts.projectsDirs.length > 0) {
+    // Deduplicate while preserving order
+    dirs = [...new Set(opts.projectsDirs)]
+  } else {
+    dirs = [opts.projectsDir || PROJECTS_DIR]
+  }
   const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
+
+  // Cache key is the sorted+joined list of directories (sorted for stability)
+  const cacheKey = [...dirs].sort().join('\0')
 
   // Check cache
   const now = Date.now()
-  if (_cache && _cacheKey === projectsDir && (now - _cacheTime) < CACHE_TTL_MS) {
+  if (_cache && _cacheKey === cacheKey && (now - _cacheTime) < CACHE_TTL_MS) {
     return maxResults > 0 ? _cache.slice(0, maxResults) : [..._cache]
   }
 
-  // Deduplicate concurrent scans — subsequent callers wait for the first scan
-  if (_pendingScan) {
+  // Deduplicate concurrent scans for the same key — subsequent callers with the
+  // same directory set share the in-flight promise instead of spawning a second scan.
+  // Callers with a different key start their own scan immediately.
+  if (_pendingScan && _pendingScanKey === cacheKey) {
     const conversations = await _pendingScan
     return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
   }
 
-  _pendingScan = performScan(projectsDir)
+  // Scan all directories and merge results
+  _pendingScanKey = cacheKey
+  _pendingScan = (async () => {
+    const perDirResults = await Promise.all(dirs.map(d => performScan(d)))
+    // Flatten, sort merged results by most recently modified
+    const merged = perDirResults.flat()
+    merged.sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)
+    return merged
+  })()
+
   let conversations
   try {
     conversations = await _pendingScan
   } finally {
     _pendingScan = null
+    _pendingScanKey = null
   }
 
   // Update cache
   _cache = conversations
-  _cacheKey = projectsDir
+  _cacheKey = cacheKey
   _cacheTime = Date.now()
 
   return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]

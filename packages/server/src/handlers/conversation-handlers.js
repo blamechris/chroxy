@@ -16,7 +16,10 @@ async function handleListConversations(ws, client, msg, ctx) {
   // ctx.scanConversations override allows tests to inject a stub and skip real fs.
   const scan = ctx.scanConversations || defaultScanConversations
   try {
-    const all = await scan()
+    // Pass provider-driven projectsDirs when available (#2965); falls back to
+    // the scanner's default (~/.claude/projects) when not set.
+    const scanOpts = ctx.projectsDirs ? { projectsDirs: ctx.projectsDirs } : {}
+    const all = await scan(scanOpts)
     // Adversary A8: scope results so a bound pairing-issued client
     // cannot enumerate conversations outside its session cwd.
     const conversations = scopeConversationsToClient(all, client, ctx)
