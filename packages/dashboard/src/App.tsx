@@ -190,7 +190,7 @@ function ViewSwitcher({
         <button
           className={`view-tab${splitMode ? ' active' : ''}`}
           onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
-          type="button" title="Split view (Cmd+\)"
+          type="button" title={`Split view (${formatShortcutKeys('Cmd+\\')})`}
         >Split</button>
         <button className={`view-tab${viewMode === 'files' ? ' active' : ''}`} onClick={() => setViewMode('files')} type="button">Files</button>
         <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
@@ -1010,7 +1010,7 @@ export function App() {
             className="header-icon-btn"
             onClick={() => setSettingsOpen(true)}
             aria-label="Settings"
-            title="Settings (Cmd+,)"
+            title={`Settings (${formatShortcutKeys('Cmd+,')})`}
             type="button"
           >
             &#9881;
@@ -1238,7 +1238,7 @@ export function App() {
               disabled={!isConnected}
               isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
-              placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : 'Cmd+Enter'} to send)` : 'Connecting...'}
+              placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : formatShortcutKeys('Cmd+Enter')} to send)` : 'Connecting...'}
               controlledValue={inputDraftValue}
               onValueChange={handleDraftChange}
               filePickerFiles={filePickerFiles}
