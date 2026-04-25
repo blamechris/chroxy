@@ -301,6 +301,40 @@ describe('extended color tokens', () => {
 })
 
 // ---------------------------------------------------------------------------
+// components.css — prefers-reduced-motion coverage (#2941)
+// ---------------------------------------------------------------------------
+describe('components.css reduced-motion overrides', () => {
+  it('disables .tunnel-warming-banner transition under prefers-reduced-motion: reduce', () => {
+    const cssPath = resolve(__dirname, 'components.css')
+    const css = readFileSync(cssPath, 'utf-8')
+
+    // Locate the prefers-reduced-motion: reduce blocks
+    const reduceBlocks: string[] = []
+    const mediaRe = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{/g
+    let match: RegExpExecArray | null
+    while ((match = mediaRe.exec(css)) !== null) {
+      // Extract content between the opening brace and the matching closing brace
+      let depth = 1
+      let i = match.index + match[0].length
+      while (i < css.length && depth > 0) {
+        if (css[i] === '{') depth++
+        else if (css[i] === '}') depth--
+        i++
+      }
+      reduceBlocks.push(css.slice(match.index, i))
+    }
+
+    expect(reduceBlocks.length).toBeGreaterThan(0)
+
+    const bannerOverridePresent = reduceBlocks.some(
+      (block) =>
+        block.includes('.tunnel-warming-banner') && block.includes('transition: none'),
+    )
+    expect(bannerOverridePresent).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Global CSS — existence check
 // ---------------------------------------------------------------------------
 describe('global.css', () => {
