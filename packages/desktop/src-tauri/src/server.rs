@@ -870,6 +870,10 @@ impl ServerManager {
         }
         // Tunnel mode: "quick", "named", or "none"
         cmd.env("CHROXY_TUNNEL", &self.tunnel_mode);
+        // Mark this as a bundled .app launch so the doctor Dependencies check
+        // downgrades to `warn` instead of `fail` — end users can't run
+        // `npm install` to fix a broken bundle; they need to reinstall.
+        cmd.env("CHROXY_BUNDLED", "1");
         // No supervisor — tray app IS the supervisor
         cmd.arg("--no-supervisor");
 
