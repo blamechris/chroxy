@@ -84,6 +84,16 @@ export class PairingManager extends EventEmitter {
     this._generatePairing()
     this.emit('pairing_refreshed', { pairingId: this._current.id })
 
+    // Reset the auto-refresh timer so it counts from the newly-generated ID,
+    // not from when the consumed ID was created. Without this, the pending
+    // timer fires on the old schedule and emits a spurious second
+    // pairing_refreshed seconds later (#3020).
+    if (this._autoRefresh && this._refreshTimer) {
+      clearTimeout(this._refreshTimer)
+      this._refreshTimer = null
+      this._scheduleRefresh()
+    }
+
     return { valid: true, sessionToken }
   }
 
