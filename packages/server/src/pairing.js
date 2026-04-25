@@ -78,6 +78,12 @@ export class PairingManager extends EventEmitter {
     }
     this._sessionTokens.set(sessionToken, { createdAt: Date.now(), sessionId: sessionId || null })
 
+    // Auto-regenerate so the dashboard always shows a fresh QR (#2916).
+    // Emit after issuing the token so the sessionToken return value is
+    // ready before any pairing_refreshed listener queries currentPairingId.
+    this._generatePairing()
+    this.emit('pairing_refreshed', { pairingId: this._current.id })
+
     return { valid: true, sessionToken }
   }
 
