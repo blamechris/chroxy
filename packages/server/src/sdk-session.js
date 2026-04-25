@@ -1,4 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import { join } from 'path'
+import { homedir } from 'os'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, FALLBACK_MODELS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
@@ -49,6 +51,16 @@ export class SdkSession extends BaseSession {
    */
   static get displayLabel() {
     return 'Claude Code (SDK)'
+  }
+
+  /**
+   * Root data directory for this provider (#2965).
+   * Consumers (conversation-scanner, ws-file-ops) use this to locate
+   * provider-specific subdirs (projects/, agents/, commands/) without
+   * hardcoding the path.
+   */
+  static get dataDir() {
+    return join(homedir(), '.claude')
   }
 
   static get capabilities() {

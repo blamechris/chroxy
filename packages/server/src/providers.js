@@ -126,6 +126,31 @@ export function resolveProviderLabel(name) {
 }
 
 /**
+ * Collect the unique data directories for all registered (non-hidden) providers
+ * that expose a static `dataDir` getter (#2965).
+ *
+ * Consumers (conversation-scanner, ws-file-ops) call this instead of hardcoding
+ * ~/.claude so that every registered provider's data is included automatically.
+ * Docker aliases are excluded (they share the same dataDir as their base) and
+ * providers that do not define dataDir are skipped silently.
+ *
+ * @returns {string[]} Deduplicated list of absolute data directory paths.
+ */
+export function getProviderDataDirs() {
+  const seen = new Set()
+  const dirs = []
+  for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+    if (HIDDEN.has(name)) continue
+    const dir = ProviderClass.dataDir
+    if (typeof dir !== 'string' || dir.length === 0) continue
+    if (seen.has(dir)) continue
+    seen.add(dir)
+    dirs.push(dir)
+  }
+  return dirs
+}
+
+/**
  * List all registered providers with their capabilities.
  * Excludes aliases (e.g. 'docker') to prevent duplicate entries in UI.
  * @returns {Array<{ name: string, capabilities: object }>}
