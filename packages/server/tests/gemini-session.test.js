@@ -263,7 +263,23 @@ describe('GeminiSession', () => {
       }
     }
 
+    // Track every session created in this block so afterEach can guarantee
+    // the spawned shim subprocess is killed even if a `waitFor` throws —
+    // otherwise a `setInterval(...)` shim could outlive the test run and
+    // hang the whole suite.
+    const createdSessions = []
+    function makeSession(opts) {
+      const s = new BaseShimmedGemini(opts || { cwd: '/tmp' })
+      createdSessions.push(s)
+      return s
+    }
+
     afterEach(() => {
+      while (createdSessions.length) {
+        const s = createdSessions.pop()
+        try { s.interrupt() } catch { /* already gone */ }
+        try { s.destroy() } catch { /* already gone */ }
+      }
       cleanupBaseShim()
     })
 
@@ -274,7 +290,7 @@ describe('GeminiSession', () => {
         { type: 'result', usage: { input_tokens: 8, output_tokens: 3 } },
       ])
 
-      const session = new BaseShimmedGemini({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const seen = []
       session.on('stream_start', (d) => seen.push({ type: 'stream_start', ...d }))
@@ -310,7 +326,7 @@ describe('GeminiSession', () => {
         `setInterval(() => {}, 1000)`,
       ].join('\n'))
 
-      const session = new BaseShimmedGemini({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const deltas = []
       const errors = []
@@ -335,7 +351,7 @@ describe('GeminiSession', () => {
     it('subprocess crash: non-zero exit emits error with displayLabel + code', async () => {
       writeBaseShimJsonl([], { exitCode: 5, stderr: 'gemini: fatal error\n' })
 
-      const session = new BaseShimmedGemini({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const errors = []
       const results = []
@@ -356,7 +372,7 @@ describe('GeminiSession', () => {
         { type: 'assistant', content: [{ type: 'text', text: 'partial...' }] },
       ], { exitCode: 1, stderr: 'fatal: pipe closed' })
 
-      const session = new BaseShimmedGemini({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const events = []
       session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
@@ -389,7 +405,7 @@ describe('GeminiSession', () => {
         `}, 100)`,
       ].join('\n'))
 
-      const session = new BaseShimmedGemini({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const results = []
       const errors = []
@@ -433,7 +449,7 @@ describe('GeminiSession', () => {
         { type: 'result', usage: {} },
       ])
 
-      const session = new BaseShimmedGemini({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const toolStarts = []
       const toolResults = []

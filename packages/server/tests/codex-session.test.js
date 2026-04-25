@@ -800,7 +800,23 @@ describe('CodexSession', () => {
       }
     }
 
+    // Track every session created in this block so afterEach can guarantee
+    // the spawned shim subprocess is killed even if a `waitFor` throws —
+    // otherwise a `setInterval(...)` shim could outlive the test run and
+    // hang the whole suite.
+    const createdSessions = []
+    function makeSession(opts) {
+      const s = new BaseShimmedCodex(opts || { cwd: '/tmp' })
+      createdSessions.push(s)
+      return s
+    }
+
     afterEach(() => {
+      while (createdSessions.length) {
+        const s = createdSessions.pop()
+        try { s.interrupt() } catch { /* already gone */ }
+        try { s.destroy() } catch { /* already gone */ }
+      }
       cleanupBaseShim()
     })
 
@@ -810,7 +826,7 @@ describe('CodexSession', () => {
         { type: 'turn.completed', usage: { input_tokens: 11, output_tokens: 4 } },
       ])
 
-      const session = new BaseShimmedCodex({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const seen = []
       session.on('stream_start', (d) => seen.push({ type: 'stream_start', ...d }))
@@ -847,7 +863,7 @@ describe('CodexSession', () => {
         `setInterval(() => {}, 1000)`,
       ].join('\n'))
 
-      const session = new BaseShimmedCodex({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
 
       const deltas = []
@@ -875,7 +891,7 @@ describe('CodexSession', () => {
       // Crash before any JSONL — ensures we still hit the close path.
       writeBaseShimJsonl([], { exitCode: 13, stderr: 'ERROR: codex blew up\n' })
 
-      const session = new BaseShimmedCodex({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const errors = []
       const results = []
@@ -898,7 +914,7 @@ describe('CodexSession', () => {
         { type: 'item.completed', item: { type: 'agent_message', text: 'partial...' } },
       ], { exitCode: 1, stderr: 'ERROR: pipe broken' })
 
-      const session = new BaseShimmedCodex({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const events = []
       session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
@@ -917,9 +933,10 @@ describe('CodexSession', () => {
       assert.notEqual(endIdx, -1, 'stream_end emitted on close when stream was open')
       assert.notEqual(errIdx, -1, 'error emitted for non-zero exit')
       assert.ok(endIdx < errIdx, 'stream_end before error')
-      // Codex overrides _emitFallbackResult to NOT fire when no turn.completed
-      // was seen and no stream produced — but stream did produce here, so the
-      // base default path runs and one result is emitted.
+      // No turn.completed arrived, but the stream did produce output before
+      // the subprocess crashed — Codex inherits the base _emitFallbackResult
+      // default, which fires exactly one result event so clients can transition
+      // back to idle.
     })
 
     it('multi-message sequencing: rejects second sendMessage while first is busy', async () => {
@@ -934,7 +951,7 @@ describe('CodexSession', () => {
         `}, 100)`,
       ].join('\n'))
 
-      const session = new BaseShimmedCodex({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const results = []
       const errors = []
@@ -980,7 +997,7 @@ describe('CodexSession', () => {
         { type: 'turn.completed', usage: {} },
       ])
 
-      const session = new BaseShimmedCodex({ cwd: '/tmp' })
+      const session = makeSession()
       session._processReady = true
       const toolStarts = []
       const toolResults = []
