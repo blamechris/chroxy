@@ -96,7 +96,7 @@ function buildHandler(session) {
     pendingPermissions: new Map(),
     permissionSessionMap: new Map(),
     getSessionManager: () => null,
-    findSessionByHookSecret: (secret) => (secret === session._hookSecret ? session : null),
+    findSessionByHookSecret: (secret) => (secret === session._hookSecret ? { session, sessionId: 'test-session' } : null),
   }
   const handler = createPermissionHandler(opts)
   return { handler, opts }

@@ -132,13 +132,24 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // #2831: find the CliSession this hook permission belongs to (via
       // the per-session hook secret from the Authorization header) so we
       // can pause its inactivity timer while the user decides.
+      // #2832: also use the chroxy-managed sessionId to populate
+      // permissionSessionMap so paired clients (boundSessionId set) can
+      // approve hook-originated permissions for their bound session.
+      // Without this entry, the binding check in permission_response
+      // rejects every approval with SESSION_TOKEN_MISMATCH.
       const authHeader = (req.headers && req.headers['authorization']) || ''
       const hookToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-      const ownerSession = (hookToken && typeof findSessionByHookSecret === 'function')
+      const ownerLookup = (hookToken && typeof findSessionByHookSecret === 'function')
         ? findSessionByHookSecret(hookToken)
         : null
+      const ownerSession = ownerLookup?.session ?? null
+      const ownerSessionId = ownerLookup?.sessionId ?? null
       if (ownerSession && typeof ownerSession.notifyPermissionPending === 'function') {
         ownerSession.notifyPermissionPending(requestId)
+      }
+      if (ownerSessionId) {
+        permissionSessionMap.set(requestId, ownerSessionId)
+        log.debug(`[session-binding-create] permission ${requestId} mapped to ${ownerSessionId} (HTTP, via hookSecret)`)
       }
 
       broadcastFn({

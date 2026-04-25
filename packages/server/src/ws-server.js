@@ -745,9 +745,16 @@ export class WsServer {
   }
 
   /**
-   * Find the CliSession whose hookSecret matches `secret`. Returns null
-   * if no match. Used by the permission handler to pause a session's
-   * inactivity timer while a hook permission is outstanding (#2831).
+   * Find the CliSession whose hookSecret matches `secret`. Returns
+   * `{ session, sessionId }` (sessionId is the chroxy-managed key, not
+   * the upstream Claude conversation id) or `null` if no match.
+   *
+   * The sessionId is needed by the permission handler so it can populate
+   * `permissionSessionMap[requestId]` for legacy hook-based permissions
+   * (#2832). Without that mapping, a paired client whose token is bound
+   * to the same session can never approve hook permissions — the
+   * binding check at `permission_response` time finds no entry and
+   * rejects with SESSION_TOKEN_MISMATCH.
    */
   _findSessionByHookSecret(secret) {
     if (!secret) return null
@@ -755,12 +762,14 @@ export class WsServer {
     for (const [sessionId, storedSecret] of this._sessionHookSecrets) {
       if (storedSecret === secret) {
         const entry = this.sessionManager?.getSession(sessionId)
-        return entry?.session || null
+        if (entry?.session) return { session: entry.session, sessionId }
+        return null
       }
     }
-    // Legacy single-session mode
+    // Legacy single-session mode — no chroxy sessionId surface, so
+    // callers can still notify the session but must skip mapping.
     if (this.cliSession && this.cliSession._hookSecret === secret) {
-      return this.cliSession
+      return { session: this.cliSession, sessionId: null }
     }
     return null
   }
