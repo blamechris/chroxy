@@ -44,6 +44,16 @@ const STANDARD_ALLOWLIST = [
   'DISPLAY',
   'SSH_AUTH_SOCK',
   'NODE_EXTRA_CA_CERTS',
+  // HTTP proxy vars — needed for corporate/enterprise environments where
+  // outbound traffic is routed through a forward proxy. Not secret-bearing.
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'all_proxy',
 ]
 
 const PROVIDERS = {

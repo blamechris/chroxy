@@ -203,4 +203,50 @@ describe('buildSpawnEnv', () => {
       )
     })
   })
+
+  describe('proxy environment variables (corporate/enterprise forwarding)', () => {
+    const proxyVars = [
+      'HTTP_PROXY',
+      'HTTPS_PROXY',
+      'NO_PROXY',
+      'http_proxy',
+      'https_proxy',
+      'no_proxy',
+      'ALL_PROXY',
+      'all_proxy',
+    ]
+
+    for (const proxyVar of proxyVars) {
+      it(`forwards ${proxyVar} to codex child env`, () => {
+        withEnv({ [proxyVar]: 'http://proxy.corp:8080', OPENAI_API_KEY: 'sk' }, () => {
+          const env = buildSpawnEnv('codex')
+          assert.equal(env[proxyVar], 'http://proxy.corp:8080',
+            `${proxyVar} must be forwarded so codex can reach provider APIs through a corporate proxy`)
+        })
+      })
+
+      it(`forwards ${proxyVar} to gemini child env`, () => {
+        withEnv({ [proxyVar]: 'http://proxy.corp:8080', GEMINI_API_KEY: 'g' }, () => {
+          const env = buildSpawnEnv('gemini')
+          assert.equal(env[proxyVar], 'http://proxy.corp:8080',
+            `${proxyVar} must be forwarded so gemini can reach provider APIs through a corporate proxy`)
+        })
+      })
+    }
+
+    it('does NOT forward arbitrary *_PROXY vars outside the allowlist', () => {
+      withEnv({
+        OPENAI_API_KEY: 'sk',
+        MY_PROXY: 'http://attacker:8080',
+        INTERNAL_PROXY: 'http://internal',
+        CUSTOM_HTTPS_PROXY: 'http://notallowed',
+      }, () => {
+        const env = buildSpawnEnv('codex')
+        assert.equal(env.MY_PROXY, undefined,
+          'arbitrary *_PROXY vars must not leak through the allowlist')
+        assert.equal(env.INTERNAL_PROXY, undefined)
+        assert.equal(env.CUSTOM_HTTPS_PROXY, undefined)
+      })
+    })
+  })
 })
