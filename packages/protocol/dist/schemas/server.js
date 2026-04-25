@@ -235,10 +235,48 @@ export const ServerWebTaskUpdatedSchema = z.object({
     type: z.literal('web_task_updated'),
     task: WebTaskSchema,
 });
+/**
+ * Emitted when a web (cloud) task command fails. Two failure shapes share this
+ * envelope:
+ *
+ * 1. **Generic task failure** — only `taskId` and `message` are populated
+ *    (e.g. missing prompt, validation error, downstream task error).
+ * 2. **`SESSION_TOKEN_MISMATCH` rejection** — emitted when a client bound to
+ *    one session attempts a `web_task_*` command against a different session.
+ *    In this case the payload also carries the canonical four-field contract
+ *    documented in `docs/error-taxonomy.md`: `code`, `message`, `boundSessionId`,
+ *    `boundSessionName`. The same four fields appear on every envelope that
+ *    can carry SESSION_TOKEN_MISMATCH (`session_error`, `error`, this schema,
+ *    and the HTTP 403 body) and originate from
+ *    `buildSessionTokenMismatchPayload()` in `packages/server/src/handler-utils.js`.
+ */
 export const ServerWebTaskErrorSchema = z.object({
     type: z.literal('web_task_error'),
     taskId: z.string().nullable().optional(),
     message: z.string(),
+    /**
+     * Machine-readable error code. Currently only `'SESSION_TOKEN_MISMATCH'` is
+     * emitted on this envelope; absent for generic task failures. Clients
+     * branch on this field to drive bound-session recovery flows. See
+     * `docs/error-taxonomy.md` § SESSION_TOKEN_MISMATCH.
+     */
+    code: z.string().optional(),
+    /**
+     * The session ID the client's auth token is bound to. Populated on
+     * `SESSION_TOKEN_MISMATCH` rejections so the client can surface which
+     * session the device is paired to. `null` when the caller has no binding
+     * (HTTP fallback path); a stale or unresolvable session ID is preserved
+     * as-is. Sourced from `buildSessionTokenMismatchPayload()`.
+     */
+    boundSessionId: z.string().nullable().optional(),
+    /**
+     * Display name of the bound session, looked up at emit time via
+     * `sessionManager.getSession()`. `null` when `boundSessionId` is null or
+     * the session can no longer be resolved. Used by clients to render
+     * actionable messages like "Device paired to _My Project_". Sourced from
+     * `buildSessionTokenMismatchPayload()`.
+     */
+    boundSessionName: z.string().nullable().optional(),
 });
 export const ServerWebTaskListSchema = z.object({
     type: z.literal('web_task_list'),

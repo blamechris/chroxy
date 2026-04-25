@@ -262,10 +262,28 @@ export declare const ServerWebTaskUpdatedSchema: z.ZodObject<{
         cwd: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>;
 }, z.core.$strip>;
+/**
+ * Emitted when a web (cloud) task command fails. Two failure shapes share this
+ * envelope:
+ *
+ * 1. **Generic task failure** — only `taskId` and `message` are populated
+ *    (e.g. missing prompt, validation error, downstream task error).
+ * 2. **`SESSION_TOKEN_MISMATCH` rejection** — emitted when a client bound to
+ *    one session attempts a `web_task_*` command against a different session.
+ *    In this case the payload also carries the canonical four-field contract
+ *    documented in `docs/error-taxonomy.md`: `code`, `message`, `boundSessionId`,
+ *    `boundSessionName`. The same four fields appear on every envelope that
+ *    can carry SESSION_TOKEN_MISMATCH (`session_error`, `error`, this schema,
+ *    and the HTTP 403 body) and originate from
+ *    `buildSessionTokenMismatchPayload()` in `packages/server/src/handler-utils.js`.
+ */
 export declare const ServerWebTaskErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"web_task_error">;
     taskId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     message: z.ZodString;
+    code: z.ZodOptional<z.ZodString>;
+    boundSessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    boundSessionName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
 export declare const ServerWebTaskListSchema: z.ZodObject<{
     type: z.ZodLiteral<"web_task_list">;
