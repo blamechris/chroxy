@@ -15,12 +15,62 @@ const log = createLogger('ws')
  *  When the cap is reached the oldest entry is evicted before inserting. */
 export const MAX_AUTH_FAILURE_ENTRIES = 10_000
 
+/** Lenient counter for benign pairing failures (already_used / expired).
+ *
+ *  These reasons are exempt from the strict brute-force `authFailures` bucket
+ *  (#2917): legitimate users rescanning a consumed QR code must not be locked
+ *  out. However a malicious client holding a known consumed pairing ID could
+ *  still hammer the server during the 60s consumed-ID TTL window.
+ *
+ *  This separate bucket caps that abuse without ever firing on a legitimate
+ *  rescan loop. The threshold (50 attempts in a 60s rolling window) is many
+ *  orders of magnitude above what a human bouncing the scanner could produce
+ *  (a real user typically rescans 2-6 times). When breached we impose a short
+ *  30s temp block and respond with `pair_fail reason: rate_limited`.
+ *
+ *  Critically, this counter is NEVER merged with the strict `authFailures`
+ *  bucket — they have different thresholds and a benign breach must not
+ *  disable real auth rate limiting for the same IP. */
+export const BENIGN_PAIR_THRESHOLD = 50
+export const BENIGN_PAIR_WINDOW_MS = 60_000
+export const BENIGN_PAIR_BLOCK_MS = 30_000
+
 /** Evict the oldest entry from a Map if it has reached the size cap. */
 function evictOldestIfFull(map) {
   if (map.size >= MAX_AUTH_FAILURE_ENTRIES) {
     const oldestKey = map.keys().next().value
     map.delete(oldestKey)
   }
+}
+
+/**
+ * Record a benign pairing attempt against the lenient bucket and return
+ * whether the caller should now block the client.
+ *
+ * Each entry is `{ count, windowStart, blockedUntil }`. The window is rolling
+ * — when the current attempt arrives more than `BENIGN_PAIR_WINDOW_MS` after
+ * `windowStart`, the count resets and the window slides forward. If the count
+ * within the live window crosses `BENIGN_PAIR_THRESHOLD`, we set
+ * `blockedUntil = now + BENIGN_PAIR_BLOCK_MS` and return true.
+ *
+ * @param {Map} map - benignPairAttempts map
+ * @param {string} key - rateLimitKey (CF-Connecting-IP or socketIp)
+ * @param {number} now - Date.now()
+ * @returns {boolean} true if the caller should now respond with rate_limited
+ */
+export function recordBenignPairAttempt(map, key, now) {
+  let entry = map.get(key)
+  if (!entry || now - entry.windowStart > BENIGN_PAIR_WINDOW_MS) {
+    if (!map.has(key)) evictOldestIfFull(map)
+    entry = { count: 0, windowStart: now, blockedUntil: 0 }
+    map.set(key, entry)
+  }
+  entry.count++
+  if (entry.count > BENIGN_PAIR_THRESHOLD && entry.blockedUntil <= now) {
+    entry.blockedUntil = now + BENIGN_PAIR_BLOCK_MS
+    return true
+  }
+  return false
 }
 
 /**
@@ -145,7 +195,7 @@ export function handleAuthMessage(ctx, ws, msg) {
 export function handlePairMessage(ctx, ws, msg) {
   const {
     clients, pairingManager, send, onAuthSuccess,
-    authFailures, minProtocolVersion, serverProtocolVersion,
+    authFailures, benignPairAttempts, minProtocolVersion, serverProtocolVersion,
     activeSessionId,
   } = ctx
   const client = clients.get(ws)
@@ -183,6 +233,17 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
+  // Lenient rate limiter for benign already_used/expired hammering (#3019).
+  // Independent from the strict authFailures bucket so its breach never
+  // disables genuine brute-force protection for the same IP.
+  const benignEntry = benignPairAttempts && benignPairAttempts.get(rateLimitKey)
+  if (benignEntry && benignEntry.blockedUntil > Date.now()) {
+    log.warn(`Pair lenient-rate-limited for ${rateLimitKey} (${benignEntry.count} benign attempts)`)
+    send(ws, { type: 'pair_fail', reason: 'rate_limited' })
+    ws.close()
+    return true
+  }
+
   // Pass the current active session ID so the issued token is bound to that session.
   const result = pairingManager.validatePairing(msg.pairingId, activeSessionId || null)
   if (result.valid) {
@@ -200,6 +261,7 @@ export function handlePairMessage(ctx, ws, msg) {
     client.authTime = Date.now()
     client.pairedWith = msg.pairingId
     authFailures.delete(rateLimitKey)
+    if (benignPairAttempts) benignPairAttempts.delete(rateLimitKey)
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)
@@ -245,9 +307,24 @@ export function handlePairMessage(ctx, ws, msg) {
     existing.blockedUntil = now + backoff
     authFailures.set(rateLimitKey, existing)
     log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (attempt ${existing.count})`)
-  } else {
-    log.info(`Pair failure from ${rateLimitKey}: ${result.reason} (benign — not counted toward rate limit)`)
+    send(ws, { type: 'pair_fail', reason: result.reason })
+    ws.close()
+    return true
   }
+
+  // Benign failure (already_used / expired). Tally on the lenient bucket so a
+  // single IP cannot hammer the server during the consumed-ID TTL window.
+  // recordBenignPairAttempt returns true the moment the threshold is breached.
+  if (benignPairAttempts) {
+    const blockedNow = recordBenignPairAttempt(benignPairAttempts, rateLimitKey, Date.now())
+    if (blockedNow) {
+      log.warn(`Pair lenient-rate-limit triggered for ${rateLimitKey} after benign hammering`)
+      send(ws, { type: 'pair_fail', reason: 'rate_limited' })
+      ws.close()
+      return true
+    }
+  }
+  log.info(`Pair failure from ${rateLimitKey}: ${result.reason} (benign — not counted toward strict rate limit)`)
   send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
   return true

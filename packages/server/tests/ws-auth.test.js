@@ -7,7 +7,15 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSpy } from './test-helpers.js'
-import { handleAuthMessage, handlePairMessage, handleKeyExchange } from '../src/ws-auth.js'
+import {
+  handleAuthMessage,
+  handlePairMessage,
+  handleKeyExchange,
+  recordBenignPairAttempt,
+  BENIGN_PAIR_THRESHOLD,
+  BENIGN_PAIR_WINDOW_MS,
+  BENIGN_PAIR_BLOCK_MS,
+} from '../src/ws-auth.js'
 import { clientHasCapability } from '../src/handler-utils.js'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
@@ -113,6 +121,7 @@ function makePairCtx({
   ws = makeMockWs(),
   onAuthSuccess = createSpy(),
   authFailures = new Map(),
+  benignPairAttempts = new Map(),
   activeSessionId = null,
 } = {}) {
   const clients = new Map([[ws, client]])
@@ -122,6 +131,7 @@ function makePairCtx({
       clients,
       pairingManager,
       authFailures,
+      benignPairAttempts,
       send,
       onAuthSuccess,
       minProtocolVersion,
@@ -980,6 +990,278 @@ describe('handlePairMessage', () => {
 
       assert.equal(authFailures.has('10.0.0.1'), false,
         'IP that only sent already_used must have no rate-limit entry')
+    })
+  })
+
+  // --- #3019: lenient rate limiter for benign already_used / expired floods ---
+
+  describe('lenient pair rate limiter (#3019)', () => {
+    /**
+     * Run N benign pair attempts from the same IP through handlePairMessage,
+     * sharing one ctx so the lenient bucket persists across attempts.
+     */
+    function hammer({ ip, reason, attempts, authFailures, benignPairAttempts }) {
+      const sentReasons = []
+      for (let i = 0; i < attempts; i++) {
+        const w = makeMockWs()
+        const c = makeMockClient({ ip })
+        const pm = { validatePairing: createSpy(() => ({ valid: false, reason })) }
+        const ctx = {
+          clients: new Map([[w, c]]),
+          pairingManager: pm,
+          authFailures,
+          benignPairAttempts,
+          send: (s, m) => s.send(JSON.stringify(m)),
+          onAuthSuccess: createSpy(),
+          minProtocolVersion: 1,
+          serverProtocolVersion: 3,
+          activeSessionId: null,
+        }
+        handlePairMessage(ctx, w, { type: 'pair', pairingId: 'consumed-id' })
+        sentReasons.push(w.lastSent()?.reason ?? null)
+      }
+      return sentReasons
+    }
+
+    it('typical legitimate rescan loop (6 attempts) is never rate-limited', () => {
+      // Real-world signal from #2917: a confused user might rescan ~5-6 times.
+      // The lenient threshold must be many orders of magnitude above this.
+      const benignPairAttempts = new Map()
+      const reasons = hammer({
+        ip: '1.2.3.4',
+        reason: 'already_used',
+        attempts: 6,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      assert.deepEqual(reasons, Array(6).fill('already_used'),
+        'all 6 attempts must surface the original already_used reason — never rate_limited')
+      const entry = benignPairAttempts.get('1.2.3.4')
+      assert.ok(entry, 'lenient bucket must record attempts')
+      assert.equal(entry.count, 6)
+      assert.equal(entry.blockedUntil, 0, 'far below threshold — must not block')
+    })
+
+    it('threshold not exceeded → no block, threshold exceeded → temp block', () => {
+      // Fire THRESHOLD attempts: all must pass with the original reason.
+      // Then the (THRESHOLD+1)-th must flip to rate_limited and start a block.
+      const benignPairAttempts = new Map()
+      const beforeBreach = hammer({
+        ip: '9.9.9.1',
+        reason: 'already_used',
+        attempts: BENIGN_PAIR_THRESHOLD,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      assert.equal(beforeBreach.filter(r => r === 'rate_limited').length, 0,
+        `first ${BENIGN_PAIR_THRESHOLD} attempts must NOT trigger rate_limited`)
+
+      const breachReasons = hammer({
+        ip: '9.9.9.1',
+        reason: 'already_used',
+        attempts: 1,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      assert.equal(breachReasons[0], 'rate_limited',
+        'attempt past threshold must respond with rate_limited')
+
+      const entry = benignPairAttempts.get('9.9.9.1')
+      assert.ok(entry.blockedUntil > Date.now(),
+        'breach must set a temporary block window')
+      assert.ok(entry.blockedUntil <= Date.now() + BENIGN_PAIR_BLOCK_MS + 50,
+        'block window must not exceed BENIGN_PAIR_BLOCK_MS')
+    })
+
+    it('subsequent attempts during the block window are rejected with rate_limited', () => {
+      const benignPairAttempts = new Map()
+      // Push past threshold to arm the block.
+      hammer({
+        ip: '9.9.9.2',
+        reason: 'already_used',
+        attempts: BENIGN_PAIR_THRESHOLD + 1,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+
+      // Now attempts during the block window — even with a valid pairing ID
+      // — must be rejected. The rate-limit gate runs before validatePairing.
+      const w = makeMockWs()
+      const c = makeMockClient({ ip: '9.9.9.2' })
+      const validateSpy = createSpy(() => ({ valid: true, sessionToken: 'tok' }))
+      const ctx = {
+        clients: new Map([[w, c]]),
+        pairingManager: { validatePairing: validateSpy },
+        authFailures: new Map(),
+        benignPairAttempts,
+        send: (s, m) => s.send(JSON.stringify(m)),
+        onAuthSuccess: createSpy(),
+        minProtocolVersion: 1,
+        serverProtocolVersion: 3,
+        activeSessionId: null,
+      }
+      handlePairMessage(ctx, w, { type: 'pair', pairingId: 'fresh-id' })
+      assert.equal(w.lastSent().type, 'pair_fail')
+      assert.equal(w.lastSent().reason, 'rate_limited')
+      assert.equal(validateSpy.callCount, 0,
+        'validatePairing must not run while the lenient block is active')
+      assert.equal(c.authenticated, false)
+    })
+
+    it('block expires correctly — attempts after blockedUntil are processed again', () => {
+      const benignPairAttempts = new Map()
+      // Manually arm a block in the past so we don't have to sleep.
+      benignPairAttempts.set('9.9.9.3', {
+        count: BENIGN_PAIR_THRESHOLD + 5,
+        windowStart: Date.now() - (BENIGN_PAIR_WINDOW_MS + 1000),
+        blockedUntil: Date.now() - 1000,
+      })
+
+      const w = makeMockWs()
+      const c = makeMockClient({ ip: '9.9.9.3' })
+      const pm = { validatePairing: createSpy(() => ({ valid: false, reason: 'already_used' })) }
+      const ctx = {
+        clients: new Map([[w, c]]),
+        pairingManager: pm,
+        authFailures: new Map(),
+        benignPairAttempts,
+        send: (s, m) => s.send(JSON.stringify(m)),
+        onAuthSuccess: createSpy(),
+        minProtocolVersion: 1,
+        serverProtocolVersion: 3,
+        activeSessionId: null,
+      }
+      handlePairMessage(ctx, w, { type: 'pair', pairingId: 'old-id' })
+      // Block window is over and the rolling window has expired — attempt is
+      // processed normally and the entry resets to count=1.
+      assert.equal(w.lastSent().reason, 'already_used',
+        'after block expiry the original reason must surface again')
+      assert.equal(benignPairAttempts.get('9.9.9.3').count, 1,
+        'expired window must reset the counter')
+    })
+
+    it('lenient bucket is independent — does not contaminate the strict authFailures bucket', () => {
+      // The whole point of #3019: a benign breach must NOT touch authFailures.
+      // Otherwise we re-introduce the #2917 lockout on legitimate retries.
+      const authFailures = new Map()
+      const benignPairAttempts = new Map()
+      hammer({
+        ip: '7.7.7.7',
+        reason: 'already_used',
+        attempts: BENIGN_PAIR_THRESHOLD + 5,
+        authFailures,
+        benignPairAttempts,
+      })
+      assert.equal(authFailures.has('7.7.7.7'), false,
+        'strict authFailures bucket must remain untouched by benign hammering')
+      assert.ok(benignPairAttempts.has('7.7.7.7'),
+        'lenient bucket must hold the entry')
+    })
+
+    it('expired reason also feeds the same lenient bucket', () => {
+      const benignPairAttempts = new Map()
+      const reasons = hammer({
+        ip: '8.8.8.8',
+        reason: 'expired',
+        attempts: BENIGN_PAIR_THRESHOLD + 1,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      // First THRESHOLD attempts respond with 'expired'; attempt past threshold
+      // flips to 'rate_limited'.
+      assert.equal(reasons[0], 'expired')
+      assert.equal(reasons[BENIGN_PAIR_THRESHOLD - 1], 'expired')
+      assert.equal(reasons[BENIGN_PAIR_THRESHOLD], 'rate_limited')
+    })
+
+    it('successful pair clears the lenient bucket for that IP', () => {
+      const benignPairAttempts = new Map()
+      // Arm a partial lenient counter (well below threshold).
+      hammer({
+        ip: '6.6.6.6',
+        reason: 'already_used',
+        attempts: 10,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      assert.equal(benignPairAttempts.get('6.6.6.6').count, 10)
+
+      // Successful pair on the same IP wipes the lenient entry.
+      const w = makeMockWs()
+      const c = makeMockClient({ ip: '6.6.6.6' })
+      const pm = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })) }
+      const ctx = {
+        clients: new Map([[w, c]]),
+        pairingManager: pm,
+        authFailures: new Map(),
+        benignPairAttempts,
+        send: (s, m) => s.send(JSON.stringify(m)),
+        onAuthSuccess: createSpy(),
+        minProtocolVersion: 1,
+        serverProtocolVersion: 3,
+        activeSessionId: null,
+      }
+      handlePairMessage(ctx, w, { type: 'pair', pairingId: 'fresh-id' })
+      assert.equal(c.authenticated, true)
+      assert.equal(benignPairAttempts.has('6.6.6.6'), false,
+        'successful pair must clear the lenient bucket entry')
+    })
+
+    it('separate IPs have separate lenient buckets', () => {
+      const benignPairAttempts = new Map()
+      hammer({
+        ip: '4.4.4.1',
+        reason: 'already_used',
+        attempts: BENIGN_PAIR_THRESHOLD,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      const reasons = hammer({
+        ip: '4.4.4.2',
+        reason: 'already_used',
+        attempts: 5,
+        authFailures: new Map(),
+        benignPairAttempts,
+      })
+      assert.equal(reasons.filter(r => r === 'rate_limited').length, 0,
+        'a different IP must not inherit the first IPs lenient counter')
+    })
+  })
+
+  describe('recordBenignPairAttempt', () => {
+    it('returns false until the threshold is crossed, then true', () => {
+      const map = new Map()
+      const now = 1_000_000
+      for (let i = 0; i < BENIGN_PAIR_THRESHOLD; i++) {
+        assert.equal(recordBenignPairAttempt(map, 'ip', now + i), false)
+      }
+      // Threshold + 1 — the attempt past threshold must flip to true.
+      assert.equal(recordBenignPairAttempt(map, 'ip', now + BENIGN_PAIR_THRESHOLD), true)
+    })
+
+    it('rolling window: an attempt past the window resets the counter', () => {
+      const map = new Map()
+      const t0 = 2_000_000
+      recordBenignPairAttempt(map, 'ip', t0)
+      // Far past the window.
+      recordBenignPairAttempt(map, 'ip', t0 + BENIGN_PAIR_WINDOW_MS + 1)
+      const entry = map.get('ip')
+      assert.equal(entry.count, 1, 'counter must reset when an attempt arrives past the window')
+      assert.equal(entry.windowStart, t0 + BENIGN_PAIR_WINDOW_MS + 1)
+    })
+
+    it('once blocked, returns false on subsequent calls (block is one-shot)', () => {
+      // The block flag is consulted on the rate-limit gate inside
+      // handlePairMessage. recordBenignPairAttempt itself only fires "true"
+      // the first time the threshold is crossed; subsequent calls within the
+      // block window return false (caller sees the block via blockedUntil).
+      const map = new Map()
+      const now = 3_000_000
+      for (let i = 0; i <= BENIGN_PAIR_THRESHOLD; i++) {
+        recordBenignPairAttempt(map, 'ip', now + i)
+      }
+      // Already blocked; calling again must not re-fire.
+      assert.equal(recordBenignPairAttempt(map, 'ip', now + BENIGN_PAIR_THRESHOLD + 1), false)
     })
   })
 

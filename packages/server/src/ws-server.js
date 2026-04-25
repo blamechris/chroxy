@@ -498,6 +498,7 @@ export class WsServer {
       get authRequired() { return self.authRequired },
       isTokenValid: (token) => self._isTokenValid(token),
       get authFailures() { return self._authFailures },
+      get benignPairAttempts() { return self._benignPairAttempts },
       get pairingManager() { return self._pairingManager },
       get activeSessionId() {
         // Provide the server's default/first session ID so pairing can bind
@@ -529,6 +530,11 @@ export class WsServer {
 
     // Auth rate limiting: track failed attempts per IP
     this._authFailures = new Map() // ip -> { count, firstFailure, blockedUntil }
+    // Lenient pairing rate limiter (#3019) — caps already_used/expired hammering
+    // without locking out users who legitimately rescan a stale QR a few times.
+    // Strictly separate from _authFailures: a benign breach must NOT disable
+    // genuine brute-force protection for the same IP.
+    this._benignPairAttempts = new Map() // ip -> { count, windowStart, blockedUntil }
     this._authCleanupInterval = null
 
     // Multi-session support: prefer sessionManager, fall back to single cliSession
@@ -1050,10 +1056,20 @@ export class WsServer {
 
     // Prune stale auth failure entries every 60s
     this._authCleanupInterval = setInterval(() => {
-      const cutoff = Date.now() - 5 * 60 * 1000
+      const now = Date.now()
+      const cutoff = now - 5 * 60 * 1000
       for (const [ip, entry] of this._authFailures) {
         if (entry.firstFailure < cutoff) {
           this._authFailures.delete(ip)
+        }
+      }
+      // Lenient bucket entries are short-lived (60s window + 30s block); drop
+      // any whose window is fully expired and that aren't currently blocked.
+      for (const [ip, entry] of this._benignPairAttempts) {
+        const windowExpired = now - entry.windowStart > 60_000
+        const notBlocked = entry.blockedUntil <= now
+        if (windowExpired && notBlocked) {
+          this._benignPairAttempts.delete(ip)
         }
       }
     }, 60_000)
