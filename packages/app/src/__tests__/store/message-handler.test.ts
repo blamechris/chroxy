@@ -2480,3 +2480,121 @@ describe('error handler', () => {
     expect(Alert.alert).toHaveBeenCalledWith('Server Error', 'An unexpected server error occurred');
   });
 });
+
+// Issue #2944: web_task_error with SESSION_TOKEN_MISMATCH + boundSessionName should
+// surface the same "Device paired to one session" Alert UX as session_error.
+describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
+  it('shows enriched Alert with boundSessionName and a Disconnect button', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      webTasks: [],
+    } as any);
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'web_task_error',
+      taskId: 'task-1',
+      code: 'SESSION_TOKEN_MISMATCH',
+      message: 'Not authorized: client is bound to a specific session',
+      boundSessionId: 'sess-xyz',
+      boundSessionName: 'AlphaSession',
+    });
+
+    expect(alertSpy).toHaveBeenCalled();
+    const [title, body, buttons] = alertSpy.mock.calls[0];
+    expect(String(body)).toContain('AlphaSession');
+    expect(String(title).toLowerCase()).not.toBe('session error');
+    expect(Array.isArray(buttons)).toBe(true);
+    expect((buttons as { text: string }[]).some((b) => /disconnect/i.test(b.text))).toBe(true);
+  });
+
+  it('Disconnect button calls disconnect() and clearSavedConnection()', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const disconnect = jest.fn();
+    const clearSavedConnection = jest.fn(() => Promise.resolve());
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      webTasks: [],
+      disconnect,
+      clearSavedConnection,
+    } as any);
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'web_task_error',
+      taskId: 'task-2',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionId: 'sess-xyz',
+      boundSessionName: 'AlphaSession',
+    });
+
+    const [, , buttons] = alertSpy.mock.calls[0];
+    const disconnectBtn = (buttons as { text: string; onPress?: () => void }[]).find(
+      (b) => /disconnect/i.test(b.text),
+    );
+    expect(disconnectBtn).toBeDefined();
+    disconnectBtn!.onPress!();
+    expect(disconnect).toHaveBeenCalled();
+    expect(clearSavedConnection).toHaveBeenCalled();
+  });
+
+  it('falls back to system-message in chat when boundSessionName is absent', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      webTasks: [],
+    } as any);
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'web_task_error',
+      taskId: 'task-3',
+      code: 'SESSION_TOKEN_MISMATCH',
+      message: 'Not authorized: client is bound to a specific session',
+      // no boundSessionName — old server
+    });
+
+    // No Alert for the mismatch — falls through to the chat system message
+    expect(alertSpy).not.toHaveBeenCalled();
+    const state = store.getState();
+    const messages = state.sessionStates['s1']?.messages ?? [];
+    expect(messages.some((m) => m.type === 'system')).toBe(true);
+  });
+
+  it('falls back to system-message for non-mismatch errors', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      webTasks: [],
+    } as any);
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'web_task_error',
+      taskId: 'task-4',
+      message: 'Task timed out',
+    });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+    const state = store.getState();
+    const messages = state.sessionStates['s1']?.messages ?? [];
+    expect(messages.some((m) => m.type === 'system')).toBe(true);
+  });
+});
