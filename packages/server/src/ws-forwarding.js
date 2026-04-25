@@ -1,5 +1,5 @@
 import { createLogger } from './logger.js'
-import { getDefaultModelId } from './models.js'
+import { getDefaultModelId, getRegistryForProvider } from './models.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -49,9 +49,18 @@ function setupSessionForwarding(normalizer, ctx) {
   const { sessionManager, devPreview, broadcast, broadcastToSession } = ctx
 
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
-    // models_updated is global — broadcast to ALL clients, not per-session
+    // models_updated is global — broadcast to ALL clients, not per-session.
+    // Look up the session's provider so clients receive the provider-scoped
+    // defaultModel rather than the Claude-only global. Falls back to the
+    // Claude default registry when the session is not found (e.g. already
+    // destroyed). Includes the provider name in the payload so clients can
+    // route the model list to the correct session type. (#2993)
     if (event === 'models_updated' && data?.models) {
-      broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId() })
+      const sessionEntry = sessionManager.getSession(sessionId)
+      const providerName = sessionEntry?.provider ?? null
+      const registry = providerName ? getRegistryForProvider(providerName) : null
+      const defaultModel = registry ? registry.getDefaultModelId() : getDefaultModelId()
+      broadcast({ type: 'available_models', models: data.models, defaultModel, provider: providerName })
       return
     }
 
@@ -180,10 +189,12 @@ function setupCliForwarding(normalizer, ctx) {
     }
   })
 
-  // models_updated bypasses normalizer — global broadcast
+  // models_updated bypasses normalizer — global broadcast.
+  // CLI mode is always a Claude session; include provider so clients can
+  // route the model list consistently with the multi-session path. (#2993)
   cliSession.on('models_updated', (data) => {
     if (data?.models) {
-      broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId() })
+      broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId(), provider: 'claude-cli' })
     }
   })
 }
