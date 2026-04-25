@@ -19,7 +19,10 @@ import { validateCwdAllowed } from '../handler-utils.js'
 async function buildRepoList(ctx = {}) {
   const scan = ctx.scanConversations || defaultScanConversations
   const readRepos = ctx.readReposFromConfig || defaultReadRepos
-  const conversations = await scan()
+  // Pass provider-driven projectsDirs when available (#2965); falls back to
+  // the scanner's default (~/.claude/projects) when not set.
+  const scanOpts = ctx.projectsDirs ? { projectsDirs: ctx.projectsDirs } : {}
+  const conversations = await scan(scanOpts)
   const autoRepos = groupConversationsByRepo(conversations)
   const manualRepos = readRepos()
   const seen = new Set()

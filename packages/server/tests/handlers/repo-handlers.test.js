@@ -60,6 +60,29 @@ describe('repo-handlers', () => {
       assert.equal(ctx._sent[0].type, 'server_error')
       assert.match(ctx._sent[0].message, /scan failed/)
     })
+
+    it('passes projectsDirs from ctx to the scanner (#2965)', async () => {
+      const projectsDirs = ['/tmp/claude/projects', '/tmp/codex/projects']
+      const ctx = makeCtx({ projectsDirs })
+      let capturedOpts
+      ctx.scanConversations = createSpy(async (opts) => { capturedOpts = opts; return [] })
+
+      await repoHandlers.list_repos(makeWs(), makeClient(), {}, ctx)
+
+      assert.ok(capturedOpts, 'scan must be called with opts')
+      assert.deepEqual(capturedOpts.projectsDirs, projectsDirs)
+    })
+
+    it('calls scanner with empty opts when ctx has no projectsDirs', async () => {
+      const ctx = makeCtx()
+      let capturedOpts
+      ctx.scanConversations = createSpy(async (opts) => { capturedOpts = opts; return [] })
+
+      await repoHandlers.list_repos(makeWs(), makeClient(), {}, ctx)
+
+      assert.ok(capturedOpts !== undefined, 'opts must be defined')
+      assert.ok(!capturedOpts.projectsDirs, 'projectsDirs must not be set when ctx lacks it')
+    })
   })
 
   describe('add_repo', () => {
