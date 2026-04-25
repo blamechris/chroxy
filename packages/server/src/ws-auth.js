@@ -224,16 +224,30 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
-  // Pairing failure — track for rate limiting, keyed by the trusted
-  // rateLimitKey (CF-Connecting-IP) rather than the shared socket peer.
-  const now = Date.now()
-  const existing = authFailures.get(rateLimitKey) || { count: 0, firstFailure: now, blockedUntil: 0 }
-  if (!authFailures.has(rateLimitKey)) evictOldestIfFull(authFailures)
-  existing.count++
-  const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
-  existing.blockedUntil = now + backoff
-  authFailures.set(rateLimitKey, existing)
-  log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (attempt ${existing.count})`)
+  // Pairing failure — only increment the shared rate-limiter bucket for
+  // genuine brute-force signals (invalid_pairing_id).
+  //
+  // `already_used` and `expired` are benign UX events: the client retried
+  // with a stale or consumed QR code. Counting them toward the exponential
+  // backoff budget locks out legitimate users who rescan a few times while
+  // waiting for a fresh QR.  Only `invalid_pairing_id` warrants aggressive
+  // rate limiting because it is the only reason that indicates a fresh
+  // wrong code — the threat model for brute-force guessing.
+  //
+  // See #2917 for the full threat-model breakdown.
+  const isBruteForceSignal = result.reason === 'invalid_pairing_id'
+  if (isBruteForceSignal) {
+    const now = Date.now()
+    const existing = authFailures.get(rateLimitKey) || { count: 0, firstFailure: now, blockedUntil: 0 }
+    if (!authFailures.has(rateLimitKey)) evictOldestIfFull(authFailures)
+    existing.count++
+    const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
+    existing.blockedUntil = now + backoff
+    authFailures.set(rateLimitKey, existing)
+    log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (attempt ${existing.count})`)
+  } else {
+    log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (benign — not counted toward rate limit)`)
+  }
   send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
   return true
