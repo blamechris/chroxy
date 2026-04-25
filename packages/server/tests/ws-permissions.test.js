@@ -294,6 +294,58 @@ describe('createPermissionHandler', () => {
       await new Promise(r => setImmediate(r))
       assert.equal(pushManager.send.mock.calls.length, 1)
     })
+
+    it('populates permissionSessionMap when hookSecret resolves to a chroxy session (#2832)', async () => {
+      // Regression: paired clients (boundSessionId set) cannot approve
+      // hook-originated permissions unless permissionSessionMap[requestId]
+      // points at the session they're bound to. Before the fix, this
+      // mapping was only ever set by the SDK forwarding path — legacy
+      // CLI hook permissions were never mapped, so every approval from
+      // a bound client failed with SESSION_TOKEN_MISMATCH.
+      const ownerSession = {
+        notifyPermissionPending: mock.fn(),
+        notifyPermissionResolved: mock.fn(),
+      }
+      const findSessionByHookSecret = mock.fn(() => ({
+        session: ownerSession,
+        sessionId: 'chroxy-sess-7',
+      }))
+      const opts = makeHandlerOpts({ findSessionByHookSecret })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const body = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: '/tmp/x' } })
+      const req = makeReq(body, { authorization: 'Bearer hook-secret-abc' })
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      assert.equal(findSessionByHookSecret.mock.calls.length, 1)
+      assert.equal(findSessionByHookSecret.mock.calls[0].arguments[0], 'hook-secret-abc')
+
+      assert.equal(opts.permissionSessionMap.size, 1)
+      const [requestId, mappedSessionId] = [...opts.permissionSessionMap.entries()][0]
+      assert.match(requestId, /^perm-/)
+      assert.equal(mappedSessionId, 'chroxy-sess-7')
+
+      assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+    })
+
+    it('does not populate permissionSessionMap when hookSecret has no chroxy sessionId (legacy single-session mode)', async () => {
+      // In legacy single-session mode the lookup returns the cliSession
+      // but no chroxy-managed sessionId. We must not invent a key — bound
+      // clients in that mode would already be a configuration error.
+      const ownerSession = { notifyPermissionPending: mock.fn() }
+      const findSessionByHookSecret = mock.fn(() => ({ session: ownerSession, sessionId: null }))
+      const opts = makeHandlerOpts({ findSessionByHookSecret })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const req = makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: {} }), { authorization: 'Bearer x' })
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(opts.permissionSessionMap.size, 0)
+      assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+    })
   })
 
   describe('handlePermissionResponseHttp', () => {

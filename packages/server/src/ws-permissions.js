@@ -111,13 +111,6 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const requestId = `perm-${randomUUID()}`
 
       log.info(`Permission request ${requestId}: ${hookData.tool_name || 'unknown tool'}`)
-      // Diagnostic correlation log for #2832 — paired with
-      // [session-binding-resend] and [session-binding-reject]. The HTTP
-      // /permission path is the legacy (non-SDK) case; the requestId acts
-      // as a stable correlation key across the permission lifecycle.
-      // Gated at debug level (#2854) to avoid spamming prod logs — enable
-      // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
-      log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=none, sourceIp=${clientIp})`)
 
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
@@ -132,14 +125,32 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // #2831: find the CliSession this hook permission belongs to (via
       // the per-session hook secret from the Authorization header) so we
       // can pause its inactivity timer while the user decides.
+      // #2832: also use the chroxy-managed sessionId to populate
+      // permissionSessionMap so paired clients (boundSessionId set) can
+      // approve hook-originated permissions for their bound session.
+      // Without this entry, the binding check in permission_response
+      // rejects every approval with SESSION_TOKEN_MISMATCH.
       const authHeader = (req.headers && req.headers['authorization']) || ''
       const hookToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-      const ownerSession = (hookToken && typeof findSessionByHookSecret === 'function')
+      const ownerLookup = (hookToken && typeof findSessionByHookSecret === 'function')
         ? findSessionByHookSecret(hookToken)
         : null
+      const ownerSession = ownerLookup?.session ?? null
+      const ownerSessionId = ownerLookup?.sessionId ?? null
       if (ownerSession && typeof ownerSession.notifyPermissionPending === 'function') {
         ownerSession.notifyPermissionPending(requestId)
       }
+      if (ownerSessionId) {
+        permissionSessionMap.set(requestId, ownerSessionId)
+      }
+      // Diagnostic correlation log for #2832 — paired with
+      // [session-binding-resend] and [session-binding-reject]. The
+      // requestId is the stable correlation key across the permission
+      // lifecycle; sessionId reflects the chroxy session that owns the
+      // hook secret (or `none` when the hook secret is unattributable).
+      // Gated at debug level (#2854) to avoid spamming prod logs — enable
+      // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
+      log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=${ownerSessionId ?? 'none'}, sourceIp=${clientIp})`)
 
       broadcastFn({
         type: 'permission_request',
