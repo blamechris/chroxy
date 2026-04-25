@@ -77,9 +77,10 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, fetchProviders]);
 
-  // Cancel timeout once providers have loaded
+  // Cancel timeout once providers have loaded; also clears timed-out state if
+  // providers arrive late (after the timeout already fired).
   useEffect(() => {
-    if (availableProviders.length > 0 && providersLoading) {
+    if (availableProviders.length > 0) {
       if (providersTimeoutRef.current) {
         clearTimeout(providersTimeoutRef.current);
         providersTimeoutRef.current = null;
@@ -87,7 +88,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       setProvidersLoading(false);
       setProvidersTimedOut(false);
     }
-  }, [availableProviders.length, providersLoading]);
+  }, [availableProviders.length]);
 
   const providerChips = [
     DEFAULT_PROVIDER_CHIP,

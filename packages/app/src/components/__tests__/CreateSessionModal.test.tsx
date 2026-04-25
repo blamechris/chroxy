@@ -29,6 +29,24 @@ function setupStore(availableProviders: any[] = []) {
   });
 }
 
+/** Returns a setter that re-wires the mock to a new providers list. */
+function setupDynamicStore(initialProviders: any[] = []) {
+  let providers = initialProviders;
+  const set = (next: any[]) => {
+    providers = next;
+  };
+  mockUseConnectionStore.mockImplementation((selector: any) => {
+    const state = {
+      get availableProviders() { return providers; },
+      fetchProviders: mockFetchProviders,
+      createSession: mockCreateSession,
+      sessions: [],
+    };
+    return selector(state);
+  });
+  return set;
+}
+
 beforeEach(() => {
   jest.useFakeTimers();
   jest.clearAllMocks();
@@ -166,6 +184,38 @@ describe('CreateSessionModal provider loading state', () => {
     // After retry, loading hint should be shown again
     const json = JSON.stringify(component!.toJSON());
     expect(json).toContain('Loading providers');
+  });
+
+  it('resets providersTimedOut when providers arrive after the timeout fires', () => {
+    const setProviders = setupDynamicStore([]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(
+        <CreateSessionModal visible onClose={jest.fn()} />
+      );
+    });
+
+    // Let the 5-second timeout fire → timed-out state shown
+    act(() => {
+      jest.advanceTimersByTime(5001);
+    });
+
+    let json = JSON.stringify(component!.toJSON());
+    expect(json).toContain('No additional providers available');
+    expect(json).not.toContain('Loading providers');
+
+    // Providers arrive late — update the store and re-render
+    act(() => {
+      setProviders([{ name: 'bedrock' }]);
+      component.update(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    json = JSON.stringify(component!.toJSON());
+    // Timed-out state must be gone; provider chip must be visible
+    expect(json).not.toContain('No additional providers available');
+    expect(json).not.toContain('Loading providers');
+    expect(json).toContain('bedrock');
   });
 
   it('Default chip always renders regardless of provider load state', () => {
