@@ -246,7 +246,7 @@ export function handlePairMessage(ctx, ws, msg) {
     authFailures.set(rateLimitKey, existing)
     log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (attempt ${existing.count})`)
   } else {
-    log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (benign — not counted toward rate limit)`)
+    log.info(`Pair failure from ${rateLimitKey}: ${result.reason} (benign — not counted toward rate limit)`)
   }
   send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
