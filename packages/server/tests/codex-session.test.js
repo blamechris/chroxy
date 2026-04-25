@@ -717,23 +717,22 @@ describe('CodexSession', () => {
     // affects codex when installed via curl|sh to ~/.local/bin or via
     // `npm install -g` to ~/.npm-global. Candidate list must cover both.
     it('includes ~/.local/bin/codex, Homebrew, /usr/local, and ~/.npm-global/bin', async () => {
-      const { readFileSync } = await import('node:fs')
-      const { dirname, join } = await import('node:path')
-      const { fileURLToPath } = await import('node:url')
-      const dir = dirname(fileURLToPath(import.meta.url))
-      const source = readFileSync(join(dir, '../src/codex-session.js'), 'utf-8')
+      const { homedir } = await import('node:os')
+      const { join } = await import('node:path')
+      const { CodexSession } = await import('../src/codex-session.js')
+      const candidates = CodexSession.binaryCandidates
 
-      const match = source.match(/resolveBinary\(\s*'codex'\s*,\s*\[([\s\S]*?)\]\s*\)/)
-      assert.ok(match, 'codex candidate array should be defined via resolveBinary')
-      const block = match[1]
-
-      assert.ok(block.includes("'.local/bin/codex'") || block.includes('.local/bin/codex'),
+      assert.ok(
+        candidates.includes(join(homedir(), '.local/bin/codex')),
         'candidate list must include ~/.local/bin/codex')
-      assert.ok(block.includes("'/opt/homebrew/bin/codex'"),
+      assert.ok(
+        candidates.includes('/opt/homebrew/bin/codex'),
         'candidate list must include /opt/homebrew/bin/codex')
-      assert.ok(block.includes("'/usr/local/bin/codex'"),
+      assert.ok(
+        candidates.includes('/usr/local/bin/codex'),
         'candidate list must include /usr/local/bin/codex')
-      assert.ok(block.includes("'.npm-global/bin/codex'"),
+      assert.ok(
+        candidates.includes(join(homedir(), '.npm-global/bin/codex')),
         'candidate list must include ~/.npm-global/bin/codex')
     })
 
