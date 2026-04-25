@@ -2507,10 +2507,14 @@ describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
 
     expect(alertSpy).toHaveBeenCalled();
     const [title, body, buttons] = alertSpy.mock.calls[0];
+    expect(String(title)).toBe('Device paired to one session');
     expect(String(body)).toContain('AlphaSession');
-    expect(String(title).toLowerCase()).not.toBe('session error');
     expect(Array.isArray(buttons)).toBe(true);
     expect((buttons as { text: string }[]).some((b) => /disconnect/i.test(b.text))).toBe(true);
+    // Alert path must NOT also append a system message to the chat
+    const state = store.getState();
+    const messages = state.sessionStates['s1']?.messages ?? [];
+    expect(messages.some((m) => m.type === 'system')).toBe(false);
   });
 
   it('Disconnect button calls disconnect() and clearSavedConnection()', () => {
