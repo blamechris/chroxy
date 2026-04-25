@@ -26,8 +26,9 @@ export interface ModelPricing {
 // ---------------------------------------------------------------------------
 
 const CLAUDE_PRICING: Record<string, ModelPricing> = {
+  // Claude Sonnet 4.5
+  'claude-sonnet-4-5': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude Sonnet 4.5' },
   // Claude 3.7 Sonnet
-  'claude-sonnet-4-5': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude 3.7 Sonnet' },
   'claude-3-7-sonnet-20250219': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude 3.7 Sonnet' },
   // Claude 3.5 Sonnet
   'claude-3-5-sonnet-20241022': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude 3.5 Sonnet' },
@@ -46,9 +47,10 @@ const CLAUDE_PRICING: Record<string, ModelPricing> = {
 // ---------------------------------------------------------------------------
 
 const CODEX_PRICING: Record<string, ModelPricing> = {
-  // GPT-5 Codex (hypothetical future model — conservative placeholder matching GPT-4o scale)
+  // GPT-5 Codex — estimated rate (no public per-token pricing published as of 2025-04;
+  // usage-based rate aligned with GPT-4o-scale models). Update when official pricing ships.
   'gpt-5-codex': { inputPer1k: 0.01, outputPer1k: 0.03, label: 'GPT-5 Codex' },
-  // GPT-5
+  // GPT-5 — estimated rate (same family as gpt-5-codex)
   'gpt-5': { inputPer1k: 0.01, outputPer1k: 0.03, label: 'GPT-5' },
   // GPT-4.1 — https://platform.openai.com/docs/pricing (2025-04)
   'gpt-4.1': { inputPer1k: 0.002, outputPer1k: 0.008, label: 'GPT-4.1' },
