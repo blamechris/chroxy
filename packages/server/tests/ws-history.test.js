@@ -8,6 +8,10 @@ import {
   flushPostAuthQueue,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
+// Importing providers.js triggers built-in provider registration, which in turn
+// calls registerProviderRegistry() so getRegistryForProvider('codex'/'gemini')
+// resolves to the correct provider class in per-provider tests below.
+import '../src/providers.js'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -836,5 +840,129 @@ describe('flushPostAuthQueue', () => {
 
     assert.equal(ctx._sends.length, 1)
     assert.equal(ctx._sends[0].type, 'lonely_msg')
+  })
+})
+
+describe('sendPostAuthInfo — provider-scoped available_models (#2956)', () => {
+  it('sends Codex-only models when active session has provider "codex"', () => {
+    const { manager } = createMockSessionManager(
+      [{ id: 'sess-codex', name: 'Codex', cwd: '/tmp' }],
+      {
+        getSession: (id) => {
+          if (id !== 'sess-codex') return undefined
+          return {
+            session: createMockSession(),
+            name: 'Codex',
+            cwd: '/tmp',
+            provider: 'codex',
+          }
+        },
+      },
+    )
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-codex' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const modelsMsg = ctx._sends.find(m => m.type === 'available_models')
+    assert.ok(modelsMsg, 'available_models not sent')
+    assert.equal(modelsMsg.provider, 'codex')
+    // No Claude aliases should appear in a Codex session's model list
+    const ids = modelsMsg.models.map(m => m.fullId)
+    for (const id of ids) {
+      assert.ok(!id.startsWith('claude-'),
+        `Codex session received Claude model: ${id}`)
+    }
+    assert.ok(ids.length > 0, 'Codex model list was empty')
+  })
+
+  it('sends Gemini-only models when active session has provider "gemini"', () => {
+    const { manager } = createMockSessionManager(
+      [{ id: 'sess-gemini', name: 'Gemini', cwd: '/tmp' }],
+      {
+        getSession: (id) => {
+          if (id !== 'sess-gemini') return undefined
+          return {
+            session: createMockSession(),
+            name: 'Gemini',
+            cwd: '/tmp',
+            provider: 'gemini',
+          }
+        },
+      },
+    )
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-gemini' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const modelsMsg = ctx._sends.find(m => m.type === 'available_models')
+    assert.ok(modelsMsg)
+    assert.equal(modelsMsg.provider, 'gemini')
+    const ids = modelsMsg.models.map(m => m.fullId)
+    for (const id of ids) {
+      assert.ok(id.startsWith('gemini'),
+        `Gemini session received non-Gemini model: ${id}`)
+    }
+  })
+
+  it('sends Claude models when active session has provider "claude-sdk"', () => {
+    const { manager } = createMockSessionManager(
+      [{ id: 'sess-sdk', name: 'Claude', cwd: '/tmp' }],
+      {
+        getSession: (id) => {
+          if (id !== 'sess-sdk') return undefined
+          return {
+            session: createMockSession(),
+            name: 'Claude',
+            cwd: '/tmp',
+            provider: 'claude-sdk',
+          }
+        },
+      },
+    )
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-sdk' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const modelsMsg = ctx._sends.find(m => m.type === 'available_models')
+    assert.ok(modelsMsg)
+    assert.equal(modelsMsg.provider, 'claude-sdk')
+    const ids = modelsMsg.models.map(m => m.id)
+    // Default Claude registry includes the alias short ids
+    assert.ok(ids.includes('sonnet') || ids.includes('opus'),
+      `Expected Claude alias ids, got: ${ids.join(', ')}`)
+  })
+
+  it('Codex and Claude sessions produce different model lists (no cross-contamination)', () => {
+    const makeManager = (id, provider) => createMockSessionManager(
+      [{ id, name: provider, cwd: '/tmp' }],
+      {
+        getSession: (sid) => {
+          if (sid !== id) return undefined
+          return { session: createMockSession(), name: provider, cwd: '/tmp', provider }
+        },
+      },
+    ).manager
+
+    const codexCtx = makeCtx({ sessionManager: makeManager('s1', 'codex'), defaultSessionId: 's1' })
+    const claudeCtx = makeCtx({ sessionManager: makeManager('s2', 'claude-sdk'), defaultSessionId: 's2' })
+    registerClient(codexCtx, makeFakeWs())
+    registerClient(claudeCtx, makeFakeWs())
+
+    sendPostAuthInfo(codexCtx, codexCtx.clients.keys().next().value)
+    sendPostAuthInfo(claudeCtx, claudeCtx.clients.keys().next().value)
+
+    const codexModels = codexCtx._sends.find(m => m.type === 'available_models').models.map(m => m.fullId)
+    const claudeModels = claudeCtx._sends.find(m => m.type === 'available_models').models.map(m => m.fullId)
+
+    for (const id of codexModels) {
+      assert.ok(!claudeModels.includes(id),
+        `Cross-contamination: ${id} in both Codex and Claude model lists`)
+    }
   })
 })

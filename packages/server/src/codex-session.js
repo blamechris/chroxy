@@ -70,18 +70,35 @@ export function buildCodexArgs(text, model) {
   return args
 }
 
-// Per-provider model allowlist — #2946.
-// `set_model` must reject a Claude or Gemini model on a Codex session (the
-// CLI would exit opaquely). Keep this list small and explicit; issue #2956
-// tracks a proper registry fed by the Codex CLI itself.
-const CODEX_ALLOWED_MODELS = Object.freeze([
-  'gpt-5-codex',
-  'gpt-5',
-  'gpt-4.1',
-  'gpt-4o',
-  'o1',
-  'o3',
-])
+// Per-provider model metadata — #2956.
+// Source of truth for `set_model` validation, fallback model list, and
+// per-model context window/label surfaced in the dashboard dropdown. Keep
+// this list small and explicit until Codex CLI grows a native
+// `supportedModels()` equivalent.
+//
+// Context-window values come from the OpenAI model docs; `contextWindow` is
+// used both in the token-usage HUD and as the Codex-side override for the
+// generic 200k default shipped by `models.js`.
+const CODEX_MODEL_METADATA = Object.freeze({
+  'gpt-5-codex': { label: 'GPT-5 Codex', contextWindow: 272_000 },
+  'gpt-5':       { label: 'GPT-5',        contextWindow: 272_000 },
+  'gpt-4.1':     { label: 'GPT-4.1',      contextWindow: 1_000_000 },
+  'gpt-4o':      { label: 'GPT-4o',       contextWindow: 128_000 },
+  'o1':          { label: 'o1',           contextWindow: 200_000 },
+  'o3':          { label: 'o3',           contextWindow: 200_000 },
+})
+
+const CODEX_ALLOWED_MODELS = Object.freeze(Object.keys(CODEX_MODEL_METADATA))
+
+const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
+  const meta = CODEX_MODEL_METADATA[id]
+  return Object.freeze({
+    id,
+    label: meta.label,
+    fullId: id,
+    contextWindow: meta.contextWindow,
+  })
+}))
 
 export class CodexSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
@@ -138,6 +155,38 @@ export class CodexSession extends JsonlSubprocessSession {
    */
   static getAllowedModels() {
     return CODEX_ALLOWED_MODELS
+  }
+
+  /**
+   * Minimal model list shown in the dashboard when the SDK has not pushed
+   * a dynamic update for this provider. Mirrors the shape returned by
+   * `createModelsRegistry().getModels()` so it can be dropped straight
+   * into the per-provider registry (#2956).
+   *
+   * @returns {ReadonlyArray<{id:string,label:string,fullId:string,contextWindow:number}>}
+   */
+  static getFallbackModels() {
+    return CODEX_FALLBACK_MODELS
+  }
+
+  /**
+   * Lookup metadata for a known Codex model. Returns null for unknown
+   * ids so the registry can fall through to its generic heuristic
+   * (useful when Codex adds a new model before the server is updated).
+   *
+   * @param {string} modelId
+   * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
+   */
+  static getModelMetadata(modelId) {
+    const meta = CODEX_MODEL_METADATA[modelId]
+    if (!meta) return null
+    return {
+      id: modelId,
+      label: meta.label,
+      fullId: modelId,
+      contextWindow: meta.contextWindow,
+      description: meta.description || '',
+    }
   }
 
   /**

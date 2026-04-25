@@ -4,7 +4,7 @@
  * Extracted from ws-server.js to separate the post-authentication
  * handshake and history replay concerns from core server orchestration.
  */
-import { toShortModelId, getModels, getDefaultModelId } from './models.js'
+import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } from './models.js'
 import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders } from './providers.js'
 import { createLogger } from './logger.js'
@@ -170,7 +170,15 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       )
     }
 
-    send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
+    // Use the active session's provider to source available models so
+    // Codex/Gemini sessions never see Claude-only entries (#2956). Non-
+    // Claude providers expose static `getFallbackModels()` via their
+    // class — getRegistryForProvider returns a provider-scoped registry
+    // seeded from that list. Claude providers share the default registry
+    // that is fed by `supportedModels()` on each SDK init.
+    const activeProvider = entry?.provider || null
+    const activeRegistry = getRegistryForProvider(activeProvider)
+    send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: activeProvider })
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
     permissions.resendPendingPermissions(ws, client)
     return
