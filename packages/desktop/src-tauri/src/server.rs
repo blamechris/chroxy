@@ -200,8 +200,9 @@ pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
 ///   `Some`. They are NOT filesystem-checked — the goal is defense-in-depth,
 ///   and a non-existent dir on PATH is harmless.
 /// - Directories already present in `base_path` are skipped to avoid
-///   duplicates, but the check is conservative (substring match) rather than
-///   element-level parsing, which matches the historical behavior.
+///   duplicates. The check splits `base_path` on `path_sep` and compares
+///   elements exactly, so paths like `/sbin` do not accidentally suppress
+///   `/bin`.
 /// - `base_path` is appended verbatim at the end.
 ///
 /// On Windows, only `node_bin` and `base_path` are joined — the user install
@@ -223,34 +224,37 @@ pub(crate) fn build_enriched_path(
     // because `%PATH%` semantics and typical install locations differ.
     #[cfg(unix)]
     {
+        let base_entries: Vec<&str> = base_path.split(path_sep).collect();
+        let already_present = |candidate: &str| base_entries.iter().any(|e| *e == candidate);
+
         for dir in &[
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "/usr/bin",
             "/bin",
         ] {
-            if !base_path.contains(dir) && !dirs.iter().any(|d| d == dir) {
+            if !already_present(dir) && !dirs.iter().any(|d| d == dir) {
                 dirs.push((*dir).to_string());
             }
         }
-    }
 
-    // User install dirs — only on Unix, and only when we know $HOME.
-    #[cfg(unix)]
-    if let Some(home) = home_dir {
-        for rel in &[
-            ".local/bin",
-            ".npm-global/bin",
-            ".claude/local/node_modules/.bin",
-        ] {
-            let candidate = home.join(rel).display().to_string();
-            if !base_path.contains(&candidate) && !dirs.iter().any(|d| d == &candidate) {
-                dirs.push(candidate);
+        // User install dirs — only when we know $HOME.
+        if let Some(home) = home_dir {
+            for rel in &[
+                ".local/bin",
+                ".npm-global/bin",
+                ".claude/local/node_modules/.bin",
+            ] {
+                let candidate = home.join(rel).display().to_string();
+                if !already_present(&candidate) && !dirs.iter().any(|d| d == &candidate) {
+                    dirs.push(candidate);
+                }
             }
         }
     }
 
-    // Silence unused-param warnings on Windows builds.
+    // Silence unused-param warning on Windows builds (user install dirs are
+    // Unix-only, so home_dir is not referenced above on Windows).
     #[cfg(windows)]
     let _ = home_dir;
 
@@ -1349,6 +1353,53 @@ mod tests {
         // The windows branch only prepends node_bin + base_path.
         assert!(out.starts_with("C:\\node;"), "unexpected prefix: {}", out);
         assert!(out.ends_with("C:\\Windows;C:\\Windows\\System32"), "unexpected suffix: {}", out);
+    }
+
+    /// User install dir already in base_path must not be duplicated.
+    /// Symmetric to `build_enriched_path_skips_system_dir_already_in_base_path`
+    /// but exercises the user-dir branch (`~/.local/bin`, `~/.npm-global/bin`).
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_skips_user_install_dir_already_in_base_path() {
+        let home = std::path::PathBuf::from("/Users/alice");
+        // base_path already contains both user install dirs.
+        let base = "/Users/alice/.local/bin:/Users/alice/.npm-global/bin:/usr/bin:/bin";
+        let out = build_enriched_path(base, "/tmp/node/bin", Some(&home), ":");
+
+        let local_bin_count = out.split(':').filter(|e| *e == "/Users/alice/.local/bin").count();
+        assert_eq!(local_bin_count, 1, "~/.local/bin duplicated in: {}", out);
+
+        let npm_bin_count = out.split(':').filter(|e| *e == "/Users/alice/.npm-global/bin").count();
+        assert_eq!(npm_bin_count, 1, "~/.npm-global/bin duplicated in: {}", out);
+    }
+
+    /// When `node_bin` equals a system bin (e.g. `/usr/bin`) the contract is:
+    /// that directory appears exactly once in the output — node_bin is
+    /// prepended, and the dedup logic then suppresses the duplicate from the
+    /// system-bins list.
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_node_bin_equals_system_bin_appears_once() {
+        // node_bin == "/usr/bin" — also a system bin candidate.
+        let out = build_enriched_path("/bin", "/usr/bin", None, ":");
+        let count = out.split(':').filter(|e| *e == "/usr/bin").count();
+        assert_eq!(count, 1, "/usr/bin should appear exactly once, got: {}", out);
+        // It should still be first (node_bin is always prepended before system bins).
+        assert!(out.starts_with("/usr/bin:"), "node_bin must be first, got: {}", out);
+    }
+
+    /// Regression: element-level dedup must not suppress `/bin` because
+    /// `base_path` contains `/sbin` (substring match would incorrectly skip it).
+    #[cfg(unix)]
+    #[test]
+    fn build_enriched_path_sbin_does_not_suppress_bin() {
+        // base_path contains /sbin but NOT /bin.
+        let out = build_enriched_path("/sbin:/usr/sbin", "/tmp/node/bin", None, ":");
+        assert!(
+            out.split(':').any(|e| e == "/bin"),
+            "/bin should be present when base_path only has /sbin, got: {}",
+            out
+        );
     }
 
     #[test]
