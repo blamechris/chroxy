@@ -125,6 +125,17 @@ export {
   resolveStreamId,
 } from './stream-id'
 
+export {
+  PROVIDER_LABELS,
+  getProviderLabel,
+  getProviderInfo,
+} from './provider-labels'
+
+export type {
+  ProviderType,
+  ProviderInfo,
+} from './provider-labels'
+
 export type {
   SessionPatch,
   PermissionMode,
