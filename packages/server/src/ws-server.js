@@ -14,7 +14,7 @@ import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
-import { handleAuthMessage, handlePairMessage, handleKeyExchange } from './ws-auth.js'
+import { handleAuthMessage, handlePairMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
@@ -1066,7 +1066,7 @@ export class WsServer {
       // Lenient bucket entries are short-lived (60s window + 30s block); drop
       // any whose window is fully expired and that aren't currently blocked.
       for (const [ip, entry] of this._benignPairAttempts) {
-        const windowExpired = now - entry.windowStart > 60_000
+        const windowExpired = now - entry.windowStart > BENIGN_PAIR_WINDOW_MS
         const notBlocked = entry.blockedUntil <= now
         if (windowExpired && notBlocked) {
           this._benignPairAttempts.delete(ip)

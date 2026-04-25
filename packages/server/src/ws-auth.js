@@ -53,6 +53,14 @@ function evictOldestIfFull(map) {
  * within the live window crosses `BENIGN_PAIR_THRESHOLD`, we set
  * `blockedUntil = now + BENIGN_PAIR_BLOCK_MS` and return true.
  *
+ * On block-arm we also slide the rolling window forward (reset windowStart,
+ * count=0) so an attacker cannot chain back-to-back blocks. Without this, a
+ * breach at t=1s blocks until t=31s; the very first post-block attempt at
+ * t=31s would still see count=51 (>threshold) inside a window that does not
+ * expire until t=61s, and would immediately re-arm another 30s block. The
+ * reset guarantees the lockout is exactly BENIGN_PAIR_BLOCK_MS followed by a
+ * fresh threshold budget.
+ *
  * @param {Map} map - benignPairAttempts map
  * @param {string} key - rateLimitKey (CF-Connecting-IP or socketIp)
  * @param {number} now - Date.now()
@@ -68,6 +76,8 @@ export function recordBenignPairAttempt(map, key, now) {
   entry.count++
   if (entry.count > BENIGN_PAIR_THRESHOLD && entry.blockedUntil <= now) {
     entry.blockedUntil = now + BENIGN_PAIR_BLOCK_MS
+    entry.windowStart = now
+    entry.count = 0
     return true
   }
   return false

@@ -1056,6 +1056,10 @@ describe('handlePairMessage', () => {
       assert.equal(beforeBreach.filter(r => r === 'rate_limited').length, 0,
         `first ${BENIGN_PAIR_THRESHOLD} attempts must NOT trigger rate_limited`)
 
+      // Bracket the breach call with timestamps so the block-window assertion
+      // is robust against scheduling jitter on slow CI runners. blockedUntil
+      // must fall inside [breachStart, breachEnd] + BENIGN_PAIR_BLOCK_MS.
+      const breachStart = Date.now()
       const breachReasons = hammer({
         ip: '9.9.9.1',
         reason: 'already_used',
@@ -1063,14 +1067,15 @@ describe('handlePairMessage', () => {
         authFailures: new Map(),
         benignPairAttempts,
       })
+      const breachEnd = Date.now()
       assert.equal(breachReasons[0], 'rate_limited',
         'attempt past threshold must respond with rate_limited')
 
       const entry = benignPairAttempts.get('9.9.9.1')
-      assert.ok(entry.blockedUntil > Date.now(),
+      assert.ok(entry.blockedUntil >= breachStart + BENIGN_PAIR_BLOCK_MS,
         'breach must set a temporary block window')
-      assert.ok(entry.blockedUntil <= Date.now() + BENIGN_PAIR_BLOCK_MS + 50,
-        'block window must not exceed BENIGN_PAIR_BLOCK_MS')
+      assert.ok(entry.blockedUntil <= breachEnd + BENIGN_PAIR_BLOCK_MS,
+        'block window must not exceed BENIGN_PAIR_BLOCK_MS beyond when the breach was recorded')
     })
 
     it('subsequent attempts during the block window are rejected with rate_limited', () => {
@@ -1262,6 +1267,39 @@ describe('handlePairMessage', () => {
       }
       // Already blocked; calling again must not re-fire.
       assert.equal(recordBenignPairAttempt(map, 'ip', now + BENIGN_PAIR_THRESHOLD + 1), false)
+    })
+
+    it('does not chain back-to-back blocks within the same rolling window', () => {
+      // Regression for Copilot review: previously, a breach early in the 60s
+      // window followed by a single attempt after the 30s block expired would
+      // re-arm a fresh 30s block (because count was still above threshold and
+      // the rolling window was still active). The fix slides windowStart on
+      // block-arm and resets count, giving the attacker a fresh budget post-
+      // block instead of an immediate re-block.
+      const map = new Map()
+      const t0 = 4_000_000
+      for (let i = 0; i <= BENIGN_PAIR_THRESHOLD; i++) {
+        recordBenignPairAttempt(map, 'ip', t0 + i)
+      }
+      const armEntry = map.get('ip')
+      assert.ok(armEntry.blockedUntil > 0, 'block must be armed')
+      assert.equal(armEntry.count, 0, 'count must reset on block-arm')
+      assert.equal(armEntry.windowStart, t0 + BENIGN_PAIR_THRESHOLD,
+        'windowStart must slide forward to the breach moment')
+
+      // Simulate "block expired, single attempt arrives" — new attempt happens
+      // 31s after breach, while the original window (60s from t0) is still
+      // technically alive. Without the fix this would re-arm; with the fix it
+      // returns false because count was reset.
+      const postBlock = t0 + BENIGN_PAIR_THRESHOLD + BENIGN_PAIR_BLOCK_MS + 1
+      assert.equal(
+        recordBenignPairAttempt(map, 'ip', postBlock), false,
+        'first post-block attempt must not immediately re-block',
+      )
+      const after = map.get('ip')
+      assert.equal(after.count, 1, 'fresh attempt counts as 1, not 52')
+      assert.ok(after.blockedUntil <= postBlock,
+        'no new block must be armed by the first post-block attempt')
     })
   })
 
