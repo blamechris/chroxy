@@ -10,5 +10,5 @@ export {
 
 export type {
   ProviderType,
-  ProviderInfo,
+  ProviderDisplayInfo,
 } from '@chroxy/store-core';

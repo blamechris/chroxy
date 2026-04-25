@@ -133,7 +133,7 @@ export {
 
 export type {
   ProviderType,
-  ProviderInfo,
+  ProviderDisplayInfo,
 } from './provider-labels'
 
 export type {

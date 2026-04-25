@@ -7,14 +7,14 @@
 
 export type ProviderType = 'sdk' | 'cli' | 'other'
 
-export interface ProviderInfo {
+export interface ProviderDisplayInfo {
   short: string
   label: string
   tooltip: string
   type: ProviderType
 }
 
-const KNOWN_PROVIDERS: Record<string, ProviderInfo> = {
+const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
   'claude-sdk': {
     short: 'SDK',
     label: 'Claude Code (SDK)',
@@ -59,7 +59,7 @@ const KNOWN_PROVIDERS: Record<string, ProviderInfo> = {
   },
 }
 
-const FALLBACK: Omit<ProviderInfo, 'label'> = {
+const FALLBACK: Omit<ProviderDisplayInfo, 'label'> = {
   short: 'API',
   tooltip: 'External provider — check your billing dashboard',
   type: 'other',
@@ -79,7 +79,7 @@ export function getProviderLabel(name: string): string {
 }
 
 /** Get display info for a provider string. Handles unknown providers gracefully. */
-export function getProviderInfo(provider: string): ProviderInfo {
+export function getProviderInfo(provider: string): ProviderDisplayInfo {
   if (KNOWN_PROVIDERS[provider]) return KNOWN_PROVIDERS[provider]
   // Heuristic fallback for unregistered providers containing 'sdk'
   if (provider.includes('sdk')) {
