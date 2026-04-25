@@ -431,6 +431,83 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+
+  describe('result — cost calculation for Codex/Gemini (cost: null from server)', () => {
+    function seedWithModel(sessionId: string, model: string) {
+      store = createMockStore(
+        baseState({
+          sessions: [{ sessionId, name: 'S', model } as any],
+          sessionStates: { [sessionId]: createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+    }
+
+    it('computes lastResultCost client-side for a known Codex model when server sends cost: null', () => {
+      seedWithModel('s-codex', 'gpt-4o')
+      handleMessage(
+        {
+          type: 'result',
+          sessionId: 's-codex',
+          cost: null,
+          usage: { input_tokens: 1000, output_tokens: 500 },
+        },
+        ctx() as any,
+      )
+      // gpt-4o: (1000/1000)*0.0025 + (500/1000)*0.01 = 0.0075
+      const cost = (store.getState() as any).sessionStates['s-codex'].lastResultCost
+      expect(cost).not.toBeNull()
+      expect(cost).toBeCloseTo(0.0075, 6)
+    })
+
+    it('computes lastResultCost client-side for a known Gemini model when server sends cost: null', () => {
+      seedWithModel('s-gemini', 'gemini-2.5-pro')
+      handleMessage(
+        {
+          type: 'result',
+          sessionId: 's-gemini',
+          cost: null,
+          usage: { input_tokens: 10000, output_tokens: 2000 },
+        },
+        ctx() as any,
+      )
+      // gemini-2.5-pro: (10000/1000)*0.00125 + (2000/1000)*0.01 = 0.0125 + 0.02 = 0.0325
+      const cost = (store.getState() as any).sessionStates['s-gemini'].lastResultCost
+      expect(cost).not.toBeNull()
+      expect(cost).toBeCloseTo(0.0325, 6)
+    })
+
+    it('leaves lastResultCost null when model is unknown and server sends cost: null', () => {
+      seedWithModel('s-unknown', 'some-unknown-model')
+      handleMessage(
+        {
+          type: 'result',
+          sessionId: 's-unknown',
+          cost: null,
+          usage: { input_tokens: 1000, output_tokens: 500 },
+        },
+        ctx() as any,
+      )
+      const cost = (store.getState() as any).sessionStates['s-unknown'].lastResultCost
+      expect(cost).toBeNull()
+    })
+
+    it('uses server-provided cost when it is a number (Claude passthrough)', () => {
+      seedWithModel('s-claude', 'claude-3-5-sonnet-20241022')
+      handleMessage(
+        {
+          type: 'result',
+          sessionId: 's-claude',
+          cost: 0.042,
+          usage: { input_tokens: 5000, output_tokens: 1000 },
+        },
+        ctx() as any,
+      )
+      const cost = (store.getState() as any).sessionStates['s-claude'].lastResultCost
+      expect(cost).toBe(0.042)
+    })
+  })
+
   describe('unknown message types', () => {
     it('does not throw on unknown types', () => {
       expect(() =>

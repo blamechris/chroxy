@@ -71,6 +71,7 @@ const PROVIDER_BILLING: Record<string, string> = {
   'claude-cli': 'Uses your Claude subscription',
   'docker-cli': 'Docker-isolated — uses your Claude subscription',
   'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
+  'codex': 'Uses OpenAI API credits',
   'gemini': 'Uses Google API credits',
 }
 

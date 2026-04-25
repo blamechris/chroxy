@@ -41,6 +41,7 @@ import {
   type KeyPair,
 } from './crypto';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
+import { calculateCost } from '../lib/model-pricing';
 import type {
   ChatMessage,
   Checkpoint,
@@ -1627,6 +1628,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _postPermissionSplits.clear();
       _deltaIdRemaps.clear();
       const usage = msg.usage as Record<string, number> | undefined;
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Resolve cost: server provides it for Claude; compute client-side for
+      // Codex/Gemini sessions that emit cost: null.
+      let resolvedCost: number | null = typeof msg.cost === 'number' ? msg.cost : null;
+      if (resolvedCost === null && usage) {
+        const sessionModel = get().sessions.find(
+          (s: SessionInfo) => s.sessionId === targetId,
+        )?.model ?? null;
+        if (sessionModel) {
+          resolvedCost = calculateCost(
+            sessionModel,
+            usage.input_tokens || 0,
+            usage.output_tokens || 0,
+          );
+        }
+      }
       const resultPatch = {
         streamingMessageId: null as string | null,
         contextUsage: usage
@@ -1637,10 +1654,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               cacheRead: usage.cache_read_input_tokens || 0,
             }
           : null,
-        lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
+        lastResultCost: resolvedCost,
         lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
       };
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
       // Notify if a background session just finished (was streaming)
       if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
         pushSessionNotification(targetId, 'completed', 'Task completed');

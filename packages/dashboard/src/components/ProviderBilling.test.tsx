@@ -14,6 +14,7 @@ vi.mock('../store/connection', () => ({
       availableProviders: [
         { name: 'claude-cli', capabilities: {} },
         { name: 'claude-sdk', capabilities: {} },
+        { name: 'codex', capabilities: {} },
         { name: 'gemini', capabilities: {} },
       ],
       defaultCwd: '/home/user',
@@ -46,6 +47,13 @@ describe('Provider billing hints (#1677)', () => {
     const select = screen.getByLabelText('Select provider')
     fireEvent.change(select, { target: { value: 'claude-sdk' } })
     expect(screen.getByTestId('provider-billing-hint')).toHaveTextContent('Uses Anthropic API credits')
+  })
+
+  it('shows billing hint for Codex provider', () => {
+    render(<CreateSessionModal {...defaultProps} />)
+    const select = screen.getByLabelText('Select provider')
+    fireEvent.change(select, { target: { value: 'codex' } })
+    expect(screen.getByTestId('provider-billing-hint')).toHaveTextContent('Uses OpenAI API credits')
   })
 
   it('shows billing hint for Gemini provider', () => {
