@@ -415,6 +415,22 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('pairing_refreshed dispatch (#2916)', () => {
+    it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
+      store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))
+      setStore(store)
+      handleMessage({ type: 'pairing_refreshed' }, ctx() as any)
+      expect((store.getState() as any).pairingRefreshedCount).toBe(1)
+    })
+
+    it('increments on each subsequent pairing_refreshed', () => {
+      store = createMockStore(baseState({ pairingRefreshedCount: 3 } as any))
+      setStore(store)
+      handleMessage({ type: 'pairing_refreshed' }, ctx() as any)
+      expect((store.getState() as any).pairingRefreshedCount).toBe(4)
+    })
+  })
+
   describe('unknown message types', () => {
     it('does not throw on unknown types', () => {
       expect(() =>
