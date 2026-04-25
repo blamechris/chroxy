@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach, mock } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -379,6 +379,13 @@ describe('PairingManager (#1836)', () => {
 
   describe('autoRefresh timer reset on validatePairing (#3020)', () => {
     beforeEach(() => {
+      mock.timers.reset()
+    })
+
+    afterEach(() => {
+      // Defensive reset: if an assertion fails mid-test after mock.timers were
+      // enabled, ensure subsequent tests/suites see real timers (otherwise
+      // mocked timers leak across the file and cause hard-to-debug failures).
       mock.timers.reset()
     })
 
