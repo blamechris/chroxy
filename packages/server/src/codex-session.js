@@ -1,13 +1,8 @@
-import { spawn } from 'child_process'
+import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
 import { homedir } from 'os'
 import { join } from 'path'
-import { BaseSession } from './base-session.js'
-import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { createLogger, redactSensitive } from './logger.js'
-
-const log = createLogger('codex')
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -49,12 +44,15 @@ const DEFAULT_MODEL = null
 // install dir — fall through to known locations so `spawn()` succeeds.
 // Covers curl|sh installers (~/.local/bin) and `npm install -g` without
 // sudo (~/.npm-global/bin).
-const CODEX = resolveBinary('codex', [
+const BINARY_CANDIDATES = [
   join(homedir(), '.local/bin/codex'),
   '/opt/homebrew/bin/codex',
   '/usr/local/bin/codex',
+  '/usr/bin/codex',
   join(homedir(), '.npm-global/bin/codex'),
-])
+]
+
+const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
 
 /**
  * Build the argv passed to `codex exec`. Exported for unit testing.
@@ -102,7 +100,27 @@ const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
   })
 }))
 
-export class CodexSession extends BaseSession {
+export class CodexSession extends JsonlSubprocessSession {
+  // ------------------------------------------------------------------
+  // Static provider identity — required by JsonlSubprocessSession
+  // ------------------------------------------------------------------
+
+  static get binaryCandidates() {
+    return BINARY_CANDIDATES
+  }
+
+  static get resolvedBinary() {
+    return CODEX
+  }
+
+  static get apiKeyEnv() {
+    return 'OPENAI_API_KEY'
+  }
+
+  static get providerName() {
+    return 'codex'
+  }
+
   /**
    * Human-readable label shown in the startup banner and anywhere else the
    * server needs to name this provider (#2953). Each provider owns its own
@@ -111,6 +129,10 @@ export class CodexSession extends BaseSession {
    */
   static get displayLabel() {
     return 'OpenAI Codex'
+  }
+
+  static get messageIdPrefix() {
+    return 'codex'
   }
 
   static get capabilities() {
@@ -176,12 +198,7 @@ export class CodexSession extends BaseSession {
       binary: {
         name: 'codex',
         args: ['--version'],
-        candidates: [
-          join(homedir(), '.local/bin/codex'),
-          '/opt/homebrew/bin/codex',
-          '/usr/local/bin/codex',
-          join(homedir(), '.npm-global/bin/codex'),
-        ],
+        candidates: BINARY_CANDIDATES,
         installHint: 'install Codex CLI',
       },
       credentials: {
@@ -194,200 +211,89 @@ export class CodexSession extends BaseSession {
 
   constructor({ cwd, model, permissionMode, skillsDir } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
-    // buildCodexArgs() omits the `-c model=...` flag so Codex CLI defers
+    // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto', skillsDir })
-    this.resumeSessionId = null
-    this._process = null
-    // Skills MVP (#2957) — Codex does not accept a system-prompt flag, so
-    // prepend the skills text to the first user message only.
-    this._skillsPrepended = false
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir })
   }
 
-  start() {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY environment variable is not set')
-    }
-    this._processReady = true
-    process.nextTick(() => {
-      this.emit('ready', { sessionId: null, model: this.model, tools: [] })
-    })
+  // ------------------------------------------------------------------
+  // JsonlSubprocessSession overrides
+  // ------------------------------------------------------------------
+
+  _buildArgs(text) {
+    return buildCodexArgs(text, this.model)
   }
 
-  /**
-   * Build the env for the codex subprocess.
-   *
-   * Uses an explicit allowlist so operator secrets (ANTHROPIC_API_KEY,
-   * CHROXY_HOOK_SECRET, arbitrary DB credentials, etc.) never leak into a
-   * third-party CLI's environment.
-   */
   _buildChildEnv() {
     return buildSpawnEnv('codex')
   }
 
-  destroy() {
-    this._destroying = true
-    this._processReady = false
-    this._isBusy = false
-    if (this._process) {
-      try {
-        this._process.kill('SIGTERM')
-      } catch { /* already dead */ }
-      this._process = null
-    }
-    this.removeAllListeners()
+  /**
+   * Only buffer stderr lines that look like actual errors/warnings —
+   * Codex can be noisy with diagnostic output.
+   */
+  _shouldSkipStderr(msg) {
+    return !(
+      msg.includes('ERROR') ||
+      msg.includes('WARN') ||
+      msg.includes('error') ||
+      msg.includes('not set')
+    )
   }
 
-  async sendMessage(text, attachments, options) {
-    if (!this._processReady) {
-      this.emit('error', { message: 'Session is not running' })
-      return
-    }
-    if (this._isBusy) {
-      this.emit('error', { message: 'Session is busy' })
-      return
-    }
-    if (attachments && attachments.length > 0) {
-      this.emit('error', { message: 'Codex provider does not support attachments' })
-      return
-    }
+  _processJsonlLine(event, ctx) {
+    if (!event.type) return
 
-    this._isBusy = true
-    this._currentMessageId = `codex-msg-${++this._messageCounter}`
+    switch (event.type) {
+      case 'item.completed': {
+        const item = event.item
+        if (!item) break
 
-    // Skills MVP (#2957) — prepend skills to the first user message of the
-    // session (Codex CLI has no --system-prompt flag).
-    let effectiveText = text
-    if (!this._skillsPrepended) {
-      const skillsText = this._buildSystemPrompt()
-      if (skillsText) {
-        effectiveText = `${skillsText}\n\n---\n\n${text}`
-      }
-      this._skillsPrepended = true
-    }
-
-    const args = buildCodexArgs(effectiveText, this.model)
-
-    let stderrBuf = ''
-    const proc = spawn(CODEX, args, {
-      cwd: this.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: this._buildChildEnv(),
-    })
-
-    this._process = proc
-    let didStreamStart = false
-    let didEmitResult = false
-
-    const rl = createInterface({ input: proc.stdout })
-
-    rl.on('line', (line) => {
-      if (this._destroying) return
-      const event = this._parseJsonLine(line)
-      if (!event || !event.type) return
-
-      switch (event.type) {
-        case 'item.completed': {
-          const item = event.item
-          if (!item) break
-
-          if (item.type === 'agent_message' && item.text) {
-            if (!didStreamStart) {
-              this.emit('stream_start', { messageId: this._currentMessageId })
-              didStreamStart = true
-            }
-            this.emit('stream_delta', { messageId: this._currentMessageId, delta: item.text })
-          } else if (item.type === 'tool_call') {
-            const toolMessageId = `codex-tool-${++this._messageCounter}`
-            this.emit('tool_start', {
-              messageId: toolMessageId,
-              toolUseId: item.id || toolMessageId,
-              tool: item.name || 'unknown',
-              input: item.arguments || item.input || {},
-            })
-          } else if (item.type === 'tool_output') {
-            this.emit('tool_result', {
-              toolUseId: item.call_id || item.id || `codex-tool-${this._messageCounter}`,
-              result: item.output || item.text || '',
-            })
+        if (item.type === 'agent_message' && item.text) {
+          if (!ctx.didStreamStart) {
+            this.emit('stream_start', { messageId: ctx.messageId })
+            ctx.didStreamStart = true
           }
-          break
-        }
-
-        case 'turn.completed': {
-          didEmitResult = true
-          // End stream before result (standard provider contract)
-          if (didStreamStart) {
-            this.emit('stream_end', { messageId: this._currentMessageId })
-            didStreamStart = false
-          }
-          const usage = event.usage || {}
-          this.emit('result', {
-            cost: null,
-            duration: null,
-            usage: {
-              input_tokens: usage.input_tokens || 0,
-              output_tokens: usage.output_tokens || 0,
-            },
-            sessionId: null,
+          this.emit('stream_delta', { messageId: ctx.messageId, delta: item.text })
+        } else if (item.type === 'tool_call') {
+          const toolMessageId = `codex-tool-${++this._messageCounter}`
+          this.emit('tool_start', {
+            messageId: toolMessageId,
+            toolUseId: item.id || toolMessageId,
+            tool: item.name || 'unknown',
+            input: item.arguments || item.input || {},
           })
-          break
+        } else if (item.type === 'tool_output') {
+          this.emit('tool_result', {
+            toolUseId: item.call_id || item.id || `codex-tool-${this._messageCounter}`,
+            result: item.output || item.text || '',
+          })
         }
+        break
+      }
 
-        default:
-          break
-      }
-    })
-
-    proc.stderr.on('data', (chunk) => {
-      if (this._destroying) return
-      const msg = chunk.toString().trim()
-      if (msg && (msg.includes('ERROR') || msg.includes('WARN') || msg.includes('error') || msg.includes('not set'))) {
-        if (stderrBuf.length < 1024) stderrBuf += (stderrBuf ? '\n' : '') + msg
-        log.error(`stderr: ${msg}`)
-      }
-    })
-
-    proc.on('close', (code) => {
-      this._process = null
-      this._isBusy = false
-      if (this._destroying) return
-      if (didStreamStart) {
-        this.emit('stream_end', { messageId: this._currentMessageId })
-      }
-      if (code !== 0 && code !== null) {
-        const detail = stderrBuf ? `: ${redactSensitive(stderrBuf.slice(0, 500))}` : ''
-        this.emit('error', { message: `Codex process exited with code ${code}${detail}` })
-      }
-      // Emit result only if turn.completed wasn't received
-      if (!didEmitResult) {
+      case 'turn.completed': {
+        ctx.didEmitResult = true
+        // End stream before result (standard provider contract)
+        if (ctx.didStreamStart) {
+          this.emit('stream_end', { messageId: ctx.messageId })
+          ctx.didStreamStart = false
+        }
+        const usage = event.usage || {}
         this.emit('result', {
           cost: null,
           duration: null,
-          usage: null,
+          usage: {
+            input_tokens: usage.input_tokens || 0,
+            output_tokens: usage.output_tokens || 0,
+          },
           sessionId: null,
         })
+        break
       }
-    })
 
-    proc.on('error', (err) => {
-      this._process = null
-      this._isBusy = false
-      if (this._destroying) return
-      this.emit('error', { message: err.message || 'Failed to spawn codex' })
-    })
-  }
-
-  interrupt() {
-    if (this._process) {
-      try {
-        this._process.kill('SIGINT')
-      } catch { /* already dead */ }
+      default:
+        break
     }
   }
-
-  setPermissionMode(_mode) {
-    // Codex CLI doesn't support permission mode switching from Chroxy
-  }
-
 }
