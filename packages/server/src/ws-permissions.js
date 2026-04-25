@@ -111,13 +111,6 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const requestId = `perm-${randomUUID()}`
 
       log.info(`Permission request ${requestId}: ${hookData.tool_name || 'unknown tool'}`)
-      // Diagnostic correlation log for #2832 — paired with
-      // [session-binding-resend] and [session-binding-reject]. The HTTP
-      // /permission path is the legacy (non-SDK) case; the requestId acts
-      // as a stable correlation key across the permission lifecycle.
-      // Gated at debug level (#2854) to avoid spamming prod logs — enable
-      // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
-      log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=none, sourceIp=${clientIp})`)
 
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
@@ -149,8 +142,15 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       }
       if (ownerSessionId) {
         permissionSessionMap.set(requestId, ownerSessionId)
-        log.debug(`[session-binding-create] permission ${requestId} mapped to ${ownerSessionId} (HTTP, via hookSecret)`)
       }
+      // Diagnostic correlation log for #2832 — paired with
+      // [session-binding-resend] and [session-binding-reject]. The
+      // requestId is the stable correlation key across the permission
+      // lifecycle; sessionId reflects the chroxy session that owns the
+      // hook secret (or `none` when the hook secret is unattributable).
+      // Gated at debug level (#2854) to avoid spamming prod logs — enable
+      // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
+      log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=${ownerSessionId ?? 'none'}, sourceIp=${clientIp})`)
 
       broadcastFn({
         type: 'permission_request',

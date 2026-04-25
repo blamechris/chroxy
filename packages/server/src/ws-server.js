@@ -762,8 +762,7 @@ export class WsServer {
     for (const [sessionId, storedSecret] of this._sessionHookSecrets) {
       if (storedSecret === secret) {
         const entry = this.sessionManager?.getSession(sessionId)
-        if (entry?.session) return { session: entry.session, sessionId }
-        return null
+        return entry?.session ? { session: entry.session, sessionId } : null
       }
     }
     // Legacy single-session mode — no chroxy sessionId surface, so
