@@ -937,14 +937,12 @@ describe('handlePairMessage', () => {
     })
 
     it('mixed already_used + invalid_pairing_id: only invalid_pairing_id counts toward rate limit (#2917)', () => {
-      // already_used sprinkled in between invalid attempts must not inflate the
-      // invalid_pairing_id counter.  Use distinct IPs for each invalid attempt
-      // so earlier backoff windows do not block later attempts — we want to
-      // verify the per-IP count only counts invalid_pairing_id, not
-      // already_used.
+      // Two complementary sub-scenarios:
       //
-      // Verification strategy: one IP with only already_used must have no
-      // entry; another IP with only invalid_pairing_id must have count=1.
+      // A) Same IP interleaves already_used and invalid_pairing_id: only the
+      //    invalid_pairing_id attempts must increment the shared bucket.
+      //
+      // B) IP with only already_used: produces no entry at all.
       const authFailures = new Map()
 
       const attemptWithIp = (ip, reason) => {
@@ -964,20 +962,24 @@ describe('handlePairMessage', () => {
         handlePairMessage(ctx, w, { type: 'pair', pairingId: 'any-id' })
       }
 
-      // IP with only already_used failures — must produce no rate-limit entry
-      attemptWithIp('10.0.0.1', 'already_used')
-      attemptWithIp('10.0.0.1', 'already_used')
-      attemptWithIp('10.0.0.1', 'already_used')
+      // Scenario A: same IP mixes both reasons.
+      // already_used before and after the invalid attempt must not change count.
+      attemptWithIp('10.0.0.3', 'already_used')    // benign — should not count
+      attemptWithIp('10.0.0.3', 'invalid_pairing_id') // brute-force signal — count=1
+      attemptWithIp('10.0.0.3', 'already_used')    // benign — count must stay 1
 
-      // Different IP with one invalid_pairing_id — must produce count=1
-      attemptWithIp('10.0.0.2', 'invalid_pairing_id')
+      const mixedEntry = authFailures.get('10.0.0.3')
+      assert.ok(mixedEntry, 'same IP with mixed reasons must have a rate-limit entry')
+      assert.equal(mixedEntry.count, 1,
+        'only the one invalid_pairing_id attempt should increment the counter — already_used must not')
+
+      // Scenario B: IP with only already_used failures — must produce no entry.
+      attemptWithIp('10.0.0.1', 'already_used')
+      attemptWithIp('10.0.0.1', 'already_used')
+      attemptWithIp('10.0.0.1', 'already_used')
 
       assert.equal(authFailures.has('10.0.0.1'), false,
         'IP that only sent already_used must have no rate-limit entry')
-
-      const entry = authFailures.get('10.0.0.2')
-      assert.ok(entry, 'IP that sent invalid_pairing_id must have a rate-limit entry')
-      assert.equal(entry.count, 1, 'exactly 1 invalid_pairing_id attempt should produce count=1')
     })
   })
 
