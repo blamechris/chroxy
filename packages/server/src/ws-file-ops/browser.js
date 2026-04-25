@@ -431,43 +431,23 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    */
   async function listAgents(ws, cwd, sessionId, opts = {}) {
     /**
-     * Scan a single directory and return the agents it contains.
-     * Errors (missing dir, unreadable, etc.) yield an empty array so a
-     * single failed dir does not abort the others (#3024).
+     * List the candidate agent .md files in a single directory. Returns
+     * `{ dir, source, filenames[] }`. Errors (missing dir, unreadable, etc.)
+     * yield an empty filenames array so a single failed dir does not abort
+     * the others (#3024).
      */
-     const scanDir = async (dir, source) => {
-      const found = []
-      let entries
+    const listDir = async (dir, source) => {
       try {
-        entries = await readdir(dir, { withFileTypes: true })
+        const entries = await readdir(dir, { withFileTypes: true })
+        const filenames = entries
+          .filter(e => e.isFile() && e.name.endsWith('.md'))
+          .filter(e => !e.name.includes('/') && !e.name.includes('\\'))
+          .map(e => e.name)
+        return { dir, source, filenames }
       } catch {
         // Directory doesn't exist or is unreadable
-        return found
+        return { dir, source, filenames: [] }
       }
-
-      for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith('.md')) continue
-        if (entry.name.includes('/') || entry.name.includes('\\')) continue
-        const name = entry.name.slice(0, -3)
-
-        let description = ''
-        try {
-          const content = await readFile(join(dir, entry.name), 'utf-8')
-          const lines = content.split('\n')
-          for (const line of lines) {
-            const trimmed = line.trim()
-            if (!trimmed || trimmed.startsWith('#')) continue
-            description = trimmed.slice(0, 120)
-            break
-          }
-        } catch (err) {
-          log.error(`Failed to read agent file ${join(dir, entry.name)}: ${err.message}`)
-        }
-
-        found.push({ name, description, source })
-      }
-
-      return found
     }
 
     // Scan user-level agent directories — default ~/.claude/agents, or
@@ -476,29 +456,50 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       ? opts.userAgentsDirs
       : [join(homedir(), '.claude', 'agents')]
 
-    // Scan project + all user dirs in parallel (#3024). Promise.all preserves
-    // input order in the resolved array, so first-wins deduplication below
-    // matches the previous sequential semantics: project dir first, then
-    // user dirs in their provided order.
-    const scans = []
+    // Phase 1: readdir project + all user dirs in parallel (#3024). Promise.all
+    // preserves input order in the resolved array, so first-wins dedup below
+    // matches the previous sequential semantics: project dir first, then user
+    // dirs in their provided order.
+    const dirScans = []
     if (cwd) {
-      scans.push(scanDir(join(cwd, '.claude', 'agents'), 'project'))
+      dirScans.push(listDir(join(cwd, '.claude', 'agents'), 'project'))
     }
     for (const dir of userAgentsDirs) {
-      scans.push(scanDir(dir, 'user'))
+      dirScans.push(listDir(dir, 'user'))
     }
-    const perDirResults = await Promise.all(scans)
+    const dirResults = await Promise.all(dirScans)
 
-    // Flatten preserving order, then dedupe by name (first occurrence wins).
-    const agents = []
+    // Phase 2: dedupe by agent name in input order — first occurrence wins.
+    // Skipping duplicates here avoids unnecessary readFile calls in later dirs
+    // (matching the old behavior that short-circuited via `seen.has(name)`).
+    const winners = []
     const seen = new Set()
-    for (const dirAgents of perDirResults) {
-      for (const agent of dirAgents) {
-        if (seen.has(agent.name)) continue
-        seen.add(agent.name)
-        agents.push(agent)
+    for (const { dir, source, filenames } of dirResults) {
+      for (const filename of filenames) {
+        const name = filename.slice(0, -3)
+        if (seen.has(name)) continue
+        seen.add(name)
+        winners.push({ name, dir, source, filename })
       }
     }
+
+    // Phase 3: read the winning agent files in parallel and parse descriptions.
+    const agents = await Promise.all(winners.map(async ({ name, dir, source, filename }) => {
+      let description = ''
+      try {
+        const content = await readFile(join(dir, filename), 'utf-8')
+        const lines = content.split('\n')
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || trimmed.startsWith('#')) continue
+          description = trimmed.slice(0, 120)
+          break
+        }
+      } catch (err) {
+        log.error(`Failed to read agent file ${join(dir, filename)}: ${err.message}`)
+      }
+      return { name, description, source }
+    }))
 
     agents.sort((a, b) => a.name.localeCompare(b.name))
 
