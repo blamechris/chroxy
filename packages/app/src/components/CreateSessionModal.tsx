@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,8 @@ import { useConnectionStore } from '../store/connection';
 import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
 import { getProviderLabel } from '../constants/providers';
+
+const PROVIDERS_TIMEOUT_MS = 5000;
 
 interface CreateSessionModalProps {
   visible: boolean;
@@ -34,6 +36,26 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const availableProviders = useConnectionStore((s) => s.availableProviders);
   const fetchProviders = useConnectionStore((s) => s.fetchProviders);
   const [showBrowser, setShowBrowser] = useState(false);
+  const [providersLoading, setProvidersLoading] = useState(false);
+  const [providersTimedOut, setProvidersTimedOut] = useState(false);
+  const providersTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const startProvidersTimeout = () => {
+    if (providersTimeoutRef.current) {
+      clearTimeout(providersTimeoutRef.current);
+    }
+    setProvidersLoading(true);
+    setProvidersTimedOut(false);
+    providersTimeoutRef.current = setTimeout(() => {
+      setProvidersLoading(false);
+      setProvidersTimedOut(true);
+    }, PROVIDERS_TIMEOUT_MS);
+  };
+
+  const handleRetryProviders = () => {
+    fetchProviders();
+    startProvidersTimeout();
+  };
 
   // Reset state when modal opens and refresh provider list from server.
   useEffect(() => {
@@ -42,8 +64,30 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       setWorktree(false);
       setProvider('');
       fetchProviders();
+      startProvidersTimeout();
+    } else {
+      // Clean up timeout when modal closes
+      if (providersTimeoutRef.current) {
+        clearTimeout(providersTimeoutRef.current);
+        providersTimeoutRef.current = null;
+      }
+      setProvidersLoading(false);
+      setProvidersTimedOut(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, fetchProviders]);
+
+  // Cancel timeout once providers have loaded
+  useEffect(() => {
+    if (availableProviders.length > 0 && providersLoading) {
+      if (providersTimeoutRef.current) {
+        clearTimeout(providersTimeoutRef.current);
+        providersTimeoutRef.current = null;
+      }
+      setProvidersLoading(false);
+      setProvidersTimedOut(false);
+    }
+  }, [availableProviders.length, providersLoading]);
 
   const providerChips = [
     DEFAULT_PROVIDER_CHIP,
@@ -166,8 +210,20 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                   </Text>
                 </TouchableOpacity>
               ))}
-              {availableProviders.length === 0 && (
+              {availableProviders.length === 0 && providersLoading && (
                 <Text style={styles.providerHint}>Loading providers…</Text>
+              )}
+              {availableProviders.length === 0 && providersTimedOut && (
+                <View style={styles.providersEmptyRow}>
+                  <Text style={styles.providerHint}>No additional providers available</Text>
+                  <TouchableOpacity
+                    onPress={handleRetryProviders}
+                    accessibilityLabel="Retry loading providers"
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.retryText}>Retry</Text>
+                  </TouchableOpacity>
+                </View>
               )}
             </View>
 
@@ -322,6 +378,17 @@ const styles = StyleSheet.create({
   providerHint: {
     color: COLORS.textDisabled,
     fontSize: 12,
+    paddingVertical: 8,
+  },
+  providersEmptyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  retryText: {
+    color: COLORS.accentBlue,
+    fontSize: 12,
+    fontWeight: '600',
     paddingVertical: 8,
   },
   createButton: {
