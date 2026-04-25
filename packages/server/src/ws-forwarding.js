@@ -60,7 +60,12 @@ function setupSessionForwarding(normalizer, ctx) {
       const providerName = sessionEntry?.provider ?? null
       const registry = providerName ? getRegistryForProvider(providerName) : null
       const defaultModel = registry ? registry.getDefaultModelId() : getDefaultModelId()
-      broadcast({ type: 'available_models', models: data.models, defaultModel, provider: providerName })
+      // When the session is not found (race with teardown) providerName is null
+      // but we still fall back to the Claude default registry, so advertise
+      // 'claude-sdk' rather than null so clients can route the model list
+      // consistently. (#2993)
+      const resolvedProvider = providerName ?? 'claude-sdk'
+      broadcast({ type: 'available_models', models: data.models, defaultModel, provider: resolvedProvider })
       return
     }
 

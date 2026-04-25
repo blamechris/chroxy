@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
-import { registerProviderRegistry, getRegistryForProvider } from '../src/models.js'
+import { registerProviderRegistry, getRegistryForProvider, updateModels, resetModels } from '../src/models.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -99,6 +99,10 @@ describe('setupForwarding', () => {
     })
 
     it('uses provider-scoped registry defaultModel for a non-Claude provider session (#2993)', () => {
+      // Seed the global Claude registry with a known non-null default so the
+      // assertion can distinguish "used codex registry" from "used Claude global".
+      updateModels([{ value: 'claude-sonnet-4-6', displayName: 'Default (Claude Sonnet)' }])
+
       // Register a fake non-Claude provider with its own fallback models
       const FakeProvider = class {
         static getFallbackModels() {
@@ -116,8 +120,8 @@ describe('setupForwarding', () => {
       registerProviderRegistry('codex-sdk', FakeProvider)
       const codexRegistry = getRegistryForProvider('codex-sdk')
 
-      // Ensure the codex registry has a null defaultModelId (it has no SDK-reported default yet)
-      // The broadcast should use codexRegistry.getDefaultModelId() = null, not the Claude global.
+      // Codex registry has no SDK-reported default — getDefaultModelId() returns null.
+      // The broadcast must use the codex registry value (null), NOT the Claude global (sonnet-4-6).
       const ctx = makeCtx()
       // Make getSession return an entry whose provider is 'codex-sdk'
       ctx.sessionManager.getSession = mock.fn(() => ({ provider: 'codex-sdk' }))
@@ -132,8 +136,13 @@ describe('setupForwarding', () => {
       assert.equal(ctx.broadcast.mock.calls.length, 1)
       const msg = ctx.broadcast.mock.calls[0].arguments[0]
       assert.equal(msg.type, 'available_models')
-      // defaultModel should come from the codex provider's registry, not Claude's global
+      // defaultModel must come from the codex provider's registry (null — no SDK default yet),
+      // not the Claude global (which is now 'sonnet-4-6'). This ensures the test is non-vacuous.
       assert.equal(msg.defaultModel, codexRegistry.getDefaultModelId())
+      assert.notEqual(msg.defaultModel, 'sonnet-4-6')
+
+      // Restore global registry state so this test doesn't bleed into others
+      resetModels()
     })
 
     it('falls back to global Claude registry when session lookup returns null (#2993)', () => {
@@ -153,6 +162,9 @@ describe('setupForwarding', () => {
       assert.equal(msg.type, 'available_models')
       // Falls back to Claude default — must still produce a valid broadcast
       assert.ok('defaultModel' in msg)
+      // provider must be resolved to 'claude-sdk' (not null) so clients can
+      // route consistently when the fallback path is taken (#2993)
+      assert.equal(msg.provider, 'claude-sdk')
     })
 
     it('includes provider field in available_models broadcast so clients can route correctly (#2993)', () => {
