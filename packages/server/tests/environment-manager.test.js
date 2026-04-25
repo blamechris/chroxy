@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 
@@ -1950,5 +1950,55 @@ describe('DevContainer containerEnv key sanitization', () => {
     assert.ok(!envPairs.some(e => e.startsWith('BAD KEY=')), 'should reject key with space')
     assert.ok(!envPairs.some(e => e.startsWith('BAD;KEY=')), 'should reject key with semicolon')
     assert.ok(!envPairs.some(e => e.includes('BAD$(cmd)')), 'should reject key with shell injection')
+  })
+})
+
+describe('EnvironmentManager._persist() rename-failure cleanup (regression: #2940)', () => {
+  let tempDir
+  let statePath
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-env-rename-fail-test-'))
+    statePath = join(tempDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  // Force the final renameSync to fail by pre-creating <statePath> as a
+  // non-empty directory. POSIX rename() into a non-empty directory throws
+  // ENOTEMPTY / EISDIR — the closest portable analogue of a transient FS error.
+  function blockRename() {
+    mkdirSync(statePath)
+    writeFileSync(join(statePath, 'sentinel'), 'block rename')
+  }
+
+  it('removes the orphaned .tmp file when the final rename fails', () => {
+    blockRename()
+
+    const mgr = new EnvironmentManager({ statePath, _execFile: () => {} })
+    // Call _persist() directly — it swallows errors by design
+    mgr._persist()
+
+    assert.equal(existsSync(statePath + '.tmp'), false, 'orphaned .tmp file must be cleaned up')
+  })
+
+  it('swallows the rename error (existing _persist error-logging contract is preserved)', () => {
+    blockRename()
+
+    const mgr = new EnvironmentManager({ statePath, _execFile: () => {} })
+    // _persist must not throw — it logs and returns
+    assert.doesNotThrow(() => mgr._persist())
+  })
+
+  it('does not leak .tmp across repeated rename failures', () => {
+    blockRename()
+
+    const mgr = new EnvironmentManager({ statePath, _execFile: () => {} })
+    mgr._persist()
+    mgr._persist()
+
+    assert.equal(existsSync(statePath + '.tmp'), false, '.tmp must never accumulate across repeated failures')
   })
 })

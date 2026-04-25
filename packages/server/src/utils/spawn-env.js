@@ -44,6 +44,18 @@ const STANDARD_ALLOWLIST = [
   'DISPLAY',
   'SSH_AUTH_SOCK',
   'NODE_EXTRA_CA_CERTS',
+  // HTTP proxy vars — needed for corporate/enterprise environments where
+  // outbound traffic is routed through a forward proxy. Values are typically
+  // infrastructure URLs; note that proxy URLs can legally embed credentials
+  // (http://user:pass@proxy:8080) — avoid logging these values.
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'all_proxy',
 ]
 
 const PROVIDERS = {

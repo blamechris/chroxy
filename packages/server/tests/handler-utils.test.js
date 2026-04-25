@@ -27,7 +27,6 @@ import {
   ALLOWED_IMAGE_TYPES,
   broadcastFocusChanged,
   resolveSession,
-  enforceBoundSession,
   sendError,
   buildSessionTokenMismatchPayload,
   SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
@@ -1085,26 +1084,6 @@ describe('resolveSession', () => {
     const client = { activeSessionId: 'sess-1', boundSessionId: null }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.deepStrictEqual(result, session)
-  })
-})
-
-describe('enforceBoundSession', () => {
-  it('does not throw when client has no bound session', () => {
-    assert.doesNotThrow(() => enforceBoundSession({ boundSessionId: null }, 'any-session'))
-  })
-
-  it('does not throw when bound session matches target', () => {
-    assert.doesNotThrow(() => enforceBoundSession({ boundSessionId: 'sess-1' }, 'sess-1'))
-  })
-
-  it('throws with SESSION_TOKEN_MISMATCH when bound session differs', () => {
-    try {
-      enforceBoundSession({ boundSessionId: 'sess-1' }, 'sess-2')
-      assert.fail('Expected an error to be thrown')
-    } catch (err) {
-      assert.equal(err.code, 'SESSION_TOKEN_MISMATCH')
-      assert.match(err.message, /bound to a different session/)
-    }
   })
 })
 

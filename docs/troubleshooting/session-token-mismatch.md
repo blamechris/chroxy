@@ -186,13 +186,14 @@ hypotheses on #2832 applies.
 - PR [#2911](https://github.com/blamechris/chroxy/pull/2911) — enriched
   `SESSION_TOKEN_MISMATCH` error payloads with `boundSessionName` so the
   app and dashboard can surface an actionable "Device paired to one
-  session" alert with a Disconnect button. Only applies to the two
-  new-session-creation paths in `session-handlers.js` /
-  `conversation-handlers.js`; the permission-response and feature-handler
-  paths still return the generic message.
+  session" alert with a Disconnect button.
+- PR [#2933](https://github.com/blamechris/chroxy/pull/2933) — unified
+  every `SESSION_TOKEN_MISMATCH` emit site to produce the same canonical
+  four-field shape (`code`, `message`, `boundSessionId`, `boundSessionName`)
+  via `buildSessionTokenMismatchPayload()` in `handler-utils.js`. All
+  paths — `session_error`, `web_task_error`, `error`, and HTTP 403 — now
+  guarantee the same fields.
 - `docs/error-taxonomy.md` — the three WebSocket error response shapes
-  (`error`, `server_error`, `session_error`). `SESSION_TOKEN_MISMATCH`
-  may arrive as either `session_error` or `error` on the WebSocket path
-  (the `permission_response` handler uses the generic `error` envelope
-  via `handler-utils.js:sendError`), or as a 403 JSON response on the
-  legacy HTTP path.
+  (`error`, `server_error`, `session_error`), including the canonical
+  four-field `SESSION_TOKEN_MISMATCH` contract and per-envelope parity
+  table.
