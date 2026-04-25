@@ -72,6 +72,7 @@ const PROVIDER_BILLING: Record<string, string> = {
   'docker-cli': 'Docker-isolated — uses your Claude subscription',
   'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
   'gemini': 'Uses Google API credits',
+  'codex': 'Uses OpenAI API credits',
 }
 
 /** Short labels for capability badges. */
