@@ -116,20 +116,37 @@ describe('getProviderDataDirs logic (#2965)', () => {
 // minimal CI environments without the workspace fully installed.
 // ------------------------------------------------------------------ //
 
+// Treat only module-resolution failures as "SDK unavailable" so a real
+// regression inside the SDK (or its init code) still surfaces as a test
+// failure instead of being silently skipped.
 async function sdkAvailable() {
   try {
     await import('@anthropic-ai/claude-agent-sdk')
     return true
-  } catch {
-    return false
+  } catch (err) {
+    if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND')) {
+      return false
+    }
+    throw err
   }
 }
 
 const SKIP_REAL_EXPORT = !(await sdkAvailable())
 
 describe('getProviderDataDirs real export (#3025)', { skip: SKIP_REAL_EXPORT }, () => {
-  it('imports and invokes the real export from providers.js', async () => {
-    const { getProviderDataDirs } = await import('../src/providers.js')
+  let getProviderDataDirs
+  let CliSession
+  let CodexSession
+  let GeminiSession
+
+  before(async () => {
+    ;({ getProviderDataDirs } = await import('../src/providers.js'))
+    ;({ CliSession } = await import('../src/cli-session.js'))
+    ;({ CodexSession } = await import('../src/codex-session.js'))
+    ;({ GeminiSession } = await import('../src/gemini-session.js'))
+  })
+
+  it('imports and invokes the real export from providers.js', () => {
     assert.equal(typeof getProviderDataDirs, 'function', 'getProviderDataDirs must be exported')
 
     const dirs = getProviderDataDirs()
@@ -141,18 +158,12 @@ describe('getProviderDataDirs real export (#3025)', { skip: SKIP_REAL_EXPORT }, 
     }
   })
 
-  it('returns a deduplicated list (no entry appears twice)', async () => {
-    const { getProviderDataDirs } = await import('../src/providers.js')
+  it('returns a deduplicated list (no entry appears twice)', () => {
     const dirs = getProviderDataDirs()
     assert.equal(new Set(dirs).size, dirs.length, 'dirs must be unique')
   })
 
-  it('includes the built-in providers that expose a static dataDir', async () => {
-    const { getProviderDataDirs } = await import('../src/providers.js')
-    const { CliSession } = await import('../src/cli-session.js')
-    const { CodexSession } = await import('../src/codex-session.js')
-    const { GeminiSession } = await import('../src/gemini-session.js')
-
+  it('includes the built-in providers that expose a static dataDir', () => {
     const dirs = getProviderDataDirs()
     assert.ok(dirs.includes(CliSession.dataDir), 'must include CliSession.dataDir')
     assert.ok(dirs.includes(CodexSession.dataDir), 'must include CodexSession.dataDir')
