@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -40,7 +40,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const [providersTimedOut, setProvidersTimedOut] = useState(false);
   const providersTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const startProvidersTimeout = () => {
+  const startProvidersTimeout = useCallback(() => {
     if (providersTimeoutRef.current) {
       clearTimeout(providersTimeoutRef.current);
     }
@@ -50,14 +50,15 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       setProvidersLoading(false);
       setProvidersTimedOut(true);
     }, PROVIDERS_TIMEOUT_MS);
-  };
+  }, []);
 
-  const handleRetryProviders = () => {
+  const handleRetryProviders = useCallback(() => {
     fetchProviders();
     startProvidersTimeout();
-  };
+  }, [fetchProviders, startProvidersTimeout]);
 
   // Reset state when modal opens and refresh provider list from server.
+  // Cancel timeout and clear loading state when modal closes or on unmount.
   useEffect(() => {
     if (visible) {
       setShowBrowser(false);
@@ -66,7 +67,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       fetchProviders();
       startProvidersTimeout();
     } else {
-      // Clean up timeout when modal closes
       if (providersTimeoutRef.current) {
         clearTimeout(providersTimeoutRef.current);
         providersTimeoutRef.current = null;
@@ -74,8 +74,14 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       setProvidersLoading(false);
       setProvidersTimedOut(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, fetchProviders]);
+    return () => {
+      // Unmount cleanup — prevent setState on unmounted component
+      if (providersTimeoutRef.current) {
+        clearTimeout(providersTimeoutRef.current);
+        providersTimeoutRef.current = null;
+      }
+    };
+  }, [visible, fetchProviders, startProvidersTimeout]);
 
   // Cancel timeout once providers have loaded; also clears timed-out state if
   // providers arrive late (after the timeout already fired).

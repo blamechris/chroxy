@@ -112,6 +112,40 @@ describe('CreateSessionModal provider loading state', () => {
     expect(json).toContain('bedrock');
   });
 
+  it('clears loading hint when providers arrive before the 5s timeout', () => {
+    const setProviders = setupDynamicStore([]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(
+        <CreateSessionModal visible onClose={jest.fn()} />
+      );
+    });
+
+    // Modal opens → loading hint shown, timeout pending
+    let json = JSON.stringify(component!.toJSON());
+    expect(json).toContain('Loading providers');
+
+    // Server responds before timeout — update store and re-render
+    act(() => {
+      setProviders([{ name: 'bedrock' }]);
+      component.update(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    json = JSON.stringify(component!.toJSON());
+    expect(json).not.toContain('Loading providers');
+    expect(json).toContain('bedrock');
+
+    // Advancing past the timeout must NOT flip the UI back to the error state
+    act(() => {
+      jest.advanceTimersByTime(5001);
+    });
+
+    json = JSON.stringify(component!.toJSON());
+    expect(json).not.toContain('No additional providers available');
+    expect(json).toContain('bedrock');
+  });
+
   it('resets loading state when modal is reopened', () => {
     setupStore([]);
 
