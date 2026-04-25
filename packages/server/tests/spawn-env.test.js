@@ -217,18 +217,23 @@ describe('buildSpawnEnv', () => {
     ]
 
     for (const proxyVar of proxyVars) {
+      // NO_PROXY/no_proxy holds a comma-separated exclusion list, not a proxy URL
+      const proxyValue = (proxyVar === 'NO_PROXY' || proxyVar === 'no_proxy')
+        ? 'localhost,127.0.0.1,.corp'
+        : 'http://proxy.corp:8080'
+
       it(`forwards ${proxyVar} to codex child env`, () => {
-        withEnv({ [proxyVar]: 'http://proxy.corp:8080', OPENAI_API_KEY: 'sk' }, () => {
+        withEnv({ [proxyVar]: proxyValue, OPENAI_API_KEY: 'sk' }, () => {
           const env = buildSpawnEnv('codex')
-          assert.equal(env[proxyVar], 'http://proxy.corp:8080',
+          assert.equal(env[proxyVar], proxyValue,
             `${proxyVar} must be forwarded so codex can reach provider APIs through a corporate proxy`)
         })
       })
 
       it(`forwards ${proxyVar} to gemini child env`, () => {
-        withEnv({ [proxyVar]: 'http://proxy.corp:8080', GEMINI_API_KEY: 'g' }, () => {
+        withEnv({ [proxyVar]: proxyValue, GEMINI_API_KEY: 'g' }, () => {
           const env = buildSpawnEnv('gemini')
-          assert.equal(env[proxyVar], 'http://proxy.corp:8080',
+          assert.equal(env[proxyVar], proxyValue,
             `${proxyVar} must be forwarded so gemini can reach provider APIs through a corporate proxy`)
         })
       })

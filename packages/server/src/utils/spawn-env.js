@@ -45,7 +45,9 @@ const STANDARD_ALLOWLIST = [
   'SSH_AUTH_SOCK',
   'NODE_EXTRA_CA_CERTS',
   // HTTP proxy vars — needed for corporate/enterprise environments where
-  // outbound traffic is routed through a forward proxy. Not secret-bearing.
+  // outbound traffic is routed through a forward proxy. Values are typically
+  // infrastructure URLs; note that proxy URLs can legally embed credentials
+  // (http://user:pass@proxy:8080) — avoid logging these values.
   'HTTP_PROXY',
   'HTTPS_PROXY',
   'NO_PROXY',
