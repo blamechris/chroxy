@@ -104,8 +104,10 @@ describe('session-handlers', () => {
       sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-1' }, ctx)
 
       assert.equal(client.activeSessionId, 'sess-1')
-      const [, sent] = ctx.send.lastCall
-      assert.equal(sent.type, 'session_switched')
+      // The handler also sends available_models after session_switched (#2956);
+      // look up session_switched by type rather than relying on lastCall order.
+      const sent = ctx._sent.find(m => m.type === 'session_switched')
+      assert.ok(sent, 'session_switched not sent')
       assert.equal(sent.sessionId, 'sess-1')
       assert.equal(sent.conversationId, 'conv-1')
     })
