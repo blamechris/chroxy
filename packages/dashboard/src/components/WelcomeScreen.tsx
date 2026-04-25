@@ -5,6 +5,7 @@
  * for resume, and keyboard shortcut hints. Replaces the blank
  * main-content area when session list is empty.
  */
+import { formatShortcutKeys } from '../utils/platform'
 
 export interface RecentSession {
   conversationId: string
@@ -42,9 +43,11 @@ function relativeTime(ts: number): string {
   return `${diffDay}d ago`
 }
 
-const shortcuts = [
-  { keys: 'Cmd+K', label: 'Command palette' },
-]
+function getShortcuts() {
+  return [
+    { keys: formatShortcutKeys('Cmd+K'), label: 'Command palette' },
+  ]
+}
 
 export function WelcomeScreen({
   onNewSession,
@@ -53,6 +56,7 @@ export function WelcomeScreen({
   className,
 }: WelcomeScreenProps) {
   const recent = recentSessions.slice(0, MAX_RECENT)
+  const shortcuts = getShortcuts()
 
   return (
     <div

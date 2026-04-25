@@ -92,4 +92,16 @@ describe('formatShortcutKeys', () => {
     // Guard against a naive replace that would mangle e.g. "Cmdr" or similar.
     expect(formatShortcutKeys('Cmdr')).toBe('Cmdr')
   })
+
+  it('rewrites tooltip-style strings on non-Mac', () => {
+    setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    expect(formatShortcutKeys('Cmd+\\')).toBe('Ctrl+\\')
+    expect(formatShortcutKeys('Cmd+,')).toBe('Ctrl+,')
+  })
+
+  it('keeps tooltip-style strings unchanged on Mac', () => {
+    setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+    expect(formatShortcutKeys('Cmd+\\')).toBe('Cmd+\\')
+    expect(formatShortcutKeys('Cmd+,')).toBe('Cmd+,')
+  })
 })
