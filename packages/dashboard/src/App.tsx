@@ -190,7 +190,7 @@ function ViewSwitcher({
         <button
           className={`view-tab${splitMode ? ' active' : ''}`}
           onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
-          type="button" title="Split view (Cmd+\)"
+          type="button" title={`Split view (${formatShortcutKeys('Cmd+\\')})`}
         >Split</button>
         <button className={`view-tab${viewMode === 'files' ? ' active' : ''}`} onClick={() => setViewMode('files')} type="button">Files</button>
         <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
@@ -235,6 +235,7 @@ export function App() {
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const connectedClients = useConnectionStore(s => s.connectedClients)
+  const pairingRefreshedCount = useConnectionStore(s => s.pairingRefreshedCount)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
@@ -775,6 +776,16 @@ export function App() {
     }
   }, [])
 
+  // Auto-refresh QR when the server regenerates the pairing ID (#2916).
+  // Only refresh while the modal is open — guarding on qrSvg would reopen
+  // the modal after the user closes it if qrSvg was not cleared on close.
+  useEffect(() => {
+    if (pairingRefreshedCount === 0) return
+    if (!qrModalOpen) return
+    handleShowQr()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairingRefreshedCount])
+
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
     sendPermissionResponse(requestId, 'allow')
     markPromptAnsweredByRequestId(requestId, 'Allowed')
@@ -1010,7 +1021,7 @@ export function App() {
             className="header-icon-btn"
             onClick={() => setSettingsOpen(true)}
             aria-label="Settings"
-            title="Settings (Cmd+,)"
+            title={`Settings (${formatShortcutKeys('Cmd+,')})`}
             type="button"
           >
             &#9881;
@@ -1238,7 +1249,7 @@ export function App() {
               disabled={!isConnected}
               isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
-              placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : 'Cmd+Enter'} to send)` : 'Connecting...'}
+              placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : formatShortcutKeys('Cmd+Enter')} to send)` : 'Connecting...'}
               controlledValue={inputDraftValue}
               onValueChange={handleDraftChange}
               filePickerFiles={filePickerFiles}

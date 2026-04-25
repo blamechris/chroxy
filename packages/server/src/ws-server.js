@@ -303,6 +303,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_updated', sessionId, name }        — session metadata updated
  *   { type: 'discovered_sessions', sessions }           — discovered local Claude sessions
  *   { type: 'pair_fail', reason }                       — pairing failed
+ *   { type: 'pairing_refreshed' }                       — pairing ID consumed; clients should re-fetch /qr (#2916)
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
@@ -593,6 +594,17 @@ export class WsServer {
       checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch((err) => {
         log.warn(`Failed to check latest npm version: ${err.message} (non-critical, update check skipped)`)
       })
+    }
+
+    // Wire PairingManager refresh events — broadcast pairing_refreshed to all
+    // authenticated dashboard clients so they can auto-refresh the QR code (#2916).
+    this._pairingRefreshedHandler = null
+    if (this._pairingManager) {
+      this._pairingRefreshedHandler = () => {
+        this._broadcast({ type: 'pairing_refreshed' })
+        log.debug('Broadcasted pairing_refreshed to all clients')
+      }
+      this._pairingManager.on('pairing_refreshed', this._pairingRefreshedHandler)
     }
 
     // Wire TokenManager rotation events — broadcast new token to all clients
@@ -1308,6 +1320,12 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
+    // Remove PairingManager listener to prevent post-shutdown broadcasts
+    if (this._pairingManager && this._pairingRefreshedHandler) {
+      this._pairingManager.off('pairing_refreshed', this._pairingRefreshedHandler)
+      this._pairingRefreshedHandler = null
+    }
+
     // Remove TokenManager listener to prevent post-shutdown broadcasts
     if (this._tokenManager && this._tokenRotatedHandler) {
       this._tokenManager.off('token_rotated', this._tokenRotatedHandler)
