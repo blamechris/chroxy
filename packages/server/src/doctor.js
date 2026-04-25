@@ -138,6 +138,13 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // node_modules/ when installed via `npm ci --workspace=@chroxy/server`.
   // The helper walks up the tree and uses createRequire as a reliable
   // proxy for whether deps are installed.
+  //
+  // Context-aware severity: when running inside a bundled .app (Tauri) or
+  // under the supervisor, a missing node_modules is unactionable for the
+  // end user — they can't run `npm install` to fix it, they need a new
+  // build or reinstall. In that context we downgrade to `warn` and provide
+  // an appropriate message. In a dev environment the original `fail` +
+  // "run npm install" message is preserved.
   if (typeof pkgDir !== 'string' || pkgDir.length === 0) {
     throw new TypeError(`pkgDir must be a non-empty string, got ${typeof pkgDir}`)
   }
@@ -149,11 +156,20 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   if (deps.ok) {
     checks.push({ name: 'Dependencies', status: 'pass', message: `resolved via ${deps.foundAt}` })
   } else {
-    checks.push({
-      name: 'Dependencies',
-      status: 'fail',
-      message: `${deps.message || 'dependencies not found'} — run npm install`,
-    })
+    const isBundledContext = process.env.CHROXY_BUNDLED === '1' || process.env.CHROXY_SUPERVISED === '1'
+    if (isBundledContext) {
+      checks.push({
+        name: 'Dependencies',
+        status: 'warn',
+        message: `${deps.message || 'dependencies not found'} — reinstall Chroxy or rebuild the app`,
+      })
+    } else {
+      checks.push({
+        name: 'Dependencies',
+        status: 'fail',
+        message: `${deps.message || 'dependencies not found'} — run npm install`,
+      })
+    }
   }
 
   // 7. Port availability

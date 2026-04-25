@@ -214,6 +214,87 @@ describe('runDoctorChecks', () => {
   })
 })
 
+describe('runDoctorChecks — bundled .app context (issue #2897)', () => {
+  it('Dependencies check is warn (not fail) when CHROXY_BUNDLED=1 and node_modules is missing', async () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-bundled-'))
+    const originalBundled = process.env.CHROXY_BUNDLED
+    try {
+      process.env.CHROXY_BUNDLED = '1'
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], pkgDir: emptyDir })
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      assert.equal(depsCheck.status, 'warn',
+        `expected warn in bundled context, got ${depsCheck.status}: ${depsCheck.message}`)
+      assert.ok(
+        depsCheck.message.includes('reinstall') || depsCheck.message.includes('rebuild'),
+        `expected actionable bundled message, got: ${depsCheck.message}`,
+      )
+    } finally {
+      if (originalBundled === undefined) delete process.env.CHROXY_BUNDLED
+      else process.env.CHROXY_BUNDLED = originalBundled
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Dependencies check is warn (not fail) when CHROXY_SUPERVISED=1 and node_modules is missing', async () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-supervised-'))
+    const originalSupervised = process.env.CHROXY_SUPERVISED
+    try {
+      process.env.CHROXY_SUPERVISED = '1'
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], pkgDir: emptyDir })
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      assert.equal(depsCheck.status, 'warn',
+        `expected warn in supervised context, got ${depsCheck.status}: ${depsCheck.message}`)
+    } finally {
+      if (originalSupervised === undefined) delete process.env.CHROXY_SUPERVISED
+      else process.env.CHROXY_SUPERVISED = originalSupervised
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Dependencies check still fails in dev context when node_modules is missing', async () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-dev-'))
+    const originalBundled = process.env.CHROXY_BUNDLED
+    const originalSupervised = process.env.CHROXY_SUPERVISED
+    try {
+      delete process.env.CHROXY_BUNDLED
+      delete process.env.CHROXY_SUPERVISED
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], pkgDir: emptyDir })
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      assert.equal(depsCheck.status, 'fail',
+        `expected fail in dev context, got ${depsCheck.status}: ${depsCheck.message}`)
+      assert.ok(
+        depsCheck.message.includes('npm install'),
+        `expected "npm install" hint in dev message, got: ${depsCheck.message}`,
+      )
+    } finally {
+      if (originalBundled === undefined) delete process.env.CHROXY_BUNDLED
+      else process.env.CHROXY_BUNDLED = originalBundled
+      if (originalSupervised === undefined) delete process.env.CHROXY_SUPERVISED
+      else process.env.CHROXY_SUPERVISED = originalSupervised
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Dependencies check passes in bundled context when deps are found normally', async () => {
+    // When deps ARE present, bundled context should still pass (not affect pass case)
+    const originalBundled = process.env.CHROXY_BUNDLED
+    try {
+      process.env.CHROXY_BUNDLED = '1'
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      assert.equal(depsCheck.status, 'pass',
+        `expected pass when deps found in bundled context, got ${depsCheck.status}: ${depsCheck.message}`)
+    } finally {
+      if (originalBundled === undefined) delete process.env.CHROXY_BUNDLED
+      else process.env.CHROXY_BUNDLED = originalBundled
+    }
+  })
+})
+
 describe('runDoctorChecks — provider awareness (issue #2951)', () => {
   it('gemini-only config does not include claude binary check', async () => {
     const { checks } = await runDoctorChecks({ providers: ['gemini'] })
