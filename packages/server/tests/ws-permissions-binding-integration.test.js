@@ -22,12 +22,20 @@ import { settingsHandlers } from '../src/handlers/settings-handlers.js'
  *
  *   1. POSITIVE: a bound client whose `boundSessionId` matches the owner
  *      session of the hook permission can approve it. No SESSION_TOKEN_MISMATCH
- *      error is emitted; `respondToPermission(requestId, decision)` is invoked
- *      on the owner CliSession.
+ *      error is emitted; the legacy `pendingPermissions` resolver runs and
+ *      ends the original HTTP response with `{decision: 'allow'}`.
  *
  *   2. NEGATIVE: a bound client whose `boundSessionId` does NOT match is
- *      rejected with the unified SESSION_TOKEN_MISMATCH payload. No
- *      `respondToPermission` call reaches any session.
+ *      rejected with the unified SESSION_TOKEN_MISMATCH payload. The legacy
+ *      HTTP response is NOT closed and the pending entry is preserved so
+ *      the legitimate client can still respond.
+ *
+ * The owner session fake intentionally omits `respondToPermission` because
+ * the production CliSession does not implement it — only SdkSession does.
+ * Legacy hook permissions resolve through `ctx.permissions.resolvePermission`
+ * (the shared pendingPermissions store), so wiring the fake any other way
+ * would let the test pass via the SDK branch even if the legacy branch
+ * regressed (raised by Copilot review on PR #3035).
  *
  * A regression that re-broke either branch (e.g. dropping the map write
  * in ws-permissions.js, or tightening the binding check in
@@ -73,24 +81,23 @@ function makeWs() {
 }
 
 /**
- * Build a CliSession-like fake. We don't need the real CliSession here —
- * the round-trip we care about is `permission_response → respondToPermission`,
- * which only requires the session to expose `respondToPermission` and a
- * `_pendingPermissions` map keyed by requestId. notifyPermissionPending /
- * notifyPermissionResolved are no-ops at this layer.
+ * Build a legacy CliSession-like fake. The production legacy HTTP hook path
+ * does NOT resolve permissions through `session.respondToPermission()` —
+ * CliSession does not implement that method (only SdkSession does). Legacy
+ * hook permissions are resolved through the shared `pendingPermissions`
+ * store via `ctx.permissions.resolvePermission()`, which closes the HTTP
+ * response with `{decision}`.
+ *
+ * Deliberately omit `respondToPermission` and `_pendingPermissions` here so
+ * `settingsHandlers.permission_response` falls through the SDK branch and
+ * exercises the same legacy resolver used in production. Surfaced by
+ * Copilot review on PR #3035.
  */
 function makeOwnerSession() {
-  const session = {
-    _pendingPermissions: new Map(),
-    respondToPermission: mock.fn((requestId, _decision) => {
-      session._pendingPermissions.delete(requestId)
-    }),
-    notifyPermissionPending: mock.fn((requestId) => {
-      session._pendingPermissions.set(requestId, true)
-    }),
+  return {
+    notifyPermissionPending: mock.fn(),
     notifyPermissionResolved: mock.fn(),
   }
-  return session
 }
 
 /**
@@ -131,8 +138,12 @@ function buildPermissionHandler({ ownerSessionId, ownerSession, hookSecret, sess
  * pendingPermissions, plus a sessionManager that resolves session ids to
  * { session, name } entries (so buildSessionTokenMismatchPayload can look
  * up boundSessionName for the rejection payload).
+ *
+ * `permissions` is the real createPermissionHandler return value — the
+ * legacy HTTP hook path calls `ctx.permissions.resolvePermission(requestId,
+ * decision)` to end the original HTTP response with `{decision}`.
  */
-function buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermissions }) {
+function buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermissions, permissions }) {
   const sent = []
   const broadcasts = []
   return {
@@ -142,8 +153,8 @@ function buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermiss
     sessionManager,
     permissionSessionMap,
     pendingPermissions,
+    permissions,
     permissionAudit: null,
-    permissions: null,
     _sent: sent,
     _broadcasts: broadcasts,
   }
@@ -222,15 +233,24 @@ describe('Integration: paired-client legacy CLI permission round-trip (#3029)', 
     // reject every approval from a bound client (the #2832 bug).
     assert.equal(permissionSessionMap.get(requestId), OWNER_SESSION_ID)
 
-    // The hook permission must end up registered as "pending" on the owner
-    // session so the response handler's hasPending check sees it. Mirrors
-    // CliSession.notifyPermissionPending wiring.
-    assert.equal(ownerSession._pendingPermissions.has(requestId), true)
+    // notifyPermissionPending is invoked on the owner session so its
+    // inactivity timer pauses while the user decides (#2831).
+    assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+    assert.equal(ownerSession.notifyPermissionPending.mock.calls[0].arguments[0], requestId)
+
+    // The legacy pendingPermissions store has the resolver entry that
+    // ends the HTTP response when permission_response arrives.
+    assert.equal(pendingPermissions.has(requestId), true)
 
     // Step 2: paired (bound) WS client sends permission_response. The client
     // authenticated with a pairing-issued token bound to OWNER_SESSION_ID,
     // which matches the map entry — binding check must pass.
-    const responseCtx = buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermissions })
+    const responseCtx = buildResponseCtx({
+      sessionManager,
+      permissionSessionMap,
+      pendingPermissions,
+      permissions: permHandler,
+    })
     const ws = makeWs()
     const client = {
       id: 'paired-client-1',
@@ -247,23 +267,29 @@ describe('Integration: paired-client legacy CLI permission round-trip (#3029)', 
     )
 
     // Positive assertions:
-    //  - NO SESSION_TOKEN_MISMATCH was sent on the WS
-    //  - respondToPermission was invoked on the owner session with the
-    //    correct args
-    //  - the map entry was consumed (so a duplicate response can't double-resolve)
+    //  - NO SESSION_TOKEN_MISMATCH error was emitted (binding check passed)
+    //  - the legacy HTTP response ended with {decision: 'allow'} — proves
+    //    the handler actually traversed the legacy resolver branch via
+    //    ctx.permissions.resolvePermission()
+    //  - the pendingPermissions entry was consumed
+    //  - the permissionSessionMap entry was consumed
     const errorMessages = ws._messages.filter((m) => m.type === 'error')
     assert.equal(errorMessages.length, 0, `unexpected error messages: ${JSON.stringify(errorMessages)}`)
     const tokenMismatches = responseCtx._sent.filter((m) => m.code === 'SESSION_TOKEN_MISMATCH')
     assert.equal(tokenMismatches.length, 0, 'binding check must NOT reject when boundSessionId matches')
 
-    assert.equal(ownerSession.respondToPermission.mock.calls.length, 1)
-    assert.deepEqual(ownerSession.respondToPermission.mock.calls[0].arguments, [requestId, 'allow'])
+    assert.equal(res.statusCode, 200)
+    assert.deepEqual(JSON.parse(res.body), { decision: 'allow' })
 
-    // The other session must not be touched.
-    assert.equal(otherSession.respondToPermission.mock.calls.length, 0)
-
-    // Map entry consumed.
+    assert.equal(pendingPermissions.has(requestId), false)
     assert.equal(permissionSessionMap.has(requestId), false)
+
+    // notifyPermissionResolved fires from the cleanup path so the inactivity
+    // timer resumes for the owner session.
+    assert.equal(ownerSession.notifyPermissionResolved.mock.calls.length, 1)
+    // The other session must not be touched.
+    assert.equal(otherSession.notifyPermissionPending.mock.calls.length, 0)
+    assert.equal(otherSession.notifyPermissionResolved.mock.calls.length, 0)
   })
 
   it('negative: bound client with non-matching boundSessionId is rejected with SESSION_TOKEN_MISMATCH', async () => {
@@ -279,11 +305,17 @@ describe('Integration: paired-client legacy CLI permission round-trip (#3029)', 
 
     const { requestId } = permOpts.broadcastFn.mock.calls[0].arguments[0]
     assert.equal(permissionSessionMap.get(requestId), OWNER_SESSION_ID)
+    assert.equal(pendingPermissions.has(requestId), true)
 
     // Step 2: a DIFFERENT paired client tries to approve it. This client's
     // pairing token is bound to OTHER_SESSION_ID, which does NOT match the
     // map entry — binding check must reject.
-    const responseCtx = buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermissions })
+    const responseCtx = buildResponseCtx({
+      sessionManager,
+      permissionSessionMap,
+      pendingPermissions,
+      permissions: permHandler,
+    })
     const ws = makeWs()
     const client = {
       id: 'paired-client-other',
@@ -303,9 +335,11 @@ describe('Integration: paired-client legacy CLI permission round-trip (#3029)', 
     //  - exactly one SESSION_TOKEN_MISMATCH error sent (unified payload)
     //  - the rejection carries boundSessionId + boundSessionName for the
     //    bound client's actual session, not the request's owner
-    //  - NO respondToPermission call reaches either session
-    //  - the map entry is preserved so the legitimate client can still
-    //    respond (don't consume on reject — see settings-handlers.js comment)
+    //  - the legacy HTTP response is NOT closed (resolver did not fire)
+    //  - the pendingPermissions entry is preserved so the legitimate
+    //    client can still respond
+    //  - the permissionSessionMap entry is preserved (don't consume on
+    //    reject — see settings-handlers.js comment)
     assert.equal(responseCtx._sent.length, 1)
     const sent = responseCtx._sent[0]
     assert.equal(sent.type, 'error')
@@ -315,10 +349,10 @@ describe('Integration: paired-client legacy CLI permission round-trip (#3029)', 
     assert.equal(sent.boundSessionId, OTHER_SESSION_ID)
     assert.equal(sent.boundSessionName, 'OtherSession')
 
-    assert.equal(ownerSession.respondToPermission.mock.calls.length, 0)
-    assert.equal(otherSession.respondToPermission.mock.calls.length, 0)
+    assert.equal(res.statusCode, null, 'HTTP response must NOT be closed when binding check rejects')
+    assert.equal(res.body, null, 'HTTP response body must NOT be written when binding check rejects')
 
-    // Map entry preserved for the legitimate client's eventual response.
-    assert.equal(permissionSessionMap.get(requestId), OWNER_SESSION_ID)
+    assert.equal(pendingPermissions.has(requestId), true, 'pending entry preserved for legitimate client')
+    assert.equal(permissionSessionMap.get(requestId), OWNER_SESSION_ID, 'map entry preserved for legitimate client')
   })
 })
