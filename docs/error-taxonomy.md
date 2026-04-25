@@ -98,10 +98,12 @@ a banner, clear per-session loading state. The optional `code` (e.g.
 
 ### `SESSION_TOKEN_MISMATCH` — canonical four-field contract
 
-When the rejection code is `SESSION_TOKEN_MISMATCH`, the inner payload
-always contains exactly four fields regardless of which envelope carries it
+When the rejection code is `SESSION_TOKEN_MISMATCH`, the payload always
+includes these four fields regardless of which envelope carries it
 (`session_error`, `web_task_error`, the generic `error` type, or the HTTP
-403 body):
+403 body). Individual envelopes may include additional keys (e.g. `type`,
+`requestId`, `taskId`, or a legacy `error` string on the HTTP path) but the
+four fields below are guaranteed on every surface:
 
 ```json
 {
@@ -116,17 +118,17 @@ always contains exactly four fields regardless of which envelope carries it
 | --- | --- | --- |
 | `code` | `string` | Always `"SESSION_TOKEN_MISMATCH"`. |
 | `message` | `string` | Human-readable description, suitable for display. |
-| `boundSessionId` | `string\|null` | The session ID the client token is bound to. `null` when the client has no binding (e.g. the HTTP fallback path) or when the binding is stale and unresolvable. |
-| `boundSessionName` | `string\|null` | Display name of the bound session, looked up at emit time. `null` when `boundSessionId` is null or the session can no longer be resolved. |
+| `boundSessionId` | `string|null` | The session ID the client token is bound to. `null` only when the caller passed no binding (e.g. the HTTP fallback path passes an empty/null value); a stale or unresolvable session ID is preserved as-is. |
+| `boundSessionName` | `string|null` | Display name of the bound session, looked up at emit time. `null` when `boundSessionId` is null or the session can no longer be resolved. |
 
 **Envelope parity.** The same four fields appear on every emit path:
 
 | Envelope | Source | Trigger |
 | --- | --- | --- |
 | `type: "session_error"` | `handlers/session-handlers.js`, `handlers/conversation-handlers.js`, `handlers/feature-handlers.js` | Bound client attempts to access a different session via the named-session flow. |
-| `type: "error"` (via `sendError`) | `handlers/settings-handlers.js` — `permission_response` | Bound client submits a response for a permission request that originated on a different session. |
+| `type: "error"` (via `ctx.send`) | `handlers/settings-handlers.js` — `permission_response` | Bound client submits a response for a permission request that originated on a different session. |
 | `type: "web_task_error"` | `handlers/feature-handlers.js` — `web_task_*` dispatch | Bound client issues a web-task command against a session it is not bound to. |
-| HTTP `403` JSON body | `packages/server/src/http-routes.js` — `POST /permission-response` | Legacy HTTP response path; session mismatch detected on the bound-session check. |
+| HTTP `403` JSON body | `packages/server/src/ws-permissions.js` — `handlePermissionResponseHttp` (routed via `http-routes.js` `POST /permission-response`) | Legacy HTTP response path; session mismatch detected on the bound-session check. |
 
 **Server-side source of truth.** Every emit site calls
 `buildSessionTokenMismatchPayload()` in
