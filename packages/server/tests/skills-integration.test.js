@@ -37,9 +37,10 @@ import { waitFor } from './test-helpers.js'
 // ---------------------------------------------------------------------------
 //
 // A node script that, when executed, writes its argv to a file (path supplied
-// via the CHROXY_SHIM_RECORD env var) and emits a single turn.completed JSONL
-// line so the parent's readline loop terminates cleanly. The shim exits 0 to
-// avoid an `error` emit racing with the test assertion.
+// via the CHROXY_SHIM_RECORD env var) and emits two JSONL lines: `turn.completed`
+// for Codex and `result` for Gemini, so each provider's readline loop terminates
+// cleanly without a fallback emit. The shim exits 0 to avoid an `error` emit
+// racing with the test assertion.
 
 function writeShim(shimPath) {
   writeFileSync(shimPath, [
@@ -68,6 +69,10 @@ describe('skills integration — true end-to-end', () => {
   let recordPath
   let savedOpenAi
   let savedGemini
+  // Track every session created in a test so afterEach can destroy() any that
+  // a failing test left running — otherwise an orphaned shim subprocess can
+  // keep the node:test worker alive past timeout.
+  let activeSessions
 
   before(() => {
     savedOpenAi = process.env.OPENAI_API_KEY
@@ -95,9 +100,17 @@ describe('skills integration — true end-to-end', () => {
     shimBin = join(shimDir, 'shim.mjs')
     recordPath = join(shimDir, 'recorded-argv.json')
     writeShim(shimBin)
+
+    activeSessions = []
   })
 
   afterEach(() => {
+    // Destroy any session a failing test left behind so the spawned shim
+    // subprocess doesn't outlive the test and pin the node:test worker open.
+    for (const session of activeSessions) {
+      try { session.destroy() } catch { /* already destroyed */ }
+    }
+    activeSessions = []
     rmSync(skillsDir, { recursive: true, force: true })
     rmSync(shimDir, { recursive: true, force: true })
   })
@@ -154,6 +167,9 @@ describe('skills integration — true end-to-end', () => {
      * spawn() call received.
      */
     function makeShimmedCodex(opts) {
+      // Override `resolvedBinary` to node so the shim script becomes the
+      // actual program executed; the wrapped `_buildArgs` below prepends the
+      // shim path so node runs it with the real codex argv as its argv.
       class ShimCodex extends CodexSession {
         static get resolvedBinary() { return process.execPath }
       }
@@ -167,12 +183,15 @@ describe('skills integration — true end-to-end', () => {
       // sanitized env, so wrap it to include CHROXY_SHIM_RECORD.
       const origBuildEnv = session._buildChildEnv.bind(session)
       session._buildChildEnv = () => ({ ...origBuildEnv(), CHROXY_SHIM_RECORD: recordPath })
+      activeSessions.push(session)
+      // Use the real start() — exercises the API-key env-var check and sets
+      // _processReady through the public path rather than poking the flag.
+      session.start()
       return session
     }
 
     it('first sendMessage spawns codex with skill text prepended to user message', async () => {
       const session = makeShimmedCodex({ cwd: '/tmp', skillsDir })
-      session._processReady = true
 
       await session.sendMessage('hello world')
 
@@ -187,7 +206,8 @@ describe('skills integration — true end-to-end', () => {
       })
 
       const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-      // Layout: [<shimBin>, 'exec', <effectiveText>, '--json']
+      // The shim records `process.argv.slice(2)`, so `recordedArgv` is the
+      // actual Codex args: ['exec', <effectiveText>, '--json', ...]
       assert.equal(recordedArgv[0], 'exec', 'first arg should be `exec`')
       assert.equal(recordedArgv[2], '--json', 'third arg should be `--json`')
 
@@ -206,7 +226,6 @@ describe('skills integration — true end-to-end', () => {
 
     it('second sendMessage does NOT re-prepend skill text', async () => {
       const session = makeShimmedCodex({ cwd: '/tmp', skillsDir })
-      session._processReady = true
 
       // First call — prepends.
       await session.sendMessage('first')
@@ -231,7 +250,6 @@ describe('skills integration — true end-to-end', () => {
       const empty = mkdtempSync(join(tmpdir(), 'chroxy-skills-empty-codex-'))
       try {
         const session = makeShimmedCodex({ cwd: '/tmp', skillsDir: empty })
-        session._processReady = true
 
         await session.sendMessage('plain message')
         await waitFor(() => existsSync(recordPath), { label: 'shim record' })
@@ -252,6 +270,7 @@ describe('skills integration — true end-to-end', () => {
 
   describe('GeminiSession sendMessage e2e', () => {
     function makeShimmedGemini(opts) {
+      // See makeShimmedCodex — same pattern: node-as-binary + shim-as-script.
       class ShimGemini extends GeminiSession {
         static get resolvedBinary() { return process.execPath }
       }
@@ -260,12 +279,15 @@ describe('skills integration — true end-to-end', () => {
       session._buildArgs = (text) => [shimBin, ...origBuildArgs(text)]
       const origBuildEnv = session._buildChildEnv.bind(session)
       session._buildChildEnv = () => ({ ...origBuildEnv(), CHROXY_SHIM_RECORD: recordPath })
+      activeSessions.push(session)
+      // Use the real start() — exercises the API-key env-var check and sets
+      // _processReady through the public path rather than poking the flag.
+      session.start()
       return session
     }
 
     it('first sendMessage spawns gemini with skill text prepended to user message', async () => {
       const session = makeShimmedGemini({ cwd: '/tmp', skillsDir })
-      session._processReady = true
 
       await session.sendMessage('hello world')
 
@@ -279,8 +301,8 @@ describe('skills integration — true end-to-end', () => {
       })
 
       const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-      // GeminiSession._buildArgs: ['-p', text, '--output-format', 'stream-json', '-y', ...]
-      // After shim prefix: [<shimBin>, '-p', <text>, '--output-format', 'stream-json', '-y', ...]
+      // The shim records `process.argv.slice(2)`, so `recordedArgv` is the
+      // actual Gemini args: ['-p', <text>, '--output-format', 'stream-json', '-y', ...]
       assert.equal(recordedArgv[0], '-p', 'first arg must be `-p`')
       const sentText = recordedArgv[1]
       assert.equal(recordedArgv[2], '--output-format')
@@ -297,7 +319,6 @@ describe('skills integration — true end-to-end', () => {
 
     it('second sendMessage does NOT re-prepend skill text', async () => {
       const session = makeShimmedGemini({ cwd: '/tmp', skillsDir })
-      session._processReady = true
 
       await session.sendMessage('first')
       await waitFor(() => existsSync(recordPath), { label: 'first record' })
@@ -319,7 +340,6 @@ describe('skills integration — true end-to-end', () => {
       const empty = mkdtempSync(join(tmpdir(), 'chroxy-skills-empty-gem-'))
       try {
         const session = makeShimmedGemini({ cwd: '/tmp', skillsDir: empty })
-        session._processReady = true
 
         await session.sendMessage('plain message')
         await waitFor(() => existsSync(recordPath), { label: 'shim record' })
