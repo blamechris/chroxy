@@ -14,7 +14,9 @@ const CACHE_TTL_MS = 5000       // cache results for 5 seconds
 let _cache = null
 let _cacheKey = null
 let _cacheTime = 0
+// In-flight scan promise — only reused when the requested cacheKey matches.
 let _pendingScan = null
+let _pendingScanKey = null
 
 /**
  * Clear the scan results cache. Useful for testing or forcing a fresh scan.
@@ -24,6 +26,7 @@ export function clearScanCache() {
   _cacheKey = null
   _cacheTime = 0
   _pendingScan = null
+  _pendingScanKey = null
 }
 
 /**
@@ -206,13 +209,16 @@ export async function scanConversations(opts = {}) {
     return maxResults > 0 ? _cache.slice(0, maxResults) : [..._cache]
   }
 
-  // Deduplicate concurrent scans — subsequent callers wait for the first scan
-  if (_pendingScan) {
+  // Deduplicate concurrent scans for the same key — subsequent callers with the
+  // same directory set share the in-flight promise instead of spawning a second scan.
+  // Callers with a different key start their own scan immediately.
+  if (_pendingScan && _pendingScanKey === cacheKey) {
     const conversations = await _pendingScan
     return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
   }
 
   // Scan all directories and merge results
+  _pendingScanKey = cacheKey
   _pendingScan = (async () => {
     const perDirResults = await Promise.all(dirs.map(d => performScan(d)))
     // Flatten, sort merged results by most recently modified
@@ -226,6 +232,7 @@ export async function scanConversations(opts = {}) {
     conversations = await _pendingScan
   } finally {
     _pendingScan = null
+    _pendingScanKey = null
   }
 
   // Update cache
