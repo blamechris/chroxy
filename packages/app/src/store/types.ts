@@ -211,130 +211,137 @@ export interface SessionNotification {
 }
 
 /**
- * ConnectionState — Zustand store shape for the mobile app's connection layer.
- *
- * NOTE (issue #2662, phase 1): This interface is a god object with ~90 members.
- * Phase 1 of the decomposition is documentation-only: the logical groups below
- * are called out so future phases can extract them into sub-interfaces /
- * Zustand slices without re-reading the whole file to find boundaries.
- *
- * Logical groups:
- *  1. Connection & socket          — `socket` (lifecycle phase/url/token live
- *                                     in useConnectionLifecycleStore)
- *  2. Sessions & multi-client      — sessions, activeSessionId, sessionStates,
- *                                     myClientId, connectedClients,
- *                                     primaryClientId, followMode
- *  3. Models & permissions         — availableModels, defaultModelId,
- *                                     availablePermissionModes,
- *                                     pendingPermissionConfirm
- *  4. Cost & budget                — totalCost, costBudget
- *  5. Server events & notifications — serverErrors, sessionNotifications,
- *                                     shutdownReason/restartEtaMs/restartingSince,
- *                                     timeoutWarning
- *  6. Discovery data from server   — slashCommands, customAgents,
- *                                     conversationHistory*, searchResults*,
- *                                     checkpoints, webFeatures, webTasks
- *  7. UI & view state              — viewMode, viewingCachedSession,
- *                                     inputSettings, terminalBuffer,
- *                                     terminalRawBuffer
- *  8. Actions                      — connect/disconnect, send*, request*,
- *                                     session lifecycle, checkpoint/plan/git/
- *                                     file/diff callbacks and requests
- *
- * Encryption state (sharedKey, nonces, pendingKeyPair, pendingSalt) lives on
- * the connection context in connection-lifecycle.ts, not on this interface.
- * A matching `EncryptionState` sub-interface will be extracted there in a
- * follow-up phase.
+ * Group 1 — Connection & socket. Lifecycle phase/URL/token live in
+ * `useConnectionLifecycleStore`; this interface holds only the live socket.
  */
-export interface ConnectionState {
-  // --- Group 1: Connection & socket ---------------------------------------
-  // Connection socket (lifecycle fields live in useConnectionLifecycleStore)
+export interface ConnectionSocketData {
   socket: WebSocket | null;
+}
 
-  // Multi-session state
+/**
+ * Group 2 — Sessions & multi-client awareness. The session list, active
+ * session, per-session UI state, and the connected-clients roster used for
+ * follow-mode/primary-client logic.
+ */
+export interface MultiClientSessionData {
   sessions: SessionInfo[];
   activeSessionId: string | null;
   sessionStates: Record<string, SessionState>;
-
-  // Cost tracking
-  totalCost: number | null;
-  costBudget: number | null;
-
-  // Available models from server (CLI mode)
-  availableModels: ModelInfo[];
-  // Server-reported default model short id (from SDK)
-  defaultModelId: string | null;
-
-  // Available permission modes from server (CLI mode)
-  availablePermissionModes: { id: string; label: string }[];
-
-  // Available providers from server (for session creation UI)
-  availableProviders: ProviderInfo[];
-
   // Connected clients (multi-client awareness)
   myClientId: string | null;
   connectedClients: ConnectedClient[];
   primaryClientId: string | null;
-
   // Follow mode: auto-switch sessions when another client switches
   followMode: boolean;
+}
 
+/**
+ * Group 3 — Models & permissions. Provider/model catalogues fetched from the
+ * server plus the pending auto-mode confirmation prompt.
+ */
+export interface ModelsAndPermissionsData {
+  // Available models from server (CLI mode)
+  availableModels: ModelInfo[];
+  // Server-reported default model short id (from SDK)
+  defaultModelId: string | null;
+  // Available permission modes from server (CLI mode)
+  availablePermissionModes: { id: string; label: string }[];
+  // Available providers from server (for session creation UI)
+  availableProviders: ProviderInfo[];
+  // Pending auto permission mode confirmation from server
+  pendingPermissionConfirm: { mode: string; warning: string } | null;
+}
+
+/**
+ * Group 4 — Cost & budget. Cumulative cost tracking + the configured budget
+ * cap broadcast by the server.
+ */
+export interface CostBudgetData {
+  totalCost: number | null;
+  costBudget: number | null;
+}
+
+/**
+ * Group 5 — Server events & notifications. Errors, session-level
+ * notifications (permission/question/completed/etc.), shutdown banner state,
+ * and the per-session idle-timeout warning.
+ */
+export interface ServerNotificationData {
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
-
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
-
-  // Claude Code Web (cloud task delegation)
-  webFeatures: WebFeatureStatus;
-  webTasks: WebTask[];
-
   // Shutdown state (reason + ETA for restarting banner countdown)
   shutdownReason: 'restart' | 'shutdown' | 'crash' | null;
   restartEtaMs: number | null;
   restartingSince: number | null;
-
-  // Pending auto permission mode confirmation from server
-  pendingPermissionConfirm: { mode: string; warning: string } | null;
-
   // Session timeout warning (from server session_warning event)
   timeoutWarning: { sessionId: string; sessionName: string; remainingMs: number; receivedAt: number } | null;
+}
 
+/**
+ * Group 6 — Discovery data fetched from the server: slash commands, custom
+ * agents, conversation history, cross-session search, checkpoints, and the
+ * Claude Code Web task surface.
+ */
+export interface DiscoveryData {
   // Slash commands from server
   slashCommands: SlashCommand[];
-
   // Custom agents from server
   customAgents: CustomAgent[];
-
   // Conversation history (for resuming past conversations)
   conversationHistory: ConversationSummary[];
   conversationHistoryLoading: boolean;
   conversationHistoryError: string | null;
-
   // Cross-session search
   searchResults: SearchResult[];
   searchLoading: boolean;
   searchQuery: string;
   searchError: string | null;
-
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];
+  // Claude Code Web (cloud task delegation)
+  webFeatures: WebFeatureStatus;
+  webTasks: WebTask[];
+}
 
+/**
+ * Group 7 — UI & view state. View-mode toggles, offline-cached-session flag,
+ * input settings, and the dual terminal buffers (stripped + raw ANSI).
+ */
+export interface UIViewData {
   // Offline cached session viewing (shows session screen when disconnected)
   viewingCachedSession: boolean;
-
   // View mode
   viewMode: 'chat' | 'terminal' | 'files' | 'system';
-
   // Input settings
   inputSettings: InputSettings;
-
   // Raw terminal output buffer (ANSI-stripped, for plain text fallback)
   terminalBuffer: string;
-
   // Raw terminal buffer with ANSI codes intact (for xterm.js replay on view switch)
   terminalRawBuffer: string;
+}
 
+/**
+ * ConnectionState — Zustand store shape for the mobile app's connection layer.
+ *
+ * Composed from per-group data sub-interfaces (#3050 / phase 3a of #2662) so
+ * the shape is discoverable without scanning the whole file. Actions are
+ * still flat for now; phase 3b (#3051) will split them into per-group action
+ * sub-interfaces.
+ *
+ * Encryption state (`encryptionState`, `pendingKeyPair`, `pendingSalt`) lives
+ * on `MessageHandlerContext` in `message-handler.ts` (#3049 extracted that
+ * `EncryptionContext` sub-interface) — not on this store.
+ */
+export interface ConnectionState extends
+  ConnectionSocketData,
+  MultiClientSessionData,
+  ModelsAndPermissionsData,
+  CostBudgetData,
+  ServerNotificationData,
+  DiscoveryData,
+  UIViewData {
   // Actions
   connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
   disconnect: () => void;
