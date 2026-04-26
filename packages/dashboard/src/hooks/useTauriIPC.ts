@@ -52,3 +52,24 @@ export async function setTunnelMode(mode: string): Promise<void> {
   if (!invoke) return
   await invoke('set_tunnel_mode', { mode })
 }
+
+/**
+ * Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
+ * Returns null when not in Tauri context (so the toggle can fall back
+ * to a sensible default), false when the key is unset or the file
+ * doesn't exist, true when explicitly enabled.
+ */
+export async function getAllowAutoPermissionMode(): Promise<boolean | null> {
+  return tauriInvoke<boolean>('get_allow_auto_permission_mode')
+}
+
+/**
+ * Write `allowAutoPermissionMode` to `~/.chroxy/config.json`. Throws on
+ * IO/parse errors so the UI can surface the failure instead of silently
+ * leaving the toggle in the wrong state.
+ */
+export async function setAllowAutoPermissionMode(value: boolean): Promise<void> {
+  const invoke = getTauriInvoke()
+  if (!invoke) return
+  await invoke('set_allow_auto_permission_mode', { value })
+}
