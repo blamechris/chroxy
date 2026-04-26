@@ -186,17 +186,9 @@ export function setLastConnectedUrl(url: string | null): void {
 // History replay flags
 // ---------------------------------------------------------------------------
 let _receivingHistoryReplay = false;
-let _isSessionSwitchReplay = false;
-let _pendingSwitchSessionId: string | null = null;
-
-export function setPendingSwitchSessionId(id: string | null): void {
-  _pendingSwitchSessionId = id;
-}
 
 export function resetReplayFlags(): void {
   _receivingHistoryReplay = false;
-  _isSessionSwitchReplay = false;
-  _pendingSwitchSessionId = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -642,12 +634,9 @@ function handleSessionUpdated(msg: Record<string, unknown>, get: MsgGet, set: Ms
 
 function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const sessionId = msg.sessionId as string;
-  // Only treat as session-switch replay if the user explicitly initiated it
-  // (auth-triggered session_switched on reconnect should use reconnect dedup)
-  if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
-    _isSessionSwitchReplay = true;
-  }
-  _pendingSwitchSessionId = null;
+  // Per-id dedup runs on every history replay path (#2901), so we no longer
+  // need a "pending-switch" hint to distinguish user-initiated session switches
+  // from auth-triggered ones.
   const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
   set((state: ConnectionState) => {
     // Initialize session state if it doesn't exist
@@ -1213,8 +1202,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'auth_ok': {
       // Reset replay flags — fresh auth means clean slate
       _receivingHistoryReplay = false;
-      _isSessionSwitchReplay = false;
-      _pendingSwitchSessionId = null;
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // Extract server context from auth_ok
@@ -1506,7 +1493,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _receivingHistoryReplay = true;
       // Full history replay (from request_full_history): clear messages before replay
       if (msg.fullHistory === true) {
-        _isSessionSwitchReplay = true;
         const targetId = (msg.sessionId as string) || get().activeSessionId;
         if (targetId && get().sessionStates[targetId]) {
           updateSession(targetId, () => ({ messages: [] }));
@@ -1527,7 +1513,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'history_replay_end':
       _receivingHistoryReplay = false;
-      _isSessionSwitchReplay = false;
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
       updateActiveSession((ss) => {
