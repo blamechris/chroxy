@@ -296,7 +296,7 @@ With green tests: remove duplication, improve naming, simplify logic, follow pro
 
 # Lint/typecheck commands
 # App: cd packages/app && npx tsc --noEmit
-# Dashboard: cd packages/server && npm run dashboard:typecheck
+# Dashboard: cd packages/dashboard && npm run typecheck
 
 ### Commit and PR
 
