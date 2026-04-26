@@ -1624,3 +1624,101 @@ describe('clearAllPendingPermissions (#2405)', () => {
     assert.equal(sdkCleared.length, 1, 'SDK session clearAll() should be called on close()')
   })
 })
+
+describe('audit trail for auto-deny resolution paths (#3057)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function makeManager() {
+    const manager = new EventEmitter()
+    manager.getSession = () => null
+    manager.listSessions = () => []
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', { get: () => null, configurable: true })
+    return manager
+  }
+
+  it('records auto-deny audit entries with reason from session_event', () => {
+    const manager = makeManager()
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    // Simulate the unified pipeline emitting permission_resolved for each
+    // auto-deny path. The audit listener must record one entry per emit.
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: { requestId: 'req-timeout', decision: 'deny', reason: 'timeout' },
+    })
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: { requestId: 'req-abort', decision: 'deny', reason: 'aborted' },
+    })
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: { requestId: 'req-cleared', decision: 'deny', reason: 'cleared' },
+    })
+
+    const entries = server._permissionAudit.query({ type: 'decision' })
+    assert.equal(entries.length, 3)
+    assert.deepStrictEqual(
+      entries.map(e => ({ requestId: e.requestId, reason: e.reason, clientId: e.clientId, decision: e.decision })),
+      [
+        { requestId: 'req-timeout', reason: 'timeout', clientId: null, decision: 'deny' },
+        { requestId: 'req-abort',   reason: 'aborted', clientId: null, decision: 'deny' },
+        { requestId: 'req-cleared', reason: 'cleared', clientId: null, decision: 'deny' },
+      ],
+    )
+  })
+
+  it('skips user-initiated resolutions to avoid double-auditing the inline WS path', () => {
+    const manager = makeManager()
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    // User responses are audited inline in settings-handlers.js with the
+    // responding clientId. The pipeline-level listener must skip these so
+    // they don't appear twice in the log.
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: { requestId: 'req-user', decision: 'allow', reason: 'user' },
+    })
+
+    const entries = server._permissionAudit.query({ type: 'decision' })
+    assert.equal(entries.length, 0,
+      'reason=user must not be audited from the pipeline; the inline path owns those')
+  })
+
+  it('ignores non-permission_resolved session_event traffic', () => {
+    const manager = makeManager()
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    // The listener filter is event === 'permission_resolved'. Verify other
+    // session events don't accidentally produce audit entries.
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_request',
+      data: { requestId: 'req-1', tool: 'Bash' },
+    })
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'stream_start',
+      data: { messageId: 'msg-1' },
+    })
+
+    const entries = server._permissionAudit.query()
+    assert.equal(entries.length, 0)
+  })
+})

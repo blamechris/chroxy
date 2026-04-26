@@ -578,6 +578,24 @@ export class WsServer {
           if (sid === sessionId) this._questionSessionMap.delete(key)
         }
       })
+
+      // #3057: audit auto-deny resolution paths (timeout / aborted / cleared).
+      // User-initiated resolutions are already audited inline in
+      // settings-handlers.js / ws-permissions.js with the responding client's
+      // id. Auto-deny paths have no client — record them here with clientId
+      // null so forensic queries see the full lifecycle of every permission
+      // request, not just the ones a user touched.
+      sessionManager.on('session_event', ({ sessionId, event, data }) => {
+        if (event !== 'permission_resolved') return
+        if (!data || data.reason === 'user') return
+        this._permissionAudit.logDecision({
+          clientId: null,
+          sessionId,
+          requestId: data.requestId,
+          decision: data.decision,
+          reason: data.reason,
+        })
+      })
     }
 
     // Dev server preview tunneling
