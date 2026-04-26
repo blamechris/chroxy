@@ -414,6 +414,30 @@ describe('handleSessionMessage', () => {
       }, ctx)
       assert.equal(entryX.session.respondToPermission.callCount, 1)
     })
+
+    // #2905: pin the cross-client dismissal contract. The responder is excluded
+    // by the (c) => c.id !== client.id filter; every other authenticated client
+    // must still receive the permission_resolved message so its prompt clears.
+    it('broadcasts permission_resolved to other clients on resolve (#2905)', async () => {
+      const ctx = makeCtx()
+      ctx.permissionSessionMap.set('req-broadcast', 'sess-1')
+      addSession(ctx, 'sess-1')
+      const responder = makeClient({ id: 'responder', activeSessionId: 'sess-1' })
+      await handleSessionMessage(WS, responder, {
+        type: 'permission_response',
+        requestId: 'req-broadcast',
+        decision: 'allow',
+      }, ctx)
+      assert.equal(ctx.broadcast.mock.calls.length, 1)
+      const [msg, filter] = ctx.broadcast.mock.calls[0].arguments
+      assert.equal(msg.type, 'permission_resolved')
+      assert.equal(msg.requestId, 'req-broadcast')
+      assert.equal(msg.decision, 'allow')
+      assert.equal(msg.sessionId, 'sess-1')
+      // Filter excludes the responder so they don't get an echo of their own ack
+      assert.equal(filter({ id: 'responder' }), false)
+      assert.equal(filter({ id: 'other-client' }), true)
+    })
   })
 
   describe('user_question_response', () => {
