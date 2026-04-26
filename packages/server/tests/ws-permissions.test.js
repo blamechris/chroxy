@@ -676,6 +676,85 @@ describe('createPermissionHandler', () => {
       assert.equal(res.statusCode, 200)
       assert.equal(respondToPermission.mock.calls.length, 1)
     })
+
+    // #2905: when one client resolves a permission via the HTTP fallback (e.g.
+    // an iOS notification action while WS was offline), every other connected
+    // client must still receive a `permission_resolved` broadcast so they can
+    // dismiss the prompt. Pre-fix the WS path in settings-handlers.js was the
+    // only emitter; both HTTP branches resolved silently and the second
+    // client was left stuck on the ★ permission bubble.
+    it('broadcasts permission_resolved to other clients when SDK path resolves (#2905)', async () => {
+      const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
+      const respondToPermission = mock.fn(() => true)
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'sdk-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(opts.broadcastFn.mock.calls.length, 1,
+        'permission_resolved must be broadcast so other clients dismiss the prompt')
+      const [msg] = opts.broadcastFn.mock.calls[0].arguments
+      assert.equal(msg.type, 'permission_resolved')
+      assert.equal(msg.requestId, 'sdk-req')
+      assert.equal(msg.decision, 'allow')
+      assert.equal(msg.sessionId, 'sess-sdk')
+    })
+
+    it('broadcasts permission_resolved when legacy path resolves (#2905)', async () => {
+      const pendingPermissions = new Map()
+      pendingPermissions.set('leg-req', { resolve: mock.fn(), timer: null })
+      const opts = makeHandlerOpts({ pendingPermissions })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'leg-req', decision: 'deny' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(opts.broadcastFn.mock.calls.length, 1,
+        'permission_resolved must broadcast for legacy HTTP-held permissions too')
+      const [msg] = opts.broadcastFn.mock.calls[0].arguments
+      assert.equal(msg.type, 'permission_resolved')
+      assert.equal(msg.requestId, 'leg-req')
+      assert.equal(msg.decision, 'deny')
+      // Genuinely unmapped legacy request: sessionId must be absent so clients
+      // don't try to route to a non-existent session.
+      assert.equal(Object.prototype.hasOwnProperty.call(msg, 'sessionId'), false,
+        'unmapped legacy requests must not carry a sessionId')
+    })
+
+    it('broadcasts permission_resolved with sessionId when legacy path has a mapping (#2905, Copilot review)', async () => {
+      // Edge case: permissionSessionMap had an entry but the SDK branch couldn't
+      // resolve (e.g. session manager was null, or the session lacked
+      // respondToPermission). The legacy fallback then handles the request and
+      // should still broadcast a sessionId for client routing consistency.
+      const pendingPermissions = new Map()
+      pendingPermissions.set('mapped-leg-req', { resolve: mock.fn(), timer: null })
+      const permissionSessionMap = new Map([['mapped-leg-req', 'sess-mapped']])
+      const opts = makeHandlerOpts({
+        pendingPermissions,
+        permissionSessionMap,
+        // No session manager — forces the SDK branch to fall through
+        getSessionManager: mock.fn(() => null),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'mapped-leg-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(opts.broadcastFn.mock.calls.length, 1)
+      const [msg] = opts.broadcastFn.mock.calls[0].arguments
+      assert.equal(msg.sessionId, 'sess-mapped',
+        'mapped legacy requests must carry sessionId so clients route consistently with the SDK and WS paths')
+    })
   })
 })
 

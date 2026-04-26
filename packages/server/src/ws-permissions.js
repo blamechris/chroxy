@@ -311,6 +311,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           permissionSessionMap.delete(requestId)
           if (resolved) {
             log.info(`Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
+            // #2905: notify other clients so they dismiss the prompt. The WS
+            // path in settings-handlers.js already broadcasts on
+            // `permission_response`; mirror that here so resolutions arriving
+            // via the HTTP fallback (e.g. lockscreen notification action) keep
+            // every connected client in sync.
+            broadcastFn({ type: 'permission_resolved', requestId, decision, sessionId: originSessionId })
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ ok: true }))
           } else {
@@ -332,6 +338,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         permissionSessionMap.delete(requestId)
         resolvePermission(requestId, decision)
         log.info(`Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
+        // #2905: same broadcast for the legacy HTTP path. Include sessionId
+        // when the request was mapped (keeps the wire contract consistent
+        // with the SDK branch and settings-handlers.js for clients that route
+        // by session); omit it for genuinely unmapped legacy requests.
+        broadcastFn({
+          type: 'permission_resolved',
+          requestId,
+          decision,
+          ...(originSessionId ? { sessionId: originSessionId } : {}),
+        })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
       } else {
