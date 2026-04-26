@@ -25,6 +25,7 @@ import { SessionBar, type SessionTabData, type SessionStatus } from './component
 import { StatusBar } from './components/StatusBar'
 import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
 import { PermissionPrompt } from './components/PermissionPrompt'
+import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
 import { PlanApproval } from './components/PlanApproval'
@@ -332,6 +333,25 @@ export function App() {
   const [sidebarFilter, setSidebarFilter] = useState('')
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+
+  // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
+  const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const transcriptResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const handleCopyTranscript = useCallback(() => {
+    const text = formatTranscript(storeMessages)
+    if (!text) return
+    void navigator.clipboard.writeText(text).then(() => {
+      setTranscriptCopied(true)
+      if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
+      transcriptResetTimerRef.current = setTimeout(() => setTranscriptCopied(false), 1500)
+    }).catch(() => {
+      // Clipboard rejected (denied permissions or insecure context). Surface
+      // the failure quietly — the user can copy manually from the chat view.
+    })
+  }, [storeMessages])
+  useEffect(() => () => {
+    if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
+  }, [])
   const [showConsoleTab, setShowConsoleTab] = useState(() => {
     return loadPersistedShowConsoleTab()
   })
@@ -443,6 +463,12 @@ export function App() {
         setSettingsOpen(prev => !prev)
         return
       }
+      // Cmd+Shift+T: copy chat transcript (#3073)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 't') {
+        e.preventDefault()
+        handleCopyTranscript()
+        return
+      }
       // Cmd+.: interrupt active session
       if ((e.metaKey || e.ctrlKey) && e.key === '.') {
         e.preventDefault()
@@ -480,7 +506,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt])
+  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -1017,6 +1043,18 @@ export function App() {
           />
         </div>
         <div className="header-right">
+          {viewMode === 'chat' && storeMessages.length > 0 && (
+            <button
+              className="header-icon-btn"
+              onClick={handleCopyTranscript}
+              aria-label="Copy chat transcript"
+              data-testid="btn-copy-transcript"
+              title={transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`}
+              type="button"
+            >
+              {transcriptCopied ? '✓' : '⎘'}
+            </button>
+          )}
           <button
             className="header-icon-btn"
             onClick={() => setSettingsOpen(true)}
