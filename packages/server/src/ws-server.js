@@ -508,10 +508,17 @@ export class WsServer {
       get benignPairAttempts() { return self._benignPairAttempts },
       get pairingManager() { return self._pairingManager },
       get activeSessionId() {
-        // Provide the server's default/first session ID so pairing can bind
-        // the issued token to the session that was active at pairing time.
-        if (self.defaultSessionId) return self.defaultSessionId
-        if (self.sessionManager) return self.sessionManager.firstSessionId || null
+        // Linking-mode default: return null so paired tokens are NOT auto-bound
+        // to a specific session. The QR shown by the dashboard is intended as a
+        // general "link this device" code that lets the app create/switch
+        // sessions freely. Auto-binding to defaultSessionId/firstSessionId
+        // (the prior behavior) silently produced session-locked tokens, so
+        // every newly-paired phone hit "Device paired to one session" the
+        // moment it tried to open another tab.
+        //
+        // Session-bound pairings are still possible via the per-client
+        // boundSessionId path; a future "Share this session" UI can opt in by
+        // creating a session-scoped pairing through a different code path.
         return null
       },
       send: sendFn,

@@ -4156,3 +4156,96 @@ describe('CORS origin restrictions (#1533)', () => {
   })
 })
 
+
+describe('WsServer linking-mode pairing default (#3079)', () => {
+  // Regression guard: WsServer's _authCtx.activeSessionId getter must always
+  // return null so paired tokens are NOT silently bound to a session, even
+  // when the server has a defaultSessionId / firstSessionId. Auto-binding
+  // produced "Device paired to one session" the moment a phone tried to open
+  // another tab — see ws-server.js:510 comment block.
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('_authCtx.activeSessionId returns null even when defaultSessionId is set', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-linking-default',
+      cliSession: createMockSession(),
+      defaultSessionId: 'sess-default-xyz',
+      authRequired: true,
+    })
+    assert.equal(server.defaultSessionId, 'sess-default-xyz',
+      'sanity: defaultSessionId is wired through')
+    assert.equal(server._authCtx.activeSessionId, null,
+      'linking-mode default: activeSessionId must be null even with defaultSessionId set')
+  })
+
+  it('_authCtx.activeSessionId returns null when sessionManager has firstSessionId', () => {
+    const { manager } = (() => {
+      const mgr = new EventEmitter()
+      const mockSession = createMockSession()
+      mockSession.cwd = '/tmp/project'
+      const sessionsMap = new Map([['first-sess', { session: mockSession, name: 'S', cwd: '/tmp', type: 'cli', isBusy: false }]])
+      mgr.getSession = (id) => sessionsMap.get(id)
+      mgr.listSessions = () => [...sessionsMap.entries()].map(([id, e]) => ({ sessionId: id, name: e.name, cwd: e.cwd, type: e.type, isBusy: e.isBusy }))
+      mgr.getHistory = () => []
+      mgr.recordUserInput = () => {}
+      mgr.touchActivity = () => {}
+      mgr.getFullHistoryAsync = async () => []
+      mgr.isBudgetPaused = () => false
+      mgr.getSessionContext = async () => null
+      Object.defineProperty(mgr, 'firstSessionId', { get: () => 'first-sess' })
+      return { manager: mgr }
+    })()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-linking-first',
+      sessionManager: manager,
+      authRequired: true,
+    })
+    assert.equal(server._authCtx.activeSessionId, null,
+      'linking-mode default: activeSessionId must be null even when sessionManager exposes firstSessionId')
+  })
+
+  it('pairing flow calls PairingManager.validatePairing with null sessionId despite defaultSessionId', async () => {
+    // End-to-end: enable pairing, complete a pair handshake, and verify the
+    // pairingManager received null (not 'sess-default-xyz') as the second arg.
+    const validateCalls = []
+    const pairingManager = new EventEmitter()
+    pairingManager.validatePairing = (pairingId, sessionId) => {
+      validateCalls.push({ pairingId, sessionId })
+      return { valid: true, sessionToken: 'session-token-abc' }
+    }
+    pairingManager.getCurrentId = () => null
+    pairingManager.consumeIfRefreshGrace = () => null
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-linking-pair',
+      cliSession: createMockSession(),
+      defaultSessionId: 'sess-default-xyz',
+      pairingManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'pair', pairingId: 'pair-id-1' })
+    await waitForMessage(messages, 'auth_ok')
+
+    assert.equal(validateCalls.length, 1, 'validatePairing called exactly once')
+    assert.equal(validateCalls[0].pairingId, 'pair-id-1')
+    assert.equal(validateCalls[0].sessionId, null,
+      'linking-mode default: pairing must NOT auto-bind to defaultSessionId')
+
+    ws.close()
+  })
+})
+

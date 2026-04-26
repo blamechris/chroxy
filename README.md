@@ -60,6 +60,31 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
 ## Quick Start
 
+### Provider credentials
+
+Chroxy reads provider API keys from environment variables at server startup. The default Claude provider uses your existing `claude` CLI login (no extra setup), but Gemini and Codex require explicit keys:
+
+| Provider | Env var | Get a key |
+|----------|---------|-----------|
+| Claude (default) | Use `claude` CLI login *or* `ANTHROPIC_API_KEY` | https://console.anthropic.com/settings/keys |
+| Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
+| Codex (OpenAI) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
+
+Add the keys you'll use to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
+
+```bash
+export OPENAI_API_KEY=sk-...
+export GEMINI_API_KEY=...
+```
+
+Or pass them inline when starting the server:
+
+```bash
+OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+```
+
+If you create a session for a provider whose key isn't set, the server returns a clear error (e.g. *"Codex: required credential not set — OPENAI_API_KEY"*). See [docs/providers.md](docs/providers.md) for per-provider capabilities and full env var reference.
+
 ### Server (on your dev machine)
 
 ```bash

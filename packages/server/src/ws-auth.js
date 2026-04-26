@@ -254,7 +254,14 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
-  // Pass the current active session ID so the issued token is bound to that session.
+  // Linking-mode default (#3079): WsServer's activeSessionId getter always
+  // returns null, so the issued token is NOT auto-bound to a session. The QR
+  // shown by the dashboard is a general "link this device" code; the app can
+  // create or switch sessions freely on its own. Session-scoped pairings can
+  // still be issued via a different code path (per-client boundSessionId) —
+  // this signature keeps the parameter so future opt-in callers can pass a
+  // real sessionId. See packages/server/src/ws-server.js:510 for the full
+  // rationale.
   const result = pairingManager.validatePairing(msg.pairingId, activeSessionId || null)
   if (result.valid) {
     // Check protocol version BEFORE marking authenticated
