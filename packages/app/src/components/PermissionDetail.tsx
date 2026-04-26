@@ -469,22 +469,22 @@ export function PermissionPill({
   onExpand: () => void;
 }) {
   const answer = message.answered || '';
-  const isAllowed = answer === 'allow' || answer === 'allowAlways' || answer === 'allowSession';
   const isDenied = answer === 'deny';
+  // Anything that isn't an explicit deny is shown as "Allowed" (#3078).
+  // History-replay marks unresolved-on-replay prompts with the opaque value
+  // '(resolved)' so the prompt collapses into a pill; treating that value as
+  // "Allowed" keeps the label consistent with the live `permission_resolved`
+  // path (decision: 'allow' | 'allowAlways' | 'allowSession') and matches the
+  // dashboard's PermissionPrompt behavior. Without this, a single missed
+  // permission_resolved during reconnect produces a stray "Resolved" pill in
+  // a sequence that otherwise reads as "Allowed".
+  const isAllowed = !isDenied;
   const summary = getPermissionSummary(message.tool, message.toolInput);
 
-  const pillStyle = isAllowed
-    ? styles.permissionPillAllowed
-    : isDenied
-      ? styles.permissionPillDenied
-      : styles.permissionPillResolved;
-  const textStyle = isAllowed
-    ? styles.permissionPillTextAllowed
-    : isDenied
-      ? styles.permissionPillTextDenied
-      : styles.permissionPillTextResolved;
-  const icon = isAllowed ? ICON_CHECK : isDenied ? ICON_CLOSE : ICON_CHECK;
-  const statusLabel = isAllowed ? 'Allowed' : isDenied ? 'Denied' : 'Resolved';
+  const pillStyle = isAllowed ? styles.permissionPillAllowed : styles.permissionPillDenied;
+  const textStyle = isAllowed ? styles.permissionPillTextAllowed : styles.permissionPillTextDenied;
+  const icon = isAllowed ? ICON_CHECK : ICON_CLOSE;
+  const statusLabel = isAllowed ? 'Allowed' : 'Denied';
 
   return (
     <TouchableOpacity
