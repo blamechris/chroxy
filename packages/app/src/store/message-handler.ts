@@ -211,6 +211,45 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
 }
 
 // ---------------------------------------------------------------------------
+// Bound-session mismatch Alert helper
+//
+// Both `session_error` (#2904) and `web_task_error` (#2944) surface the same
+// actionable Alert when the server reports a SESSION_TOKEN_MISMATCH with a
+// bound session name attached. The body copy differs slightly between the two
+// surfaces (chat vs. web tasks) but the title, button layout, and the
+// disconnect/clearSavedConnection side-effects are identical. Centralising
+// here keeps the Disconnect behaviour in lockstep across surfaces (#3022).
+// ---------------------------------------------------------------------------
+function showBoundSessionMismatchAlert(bodyText: string): void {
+  Alert.alert(
+    'Device paired to one session',
+    bodyText,
+    [
+      { text: 'OK', style: 'cancel' },
+      {
+        text: 'Disconnect',
+        style: 'destructive',
+        onPress: () => {
+          // Close the active socket, reset in-memory state AND
+          // forget the stored credentials — otherwise ConnectScreen
+          // auto-reconnects with the same bound token and the user
+          // is stuck. `clearSavedCredentials` alone is a SecureStore
+          // wipe; it doesn't touch the live socket. `disconnect()`
+          // handles the socket + in-memory state;
+          // `clearSavedConnection()` wipes storage + state.
+          const s = getStore().getState();
+          try { s.disconnect(); } catch { /* best-effort */ }
+          const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
+          if (typeof clearSaved === 'function') {
+            clearSaved.call(s).catch(() => {});
+          }
+        },
+      },
+    ],
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Connection context (set by connect(), read by handleMessage)
 // ---------------------------------------------------------------------------
 let _connectionContext: ConnectionContext | null = null;
@@ -1041,31 +1080,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           typeof msg.boundSessionName === 'string' &&
           msg.boundSessionName.length > 0
         ) {
-          Alert.alert(
-            'Device paired to one session',
+          showBoundSessionMismatchAlert(
             `This device is paired to session "${msg.boundSessionName}" and can only talk to that session. To create or open other sessions, disconnect and scan a fresh QR code from the desktop.`,
-            [
-              { text: 'OK', style: 'cancel' },
-              {
-                text: 'Disconnect',
-                style: 'destructive',
-                onPress: () => {
-                  // Close the active socket, reset in-memory state AND
-                  // forget the stored credentials — otherwise ConnectScreen
-                  // auto-reconnects with the same bound token and the user
-                  // is stuck. `clearSavedCredentials` alone is a SecureStore
-                  // wipe; it doesn't touch the live socket. `disconnect()`
-                  // handles the socket + in-memory state;
-                  // `clearSavedConnection()` wipes storage + state.
-                  const s = getStore().getState();
-                  try { s.disconnect(); } catch { /* best-effort */ }
-                  const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
-                  if (typeof clearSaved === 'function') {
-                    clearSaved.call(s).catch(() => {});
-                  }
-                },
-              },
-            ],
           );
         } else {
           Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
@@ -2256,24 +2272,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         typeof msg.boundSessionName === 'string' &&
         msg.boundSessionName.length > 0
       ) {
-        Alert.alert(
-          'Device paired to one session',
+        showBoundSessionMismatchAlert(
           `This device is paired to session "${msg.boundSessionName}" and can only perform web tasks in that session. To use other sessions, disconnect and scan a fresh QR code from the desktop.`,
-          [
-            { text: 'OK', style: 'cancel' },
-            {
-              text: 'Disconnect',
-              style: 'destructive',
-              onPress: () => {
-                const s = getStore().getState();
-                try { s.disconnect(); } catch { /* best-effort */ }
-                const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
-                if (typeof clearSaved === 'function') {
-                  clearSaved.call(s).catch(() => {});
-                }
-              },
-            },
-          ],
         );
         break;
       }

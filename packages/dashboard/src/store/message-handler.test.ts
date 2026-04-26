@@ -415,6 +415,138 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('history replay: tool_start dedup (#2901)', () => {
+    function seedWithTool(toolId: string) {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: {
+              ...createEmptySessionState(),
+              messages: [
+                { id: toolId, type: 'tool_use', content: 'Bash: ls', tool: 'Bash', timestamp: 1 },
+              ],
+            },
+          },
+        }),
+      )
+      setStore(store)
+    }
+
+    // Regression: on plain reconnect replay (not a session switch), the
+    // dashboard's `tool_start` handler had a blanket
+    // `_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0`
+    // early return that fired against the legacy flat `messages` array — but
+    // multi-session state keeps that array empty, so the guard never tripped
+    // and replayed tool_use entries appended on top of the live copies. The
+    // per-id dedup at the same handler now runs on every replay path.
+    it('deduplicates tool_use by stable messageId during plain reconnect replay', () => {
+      seedWithTool('tool-1')
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          input: 'ls',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('tool-1')
+    })
+
+    it('deduplicates tool_use by stable messageId during session-switch replay', () => {
+      seedWithTool('tool-1')
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+        ctx() as any,
+      )
+      // session-switch replay clears messages first, so re-seed a tool to
+      // simulate the replay sending the same tool a client already cached
+      // (e.g. from a previous fetch). We bypass the clear by re-injecting.
+      ;(store.getState() as any).sessionStates.s1.messages = [
+        { id: 'tool-1', type: 'tool_use', content: 'Bash: ls', tool: 'Bash', timestamp: 1 },
+      ]
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          input: 'ls',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+    })
+
+    it('appends new tool_use whose id is not yet in cache (legitimate replay)', () => {
+      seedWithTool('tool-1')
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-2',
+          tool: 'Read',
+          input: 'file.ts',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(2)
+      expect(msgs[1].id).toBe('tool-2')
+      expect(msgs[1].tool).toBe('Read')
+    })
+
+    it('does not blanket-skip tool_start replay when legacy messages list is non-empty', () => {
+      // Pre-fix: legacy `messages.length > 0` guard would drop this entire
+      // tool_start because the flat array had something. Per-id dedup lets
+      // genuinely new tools through.
+      seedWithTool('tool-1')
+      ;(store.getState() as any).messages = [
+        { id: 'legacy', type: 'system', content: 'x', timestamp: 1 },
+      ]
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-3',
+          tool: 'Edit',
+          input: 'patch',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(2)
+      expect(msgs[1].id).toBe('tool-3')
+    })
+
+    it('appends tool_use normally outside any history replay (live event)', () => {
+      seedWithTool('tool-1')
+      // No history_replay_start — this is a live tool_start
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1', // same id, still appended because not in replay
+          tool: 'Bash',
+          input: 'ls',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      // Live duplicates are unusual but not handled here — only replay dedups.
+      expect(msgs).toHaveLength(2)
+    })
+  })
+
   describe('pairing_refreshed dispatch (#2916)', () => {
     it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
       store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))
