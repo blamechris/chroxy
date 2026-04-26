@@ -1414,7 +1414,15 @@ setStore({
 
 // Persist session messages, active session, session list when they change
 let _prevActiveSessionId: string | null = null;
-const _prevMessageCounts: Record<string, number> = {};
+// Reference-equality cache. Tracking just `messages.length` (the previous
+// implementation) missed the case where stream_delta events appended content
+// to an existing response message without changing the array length: the new
+// content never reached AsyncStorage, and on a cold restart the user saw the
+// "Claude" header with an empty body for the most recent response (#3076).
+// flushPendingDeltas always produces a new messages-array reference when
+// content changes, so reference comparison catches both new entries and
+// in-place content updates.
+const _prevMessages: Record<string, ChatMessage[]> = {};
 let _prevTerminalBufferLen = 0;
 let _prevSessions: SessionInfo[] = [];
 useConnectionStore.subscribe((state) => {
@@ -1425,18 +1433,19 @@ useConnectionStore.subscribe((state) => {
       const prevSs = state.sessionStates[_prevActiveSessionId];
       if (prevSs) {
         persistSessionMessages(_prevActiveSessionId, prevSs.messages);
-        _prevMessageCounts[_prevActiveSessionId] = prevSs.messages.length;
+        _prevMessages[_prevActiveSessionId] = prevSs.messages;
       }
     }
     _prevActiveSessionId = state.activeSessionId;
     persistActiveSession(state.activeSessionId).catch(() => {});
   }
 
-  // Persist messages for ALL sessions with changed message counts (not just active)
+  // Persist messages for ALL sessions whose message array reference changed.
+  // The persister is debounced per-session (500ms) so streaming many deltas
+  // collapses into a single write.
   for (const [sessionId, ss] of Object.entries(state.sessionStates)) {
-    const prevCount = _prevMessageCounts[sessionId] ?? 0;
-    if (ss.messages.length !== prevCount) {
-      _prevMessageCounts[sessionId] = ss.messages.length;
+    if (ss.messages !== _prevMessages[sessionId]) {
+      _prevMessages[sessionId] = ss.messages;
       persistSessionMessages(sessionId, ss.messages);
     }
   }
