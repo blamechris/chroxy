@@ -9,17 +9,24 @@ const log = createLogger('models')
 /** Default context window for unknown models */
 export const DEFAULT_CONTEXT_WINDOW = 200_000
 
+/** Suffix the Claude CLI uses to mark the explicit 1M-context variant */
+export const ONE_M_SUFFIX = '[1m]'
+
 /**
  * Static context-window heuristic used at cold start before the SDK reports.
- * Opus 4.6+ has 1M; most other Claude models have 200k. The SDK sends
- * authoritative values in `SDKResultSuccess.modelUsage[*].contextWindow`
- * after each turn — registries opportunistically correct themselves via
- * `updateContextWindow()` so wrong guesses only surface for the first turn.
+ * Opus 4.6+ has 1M; most other Claude models have 200k. Any id carrying the
+ * explicit `[1m]` CLI suffix is a 1M-context variant regardless of the base
+ * model. The SDK sends authoritative values in
+ * `SDKResultSuccess.modelUsage[*].contextWindow` after each turn — registries
+ * opportunistically correct themselves via `updateContextWindow()` so wrong
+ * guesses only surface for the first turn.
  *
  * Exported so Claude providers (SdkSession/CliSession) can reuse it in
  * their `getModelMetadata()` implementations.
  */
 export function resolveClaudeContextWindow(fullId) {
+  if (typeof fullId !== 'string') return DEFAULT_CONTEXT_WINDOW
+  if (fullId.endsWith(ONE_M_SUFFIX)) return 1_000_000
   if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
   if (fullId.includes('opus-4-7') || fullId.includes('opus-4.7')) return 1_000_000
   return DEFAULT_CONTEXT_WINDOW
@@ -40,6 +47,10 @@ export function claudeDeriveId(fullId) {
 // version in the claude CLI, so these entries stay valid across releases.
 // Dated full IDs are intentionally avoided here — the SDK's supportedModels()
 // is the source of truth for concrete version identifiers.
+//
+// These also seed the merge step in `updateModels()` so that a stale or
+// minimal SDK response (e.g. only reporting 4.6 models) still surfaces the
+// newer 4.7 chip in the picker (#3075).
 //
 // Deep-frozen so callers of getModels() can't mutate the module-level constant
 // via the returned array reference.
@@ -122,15 +133,19 @@ export function canonicalStringify(value) {
 
 /**
  * Derive a human-readable label from a stripped model ID.
- * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4"
+ * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4",
+ * "opus-4-7[1m]" → "Opus 4.7 (1M)"
  */
 function humanizeModelId(id) {
-  let clean = id.replace(/-\d{8,}$/, '')
+  const oneM = id.endsWith(ONE_M_SUFFIX)
+  let clean = oneM ? id.slice(0, -ONE_M_SUFFIX.length) : id
+  clean = clean.replace(/-\d{8,}$/, '')
   const parts = clean.split('-')
   if (parts.length === 0) return id
   const family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1)
   const version = parts.slice(1).join('.')
-  return version ? `${family} ${version}` : family
+  const base = version ? `${family} ${version}` : family
+  return oneM ? `${base} (1M)` : base
 }
 
 /**
@@ -287,6 +302,50 @@ export function createModelsRegistry(hooks = {}) {
         }
         return converted
       }
+
+      // Merge fallback entries that the SDK omitted so the picker stays
+      // useful when the CLI under-reports (#3075 — observed on Opus 4.7,
+      // where supportedModels() returned only the 4.6 family). Match on
+      // fullId — fallback's id is a short alias (e.g. `opus`) that would
+      // otherwise collide with a derived id of the same family.
+      const seenFullIds = new Set(converted.map(m => m.fullId))
+      for (const fb of fallbackModels) {
+        if (!seenFullIds.has(fb.fullId)) {
+          // Re-derive the short id with the registry's hook so non-Claude
+          // providers don't accidentally inherit Claude's `claude-` strip.
+          const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
+          const id = providerMeta?.id ?? deriveIdFn(fb.fullId)
+          const label = providerMeta?.label || humanizeModelId(id)
+          const contextWindow = contextWindowOverrides.get(fb.fullId)
+            ?? providerMeta?.contextWindow
+            ?? fb.contextWindow
+            ?? resolveContextWindowFn(fb.fullId)
+          converted.push({ id, label, fullId: fb.fullId, contextWindow })
+          seenFullIds.add(fb.fullId)
+        }
+      }
+
+      // Synthesize 1M-context variants for any model with a >=1M context
+      // window that doesn't already have an explicit `[1m]` entry. The CLI
+      // accepts `claude-*[1m]` as a separate model id (verified against the
+      // claude binary), so the picker should surface it as a distinct chip
+      // even though `supportedModels()` doesn't list it (#3075).
+      const variants = []
+      for (const m of converted) {
+        if (!m.fullId || m.fullId.endsWith(ONE_M_SUFFIX)) continue
+        if (m.contextWindow < 1_000_000) continue
+        const variantFullId = `${m.fullId}${ONE_M_SUFFIX}`
+        if (seenFullIds.has(variantFullId)) continue
+        const variantId = `${m.id}${ONE_M_SUFFIX}`
+        variants.push({
+          id: variantId,
+          label: humanizeModelId(variantId),
+          fullId: variantFullId,
+          contextWindow: 1_000_000,
+        })
+        seenFullIds.add(variantFullId)
+      }
+      converted.push(...variants)
 
       applyModels(converted, nextDefault)
       return converted

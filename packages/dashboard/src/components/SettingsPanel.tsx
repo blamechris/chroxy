@@ -11,7 +11,18 @@ import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 import { isTauri } from '../utils/tauri'
-import { getTunnelMode, setTunnelMode, restartServer, getServerInfo } from '../hooks/useTauriIPC'
+import {
+  getTunnelMode,
+  setTunnelMode,
+  restartServer,
+  getServerInfo,
+  getAllowAutoPermissionMode,
+  setAllowAutoPermissionMode,
+} from '../hooks/useTauriIPC'
+
+/** Confirmation copy from issue #3077 — keep verbatim. */
+const AUTO_PERMISSION_CONFIRM_MESSAGE =
+  'Auto-permission mode disables all per-tool prompts for non-paired clients. Continue?'
 
 export interface SettingsPanelProps {
   isOpen: boolean
@@ -57,12 +68,19 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
   const [restarting, setRestarting] = useState(false)
+  const [allowAutoPerm, setAllowAutoPerm] = useState<boolean>(false)
+  const [autoPermError, setAutoPermError] = useState<string | null>(null)
+  const [autoPermDirty, setAutoPermDirty] = useState<boolean>(false)
+  const [autoPermSaving, setAutoPermSaving] = useState<boolean>(false)
 
   // Load tunnel mode from Tauri settings and running server on open
   useEffect(() => {
     if (!isOpen || !inTauri) return
     setTunnelError(null)
     setRestarting(false)
+    setAutoPermError(null)
+    setAutoPermDirty(false)
+    setAutoPermSaving(false)
     // Read saved setting (what user selected)
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
@@ -71,7 +89,38 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     getServerInfo().then(info => {
       if (info?.tunnelMode) setServerTunnelMode(info.tunnelMode)
     })
+    // Read current auto-permission flag from ~/.chroxy/config.json
+    getAllowAutoPermissionMode().then(value => {
+      if (value !== null) setAllowAutoPerm(value)
+    }).catch(err => {
+      setAutoPermError(err instanceof Error ? err.message : String(err))
+    })
   }, [isOpen, inTauri])
+
+  const handleToggleAutoPerm = useCallback(async (next: boolean) => {
+    setAutoPermError(null)
+    // Confirm only when ENABLING — disabling auto-mode is always safe.
+    if (next) {
+      // window.confirm is synchronous and Tauri-compatible. The dashboard
+      // already relies on it elsewhere for destructive actions.
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm(AUTO_PERMISSION_CONFIRM_MESSAGE)
+        : true
+      if (!ok) return
+    }
+    const previous = allowAutoPerm
+    setAllowAutoPerm(next)
+    setAutoPermSaving(true)
+    try {
+      await setAllowAutoPermissionMode(next)
+      setAutoPermDirty(true)
+    } catch (err) {
+      setAllowAutoPerm(previous)
+      setAutoPermError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAutoPermSaving(false)
+    }
+  }, [allowAutoPerm])
 
   const handleTunnelModeChange = useCallback(async (mode: string) => {
     setTunnelError(null)
@@ -228,6 +277,45 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                   onChange={(e) => onToggleConsoleTab(e.target.checked)}
                 />
               </div>
+            </section>
+          )}
+
+          {inTauri && (
+            <section className="settings-section">
+              <h3>Security</h3>
+              <div className="settings-field">
+                <label htmlFor="allow-auto-perm">Allow auto-permission mode</label>
+                <input
+                  id="allow-auto-perm"
+                  type="checkbox"
+                  checked={allowAutoPerm}
+                  disabled={autoPermSaving}
+                  onChange={(e) => handleToggleAutoPerm(e.target.checked)}
+                />
+              </div>
+              <p className="settings-help">
+                When enabled, sessions on the host can switch to auto-permission
+                mode (no per-tool prompts). Paired QR clients are always blocked
+                from this regardless of the toggle.
+              </p>
+              {autoPermError && (
+                <p className="tunnel-mode-error" role="alert">{autoPermError}</p>
+              )}
+              {autoPermDirty && !autoPermError && (
+                <button
+                  type="button"
+                  className="tunnel-restart-btn"
+                  disabled={restarting}
+                  onClick={async () => {
+                    setRestarting(true)
+                    await restartServer()
+                    setAutoPermDirty(false)
+                    setTimeout(() => setRestarting(false), 3000)
+                  }}
+                >
+                  {restarting ? 'Restarting...' : 'Restart Server to Apply'}
+                </button>
+              )}
             </section>
           )}
 

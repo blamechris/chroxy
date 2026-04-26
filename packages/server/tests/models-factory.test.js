@@ -47,7 +47,7 @@ describe('createModelsRegistry', () => {
     ]
     registry.updateModels(sdkModels)
 
-    assert.equal(registry.getModels().length, 1)
+    // SDK entry comes first; fallback merge + 1m synthesis appends more.
     assert.equal(registry.getModels()[0].fullId, 'claude-test-model')
     assert.equal(registry.resolveModelId('test-model'), 'claude-test-model')
     assert.ok(registry.getAllowedModelIds().has('test-model'))
@@ -89,7 +89,9 @@ describe('createModelsRegistry', () => {
     registry.updateModels([
       { value: 'claude-test', displayName: 'Test', description: '' },
     ])
-    assert.equal(registry.getModels().length, 1)
+    // After updateModels, registry holds SDK entry + merged fallbacks/1m
+    // variants — verify the SDK entry is present, then reset.
+    assert.equal(registry.getModels()[0].fullId, 'claude-test')
 
     registry.resetModels()
     assert.ok(registry.getModels().length >= 1)
@@ -157,8 +159,7 @@ describe('createModelsRegistry isolation', () => {
       { value: 'claude-alpha', displayName: 'Alpha', description: '' },
     ])
 
-    // Instance a should have the new model
-    assert.equal(a.getModels().length, 1)
+    // Instance a should have the new model (plus merged fallbacks)
     assert.equal(a.getModels()[0].fullId, 'claude-alpha')
 
     // Instance b should still have defaults
@@ -181,8 +182,7 @@ describe('createModelsRegistry isolation', () => {
     // a should be back to defaults
     assert.ok(a.getModels().length >= 1)
 
-    // b should still have its custom model
-    assert.equal(b.getModels().length, 1)
+    // b should still have its custom model (first entry, before fallback merge)
     assert.equal(b.getModels()[0].fullId, 'claude-y')
   })
 })
@@ -206,11 +206,14 @@ describe('disk cache (loadCache / saveCache)', () => {
       { value: 'claude-sonnet-4-6', displayName: 'Default (Sonnet 4.6)', description: '' },
       { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
     ])
+    const r1Models = r1.getModels()
     assert.equal(r1.saveCache(cachePath), true)
 
     const r2 = createModelsRegistry()
     assert.equal(r2.loadCache(cachePath), true)
-    assert.equal(r2.getModels().length, 2)
+    // Cache round-trip preserves the full list (SDK entries + merged fallbacks
+    // + synthesized [1m] variants) rather than collapsing back to the SDK shape.
+    assert.equal(r2.getModels().length, r1Models.length)
     assert.equal(r2.getModels()[0].fullId, 'claude-sonnet-4-6')
     assert.equal(r2.getDefaultModelId(), 'sonnet-4-6')
   })

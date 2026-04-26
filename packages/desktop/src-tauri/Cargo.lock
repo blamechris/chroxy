@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "chroxy-desktop"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "cocoa",
  "dirs 5.0.1",

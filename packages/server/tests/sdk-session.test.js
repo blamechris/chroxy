@@ -658,12 +658,20 @@ describe('SdkSession', () => {
       await session._fetchSupportedModels()
 
       assert.equal(events.length, 1)
-      assert.equal(events[0].models.length, 2)
-      assert.equal(events[0].models[0].id, 'sonnet-4-6')
-      assert.equal(events[0].models[0].label, 'Sonnet 4.6')
-      assert.equal(events[0].models[0].fullId, 'claude-sonnet-4-6')
-      assert.equal(events[0].models[1].id, 'opus-4-6')
-      assert.equal(events[0].models[1].label, 'Opus 4.6')
+      // Lookup by fullId — the registry merges fallback entries the SDK
+      // omitted (#3075) and synthesizes [1m] variants for >=1M models, so
+      // the emitted list is a superset of the two SDK entries above. We
+      // assert that the SDK-supplied entries were converted correctly,
+      // not the total length (which is registry-driven).
+      const byFullId = new Map(events[0].models.map(m => [m.fullId, m]))
+      const sonnet = byFullId.get('claude-sonnet-4-6')
+      const opus = byFullId.get('claude-opus-4-6')
+      assert.ok(sonnet, 'expected sonnet entry from SDK input')
+      assert.equal(sonnet.id, 'sonnet-4-6')
+      assert.equal(sonnet.label, 'Sonnet 4.6')
+      assert.ok(opus, 'expected opus entry from SDK input')
+      assert.equal(opus.id, 'opus-4-6')
+      assert.equal(opus.label, 'Opus 4.6')
     })
 
     it('does not emit when query has no supportedModels method', async () => {
