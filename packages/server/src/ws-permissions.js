@@ -51,9 +51,10 @@ function sanitizeToolInput(input) {
  * @param {Map} opts.permissionSessionMap - requestId -> sessionId (owned by WsServer)
  * @param {Function} opts.getSessionManager - () => sessionManager (late-bound for test compat)
  * @param {Object|null} opts.pairingManager - PairingManager instance used to look up token→sessionId bindings for the HTTP permission-response fallback. Optional — when null, HTTP responses skip the binding check (single-token mode).
+ * @param {Function} [opts.getPermissionAudit] - () => PermissionAuditLog or null (late-bound). When present, HTTP user-initiated permission responses are audited with `clientId: 'http'` and `reason: 'user'` (#3059). Optional for backwards compat with existing test fixtures.
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager, findSessionByHookSecret }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -315,6 +316,21 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             // (PermissionManager.emit → SdkSession.emit → SessionManager
             // session_event → EventNormalizer → broadcast). The previous
             // inline broadcast here was the #2905 fix and is now redundant.
+            // #3059: audit HTTP user-initiated resolutions. The pipeline-layer
+            // audit listener filters reason==='user' to avoid double-auditing
+            // the WS path (which logs inline with client.id), so HTTP needs
+            // its own inline call. clientId='http' distinguishes from auto-
+            // deny entries (clientId=null) in forensic queries.
+            const audit = getPermissionAudit?.()
+            if (audit) {
+              audit.logDecision({
+                clientId: 'http',
+                sessionId: originSessionId,
+                requestId,
+                decision,
+                reason: 'user',
+              })
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ ok: true }))
           } else {
@@ -346,6 +362,19 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           decision,
           ...(originSessionId ? { sessionId: originSessionId } : {}),
         })
+        // #3059: audit the legacy HTTP path too. There's no PermissionManager
+        // wiring here (legacy non-SDK sessions don't have one), so this is
+        // the only audit hook for these resolutions.
+        const audit = getPermissionAudit?.()
+        if (audit) {
+          audit.logDecision({
+            clientId: 'http',
+            sessionId: originSessionId ?? null,
+            requestId,
+            decision,
+            reason: 'user',
+          })
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
       } else {

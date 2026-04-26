@@ -755,6 +755,137 @@ describe('createPermissionHandler', () => {
       assert.equal(msg.sessionId, 'sess-mapped',
         'mapped legacy requests must carry sessionId so clients route consistently with the SDK and WS paths')
     })
+
+    // #3059: HTTP user-initiated permission responses must produce an audit
+    // entry. Pre-fix, only the WS path audited (with client.id) and the
+    // pipeline-layer auto-deny audit filtered out reason==='user' to avoid
+    // double-auditing. HTTP user resolutions fell into the gap and were not
+    // recorded. Fix: inline audit at the HTTP success branch with
+    // clientId='http' (distinct from auto-deny's null) and reason='user'.
+    it('records audit entry for SDK HTTP user response (#3059)', async () => {
+      const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
+      const respondToPermission = mock.fn(() => true)
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const audit = { logDecision: mock.fn() }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        getPermissionAudit: mock.fn(() => audit),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'sdk-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(audit.logDecision.mock.calls.length, 1,
+        'SDK HTTP path must record one audit entry')
+      assert.deepStrictEqual(audit.logDecision.mock.calls[0].arguments[0], {
+        clientId: 'http',
+        sessionId: 'sess-sdk',
+        requestId: 'sdk-req',
+        decision: 'allow',
+        reason: 'user',
+      })
+    })
+
+    it('records audit entry for legacy HTTP user response (#3059)', async () => {
+      const pendingPermissions = new Map()
+      pendingPermissions.set('leg-req', { resolve: mock.fn(), timer: null })
+      const audit = { logDecision: mock.fn() }
+      const opts = makeHandlerOpts({
+        pendingPermissions,
+        getPermissionAudit: mock.fn(() => audit),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'leg-req', decision: 'deny' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(audit.logDecision.mock.calls.length, 1,
+        'legacy HTTP path must record one audit entry too — no PermissionManager pipeline available')
+      // sessionId is null for genuinely unmapped legacy requests, matching
+      // the wire-shape contract that the broadcast omits sessionId entirely.
+      assert.deepStrictEqual(audit.logDecision.mock.calls[0].arguments[0], {
+        clientId: 'http',
+        sessionId: null,
+        requestId: 'leg-req',
+        decision: 'deny',
+        reason: 'user',
+      })
+    })
+
+    it('records audit entry for mapped legacy HTTP response with sessionId (#3059)', async () => {
+      // Same edge case as the existing mapped-legacy broadcast test: the
+      // permissionSessionMap entry exists but the SDK branch falls through
+      // (no session manager). Audit must still capture the sessionId so
+      // forensic queries can correlate by session.
+      const pendingPermissions = new Map()
+      pendingPermissions.set('mapped-leg-req', { resolve: mock.fn(), timer: null })
+      const permissionSessionMap = new Map([['mapped-leg-req', 'sess-mapped']])
+      const audit = { logDecision: mock.fn() }
+      const opts = makeHandlerOpts({
+        pendingPermissions,
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => null),
+        getPermissionAudit: mock.fn(() => audit),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'mapped-leg-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(audit.logDecision.mock.calls[0].arguments[0].sessionId, 'sess-mapped')
+    })
+
+    it('skips audit when getPermissionAudit returns null (#3059, backwards compat)', async () => {
+      // Existing tests use makeHandlerOpts() without getPermissionAudit —
+      // the call must remain a no-op for those fixtures rather than crash.
+      const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
+      const respondToPermission = mock.fn(() => true)
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        getPermissionAudit: mock.fn(() => null),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'sdk-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200, 'success path must still complete normally')
+    })
+
+    it('does NOT audit when SDK respondToPermission returns false (expired) (#3059)', async () => {
+      // The "permission expired before HTTP response arrived" branch returns
+      // 410 and must not produce an audit entry — there is no decision to
+      // record (the auto-deny path already audited it).
+      const permissionSessionMap = new Map([['expired-req', 'sess-x']])
+      const respondToPermission = mock.fn(() => false)
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const audit = { logDecision: mock.fn() }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        getPermissionAudit: mock.fn(() => audit),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'expired-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 410, 'expired branch returns 410')
+      assert.equal(audit.logDecision.mock.calls.length, 0,
+        'expired SDK responses must not be audited — auto-deny already recorded')
+    })
   })
 })
 

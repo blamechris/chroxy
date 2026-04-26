@@ -429,6 +429,9 @@ export class WsServer {
       // permission belonging to it is outstanding so the session's
       // 5-min inactivity timer can pause until the user responds.
       findSessionByHookSecret: (secret) => self._findSessionByHookSecret(secret),
+      // #3059: audit HTTP user-initiated permission responses. Late-bound
+      // via getter because _permissionAudit is constructed after this call.
+      getPermissionAudit: () => self._permissionAudit,
     })
     // Handler context: late-bound via getters for test compat (tests may reassign properties)
     this._handlerCtx = {
