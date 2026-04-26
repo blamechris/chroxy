@@ -86,7 +86,6 @@ import {
   setDisconnectedAttemptId,
   lastConnectedUrl,
   setLastConnectedUrl,
-  setPendingSwitchSessionId,
   resetReplayFlags,
   clearPermissionSplits,
   clearTerminalWriteBatching,
@@ -1261,9 +1260,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket, activeSessionId, sessionStates } = get();
 
     if (sessionId === activeSessionId) return;
-
-    // Mark as user-initiated switch so session_switched handler uses session-switch dedup
-    setPendingSwitchSessionId(sessionId);
 
     // Optimistically switch to cached state + dismiss notifications for target session
     const cached = sessionStates[sessionId];

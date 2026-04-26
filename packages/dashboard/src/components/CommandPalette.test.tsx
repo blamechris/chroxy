@@ -2,7 +2,24 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { CommandPalette, type Command } from './CommandPalette'
 
-afterEach(cleanup)
+const ORIGINAL_NAVIGATOR = globalThis.navigator
+
+function setUserAgent(ua: string) {
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { userAgent: ua },
+    configurable: true,
+    writable: true,
+  })
+}
+
+afterEach(() => {
+  cleanup()
+  Object.defineProperty(globalThis, 'navigator', {
+    value: ORIGINAL_NAVIGATOR,
+    configurable: true,
+    writable: true,
+  })
+})
 
 const mockCommands: Command[] = [
   { id: 'new-session', name: 'New Session', category: 'Session', shortcut: 'Cmd+N', action: vi.fn() },
@@ -38,9 +55,17 @@ describe('CommandPalette', () => {
     expect(screen.getByText('Toggle Theme')).toBeInTheDocument()
   })
 
-  it('shows keyboard shortcuts when provided', () => {
+  it('shows keyboard shortcuts formatted for Mac platforms', () => {
+    setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
     render(<CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} />)
     expect(screen.getByText('Cmd+N')).toBeInTheDocument()
+  })
+
+  it('shows keyboard shortcuts formatted for non-Mac platforms', () => {
+    setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    render(<CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByText('Ctrl+N')).toBeInTheDocument()
+    expect(screen.queryByText('Cmd+N')).not.toBeInTheDocument()
   })
 
   it('filters commands by search query', () => {
@@ -138,7 +163,7 @@ describe('CommandPalette', () => {
     render(<CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} mruList={mruList} />)
     // Within Settings category: toggle-theme (MRU) should come before change-model
     const options = screen.getAllByRole('option')
-    const names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
+    const names = options.map(opt => opt.textContent?.replace(/(?:Cmd|Ctrl)\+\S+/, '').trim())
     const settingsStart = names.indexOf('Toggle Theme')
     const changeModelIdx = names.indexOf('Change Model')
     expect(settingsStart).toBeGreaterThanOrEqual(0)
@@ -162,7 +187,7 @@ describe('CommandPalette', () => {
       <CommandPalette commands={mockCommands} isOpen={true} onClose={onClose} mruList={mruList} />,
     )
     let options = screen.getAllByRole('option')
-    let names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
+    let names = options.map(opt => opt.textContent?.replace(/(?:Cmd|Ctrl)\+\S+/, '').trim())
     expect(names.indexOf('Change Model')).toBeGreaterThanOrEqual(0)
     expect(names.indexOf('Toggle Theme')).toBeGreaterThanOrEqual(0)
     expect(names.indexOf('Change Model')).toBeLessThan(names.indexOf('Toggle Theme'))
@@ -177,7 +202,7 @@ describe('CommandPalette', () => {
       <CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} mruList={[...mruList]} />,
     )
     options = screen.getAllByRole('option')
-    names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
+    names = options.map(opt => opt.textContent?.replace(/(?:Cmd|Ctrl)\+\S+/, '').trim())
     // Toggle Theme should now appear before Change Model in Settings
     expect(names.indexOf('Toggle Theme')).toBeGreaterThanOrEqual(0)
     expect(names.indexOf('Change Model')).toBeGreaterThanOrEqual(0)
