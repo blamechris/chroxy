@@ -1721,4 +1721,32 @@ describe('audit trail for auto-deny resolution paths (#3057)', () => {
     const entries = server._permissionAudit.query()
     assert.equal(entries.length, 0)
   })
+
+  // #3060: close() must unregister sessionManager listeners. Without this, a
+  // long-lived SessionManager keeps closed WsServer instances pinned in memory
+  // and replays events to all retired instances. Symmetric with the existing
+  // pairing_refreshed / token_rotated handler cleanup in close().
+  it('removes session_event audit listener on close (#3060)', () => {
+    const manager = makeManager()
+    const closedServer = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+    closedServer.close()
+
+    // After close, emitting on the manager must NOT add audit entries on the
+    // closed server (we keep the reference to verify the negative).
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: { requestId: 'req-after-close', decision: 'deny', reason: 'timeout' },
+    })
+
+    assert.equal(closedServer._permissionAudit.query({ type: 'decision' }).length, 0,
+      'closed WsServer must not receive audit entries from its old SessionManager listener')
+    // Listener counts on the manager must be zero for our three events.
+    assert.equal(manager.listenerCount('session_event'), 0,
+      'session_event listener must be removed on close()')
+    assert.equal(manager.listenerCount('session_created'), 0,
+      'session_created listener must be removed on close()')
+    assert.equal(manager.listenerCount('session_destroyed'), 0,
+      'session_destroyed listener must be removed on close()')
+  })
 })
