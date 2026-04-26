@@ -316,7 +316,7 @@ export interface UIViewData {
   viewMode: 'chat' | 'terminal' | 'files' | 'system';
   // Input settings
   inputSettings: InputSettings;
-  // Raw terminal output buffer (ANSI-stripped, for plain text fallback)
+  // Terminal output buffer with ANSI codes stripped (for plain text fallback)
   terminalBuffer: string;
   // Raw terminal buffer with ANSI codes intact (for xterm.js replay on view switch)
   terminalRawBuffer: string;
@@ -380,8 +380,10 @@ export interface ModelsAndPermissionsActions {
 
 /**
  * Action group 5 — Discovery fetchers. Server-side data fetching and
- * resume/search flows. Mirrors `DiscoveryData` (without the checkpoint
- * mutators, which live with their plan-mode siblings).
+ * resume/search flows. Mirrors the `DiscoveryData` slice except for
+ * checkpoint mutators (which live with their plan-mode siblings in
+ * `CheckpointAndPlanActions`) and web task/web feature actions (which
+ * live in `WebTaskActions`).
  */
 export interface DiscoveryActions {
   fetchProviders: () => void;
