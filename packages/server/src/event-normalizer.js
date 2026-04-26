@@ -200,8 +200,9 @@ Object.assign(EVENT_MAP, {
 
   // #3048: clear stale prompts on every connected client when a permission
   // resolves via any path (user response, timeout, abort signal, clearAll).
-  // Inline broadcasts in settings-handlers.js (WS) and ws-permissions.js (HTTP)
-  // were redundant with this and have been removed.
+  // The SDK paths in settings-handlers.js (WS) and ws-permissions.js (HTTP)
+  // were de-inlined to use this mapping, but the legacy non-SDK branches in
+  // those files (no PermissionManager available) still broadcast inline.
   permission_resolved: (data, ctx) => ({
     messages: [{
       msg: {
