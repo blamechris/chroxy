@@ -26,6 +26,28 @@ const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 const DEFAULT_PROVIDER = 'claude-sdk'
 
 /**
+ * Detect whether the server is running inside a bundled .app (Tauri) or
+ * under the supervisor process. In either case, the end user cannot fix
+ * a missing dependency / broken install themselves by running `npm install`
+ * — they need a reinstall or rebuild. Checks affected by this distinction
+ * (Dependencies, and likely cloudflared / Node version / port soon)
+ * downgrade `fail` → `warn` and surface a context-appropriate hint.
+ *
+ * Centralised here so:
+ *   - The detection lives in one place as more checks adopt it
+ *   - Tests can stub `process.env` once (or import this helper directly)
+ *     instead of duplicating the env-var pattern at every call site
+ *
+ * Exported for tests; production callers should prefer using the helper
+ * from within `runDoctorChecks`.
+ *
+ * @returns {boolean} true when CHROXY_BUNDLED=1 OR CHROXY_SUPERVISED=1
+ */
+export function isBundledOrSupervisedContext() {
+  return process.env.CHROXY_BUNDLED === '1' || process.env.CHROXY_SUPERVISED === '1'
+}
+
+/**
  * Resolve the list of providers to preflight check.
  *
  * Precedence:
@@ -156,8 +178,7 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   if (deps.ok) {
     checks.push({ name: 'Dependencies', status: 'pass', message: `resolved via ${deps.foundAt}` })
   } else {
-    const isBundledContext = process.env.CHROXY_BUNDLED === '1' || process.env.CHROXY_SUPERVISED === '1'
-    if (isBundledContext) {
+    if (isBundledOrSupervisedContext()) {
       checks.push({
         name: 'Dependencies',
         status: 'warn',

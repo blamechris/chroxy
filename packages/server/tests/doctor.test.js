@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, parse as parsePath, relative } from 'node:path'
-import { runDoctorChecks, checkBinary } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext } from '../src/doctor.js'
 
 /**
  * Integration tests for doctor.js.
@@ -408,6 +408,76 @@ describe('runDoctorChecks — provider awareness (issue #2951)', () => {
     assert.ok(providerChecks.length > 0, 'expected at least one gemini-tagged check')
     for (const c of providerChecks) {
       assert.equal(c.provider, 'gemini')
+    }
+  })
+})
+
+describe('isBundledOrSupervisedContext (issue #3023)', () => {
+  // Save/restore env vars per test so the suite never leaks state — these
+  // values affect any other check that adopts the helper.
+  const originalBundled = process.env.CHROXY_BUNDLED
+  const originalSupervised = process.env.CHROXY_SUPERVISED
+
+  function restoreEnv() {
+    if (originalBundled === undefined) delete process.env.CHROXY_BUNDLED
+    else process.env.CHROXY_BUNDLED = originalBundled
+    if (originalSupervised === undefined) delete process.env.CHROXY_SUPERVISED
+    else process.env.CHROXY_SUPERVISED = originalSupervised
+  }
+
+  it('returns false when neither env var is set', () => {
+    try {
+      delete process.env.CHROXY_BUNDLED
+      delete process.env.CHROXY_SUPERVISED
+      assert.equal(isBundledOrSupervisedContext(), false)
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('returns true when CHROXY_BUNDLED=1', () => {
+    try {
+      delete process.env.CHROXY_SUPERVISED
+      process.env.CHROXY_BUNDLED = '1'
+      assert.equal(isBundledOrSupervisedContext(), true)
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('returns true when CHROXY_SUPERVISED=1', () => {
+    try {
+      delete process.env.CHROXY_BUNDLED
+      process.env.CHROXY_SUPERVISED = '1'
+      assert.equal(isBundledOrSupervisedContext(), true)
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('returns true when both env vars are set', () => {
+    try {
+      process.env.CHROXY_BUNDLED = '1'
+      process.env.CHROXY_SUPERVISED = '1'
+      assert.equal(isBundledOrSupervisedContext(), true)
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('only treats the literal string "1" as truthy (not "0", "true", or empty)', () => {
+    try {
+      delete process.env.CHROXY_SUPERVISED
+      for (const val of ['0', 'true', 'yes', '', '2']) {
+        process.env.CHROXY_BUNDLED = val
+        assert.equal(
+          isBundledOrSupervisedContext(),
+          false,
+          `expected false for CHROXY_BUNDLED=${JSON.stringify(val)}`,
+        )
+      }
+    } finally {
+      restoreEnv()
     }
   })
 })
