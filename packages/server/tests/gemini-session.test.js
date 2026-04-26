@@ -1,6 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { writeFileSync, unlinkSync, existsSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { GeminiSession } from '../src/gemini-session.js'
+import { waitFor } from './test-helpers.js'
 
 describe('GeminiSession', () => {
   let savedApiKey
@@ -209,6 +213,262 @@ describe('GeminiSession', () => {
         'gemini-session.js must import homedir from os')
       assert.ok(/import\s*\{[^}]*join[^}]*\}\s*from\s*'path'/.test(source),
         'gemini-session.js must import join from path')
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // sendMessage() through the FULL spawn pipeline of the JsonlSubprocessSession
+  // base class — closes #2991.
+  //
+  // The pre-existing tests above only call `_processGeminiEvent` in isolation.
+  // Below we override only the static `resolvedBinary` (point it at node) and
+  // `_buildArgs()` (point node at our shim script) so the real
+  // `JsonlSubprocessSession.sendMessage()` runs through the real
+  // `GeminiSession._processJsonlLine()` mapper.
+  // ---------------------------------------------------------------------------
+  describe('sendMessage() via JsonlSubprocessSession base (#2991)', () => {
+    const baseShimPath = join(tmpdir(), `gemini-base-shim-${process.pid}-${Date.now()}.mjs`)
+
+    function writeBaseShim(body) {
+      writeFileSync(baseShimPath, body)
+    }
+
+    function writeBaseShimJsonl(lines, { exitCode = 0, stderr = '' } = {}) {
+      const payload = lines.map((l) => JSON.stringify(l)).join('\n')
+      const parts = [
+        '#!/usr/bin/env node',
+        `process.stdout.write(${JSON.stringify(payload + (payload ? '\n' : ''))})`,
+      ]
+      if (stderr) parts.push(`process.stderr.write(${JSON.stringify(stderr)})`)
+      parts.push(`process.exit(${exitCode})`)
+      writeBaseShim(parts.join('\n'))
+    }
+
+    function cleanupBaseShim() {
+      if (existsSync(baseShimPath)) unlinkSync(baseShimPath)
+    }
+
+    /**
+     * GeminiSession but with the binary swapped for `node` and argv overridden
+     * to invoke the shim script. _buildChildEnv, _processJsonlLine,
+     * _shouldSkipStderr all flow from the real subclass.
+     */
+    class BaseShimmedGemini extends GeminiSession {
+      static get resolvedBinary() {
+        return process.execPath
+      }
+
+      _buildArgs(text) {
+        return [baseShimPath, text]
+      }
+    }
+
+    // Track every session created in this block so afterEach can guarantee
+    // the spawned shim subprocess is killed even if a `waitFor` throws —
+    // otherwise a `setInterval(...)` shim could outlive the test run and
+    // hang the whole suite.
+    const createdSessions = []
+    function makeSession(opts) {
+      const s = new BaseShimmedGemini(opts || { cwd: '/tmp' })
+      createdSessions.push(s)
+      return s
+    }
+
+    afterEach(() => {
+      while (createdSessions.length) {
+        const s = createdSessions.pop()
+        try { s.interrupt() } catch { /* already gone */ }
+        try { s.destroy() } catch { /* already gone */ }
+      }
+      cleanupBaseShim()
+    })
+
+    it('successful round-trip: assistant text + result → stream + result', async () => {
+      writeBaseShimJsonl([
+        { type: 'assistant', content: [{ type: 'text', text: 'Greetings, ' }] },
+        { type: 'assistant', content: [{ type: 'text', text: 'Earthling.' }] },
+        { type: 'result', usage: { input_tokens: 8, output_tokens: 3 } },
+      ])
+
+      const session = makeSession()
+      session._processReady = true
+      const seen = []
+      session.on('stream_start', (d) => seen.push({ type: 'stream_start', ...d }))
+      session.on('stream_delta', (d) => seen.push({ type: 'stream_delta', ...d }))
+      session.on('stream_end', (d) => seen.push({ type: 'stream_end', ...d }))
+      session.on('result', (d) => seen.push({ type: 'result', ...d }))
+      session.on('error', (d) => seen.push({ type: 'error', ...d }))
+
+      await session.sendMessage('hello')
+      await waitFor(() => seen.find(e => e.type === 'result'), { label: 'result event' })
+
+      const types = seen.map((e) => e.type)
+      assert.deepEqual(types, ['stream_start', 'stream_delta', 'stream_delta', 'stream_end', 'result'])
+
+      const deltas = seen.filter(e => e.type === 'stream_delta').map(e => e.delta)
+      assert.deepEqual(deltas, ['Greetings, ', 'Earthling.'])
+
+      const start = seen.find(e => e.type === 'stream_start')
+      const end = seen.find(e => e.type === 'stream_end')
+      assert.equal(end.messageId, start.messageId, 'stream_end shares stream_start id')
+      assert.match(start.messageId, /^gemini-msg-/, 'gemini prefix preserved by base class')
+
+      const result = seen.find(e => e.type === 'result')
+      assert.equal(result.usage.input_tokens, 8)
+      assert.equal(result.usage.output_tokens, 3)
+    })
+
+    it('abort mid-stream: interrupt() kills the subprocess and clears busy', async () => {
+      writeBaseShim([
+        '#!/usr/bin/env node',
+        `process.stdout.write(JSON.stringify({ type: 'assistant', content: [{ type: 'text', text: 'starting...' }] }) + '\\n')`,
+        // Hang waiting for SIGINT — interrupt() should kill us.
+        `setInterval(() => {}, 1000)`,
+      ].join('\n'))
+
+      const session = makeSession()
+      session._processReady = true
+      const deltas = []
+      const errors = []
+      const results = []
+      session.on('stream_delta', (d) => deltas.push(d))
+      session.on('error', (e) => errors.push(e))
+      session.on('result', (r) => results.push(r))
+
+      await session.sendMessage('hello')
+      await waitFor(() => deltas.length >= 1, { label: 'first delta before interrupt' })
+      assert.equal(session.isRunning, true, 'session must be busy mid-stream')
+
+      session.interrupt()
+
+      // After SIGINT the subprocess exits; close handler clears busy and
+      // emits a fallback result (turn.completed/result never arrived).
+      await waitFor(() => !session.isRunning, { label: 'isRunning cleared after interrupt' })
+      assert.equal(session._process, null, '_process cleared after close')
+      assert.ok(results.length >= 1, 'fallback result fired after abort')
+    })
+
+    it('subprocess crash: non-zero exit emits error with displayLabel + code', async () => {
+      writeBaseShimJsonl([], { exitCode: 5, stderr: 'gemini: fatal error\n' })
+
+      const session = makeSession()
+      session._processReady = true
+      const errors = []
+      const results = []
+      session.on('error', (e) => errors.push(e))
+      session.on('result', (r) => results.push(r))
+
+      await session.sendMessage('hi')
+      await waitFor(() => errors.length >= 1, { label: 'error event' })
+
+      assert.equal(errors.length, 1)
+      // Gemini uses displayLabel 'Google Gemini'.
+      assert.match(errors[0].message, /Google Gemini.*code 5/)
+      assert.match(errors[0].message, /fatal error/)
+    })
+
+    it('subprocess crash mid-stream: stream_end + error + fallback result', async () => {
+      writeBaseShimJsonl([
+        { type: 'assistant', content: [{ type: 'text', text: 'partial...' }] },
+      ], { exitCode: 1, stderr: 'fatal: pipe closed' })
+
+      const session = makeSession()
+      session._processReady = true
+      const events = []
+      session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
+      session.on('stream_delta', (d) => events.push({ type: 'stream_delta', ...d }))
+      session.on('stream_end', (d) => events.push({ type: 'stream_end', ...d }))
+      session.on('error', (d) => events.push({ type: 'error', ...d }))
+      session.on('result', (d) => events.push({ type: 'result', ...d }))
+
+      await session.sendMessage('hi')
+      await waitFor(() => events.find(e => e.type === 'result'), { label: 'result event' })
+
+      const types = events.map(e => e.type)
+      const endIdx = types.indexOf('stream_end')
+      const errIdx = types.indexOf('error')
+      const resIdx = types.indexOf('result')
+      assert.notEqual(endIdx, -1, 'stream_end emitted on close when stream was open')
+      assert.notEqual(errIdx, -1, 'error emitted for non-zero exit')
+      assert.notEqual(resIdx, -1, 'fallback result emitted on close')
+      assert.ok(endIdx < errIdx, 'stream_end before error')
+    })
+
+    it('multi-message sequencing: rejects second sendMessage while first is busy', async () => {
+      writeBaseShim([
+        '#!/usr/bin/env node',
+        `process.stdout.write(JSON.stringify({ type: 'assistant', content: [{ type: 'text', text: 'first' }] }) + '\\n')`,
+        // Stay busy briefly so the second sendMessage hits while busy.
+        `setTimeout(() => {`,
+        `  process.stdout.write(JSON.stringify({ type: 'result', usage: { input_tokens: 1, output_tokens: 1 } }) + '\\n')`,
+        `  process.exit(0)`,
+        `}, 100)`,
+      ].join('\n'))
+
+      const session = makeSession()
+      session._processReady = true
+      const results = []
+      const errors = []
+      const deltas = []
+      session.on('result', (r) => results.push(r))
+      session.on('error', (e) => errors.push(e))
+      session.on('stream_delta', (d) => deltas.push(d))
+
+      await session.sendMessage('first')
+      await waitFor(() => deltas.length >= 1, { label: 'first delta' })
+      assert.equal(session.isRunning, true, 'first message keeps session busy')
+
+      // Second sendMessage MUST be rejected with a busy error.
+      await session.sendMessage('second')
+      assert.equal(errors.length, 1, 'second send emitted exactly one error')
+      assert.match(errors[0].message, /busy/)
+
+      // First completes normally.
+      await waitFor(() => results.length >= 1, { label: 'first result' })
+      await waitFor(() => !session.isRunning, { label: 'busy cleared' })
+
+      // Third send succeeds — fully exercises the real mapper again.
+      writeBaseShimJsonl([
+        { type: 'assistant', content: [{ type: 'text', text: 'third' }] },
+        { type: 'result', usage: {} },
+      ])
+      const seenAfter = []
+      session.on('stream_delta', (d) => seenAfter.push(d))
+      await session.sendMessage('third')
+      await waitFor(() => results.length >= 2, { label: 'third result' })
+      assert.ok(seenAfter.some(d => d.delta === 'third'), 'third message went through mapper')
+    })
+
+    it('drives the real GeminiSession._processJsonlLine via the base sendMessage', async () => {
+      // Tool-flavoured events — confirms the real subclass mapper handles
+      // tool_use blocks and standalone tool_result events through the full
+      // spawn pipeline.
+      writeBaseShimJsonl([
+        { type: 'assistant', content: [{ type: 'tool_use', id: 'g-tool-7', name: 'search', input: { q: 'hello' } }] },
+        { type: 'tool_result', tool_use_id: 'g-tool-7', content: 'matched 1 doc' },
+        { type: 'result', usage: {} },
+      ])
+
+      const session = makeSession()
+      session._processReady = true
+      const toolStarts = []
+      const toolResults = []
+      const results = []
+      session.on('tool_start', (d) => toolStarts.push(d))
+      session.on('tool_result', (d) => toolResults.push(d))
+      session.on('result', (d) => results.push(d))
+
+      await session.sendMessage('use a tool')
+      await waitFor(() => results.length >= 1, { label: 'result' })
+
+      assert.equal(toolStarts.length, 1)
+      assert.equal(toolStarts[0].tool, 'search')
+      assert.equal(toolStarts[0].toolUseId, 'g-tool-7')
+      assert.deepEqual(toolStarts[0].input, { q: 'hello' })
+
+      assert.equal(toolResults.length, 1)
+      assert.equal(toolResults[0].toolUseId, 'g-tool-7')
+      assert.equal(toolResults[0].result, 'matched 1 doc')
     })
   })
 })

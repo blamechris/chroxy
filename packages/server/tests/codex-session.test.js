@@ -750,4 +750,270 @@ describe('CodexSession', () => {
         'codex-session.js must import join from path')
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // sendMessage() through the FULL spawn pipeline of the JsonlSubprocessSession
+  // base class — closes #2991.
+  //
+  // The existing `ShimmedCodexSession` block above re-implements sendMessage()
+  // on top of the subclass, so a misconfigured `resolvedBinary` or broken
+  // `_buildArgs()` would never surface. Below we override only the static
+  // `resolvedBinary` (point it at node) and `_buildArgs()` (point node at our
+  // shim script) so the real `JsonlSubprocessSession.sendMessage()` runs
+  // through the real `CodexSession._processJsonlLine()`.
+  // ---------------------------------------------------------------------------
+  describe('sendMessage() via JsonlSubprocessSession base (#2991)', () => {
+    const baseShimPath = join(tmpdir(), `codex-base-shim-${process.pid}-${Date.now()}.mjs`)
+
+    function writeBaseShim(body) {
+      writeFileSync(baseShimPath, body)
+    }
+
+    function writeBaseShimJsonl(lines, { exitCode = 0, stderr = '' } = {}) {
+      const payload = lines.map((l) => JSON.stringify(l)).join('\n')
+      const parts = [
+        '#!/usr/bin/env node',
+        `process.stdout.write(${JSON.stringify(payload + (payload ? '\n' : ''))})`,
+      ]
+      if (stderr) parts.push(`process.stderr.write(${JSON.stringify(stderr)})`)
+      parts.push(`process.exit(${exitCode})`)
+      writeBaseShim(parts.join('\n'))
+    }
+
+    function cleanupBaseShim() {
+      if (existsSync(baseShimPath)) unlinkSync(baseShimPath)
+    }
+
+    /**
+     * CodexSession but with the binary swapped for `node` and argv overridden
+     * to invoke the shim script. _buildChildEnv, _processJsonlLine,
+     * _shouldSkipStderr, _emitFallbackResult all flow from the real subclass.
+     */
+    class BaseShimmedCodex extends CodexSession {
+      static get resolvedBinary() {
+        return process.execPath
+      }
+
+      _buildArgs(text) {
+        // Node executes the shim; pass `text` through so the shim could echo it.
+        return [baseShimPath, text]
+      }
+    }
+
+    // Track every session created in this block so afterEach can guarantee
+    // the spawned shim subprocess is killed even if a `waitFor` throws —
+    // otherwise a `setInterval(...)` shim could outlive the test run and
+    // hang the whole suite.
+    const createdSessions = []
+    function makeSession(opts) {
+      const s = new BaseShimmedCodex(opts || { cwd: '/tmp' })
+      createdSessions.push(s)
+      return s
+    }
+
+    afterEach(() => {
+      while (createdSessions.length) {
+        const s = createdSessions.pop()
+        try { s.interrupt() } catch { /* already gone */ }
+        try { s.destroy() } catch { /* already gone */ }
+      }
+      cleanupBaseShim()
+    })
+
+    it('successful round-trip: agent_message + turn.completed → stream + result', async () => {
+      writeBaseShimJsonl([
+        { type: 'item.completed', item: { type: 'agent_message', text: 'Hi from base' } },
+        { type: 'turn.completed', usage: { input_tokens: 11, output_tokens: 4 } },
+      ])
+
+      const session = makeSession()
+      session._processReady = true
+      const seen = []
+      session.on('stream_start', (d) => seen.push({ type: 'stream_start', ...d }))
+      session.on('stream_delta', (d) => seen.push({ type: 'stream_delta', ...d }))
+      session.on('stream_end', (d) => seen.push({ type: 'stream_end', ...d }))
+      session.on('result', (d) => seen.push({ type: 'result', ...d }))
+      session.on('error', (d) => seen.push({ type: 'error', ...d }))
+
+      await session.sendMessage('hello')
+      await waitFor(() => seen.find(e => e.type === 'result'), { label: 'result event' })
+
+      const types = seen.map((e) => e.type)
+      assert.deepEqual(types, ['stream_start', 'stream_delta', 'stream_end', 'result'])
+
+      const delta = seen.find((e) => e.type === 'stream_delta')
+      assert.equal(delta.delta, 'Hi from base')
+
+      const start = seen.find((e) => e.type === 'stream_start')
+      const end = seen.find((e) => e.type === 'stream_end')
+      assert.equal(end.messageId, start.messageId, 'stream_end shares stream_start id')
+      assert.match(start.messageId, /^codex-msg-/, 'codex prefix preserved by base class')
+
+      const result = seen.find((e) => e.type === 'result')
+      assert.equal(result.usage.input_tokens, 11)
+      assert.equal(result.usage.output_tokens, 4)
+    })
+
+    it('abort mid-stream: interrupt() kills the subprocess and clears busy', async () => {
+      // Long-lived shim — emits one chunk then sleeps so we have time to interrupt.
+      writeBaseShim([
+        '#!/usr/bin/env node',
+        `process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'starting...' } }) + '\\n')`,
+        // Hang waiting for SIGINT — our interrupt() should kill us.
+        `setInterval(() => {}, 1000)`,
+      ].join('\n'))
+
+      const session = makeSession()
+      session._processReady = true
+
+      const deltas = []
+      const errors = []
+      const results = []
+      session.on('stream_delta', (d) => deltas.push(d))
+      session.on('error', (e) => errors.push(e))
+      session.on('result', (r) => results.push(r))
+
+      await session.sendMessage('hello')
+      // Wait for the first delta to confirm the subprocess is live.
+      await waitFor(() => deltas.length >= 1, { label: 'first delta before interrupt' })
+      assert.equal(session.isRunning, true, 'session must be busy mid-stream')
+
+      session.interrupt()
+
+      // After SIGINT the subprocess exits; close handler clears busy and
+      // emits a fallback result (turn.completed never arrived).
+      await waitFor(() => !session.isRunning, { label: 'isRunning cleared after interrupt' })
+      assert.equal(session._process, null, '_process cleared after close')
+      assert.ok(results.length >= 1, 'fallback result fired after abort')
+    })
+
+    it('subprocess crash: non-zero exit emits error with displayLabel + code', async () => {
+      // Crash before any JSONL — ensures we still hit the close path.
+      writeBaseShimJsonl([], { exitCode: 13, stderr: 'ERROR: codex blew up\n' })
+
+      const session = makeSession()
+      session._processReady = true
+      const errors = []
+      const results = []
+      session.on('error', (e) => errors.push(e))
+      session.on('result', (r) => results.push(r))
+
+      await session.sendMessage('hi')
+      await waitFor(() => errors.length >= 1, { label: 'error event' })
+
+      assert.equal(errors.length, 1)
+      // Codex uses displayLabel 'OpenAI Codex' (verified by the static).
+      assert.match(errors[0].message, /OpenAI Codex.*code 13/)
+      // _shouldSkipStderr keeps lines containing "ERROR" → message includes detail.
+      assert.match(errors[0].message, /codex blew up/)
+    })
+
+    it('subprocess crash mid-stream: stream_end + error + fallback result', async () => {
+      // Emit a partial stream then exit non-zero before turn.completed.
+      writeBaseShimJsonl([
+        { type: 'item.completed', item: { type: 'agent_message', text: 'partial...' } },
+      ], { exitCode: 1, stderr: 'ERROR: pipe broken' })
+
+      const session = makeSession()
+      session._processReady = true
+      const events = []
+      session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
+      session.on('stream_delta', (d) => events.push({ type: 'stream_delta', ...d }))
+      session.on('stream_end', (d) => events.push({ type: 'stream_end', ...d }))
+      session.on('error', (d) => events.push({ type: 'error', ...d }))
+      session.on('result', (d) => events.push({ type: 'result', ...d }))
+
+      await session.sendMessage('hi')
+      await waitFor(() => events.find(e => e.type === 'result'), { label: 'result event' })
+
+      const types = events.map(e => e.type)
+      // stream_end must fire before error+result so clients can close their bubble
+      const endIdx = types.indexOf('stream_end')
+      const errIdx = types.indexOf('error')
+      assert.notEqual(endIdx, -1, 'stream_end emitted on close when stream was open')
+      assert.notEqual(errIdx, -1, 'error emitted for non-zero exit')
+      assert.ok(endIdx < errIdx, 'stream_end before error')
+      // No turn.completed arrived, but the stream did produce output before
+      // the subprocess crashed — Codex inherits the base _emitFallbackResult
+      // default, which fires exactly one result event so clients can transition
+      // back to idle.
+    })
+
+    it('multi-message sequencing: rejects second sendMessage while first is busy', async () => {
+      // Long-running first message — stays busy until we let it finish.
+      writeBaseShim([
+        '#!/usr/bin/env node',
+        `process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'first' } }) + '\\n')`,
+        // Wait 100ms to give the second sendMessage a chance to fire while busy.
+        `setTimeout(() => {`,
+        `  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\\n')`,
+        `  process.exit(0)`,
+        `}, 100)`,
+      ].join('\n'))
+
+      const session = makeSession()
+      session._processReady = true
+      const results = []
+      const errors = []
+      const deltas = []
+      session.on('result', (r) => results.push(r))
+      session.on('error', (e) => errors.push(e))
+      session.on('stream_delta', (d) => deltas.push(d))
+
+      await session.sendMessage('first')
+      // Wait for the subprocess to start streaming — confirms _isBusy=true.
+      await waitFor(() => deltas.length >= 1, { label: 'first delta' })
+      assert.equal(session.isRunning, true, 'first message keeps session busy')
+
+      // Second sendMessage MUST be rejected with a busy error.
+      await session.sendMessage('second')
+      assert.equal(errors.length, 1, 'second send emitted exactly one error')
+      assert.match(errors[0].message, /busy/)
+
+      // First completes normally.
+      await waitFor(() => results.length >= 1, { label: 'first result' })
+      await waitFor(() => !session.isRunning, { label: 'busy cleared' })
+
+      // Now a third send should succeed (process is idle again). Reuse a
+      // simple shim so we know it parses through the real subclass mapper.
+      writeBaseShimJsonl([
+        { type: 'item.completed', item: { type: 'agent_message', text: 'third' } },
+        { type: 'turn.completed', usage: {} },
+      ])
+      const seenAfter = []
+      session.on('stream_delta', (d) => seenAfter.push(d))
+      await session.sendMessage('third')
+      await waitFor(() => results.length >= 2, { label: 'third result' })
+      assert.ok(seenAfter.some(d => d.delta === 'third'), 'third message went through mapper')
+    })
+
+    it('drives the real CodexSession._processJsonlLine via the base sendMessage', async () => {
+      // Tool-flavoured events — ensures the subclass mapper (not the
+      // base default) is wired in. Validates `tool_call` → tool_start
+      // and `tool_output` → tool_result through the full pipeline.
+      writeBaseShimJsonl([
+        { type: 'item.completed', item: { type: 'tool_call', id: 'tc-99', name: 'shell', arguments: { cmd: 'ls' } } },
+        { type: 'item.completed', item: { type: 'tool_output', call_id: 'tc-99', output: 'file.txt' } },
+        { type: 'turn.completed', usage: {} },
+      ])
+
+      const session = makeSession()
+      session._processReady = true
+      const toolStarts = []
+      const toolResults = []
+      session.on('tool_start', (d) => toolStarts.push(d))
+      session.on('tool_result', (d) => toolResults.push(d))
+
+      await session.sendMessage('run a tool')
+      await waitFor(() => toolResults.length >= 1, { label: 'tool_result' })
+
+      assert.equal(toolStarts.length, 1)
+      assert.equal(toolStarts[0].tool, 'shell')
+      assert.equal(toolStarts[0].toolUseId, 'tc-99')
+      assert.deepEqual(toolStarts[0].input, { cmd: 'ls' })
+      assert.equal(toolResults.length, 1)
+      assert.equal(toolResults[0].toolUseId, 'tc-99')
+      assert.equal(toolResults[0].result, 'file.txt')
+    })
+  })
 })
