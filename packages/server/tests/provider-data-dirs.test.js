@@ -41,9 +41,9 @@ describe('Provider static dataDir (#2965)', () => {
 // ------------------------------------------------------------------ //
 // getProviderDataDirs logic — tested via standalone helper
 // to avoid triggering the @anthropic-ai/claude-agent-sdk import chain
-// that causes providers.js imports to fail in this test environment.
-// The full integration (with the real registry) is exercised by
-// providers.test.js once the SDK package is available.
+// that causes providers.js imports to fail in minimal test environments.
+// Retained as a fast unit test; the integration suite below (#3025)
+// exercises the real export when the SDK is installed.
 // ------------------------------------------------------------------ //
 
 describe('getProviderDataDirs logic (#2965)', () => {
@@ -104,6 +104,70 @@ describe('getProviderDataDirs logic (#2965)', () => {
     class B {}
     const dirs = collectDataDirs([A, B])
     assert.deepEqual(dirs, [])
+  })
+})
+
+// ------------------------------------------------------------------ //
+// getProviderDataDirs — real export integration (#3025)
+// Imports the actual function from providers.js to guard against drift
+// between the inline algorithm above and the live implementation.
+// Skipped when @anthropic-ai/claude-agent-sdk is not installed
+// (providers.js → sdk-session.js → SDK), which is the case in
+// minimal CI environments without the workspace fully installed.
+// ------------------------------------------------------------------ //
+
+// Treat only module-resolution failures as "SDK unavailable" so a real
+// regression inside the SDK (or its init code) still surfaces as a test
+// failure instead of being silently skipped.
+async function sdkAvailable() {
+  try {
+    await import('@anthropic-ai/claude-agent-sdk')
+    return true
+  } catch (err) {
+    if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND')) {
+      return false
+    }
+    throw err
+  }
+}
+
+const SKIP_REAL_EXPORT = !(await sdkAvailable())
+
+describe('getProviderDataDirs real export (#3025)', { skip: SKIP_REAL_EXPORT }, () => {
+  let getProviderDataDirs
+  let CliSession
+  let CodexSession
+  let GeminiSession
+
+  before(async () => {
+    ;({ getProviderDataDirs } = await import('../src/providers.js'))
+    ;({ CliSession } = await import('../src/cli-session.js'))
+    ;({ CodexSession } = await import('../src/codex-session.js'))
+    ;({ GeminiSession } = await import('../src/gemini-session.js'))
+  })
+
+  it('imports and invokes the real export from providers.js', () => {
+    assert.equal(typeof getProviderDataDirs, 'function', 'getProviderDataDirs must be exported')
+
+    const dirs = getProviderDataDirs()
+    assert.ok(Array.isArray(dirs), 'must return an array')
+    assert.ok(dirs.length > 0, 'must return at least one provider dataDir')
+    for (const dir of dirs) {
+      assert.equal(typeof dir, 'string', 'each entry must be a string')
+      assert.ok(dir.length > 0, 'each entry must be non-empty')
+    }
+  })
+
+  it('returns a deduplicated list (no entry appears twice)', () => {
+    const dirs = getProviderDataDirs()
+    assert.equal(new Set(dirs).size, dirs.length, 'dirs must be unique')
+  })
+
+  it('includes the built-in providers that expose a static dataDir', () => {
+    const dirs = getProviderDataDirs()
+    assert.ok(dirs.includes(CliSession.dataDir), 'must include CliSession.dataDir')
+    assert.ok(dirs.includes(CodexSession.dataDir), 'must include CodexSession.dataDir')
+    assert.ok(dirs.includes(GeminiSession.dataDir), 'must include GeminiSession.dataDir')
   })
 })
 
