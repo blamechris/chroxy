@@ -276,6 +276,77 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
+/// Returns `false` if the config file doesn't exist or the key is missing.
+/// Surfaces parse errors so the UI can show a meaningful message instead
+/// of silently presenting the wrong toggle state.
+#[tauri::command]
+fn get_allow_auto_permission_mode() -> Result<bool, String> {
+    let path = config::config_path().ok_or("Could not determine home directory")?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
+    let cfg: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))?;
+    Ok(cfg
+        .get("allowAutoPermissionMode")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+/// Write `allowAutoPermissionMode` to `~/.chroxy/config.json`, preserving
+/// other keys and 0o600 permissions. Creates the file (and parent dir) if
+/// missing. The server picks up the new value on next restart.
+#[tauri::command]
+fn set_allow_auto_permission_mode(value: bool) -> Result<(), String> {
+    let path = config::config_path().ok_or("Could not determine home directory")?;
+    set_allow_auto_permission_mode_at(&path, value)
+}
+
+/// Helper that does the actual file read/merge/write, parameterised on path
+/// so unit tests can target a temp file instead of `~/.chroxy/config.json`.
+fn set_allow_auto_permission_mode_at(
+    path: &std::path::Path,
+    value: bool,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create config dir {}: {}", parent.display(), e))?;
+    }
+
+    let mut cfg: serde_json::Value = if path.exists() {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
+        if contents.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&contents)
+                .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    if !cfg.is_object() {
+        return Err(format!(
+            "Config file {} is not a JSON object",
+            path.display()
+        ));
+    }
+
+    cfg["allowAutoPermissionMode"] = serde_json::Value::Bool(value);
+
+    let json_str = serde_json::to_string_pretty(&cfg)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+
+    platform::write_restricted(path, &json_str)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 async fn pick_directory(
     app: tauri::AppHandle,
@@ -432,6 +503,8 @@ pub fn run() {
             save_setup_config,
             get_tunnel_mode,
             set_tunnel_mode,
+            get_allow_auto_permission_mode,
+            set_allow_auto_permission_mode,
             #[cfg(target_os = "macos")]
             voice_available,
             #[cfg(target_os = "macos")]
@@ -1333,3 +1406,107 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title(title).body(body).show();
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    /// Reads `allowAutoPermissionMode` from a config path. Mirrors the
+    /// non-IPC half of `get_allow_auto_permission_mode` for testing.
+    fn read_flag(path: &std::path::Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        let contents = std::fs::read_to_string(path).expect("read config");
+        let cfg: serde_json::Value = serde_json::from_str(&contents).expect("parse json");
+        cfg.get("allowAutoPermissionMode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn writes_flag_to_new_config_file_with_0o600() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+
+        set_allow_auto_permission_mode_at(&path, true).unwrap();
+
+        assert!(path.exists());
+        assert!(read_flag(&path));
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Expected 0o600, got {:o}", mode);
+    }
+
+    #[test]
+    fn preserves_other_keys_when_updating_flag() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"apiToken":"tok-123","port":9999,"tunnel":"named"}"#,
+        )
+        .unwrap();
+
+        set_allow_auto_permission_mode_at(&path, true).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(cfg["apiToken"], "tok-123");
+        assert_eq!(cfg["port"], 9999);
+        assert_eq!(cfg["tunnel"], "named");
+        assert_eq!(cfg["allowAutoPermissionMode"], true);
+    }
+
+    #[test]
+    fn round_trips_off_to_on_to_off() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"port":8765}"#).unwrap();
+
+        set_allow_auto_permission_mode_at(&path, true).unwrap();
+        assert!(read_flag(&path));
+
+        set_allow_auto_permission_mode_at(&path, false).unwrap();
+        assert!(!read_flag(&path));
+
+        // Other keys still present
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(cfg["port"], 8765);
+    }
+
+    #[test]
+    fn creates_parent_directory_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nested/dir/config.json");
+
+        set_allow_auto_permission_mode_at(&path, true).unwrap();
+
+        assert!(path.exists());
+        assert!(read_flag(&path));
+    }
+
+    #[test]
+    fn rejects_non_object_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "[1,2,3]").unwrap();
+
+        let err = set_allow_auto_permission_mode_at(&path, true).unwrap_err();
+        assert!(err.contains("not a JSON object"), "got: {}", err);
+    }
+
+    #[test]
+    fn handles_empty_file_as_empty_object() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "").unwrap();
+
+        set_allow_auto_permission_mode_at(&path, true).unwrap();
+        assert!(read_flag(&path));
+    }
+}
+
