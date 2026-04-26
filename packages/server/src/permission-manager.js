@@ -189,7 +189,7 @@ export class PermissionManager extends EventEmitter {
             this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
-            this.emit('permission_resolved', { requestId, reason: 'aborted' })
+            this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'aborted' })
           }
         }, { once: true })
       }
@@ -202,7 +202,7 @@ export class PermissionManager extends EventEmitter {
           this._pendingPermissions.delete(requestId)
           this._lastPermissionData.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission timed out' })
-          this.emit('permission_resolved', { requestId, reason: 'timeout' })
+          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout' })
         }
       }, this._timeoutMs)
       this._permissionTimers.set(requestId, timer)
@@ -277,7 +277,7 @@ export class PermissionManager extends EventEmitter {
 
     // Emit before resolve() so listeners see the pending-count drop
     // before any follow-on work runs synchronously.
-    this.emit('permission_resolved', { requestId, reason: decision })
+    this.emit('permission_resolved', { requestId, decision, reason: 'user' })
 
     if (decision === 'allow') {
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
@@ -407,7 +407,7 @@ export class PermissionManager extends EventEmitter {
 
     // Emit resolved events so listeners reset any paused state (#2831).
     for (const requestId of pendingIds) {
-      this.emit('permission_resolved', { requestId, reason: 'cleared' })
+      this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'cleared' })
     }
     if (hadUserAnswer) {
       this.emit('permission_resolved', { reason: 'cleared' })

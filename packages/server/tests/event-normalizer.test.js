@@ -295,6 +295,30 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: permission_resolved (#3048) ----
+
+  describe('permission_resolved event', () => {
+    it('emits broadcast message with requestId, decision, and ctx.sessionId', () => {
+      const data = { requestId: 'req-1', decision: 'allow', reason: 'user' }
+      const result = normalizer.normalize('permission_resolved', data, makeCtx({ sessionId: 'sess-7' }))
+      assert.equal(result.messages.length, 1)
+      assert.deepStrictEqual(result.messages[0].msg, {
+        type: 'permission_resolved',
+        requestId: 'req-1',
+        decision: 'allow',
+        sessionId: 'sess-7',
+      })
+      // Filter must be undefined so all clients (including the resolver) receive it
+      assert.equal(result.messages[0].filter, undefined)
+    })
+
+    it('forwards deny decision from auto-deny paths (timeout/abort/cleared)', () => {
+      const data = { requestId: 'req-2', decision: 'deny', reason: 'timeout' }
+      const result = normalizer.normalize('permission_resolved', data, makeCtx({ sessionId: 'sess-7' }))
+      assert.equal(result.messages[0].msg.decision, 'deny')
+    })
+  })
+
   // ---- EVENT_MAP: error ----
 
   describe('error event', () => {

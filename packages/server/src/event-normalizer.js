@@ -198,6 +198,22 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #3048: clear stale prompts on every connected client when a permission
+  // resolves via any path (user response, timeout, abort signal, clearAll).
+  // The SDK paths in settings-handlers.js (WS) and ws-permissions.js (HTTP)
+  // were de-inlined to use this mapping, but the legacy non-SDK branches in
+  // those files (no PermissionManager available) still broadcast inline.
+  permission_resolved: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'permission_resolved',
+        requestId: data.requestId,
+        decision: data.decision,
+        sessionId: ctx.sessionId,
+      },
+    }],
+  }),
+
   error: (data) => {
     const msg = {
       type: 'message',

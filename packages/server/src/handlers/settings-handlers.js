@@ -328,10 +328,14 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     })
   }
 
-  // Notify all OTHER clients that this permission was resolved so they dismiss their prompts
-  if (resolved) {
+  // #3048: SDK-session broadcasts now go through the unified pipeline
+  // (PermissionManager.emit → SdkSession.emit → SessionManager session_event
+  // → EventNormalizer → broadcast). Legacy non-SDK sessions resolved via
+  // ctx.permissions.resolvePermission have no PermissionManager to wire
+  // through, so keep an inline broadcast for that branch only.
+  if (resolved && !originSessionId) {
     ctx.broadcast(
-      { type: 'permission_resolved', requestId, decision, sessionId: originSessionId },
+      { type: 'permission_resolved', requestId, decision },
       (c) => c.id !== client.id
     )
   }
