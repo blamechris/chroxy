@@ -318,13 +318,17 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
   }
 
-  // Audit trail for permission decisions
+  // Audit trail for permission decisions. Auto-deny paths
+  // (timeout/aborted/cleared) are audited from the unified pipeline in
+  // ws-server.js (#3057) — this branch only fires for user-initiated WS
+  // responses, hence reason: 'user'.
   if (resolved && ctx.permissionAudit) {
     ctx.permissionAudit.logDecision({
       clientId: client.id,
       sessionId: originSessionId,
       requestId,
       decision,
+      reason: 'user',
     })
   }
 

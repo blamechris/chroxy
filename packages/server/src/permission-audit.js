@@ -52,18 +52,24 @@ export class PermissionAuditLog {
   /**
    * Record a permission decision (approve/deny).
    * @param {object} params
-   * @param {string} params.clientId - Client that responded
+   * @param {string|null} params.clientId - Client that responded. Null for
+   *   auto-deny paths (timeout / aborted / cleared) which have no responder.
    * @param {string} params.sessionId - Session the permission belongs to
    * @param {string} params.requestId - The permission request ID
    * @param {string} params.decision - 'allow' or 'deny'
+   * @param {string} [params.reason] - How the permission was resolved.
+   *   Defaults to 'user' for backwards compatibility with the inline WS-path
+   *   audit. Auto-deny paths pass 'timeout' | 'aborted' | 'cleared' so
+   *   forensic queries can distinguish user denies from auto-denies (#3057).
    */
-  logDecision({ clientId, sessionId, requestId, decision }) {
+  logDecision({ clientId, sessionId, requestId, decision, reason = 'user' }) {
     this._append({
       type: 'decision',
       clientId,
       sessionId,
       requestId,
       decision,
+      reason,
       timestamp: Date.now(),
     })
   }

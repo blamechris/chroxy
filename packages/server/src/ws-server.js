@@ -547,9 +547,12 @@ export class WsServer {
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 
-    // Register/unregister per-session hook secrets and clean up checkpoints on lifecycle events
+    // Register/unregister per-session hook secrets and clean up checkpoints on lifecycle events.
+    // Handlers are stored on `this` so close() can remove them — without this, a long-lived
+    // SessionManager keeps every retired WsServer pinned in memory and replays events to
+    // closed instances. Symmetric with _pairingRefreshedHandler / _tokenRotatedHandler.
     if (sessionManager && typeof sessionManager.on === 'function') {
-      sessionManager.on('session_created', ({ sessionId }) => {
+      this._sessionCreatedHandler = ({ sessionId }) => {
         const entry = sessionManager.getSession(sessionId)
         const secret = entry?.session?._hookSecret
         if (secret) {
@@ -557,8 +560,8 @@ export class WsServer {
           this._sessionHookSecrets.set(sessionId, secret)
           log.debug(`Registered hook secret for session ${sessionId}`)
         }
-      })
-      sessionManager.on('session_destroyed', ({ sessionId }) => {
+      }
+      this._sessionDestroyedHandler = ({ sessionId }) => {
         // Look up the stored secret — the session is already removed from the map
         const secret = this._sessionHookSecrets.get(sessionId)
         if (secret) {
@@ -577,7 +580,28 @@ export class WsServer {
         for (const [key, sid] of this._questionSessionMap) {
           if (sid === sessionId) this._questionSessionMap.delete(key)
         }
-      })
+      }
+      // #3057: audit auto-deny resolution paths (timeout / aborted / cleared).
+      // The WS inline response path in settings-handlers.js audits user
+      // resolutions with the responding client's id. Auto-deny paths have no
+      // client — record them here with clientId null so forensic queries see
+      // the full lifecycle of every permission request, not just the ones a
+      // user touched. (HTTP user resolutions still aren't audited — pre-existing
+      // gap tracked in #3059.)
+      this._sessionEventAuditHandler = ({ sessionId, event, data }) => {
+        if (event !== 'permission_resolved') return
+        if (!data || data.reason === 'user') return
+        this._permissionAudit.logDecision({
+          clientId: null,
+          sessionId,
+          requestId: data.requestId,
+          decision: data.decision,
+          reason: data.reason,
+        })
+      }
+      sessionManager.on('session_created', this._sessionCreatedHandler)
+      sessionManager.on('session_destroyed', this._sessionDestroyedHandler)
+      sessionManager.on('session_event', this._sessionEventAuditHandler)
     }
 
     // Dev server preview tunneling
@@ -1363,6 +1387,25 @@ export class WsServer {
     if (this._tokenManager && this._tokenRotatedHandler) {
       this._tokenManager.off('token_rotated', this._tokenRotatedHandler)
       this._tokenRotatedHandler = null
+    }
+
+    // Remove SessionManager listeners to prevent the closed WsServer from
+    // being kept alive by a long-lived SessionManager. Without this, a server
+    // recreated against the same SessionManager would receive duplicated
+    // events on every old + new instance (#3060).
+    if (this.sessionManager && typeof this.sessionManager.off === 'function') {
+      if (this._sessionCreatedHandler) {
+        this.sessionManager.off('session_created', this._sessionCreatedHandler)
+        this._sessionCreatedHandler = null
+      }
+      if (this._sessionDestroyedHandler) {
+        this.sessionManager.off('session_destroyed', this._sessionDestroyedHandler)
+        this._sessionDestroyedHandler = null
+      }
+      if (this._sessionEventAuditHandler) {
+        this.sessionManager.off('session_event', this._sessionEventAuditHandler)
+        this._sessionEventAuditHandler = null
+      }
     }
 
     if (this._pingInterval) {

@@ -43,6 +43,60 @@ describe('PermissionAuditLog (#1851)', () => {
     assert.equal(entries[0].decision, 'allow')
   })
 
+  // #3057: auto-deny resolution paths (timeout / aborted / cleared) record
+  // an audit entry with clientId null and a non-'user' reason, so forensic
+  // queries can distinguish "user explicitly denied" from "auto-denied
+  // because the request expired". The reason field also reveals which path
+  // produced the resolution.
+  it('records reason field on permission decisions (#3057)', () => {
+    log.logDecision({
+      clientId: null,
+      sessionId: 's1',
+      requestId: 'req-timeout',
+      decision: 'deny',
+      reason: 'timeout',
+    })
+    log.logDecision({
+      clientId: null,
+      sessionId: 's1',
+      requestId: 'req-abort',
+      decision: 'deny',
+      reason: 'aborted',
+    })
+    log.logDecision({
+      clientId: null,
+      sessionId: 's1',
+      requestId: 'req-cleared',
+      decision: 'deny',
+      reason: 'cleared',
+    })
+
+    const entries = log.query({ type: 'decision' })
+    assert.equal(entries.length, 3)
+    assert.deepStrictEqual(
+      entries.map(e => ({ requestId: e.requestId, reason: e.reason, clientId: e.clientId })),
+      [
+        { requestId: 'req-timeout', reason: 'timeout', clientId: null },
+        { requestId: 'req-abort',   reason: 'aborted', clientId: null },
+        { requestId: 'req-cleared', reason: 'cleared', clientId: null },
+      ],
+    )
+  })
+
+  it('defaults reason to "user" for backwards compatibility (#3057)', () => {
+    // Older callers (and any code we missed) pass no reason — they should
+    // be tagged 'user' so forensic queries can still filter on the new
+    // field without false negatives.
+    log.logDecision({
+      clientId: 'c1',
+      sessionId: 's1',
+      requestId: 'r1',
+      decision: 'allow',
+    })
+    const entries = log.query({ type: 'decision' })
+    assert.equal(entries[0].reason, 'user')
+  })
+
   it('filters by sessionId', () => {
     log.logModeChange({ clientId: 'c1', sessionId: 's1', previousMode: 'approve', newMode: 'auto' })
     log.logModeChange({ clientId: 'c1', sessionId: 's2', previousMode: 'approve', newMode: 'plan' })
