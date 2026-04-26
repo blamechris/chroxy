@@ -430,42 +430,24 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    *   to scan (#2965). When omitted, defaults to [~/.claude/agents].
    */
   async function listAgents(ws, cwd, sessionId, opts = {}) {
-    const agents = []
-    const seen = new Set()
-
-    const scanDir = async (dir, source) => {
+    /**
+     * List the candidate agent .md files in a single directory. Returns
+     * `{ dir, source, filenames[] }`. Errors (missing dir, unreadable, etc.)
+     * yield an empty filenames array so a single failed dir does not abort
+     * the others (#3024).
+     */
+    const listDir = async (dir, source) => {
       try {
         const entries = await readdir(dir, { withFileTypes: true })
-        for (const entry of entries) {
-          if (!entry.isFile() || !entry.name.endsWith('.md')) continue
-          if (entry.name.includes('/') || entry.name.includes('\\')) continue
-          const name = entry.name.slice(0, -3)
-          if (seen.has(name)) continue
-          seen.add(name)
-
-          let description = ''
-          try {
-            const content = await readFile(join(dir, entry.name), 'utf-8')
-            const lines = content.split('\n')
-            for (const line of lines) {
-              const trimmed = line.trim()
-              if (!trimmed || trimmed.startsWith('#')) continue
-              description = trimmed.slice(0, 120)
-              break
-            }
-          } catch (err) {
-            log.error(`Failed to read agent file ${join(dir, entry.name)}: ${err.message}`)
-          }
-
-          agents.push({ name, description, source })
-        }
+        const filenames = entries
+          .filter(e => e.isFile() && e.name.endsWith('.md'))
+          .filter(e => !e.name.includes('/') && !e.name.includes('\\'))
+          .map(e => e.name)
+        return { dir, source, filenames }
       } catch {
         // Directory doesn't exist or is unreadable
+        return { dir, source, filenames: [] }
       }
-    }
-
-    if (cwd) {
-      await scanDir(join(cwd, '.claude', 'agents'), 'project')
     }
 
     // Scan user-level agent directories — default ~/.claude/agents, or
@@ -474,9 +456,50 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       ? opts.userAgentsDirs
       : [join(homedir(), '.claude', 'agents')]
 
-    for (const dir of userAgentsDirs) {
-      await scanDir(dir, 'user')
+    // Phase 1: readdir project + all user dirs in parallel (#3024). Promise.all
+    // preserves input order in the resolved array, so first-wins dedup below
+    // matches the previous sequential semantics: project dir first, then user
+    // dirs in their provided order.
+    const dirScans = []
+    if (cwd) {
+      dirScans.push(listDir(join(cwd, '.claude', 'agents'), 'project'))
     }
+    for (const dir of userAgentsDirs) {
+      dirScans.push(listDir(dir, 'user'))
+    }
+    const dirResults = await Promise.all(dirScans)
+
+    // Phase 2: dedupe by agent name in input order — first occurrence wins.
+    // Skipping duplicates here avoids unnecessary readFile calls in later dirs
+    // (matching the old behavior that short-circuited via `seen.has(name)`).
+    const winners = []
+    const seen = new Set()
+    for (const { dir, source, filenames } of dirResults) {
+      for (const filename of filenames) {
+        const name = filename.slice(0, -3)
+        if (seen.has(name)) continue
+        seen.add(name)
+        winners.push({ name, dir, source, filename })
+      }
+    }
+
+    // Phase 3: read the winning agent files in parallel and parse descriptions.
+    const agents = await Promise.all(winners.map(async ({ name, dir, source, filename }) => {
+      let description = ''
+      try {
+        const content = await readFile(join(dir, filename), 'utf-8')
+        const lines = content.split('\n')
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || trimmed.startsWith('#')) continue
+          description = trimmed.slice(0, 120)
+          break
+        }
+      } catch (err) {
+        log.error(`Failed to read agent file ${join(dir, filename)}: ${err.message}`)
+      }
+      return { name, description, source }
+    }))
 
     agents.sort((a, b) => a.name.localeCompare(b.name))
 

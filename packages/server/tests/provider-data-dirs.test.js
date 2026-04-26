@@ -377,4 +377,60 @@ describe('listAgents with multiple provider agentsDirs (#2965)', () => {
     assert.equal(agents.length, 1, 'shared-agent must appear only once')
     assert.equal(agents[0].description, 'Claude version', 'first dir wins on dedup')
   })
+
+  it('listAgents preserves first-wins order across parallel dir scans (#3024)', async () => {
+    // Under parallelization, dedup must follow the input array order rather
+    // than completion order — `Promise.all` guarantees the resolved array
+    // matches the input order regardless of which scan finishes first. This
+    // test verifies the invariant by giving the first dir many more files
+    // than the second; even though the first dir takes more I/O, the shared
+    // agent name must still resolve to that dir's version.
+    const { createBrowserOps } = await import('../src/ws-file-ops/browser.js')
+
+    const claudeAgents = join(claudeDir, 'agents')
+    const codexAgents = join(codexDir, 'agents')
+
+    for (let i = 0; i < 50; i++) {
+      makeAgentFile(claudeAgents, `claude-filler-${i}`, `Claude filler ${i}`)
+    }
+    makeAgentFile(claudeAgents, 'shared-agent', 'Claude version')
+    makeAgentFile(codexAgents, 'shared-agent', 'Codex version')
+
+    const received = []
+    const sendFn = (_ws, msg) => received.push(msg)
+
+    const browser = createBrowserOps(sendFn, async () => null, async () => null)
+    await browser.listAgents(null, tempCwd, null, {
+      userAgentsDirs: [claudeAgents, codexAgents],
+    })
+
+    const [response] = received
+    const shared = response.agents.find(a => a.name === 'shared-agent')
+    assert.ok(shared, 'shared-agent must be present')
+    assert.equal(shared.description, 'Claude version', 'first dir must win regardless of scan completion order')
+    assert.equal(shared.source, 'user', 'shared agent must come from a user dir, not project')
+
+    // Verify only one shared-agent in the result (no leak from the second dir)
+    const sharedCount = response.agents.filter(a => a.name === 'shared-agent').length
+    assert.equal(sharedCount, 1, 'shared-agent must appear exactly once after dedup')
+  })
+
+  it('listAgents tolerates a missing dir and returns results from the others (#3024)', async () => {
+    const { createBrowserOps } = await import('../src/ws-file-ops/browser.js')
+
+    const claudeAgents = join(claudeDir, 'agents')
+    makeAgentFile(claudeAgents, 'claude-agent', 'An agent from Claude')
+
+    const received = []
+    const sendFn = (_ws, msg) => received.push(msg)
+
+    const browser = createBrowserOps(sendFn, async () => null, async () => null)
+    await browser.listAgents(null, tempCwd, null, {
+      userAgentsDirs: [claudeAgents, '/nonexistent/path/agents'],
+    })
+
+    const [response] = received
+    const names = response.agents.map(a => a.name)
+    assert.ok(names.includes('claude-agent'), 'must include agent from existing dir')
+  })
 })
