@@ -338,8 +338,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         permissionSessionMap.delete(requestId)
         resolvePermission(requestId, decision)
         log.info(`Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
-        // #2905: same broadcast for the legacy single-session HTTP path.
-        broadcastFn({ type: 'permission_resolved', requestId, decision })
+        // #2905: same broadcast for the legacy HTTP path. Include sessionId
+        // when the request was mapped (keeps the wire contract consistent
+        // with the SDK branch and settings-handlers.js for clients that route
+        // by session); omit it for genuinely unmapped legacy requests.
+        broadcastFn({
+          type: 'permission_resolved',
+          requestId,
+          decision,
+          ...(originSessionId ? { sessionId: originSessionId } : {}),
+        })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
       } else {
