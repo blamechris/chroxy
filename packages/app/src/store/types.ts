@@ -316,60 +316,109 @@ export interface UIViewData {
   viewMode: 'chat' | 'terminal' | 'files' | 'system';
   // Input settings
   inputSettings: InputSettings;
-  // Raw terminal output buffer (ANSI-stripped, for plain text fallback)
+  // Terminal output buffer with ANSI codes stripped (for plain text fallback)
   terminalBuffer: string;
   // Raw terminal buffer with ANSI codes intact (for xterm.js replay on view switch)
   terminalRawBuffer: string;
 }
 
 /**
- * ConnectionState — Zustand store shape for the mobile app's connection layer.
- *
- * Composed from per-group data sub-interfaces (#3050 / phase 3a of #2662) so
- * the shape is discoverable without scanning the whole file. Actions are
- * still flat for now; phase 3b (#3051) will split them into per-group action
- * sub-interfaces.
- *
- * Encryption state (`encryptionState`, `pendingKeyPair`, `pendingSalt`) lives
- * on `MessageHandlerContext` in `message-handler.ts` (#3049 extracted that
- * `EncryptionContext` sub-interface) — not on this store.
+ * Action group 1 — Connection lifecycle. Connect/disconnect plus the
+ * persisted-connection helpers used by ConnectScreen / SessionScreen on app
+ * start.
  */
-export interface ConnectionState extends
-  ConnectionSocketData,
-  MultiClientSessionData,
-  ModelsAndPermissionsData,
-  CostBudgetData,
-  ServerNotificationData,
-  DiscoveryData,
-  UIViewData {
-  // Actions
+export interface ConnectionActions {
   connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
   disconnect: () => void;
   loadSavedConnection: () => Promise<void>;
   clearSavedConnection: () => Promise<void>;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'system') => void;
+}
+
+/**
+ * Action group 2 — Sessions & multi-client. Session lifecycle (create /
+ * switch / destroy / rename / forget), follow-mode toggle, and the
+ * convenience accessor for the active session's state.
+ */
+export interface MultiClientSessionActions {
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
+  createSession: (name: string, cwd?: string, worktree?: boolean, provider?: string) => void;
+  destroySession: (sessionId: string) => void;
+  renameSession: (sessionId: string, name: string) => void;
+  forgetSession: () => void;
+  setFollowMode: (enabled: boolean) => void;
+  getActiveSessionState: () => SessionState;
+}
+
+/**
+ * Action group 3 — Message input & responses. User-message construction,
+ * input/interrupt sending, and the permission/question response paths plus
+ * their local mark-as-answered helpers.
+ */
+export interface MessageInputActions {
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
-  appendTerminalData: (data: string) => void;
-  clearTerminalBuffer: () => void;
-  setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
-  updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
+}
+
+/**
+ * Action group 4 — Models & permissions. Setters for the active model and
+ * permission mode (including the auto-mode confirmation flow), plus
+ * session-rule registration.
+ */
+export interface ModelsAndPermissionsActions {
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
-  resize: (cols: number, rows: number) => void;
+  setPermissionRules: (rules: PermissionRule[]) => void;
+}
 
+/**
+ * Action group 5 — Discovery fetchers. Server-side data fetching and
+ * resume/search flows. Mirrors the `DiscoveryData` slice except for
+ * checkpoint mutators (which live with their plan-mode siblings in
+ * `CheckpointAndPlanActions`) and web task/web feature actions (which
+ * live in `WebTaskActions`).
+ */
+export interface DiscoveryActions {
+  fetchProviders: () => void;
+  fetchSlashCommands: () => void;
+  fetchCustomAgents: () => void;
+  fetchConversationHistory: () => void;
+  resumeConversation: (conversationId: string, cwd?: string) => void;
+  searchConversations: (query: string) => void;
+  clearSearchResults: () => void;
+  requestFullHistory: (sessionId?: string) => void;
+}
+
+/**
+ * Action group 6 — Checkpoint & plan-mode. CRUD for session checkpoints +
+ * the plan-mode approve/reject flow. Bundled because both gate continued
+ * conversation progress.
+ */
+export interface CheckpointAndPlanActions {
+  createCheckpoint: (name?: string) => void;
+  listCheckpoints: () => void;
+  restoreCheckpoint: (checkpointId: string) => void;
+  deleteCheckpoint: (checkpointId: string) => void;
+  clearPlanState: () => void;
+  sendPlanResponse: (sessionId: string, approve: boolean) => void;
+}
+
+/**
+ * Action group 7 — File system / git / diff operations. All file-browser,
+ * directory-listing, git-status/branches/stage/commit, and diff requests
+ * plus their result-callback registrations.
+ */
+export interface FileGitDiffActions {
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
   requestDirectoryListing: (path?: string) => void;
-
   // File browser
   setFileBrowserCallback: (cb: ((listing: FileListing) => void) | null) => void;
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
@@ -377,7 +426,6 @@ export interface ConnectionState extends
   requestFileContent: (path: string) => void;
   setFileWriteCallback: (cb: ((result: FileWriteResult) => void) | null) => void;
   requestFileWrite: (path: string, content: string) => void;
-
   // Git operations
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
   setGitBranchesCallback: (cb: ((result: GitBranchesResult) => void) | null) => void;
@@ -388,75 +436,77 @@ export interface ConnectionState extends
   requestGitStage: (paths: string[]) => void;
   requestGitUnstage: (paths: string[]) => void;
   requestGitCommit: (message: string) => void;
-
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;
   requestDiff: (base?: string) => void;
+}
 
-  // Session actions
-  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
-  createSession: (name: string, cwd?: string, worktree?: boolean, provider?: string) => void;
-  destroySession: (sessionId: string) => void;
-  renameSession: (sessionId: string, name: string) => void;
-  forgetSession: () => void;
-
-  // Providers
-  fetchProviders: () => void;
-
-  // Slash commands
-  fetchSlashCommands: () => void;
-
-  // Custom agents
-  fetchCustomAgents: () => void;
-
-  // Conversation history (resume past conversations)
-  fetchConversationHistory: () => void;
-  resumeConversation: (conversationId: string, cwd?: string) => void;
-
-  // Cross-session search
-  searchConversations: (query: string) => void;
-  clearSearchResults: () => void;
-
-  // Full history sync (session portability)
-  requestFullHistory: (sessionId?: string) => void;
-
-  // Checkpoint actions
-  createCheckpoint: (name?: string) => void;
-  listCheckpoints: () => void;
-  restoreCheckpoint: (checkpointId: string) => void;
-  deleteCheckpoint: (checkpointId: string) => void;
-
-  // Session rules actions
-  setPermissionRules: (rules: PermissionRule[]) => void;
-
-  // Plan mode actions
-  clearPlanState: () => void;
-  sendPlanResponse: (sessionId: string, approve: boolean) => void;
-
-  // Server error actions
+/**
+ * Action group 8 — Server-event dismissals. Mirrors `ServerNotificationData`:
+ * dismiss errors, session notifications, and the idle-timeout warning.
+ */
+export interface ServerNotificationActions {
   dismissServerError: (id: string) => void;
-
-  // Session notification actions
   dismissSessionNotification: (id: string) => void;
+  dismissTimeoutWarning: () => void;
+}
 
-  // Dev server preview
-  closeDevPreview: (port: number) => void;
-
-  // Web tasks (Claude Code Web)
+/**
+ * Action group 9 — Web tasks (Claude Code Web cloud delegation) and the
+ * dev-server preview tunnel close. Bundled because both cover external /
+ * out-of-process surfaces the session can hand work off to.
+ */
+export interface WebTaskActions {
   launchWebTask: (prompt: string, cwd?: string) => 'sent' | false;
   listWebTasks: () => void;
   teleportWebTask: (taskId: string) => void;
+  closeDevPreview: (port: number) => void;
+}
 
-  // Offline cached session viewing
+/**
+ * Action group 10 — UI / view / terminal. View-mode toggles, offline cached
+ * session entry/exit, input-settings updater, terminal write surface, and
+ * the resize handshake. Mirrors `UIViewData`.
+ */
+export interface UIViewActions {
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'system') => void;
   viewCachedSession: () => void;
   exitCachedSession: () => void;
-
-  // Session timeout warning
-  dismissTimeoutWarning: () => void;
-
-  // Follow mode
-  setFollowMode: (enabled: boolean) => void;
-
-  // Convenience accessor
-  getActiveSessionState: () => SessionState;
+  updateInputSettings: (settings: Partial<InputSettings>) => void;
+  appendTerminalData: (data: string) => void;
+  clearTerminalBuffer: () => void;
+  setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
+  resize: (cols: number, rows: number) => void;
 }
+
+/**
+ * ConnectionState — Zustand store shape for the mobile app's connection layer.
+ *
+ * Composed from per-group data sub-interfaces (#3050 / phase 3a of #2662)
+ * AND per-group action sub-interfaces (#3051 / phase 3b of #2662) so the
+ * shape is discoverable without scanning the whole file.
+ *
+ * Encryption state (`encryptionState`, `pendingKeyPair`, `pendingSalt`) lives
+ * on `MessageHandlerContext` in `message-handler.ts` (#3049 extracted that
+ * `EncryptionContext` sub-interface) — not on this store.
+ */
+export interface ConnectionState extends
+  // Data groups (phase 3a)
+  ConnectionSocketData,
+  MultiClientSessionData,
+  ModelsAndPermissionsData,
+  CostBudgetData,
+  ServerNotificationData,
+  DiscoveryData,
+  UIViewData,
+  // Action groups (phase 3b)
+  ConnectionActions,
+  MultiClientSessionActions,
+  MessageInputActions,
+  ModelsAndPermissionsActions,
+  DiscoveryActions,
+  CheckpointAndPlanActions,
+  FileGitDiffActions,
+  ServerNotificationActions,
+  WebTaskActions,
+  UIViewActions {}
