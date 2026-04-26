@@ -326,9 +326,10 @@ describe('components.css reduced-motion overrides', () => {
 
     expect(reduceBlocks.length).toBeGreaterThan(0)
 
-    const bannerOverridePresent = reduceBlocks.some(
-      (block) =>
-        block.includes('.tunnel-warming-banner') && block.includes('transition: none'),
+    // Require selector and property to co-occur inside the same rule block,
+    // not merely the same @media block (#3012).
+    const bannerOverridePresent = reduceBlocks.some((block) =>
+      /\.tunnel-warming-banner\s*\{[^}]*transition:\s*none/.test(block),
     )
     expect(bannerOverridePresent).toBe(true)
   })

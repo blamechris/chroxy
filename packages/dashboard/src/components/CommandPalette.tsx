@@ -2,6 +2,7 @@
  * CommandPalette — searchable command list overlay with keyboard navigation.
  */
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { formatShortcutKeys } from '../utils/platform'
 
 export interface Command {
   id: string
@@ -143,7 +144,9 @@ export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPa
                   >
                     <span className="command-palette-item-name">{cmd.name}</span>
                     {cmd.shortcut && (
-                      <span className="command-palette-item-shortcut">{cmd.shortcut}</span>
+                      <span className="command-palette-item-shortcut">
+                        {formatShortcutKeys(cmd.shortcut)}
+                      </span>
                     )}
                   </div>
                 )

@@ -1287,7 +1287,7 @@ mod tests {
             ":",
         );
         // Homebrew appears exactly once (in the base path) — not prepended again.
-        let occurrences = out.matches("/opt/homebrew/bin").count();
+        let occurrences = out.split(':').filter(|e| *e == "/opt/homebrew/bin").count();
         assert_eq!(occurrences, 1, "homebrew duplicated in: {}", out);
     }
 
