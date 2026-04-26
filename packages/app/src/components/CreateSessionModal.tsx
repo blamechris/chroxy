@@ -153,7 +153,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
           contentContainerStyle={styles.scrollContent}
           bounces={false}
           keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
         >
           <View style={styles.modal}>
             <Text style={styles.title}>New Session</Text>
