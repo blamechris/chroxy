@@ -191,8 +191,15 @@ export class SdkSession extends BaseSession {
       this._pauseResultTimeoutForPermission()
       this.emit('user_question', data)
     })
-    this._permissions.on('permission_resolved', () => {
+    this._permissions.on('permission_resolved', (data) => {
       this._resumeResultTimeoutForPermission()
+      // #3048: re-emit so the unified pipeline (SessionManager → ws-forwarding
+      // → EventNormalizer → broadcast) can fan out the resolution to every
+      // connected client. Gate on requestId — the AskUserQuestion paths emit
+      // with `toolUseId` and use a separate wire contract.
+      if (data && data.requestId) {
+        this.emit('permission_resolved', data)
+      }
     })
 
     // Backward-compatible accessors (used by ws-permissions.js, settings-handlers.js)

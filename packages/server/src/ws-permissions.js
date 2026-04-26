@@ -311,12 +311,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           permissionSessionMap.delete(requestId)
           if (resolved) {
             log.info(`Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
-            // #2905: notify other clients so they dismiss the prompt. The WS
-            // path in settings-handlers.js already broadcasts on
-            // `permission_response`; mirror that here so resolutions arriving
-            // via the HTTP fallback (e.g. lockscreen notification action) keep
-            // every connected client in sync.
-            broadcastFn({ type: 'permission_resolved', requestId, decision, sessionId: originSessionId })
+            // #3048: broadcast is now handled by the unified pipeline
+            // (PermissionManager.emit → SdkSession.emit → SessionManager
+            // session_event → EventNormalizer → broadcast). The previous
+            // inline broadcast here was the #2905 fix and is now redundant.
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ ok: true }))
           } else {

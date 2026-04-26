@@ -677,13 +677,15 @@ describe('createPermissionHandler', () => {
       assert.equal(respondToPermission.mock.calls.length, 1)
     })
 
-    // #2905: when one client resolves a permission via the HTTP fallback (e.g.
-    // an iOS notification action while WS was offline), every other connected
-    // client must still receive a `permission_resolved` broadcast so they can
-    // dismiss the prompt. Pre-fix the WS path in settings-handlers.js was the
-    // only emitter; both HTTP branches resolved silently and the second
-    // client was left stuck on the ★ permission bubble.
-    it('broadcasts permission_resolved to other clients when SDK path resolves (#2905)', async () => {
+    // #2905 / #3048: when one client resolves a permission via the HTTP fallback
+    // (e.g. an iOS notification action while WS was offline), every other
+    // connected client must still receive a `permission_resolved` broadcast so
+    // they can dismiss the prompt. Post-#3048 the SDK path no longer broadcasts
+    // inline — `respondToPermission` triggers the unified pipeline
+    // (PermissionManager.emit → SdkSession.emit → SessionManager session_event
+    // → EventNormalizer → broadcast), so this handler just calls into the
+    // session and lets the pipeline fan out the resolution.
+    it('routes SDK path through respondToPermission (no inline broadcast — unified pipeline owns it, #3048)', async () => {
       const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
       const respondToPermission = mock.fn(() => true)
       const sm = {
@@ -699,13 +701,11 @@ describe('createPermissionHandler', () => {
       handlePermissionResponseHttp(req, res)
       await new Promise(r => setImmediate(r))
       assert.equal(res.statusCode, 200)
-      assert.equal(opts.broadcastFn.mock.calls.length, 1,
-        'permission_resolved must be broadcast so other clients dismiss the prompt')
-      const [msg] = opts.broadcastFn.mock.calls[0].arguments
-      assert.equal(msg.type, 'permission_resolved')
-      assert.equal(msg.requestId, 'sdk-req')
-      assert.equal(msg.decision, 'allow')
-      assert.equal(msg.sessionId, 'sess-sdk')
+      assert.equal(respondToPermission.mock.calls.length, 1,
+        'SDK session.respondToPermission must be invoked')
+      assert.deepStrictEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow'])
+      assert.equal(opts.broadcastFn.mock.calls.length, 0,
+        'SDK path must NOT broadcast inline — the unified pipeline handles it (#3048)')
     })
 
     it('broadcasts permission_resolved when legacy path resolves (#2905)', async () => {

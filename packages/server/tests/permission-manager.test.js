@@ -143,6 +143,52 @@ describe('PermissionManager', () => {
       assert.ok(!pm._lastPermissionData.has(requestId))
     })
 
+    // #3048: every resolution path must emit a uniform { requestId, decision, reason }
+    // payload so the unified broadcast pipeline (PermissionManager → SdkSession
+    // → ws-forwarding) can fan out without path-specific branches.
+    it('emits unified permission_resolved payload from respondToPermission (#3048)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      const promise = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      const requestId = Array.from(pm._pendingPermissions.keys())[0]
+      pm.respondToPermission(requestId, 'allow')
+      await promise
+
+      assert.equal(events.length, 1)
+      assert.deepStrictEqual(events[0], { requestId, decision: 'allow', reason: 'user' })
+    })
+
+    it('emits unified permission_resolved payload on timeout (#3048)', async () => {
+      const fastPm = createManager({ timeoutMs: 5 })
+      const events = []
+      fastPm.on('permission_resolved', (data) => events.push(data))
+
+      const promise = fastPm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      const requestId = Array.from(fastPm._pendingPermissions.keys())[0]
+      const result = await promise
+
+      assert.equal(result.behavior, 'deny')
+      assert.equal(events.length, 1)
+      assert.deepStrictEqual(events[0], { requestId, decision: 'deny', reason: 'timeout' })
+      fastPm.destroy()
+    })
+
+    it('emits unified permission_resolved payload on abort (#3048)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      const controller = new AbortController()
+      const promise = pm.handlePermission('Bash', { command: 'ls' }, controller.signal, 'approve')
+      const requestId = Array.from(pm._pendingPermissions.keys())[0]
+      controller.abort()
+      const result = await promise
+
+      assert.equal(result.behavior, 'deny')
+      assert.equal(events.length, 1)
+      assert.deepStrictEqual(events[0], { requestId, decision: 'deny', reason: 'aborted' })
+    })
+
     it('auto-denies on abort signal', async () => {
       const controller = new AbortController()
       const promise = pm.handlePermission('Bash', {}, controller.signal, 'approve')
@@ -326,6 +372,30 @@ describe('PermissionManager', () => {
       assert.equal(result2.behavior, 'deny')
       assert.equal(pm._pendingPermissions.size, 0)
       assert.equal(pm._lastPermissionData.size, 0)
+    })
+
+    // #3048: every resolution path must emit a uniform { requestId, decision, reason }
+    // payload so the unified broadcast pipeline can fan out to every connected client.
+    it('emits permission_resolved with decision:deny + reason:cleared per pending request (#3048)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      const p1 = pm.handlePermission('Bash', {}, null, 'approve')
+      const p2 = pm.handlePermission('Read', {}, null, 'approve')
+      const reqIds = Array.from(pm._pendingPermissions.keys())
+      assert.equal(reqIds.length, 2)
+
+      pm.clearAll()
+      await Promise.all([p1, p2])
+
+      // One emit per pending request — each carries decision + reason
+      const requestEmits = events.filter(e => e.requestId)
+      assert.equal(requestEmits.length, 2)
+      for (const emit of requestEmits) {
+        assert.equal(emit.decision, 'deny')
+        assert.equal(emit.reason, 'cleared')
+        assert.ok(reqIds.includes(emit.requestId))
+      }
     })
 
     it('auto-denies pending user answer', async () => {

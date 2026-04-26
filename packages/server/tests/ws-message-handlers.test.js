@@ -415,26 +415,50 @@ describe('handleSessionMessage', () => {
       assert.equal(entryX.session.respondToPermission.callCount, 1)
     })
 
-    // #2905: pin the cross-client dismissal contract. The responder is excluded
-    // by the (c) => c.id !== client.id filter; every other authenticated client
-    // must still receive the permission_resolved message so its prompt clears.
-    it('broadcasts permission_resolved to other clients on resolve (#2905)', async () => {
+    // #2905 / #3048: cross-client dismissal contract. Post-#3048, SDK sessions
+    // (those with an originSessionId mapping) route the broadcast through the
+    // unified pipeline (PermissionManager.emit → SdkSession.emit → SessionManager
+    // session_event → EventNormalizer → broadcast). The handler no longer
+    // broadcasts inline for SDK requests — it just calls respondToPermission
+    // and lets the pipeline fan out. Verify by asserting respondToPermission
+    // is invoked and ctx.broadcast is NOT called.
+    it('routes SDK resolution through respondToPermission (no inline broadcast — unified pipeline owns it, #3048)', async () => {
       const ctx = makeCtx()
       ctx.permissionSessionMap.set('req-broadcast', 'sess-1')
-      addSession(ctx, 'sess-1')
+      const entry = addSession(ctx, 'sess-1')
       const responder = makeClient({ id: 'responder', activeSessionId: 'sess-1' })
       await handleSessionMessage(WS, responder, {
         type: 'permission_response',
         requestId: 'req-broadcast',
         decision: 'allow',
       }, ctx)
-      assert.equal(ctx.broadcast.mock.calls.length, 1)
+      assert.equal(entry.session.respondToPermission.callCount, 1)
+      assert.deepStrictEqual(entry.session.respondToPermission.lastCall, ['req-broadcast', 'allow'])
+      assert.equal(ctx.broadcast.mock.calls.length, 0,
+        'SDK path must NOT broadcast inline — the unified pipeline handles it (#3048)')
+    })
+
+    // #3048: legacy non-SDK sessions resolved via ctx.permissions.resolvePermission
+    // have no PermissionManager to wire through, so the handler still broadcasts
+    // inline for that branch. Verify the filter excludes the responder.
+    it('broadcasts inline for legacy non-SDK resolutions (#3048)', async () => {
+      const ctx = makeCtx()
+      // No permissionSessionMap entry → originSessionId is null → legacy branch
+      ctx.pendingPermissions.set('legacy-req', { resolve: () => {}, timer: null })
+      const responder = makeClient({ id: 'responder' })  // unbound client
+      await handleSessionMessage(WS, responder, {
+        type: 'permission_response',
+        requestId: 'legacy-req',
+        decision: 'deny',
+      }, ctx)
+      assert.equal(ctx.broadcast.mock.calls.length, 1,
+        'legacy branch must still broadcast inline (no PermissionManager pipeline available)')
       const [msg, filter] = ctx.broadcast.mock.calls[0].arguments
       assert.equal(msg.type, 'permission_resolved')
-      assert.equal(msg.requestId, 'req-broadcast')
-      assert.equal(msg.decision, 'allow')
-      assert.equal(msg.sessionId, 'sess-1')
-      // Filter excludes the responder so they don't get an echo of their own ack
+      assert.equal(msg.requestId, 'legacy-req')
+      assert.equal(msg.decision, 'deny')
+      assert.equal(Object.prototype.hasOwnProperty.call(msg, 'sessionId'), false,
+        'unmapped legacy resolutions must not carry a sessionId')
       assert.equal(filter({ id: 'responder' }), false)
       assert.equal(filter({ id: 'other-client' }), true)
     })

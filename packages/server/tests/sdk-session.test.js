@@ -155,6 +155,71 @@ describe('SdkSession', () => {
       // Should not throw
       session.respondToPermission('nonexistent', 'allow')
     })
+
+    // #3048: SdkSession re-emits permission_resolved upward so SessionManager
+    // can fan it out via the unified broadcast pipeline. Only requestId-bearing
+    // emits are forwarded — AskUserQuestion paths use toolUseId and a separate
+    // wire contract (user_question / user_question_response).
+    it('re-emits permission_resolved upward when payload carries a requestId (#3048)', async () => {
+      const upstream = []
+      session.on('permission_resolved', (data) => upstream.push(data))
+
+      const promise = session._handlePermission('Bash', { command: 'ls' }, null)
+      const requestId = Array.from(session._pendingPermissions.keys())[0]
+      session.respondToPermission(requestId, 'allow')
+      await promise
+
+      assert.equal(upstream.length, 1)
+      assert.deepStrictEqual(upstream[0], { requestId, decision: 'allow', reason: 'user' })
+    })
+
+    it('re-emits permission_resolved on timeout (#3048)', async () => {
+      const fastSession = new SdkSession({ cwd: '/tmp' })
+      // Override the manager with a fast timeout so the test runs quickly
+      fastSession._permissions._timeoutMs = 5
+      const upstream = []
+      fastSession.on('permission_resolved', (data) => upstream.push(data))
+
+      const promise = fastSession._handlePermission('Bash', { command: 'ls' }, null)
+      const requestId = Array.from(fastSession._pendingPermissions.keys())[0]
+      const result = await promise
+
+      assert.equal(result.behavior, 'deny')
+      assert.equal(upstream.length, 1)
+      assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'timeout' })
+      fastSession.destroy()
+    })
+
+    it('re-emits permission_resolved on abort (#3048)', async () => {
+      const upstream = []
+      session.on('permission_resolved', (data) => upstream.push(data))
+
+      const controller = new AbortController()
+      const promise = session._handlePermission('Bash', { command: 'ls' }, controller.signal)
+      const requestId = Array.from(session._pendingPermissions.keys())[0]
+      controller.abort()
+      const result = await promise
+
+      assert.equal(result.behavior, 'deny')
+      assert.equal(upstream.length, 1)
+      assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'aborted' })
+    })
+
+    it('does NOT re-emit AskUserQuestion permission_resolved (no requestId — separate wire contract, #3048)', async () => {
+      const upstream = []
+      session.on('permission_resolved', (data) => upstream.push(data))
+
+      // AskUserQuestion routes through _handlePermission but resolves via
+      // the question path (toolUseId, no requestId). The PermissionManager
+      // emits { reason: 'answered' } with no requestId — SdkSession must
+      // NOT re-emit it onto the unified pipeline.
+      const promise = session._handlePermission('AskUserQuestion', { questions: [{ question: 'ok?' }] }, null)
+      session.respondToQuestion('yes')
+      await promise
+
+      assert.equal(upstream.length, 0,
+        'question paths use toolUseId and route via user_question, not permission_resolved')
+    })
   })
 
   // -- acceptEdits permission mode --
