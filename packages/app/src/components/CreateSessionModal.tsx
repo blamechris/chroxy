@@ -132,7 +132,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     >
       <KeyboardAvoidingView
         style={styles.overlay}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         {showBrowser ? (
           <View style={styles.modal}>
@@ -148,7 +148,13 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
             />
           </View>
         ) : (
-        <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
+        <ScrollView
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          bounces={false}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.modal}>
             <Text style={styles.title}>New Session</Text>
 
@@ -255,14 +261,18 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
+  },
+  scrollView: {
+    flex: 1,
   },
   scrollContent: {
+    // Centering lives here (not on the overlay) so when the keyboard pops up
+    // and content overflows, the ScrollView can actually scroll instead of
+    // letting the centered modal clip off the top of the screen on Android.
     flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 24,
   },
   modal: {
     width: '100%',
