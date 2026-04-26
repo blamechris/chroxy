@@ -46,10 +46,56 @@ export class PairingManager extends EventEmitter {
   }
 
   /**
+   * Generate a NEW pairing ID bound at creation time to a specific session
+   * (#3070). Unlike `_generatePairing()`, this does NOT replace `_current`
+   * (the linking-mode QR keeps auto-refreshing for general device pairing);
+   * it adds an additional one-shot entry with `boundSessionId` stored on it.
+   *
+   * The returned URL goes into a "Share this session" QR. When the scanner
+   * pairs, the issued sessionToken is bound to the specified sessionId, so
+   * the paired client can chat into that session but cannot list/switch/
+   * destroy others.
+   *
+   * @param {string} sessionId - Session to bind the issued token to
+   * @returns {{ pairingId: string, pairingUrl: string|null }}
+   * @throws {Error} If sessionId is empty / non-string
+   */
+  generateBoundPairing(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error('generateBoundPairing requires a non-empty sessionId')
+    }
+    if (this._destroyed) {
+      throw new Error('PairingManager is destroyed')
+    }
+
+    // Cap active pairings to prevent unbounded growth (same policy as the
+    // linking-mode generator).
+    if (this._activePairings.size >= MAX_ACTIVE_PAIRINGS) {
+      const oldest = this._activePairings.keys().next().value
+      this._activePairings.delete(oldest)
+    }
+
+    const id = randomBytes(12).toString('base64url')
+    const expiresAt = Date.now() + this._ttlMs
+    this._activePairings.set(id, { expiresAt, used: false, boundSessionId: sessionId })
+
+    const pairingUrl = this._wsUrl
+      ? `chroxy://${this._wsUrl.replace(/^wss?:\/\//, '')}?pair=${id}`
+      : null
+    return { pairingId: id, pairingUrl }
+  }
+
+  /**
    * Validate a pairing ID and issue a session token if valid.
    * Accepts any active pairing ID (current or recently-refreshed within TTL).
+   *
+   * If the pairing entry was created via `generateBoundPairing(sessionId)`,
+   * the binding is taken from the entry — `sessionId` param is ignored.
+   * Otherwise (linking-mode pairings), the param controls the binding.
+   *
    * @param {string} pairingId
    * @param {string|null} [sessionId] - Session ID to bind to the issued token
+   *   (only honored when the entry has no boundSessionId of its own).
    * @returns {{ valid: boolean, sessionToken?: string, reason?: string }}
    */
   validatePairing(pairingId, sessionId = null) {
@@ -70,28 +116,35 @@ export class PairingManager extends EventEmitter {
     // Mark as used (one-time)
     entry.used = true
 
-    // Issue a session token (with FIFO eviction at cap)
+    // Issue a session token (with FIFO eviction at cap). Entry-bound pairings
+    // (#3070) take precedence — the param is only honored for linking-mode
+    // pairings that didn't fix a binding at creation time.
+    const effectiveSessionId = entry.boundSessionId || sessionId || null
     const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
     if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
       const oldest = this._sessionTokens.keys().next().value
       this._sessionTokens.delete(oldest)
     }
-    this._sessionTokens.set(sessionToken, { createdAt: Date.now(), sessionId: sessionId || null })
+    this._sessionTokens.set(sessionToken, { createdAt: Date.now(), sessionId: effectiveSessionId })
 
-    // Auto-regenerate so the dashboard always shows a fresh QR (#2916).
-    // Emit after issuing the token so the sessionToken return value is
-    // ready before any pairing_refreshed listener queries currentPairingId.
-    this._generatePairing()
-    this.emit('pairing_refreshed', { pairingId: this._current.id })
+    // Auto-regenerate so the dashboard always shows a fresh QR (#2916), but
+    // only when the just-consumed ID was the linking-mode `_current`. Bound
+    // share-pairings shouldn't trigger a linking-mode rotation.
+    if (this._current && this._current.id === pairingId) {
+      // Emit after issuing the token so the sessionToken return value is
+      // ready before any pairing_refreshed listener queries currentPairingId.
+      this._generatePairing()
+      this.emit('pairing_refreshed', { pairingId: this._current.id })
 
-    // Reset the auto-refresh timer so it counts from the newly-generated ID,
-    // not from when the consumed ID was created. Without this, the pending
-    // timer fires on the old schedule and emits a spurious second
-    // pairing_refreshed seconds later (#3020).
-    if (this._autoRefresh && this._refreshTimer) {
-      clearTimeout(this._refreshTimer)
-      this._refreshTimer = null
-      this._scheduleRefresh()
+      // Reset the auto-refresh timer so it counts from the newly-generated ID,
+      // not from when the consumed ID was created. Without this, the pending
+      // timer fires on the old schedule and emits a spurious second
+      // pairing_refreshed seconds later (#3020).
+      if (this._autoRefresh && this._refreshTimer) {
+        clearTimeout(this._refreshTimer)
+        this._refreshTimer = null
+        this._scheduleRefresh()
+      }
     }
 
     return { valid: true, sessionToken }

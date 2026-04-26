@@ -14,11 +14,23 @@ export interface QrModalProps {
   qrSvg: string | null
   loading: boolean
   error?: string
+  /** Modal title — defaults to "Pair Mobile App". */
+  title?: string
+  /** Body line shown under the QR — defaults to the link-mode text. */
+  instructions?: string
 }
 
-export function QrModal({ open, onClose, qrSvg, loading, error }: QrModalProps) {
+export function QrModal({
+  open,
+  onClose,
+  qrSvg,
+  loading,
+  error,
+  title = 'Pair Mobile App',
+  instructions = 'Scan with Chroxy app to pair your phone',
+}: QrModalProps) {
   return (
-    <Modal open={open} onClose={onClose} title="Pair Mobile App" maxWidth="400px">
+    <Modal open={open} onClose={onClose} title={title} maxWidth="400px">
       <button className="qr-modal-close" onClick={onClose} aria-label="Close" type="button">
         &times;
       </button>
@@ -44,7 +56,7 @@ export function QrModal({ open, onClose, qrSvg, loading, error }: QrModalProps) 
             }}
           />
           <p className="qr-modal-instructions">
-            Scan with Chroxy app to pair your phone
+            {instructions}
           </p>
         </div>
       )}
