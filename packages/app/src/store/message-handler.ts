@@ -112,9 +112,10 @@ import { encrypt, decrypt } from '../utils/crypto';
 // EncryptionContext — E2E encryption state grouped into a sub-interface so
 // it's reusable, discoverable, and resettable as a unit (#3049, phase 2 of
 // #2662). Combines the post-handshake `EncryptionState` (sharedKey + nonces,
-// defined in `@chroxy/store-core/crypto`) with the in-flight key-exchange
-// fields (`pendingKeyPair`, `pendingSalt`) that the handshake produces and
-// then drops once a shared key is derived.
+// imported via `../utils/crypto`, which re-exports the type from
+// `@chroxy/store-core`) with the in-flight key-exchange fields
+// (`pendingKeyPair`, `pendingSalt`) that the handshake produces and then
+// drops once a shared key is derived.
 // ---------------------------------------------------------------------------
 
 export interface EncryptionContext {
