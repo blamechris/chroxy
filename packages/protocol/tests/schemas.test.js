@@ -184,4 +184,142 @@ describe('@chroxy/protocol schemas', () => {
     })
     assert.ok(!result.success, 'Should reject code longer than 64 chars')
   })
+
+  it('validates ServerProviderListSchema with capabilities', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [
+        { name: 'claude', capabilities: { sandbox: true, push: false } },
+        { name: 'codex', capabilities: {} },
+      ],
+    })
+    assert.ok(result.success, 'Should validate provider_list with capabilities')
+    assert.equal(result.data.providers.length, 2)
+    assert.equal(result.data.providers[0].name, 'claude')
+    assert.deepEqual(result.data.providers[0].capabilities, { sandbox: true, push: false })
+  })
+
+  it('validates ServerProviderListSchema without optional capabilities', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{ name: 'claude' }],
+    })
+    assert.ok(result.success, 'Should validate provider_list when capabilities is omitted')
+    assert.equal(result.data.providers[0].capabilities, undefined)
+  })
+
+  it('validates ServerProviderListSchema with empty providers array', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [],
+    })
+    assert.ok(result.success, 'Should validate provider_list with empty providers array')
+  })
+
+  it('rejects ServerProviderListSchema with wrong type literal', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'providers',
+      providers: [{ name: 'claude' }],
+    })
+    assert.ok(!result.success, 'Should reject when type is not "provider_list"')
+  })
+
+  it('rejects ServerProviderListSchema missing providers field', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+    })
+    assert.ok(!result.success, 'Should reject when providers field is missing')
+  })
+
+  it('rejects ServerProviderListSchema when provider entry missing name', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{ capabilities: { sandbox: true } }],
+    })
+    assert.ok(!result.success, 'Should reject provider entry without name')
+  })
+
+  it('rejects ServerProviderListSchema when capabilities values are not booleans', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{ name: 'claude', capabilities: { sandbox: 'yes' } }],
+    })
+    assert.ok(!result.success, 'Should reject non-boolean capability values')
+  })
+
+  it('validates ServerSkillsListSchema with description', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [
+        { name: 'review', description: 'Review a pull request' },
+        { name: 'commit', description: 'Create a git commit' },
+      ],
+    })
+    assert.ok(result.success, 'Should validate skills_list with descriptions')
+    assert.equal(result.data.skills.length, 2)
+    assert.equal(result.data.skills[0].name, 'review')
+    assert.equal(result.data.skills[0].description, 'Review a pull request')
+  })
+
+  it('validates ServerSkillsListSchema without optional description', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [{ name: 'commit' }],
+    })
+    assert.ok(result.success, 'Should validate skills_list when description is omitted')
+    assert.equal(result.data.skills[0].description, undefined)
+  })
+
+  it('validates ServerSkillsListSchema with empty skills array', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [],
+    })
+    assert.ok(result.success, 'Should validate skills_list with empty skills array')
+  })
+
+  it('rejects ServerSkillsListSchema with wrong type literal', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills',
+      skills: [{ name: 'commit' }],
+    })
+    assert.ok(!result.success, 'Should reject when type is not "skills_list"')
+  })
+
+  it('rejects ServerSkillsListSchema missing skills field', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+    })
+    assert.ok(!result.success, 'Should reject when skills field is missing')
+  })
+
+  it('rejects ServerSkillsListSchema when skill entry missing name', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [{ description: 'No name' }],
+    })
+    assert.ok(!result.success, 'Should reject skill entry without name')
+  })
+
+  it('rejects ServerSkillsListSchema when description is not a string', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [{ name: 'commit', description: 42 }],
+    })
+    assert.ok(!result.success, 'Should reject non-string description')
+  })
 })
