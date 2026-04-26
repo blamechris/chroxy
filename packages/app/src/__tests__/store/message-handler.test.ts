@@ -1684,6 +1684,35 @@ describe('stream_delta handler', () => {
     const toolUseMsg = ss.messages.find((m) => m.id === 'msg-1');
     expect(toolUseMsg?.content).toBe('ls');
   });
+
+  // #3071 — when stream_start is dropped (e.g., session not yet in store at the
+  // time it arrived), the next stream_delta with the same messageId must NOT
+  // concatenate onto the existing tool_use bubble. The delta handler defends
+  // by detecting the type collision and lazy-creating a suffixed response.
+  it('ID collision recovery: lazy-creates response when stream_start was missed', () => {
+    const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Skip stream_start — simulate the dropped/raced case
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'After tool ' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'response' });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responseMsg = ss.messages.find((m) => m.id === 'msg-1-response');
+    expect(responseMsg).toBeDefined();
+    expect(responseMsg?.type).toBe('response');
+    expect(responseMsg?.content).toBe('After tool response');
+    // tool_use bubble must remain pristine — no concatenated assistant text
+    const toolUseMsg = ss.messages.find((m) => m.id === 'msg-1');
+    expect(toolUseMsg?.content).toBe('ls');
+  });
 });
 
 describe('stream_end handler', () => {

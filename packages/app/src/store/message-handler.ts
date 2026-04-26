@@ -1318,6 +1318,32 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         deltaId = newId;
       } else if (_ctx.deltaIdRemaps.has(deltaId)) {
         deltaId = _ctx.deltaIdRemaps.get(deltaId)!;
+      } else {
+        // Defensive: server reuses messageId for tool_start and the post-tool
+        // stream_start. If stream_start was dropped or hasn't registered the
+        // remap yet (e.g., session not in store at the time), the delta would
+        // otherwise concatenate onto the tool_use bubble. Detect that here and
+        // route to a suffixed response id, lazy-creating the bubble.
+        const targetId = capturedSessionId;
+        const effectiveDeltaId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
+        if (effectiveDeltaId && get().sessionStates[effectiveDeltaId]) {
+          const ss = get().sessionStates[effectiveDeltaId];
+          const existing = ss.messages.find((m) => m.id === deltaId);
+          if (existing && existing.type !== 'response') {
+            const suffixed = `${deltaId}-response`;
+            _ctx.deltaIdRemaps.set(deltaId, suffixed);
+            if (!ss.messages.some((m) => m.id === suffixed)) {
+              updateSession(effectiveDeltaId, (s) => ({
+                streamingMessageId: suffixed,
+                messages: [
+                  ...s.messages,
+                  { id: suffixed, type: 'response' as const, content: '', timestamp: Date.now() },
+                ],
+              }));
+            }
+            deltaId = suffixed;
+          }
+        }
       }
 
       const existingDelta = _ctx.pendingDeltas.get(deltaId);
