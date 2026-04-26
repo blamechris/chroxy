@@ -287,7 +287,11 @@ function _isSecureRequest(req) {
  *   { type: 'dev_preview_stopped', port, sessionId }    — dev server preview tunnel closed
  *   { type: 'web_task_created', task }                  — cloud task launched
  *   { type: 'web_task_updated', task }                  — cloud task status changed
- *   { type: 'web_task_error', taskId?, message }        — cloud task error
+ *   { type: 'web_task_error', taskId?, message, code?, boundSessionId?, boundSessionName? } — cloud task error
+ *                                                       (code may carry SESSION_TOKEN_MISMATCH or other web-task codes
+ *                                                        e.g. WEB_TASK_PROMPT_TOO_LARGE; boundSessionId/boundSessionName
+ *                                                        are populated on SESSION_TOKEN_MISMATCH only;
+ *                                                        see docs/error-taxonomy.md)
  *   { type: 'web_task_list', tasks }                    — response to list_web_tasks
  *   { type: 'diff_result', diff, error? }              — git diff result
  *   { type: 'error', message }                          — general error message

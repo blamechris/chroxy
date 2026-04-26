@@ -322,4 +322,56 @@ describe('@chroxy/protocol schemas', () => {
     })
     assert.ok(!result.success, 'Should reject non-string description')
   })
+
+  it('validates ServerWebTaskErrorSchema with generic-task-failure shape', async () => {
+    const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: 'task-1',
+      message: 'Task prompt is required',
+    })
+    assert.ok(result.success, 'Should validate generic web_task_error without code/boundSession*')
+  })
+
+  it('validates ServerWebTaskErrorSchema with SESSION_TOKEN_MISMATCH four-field contract', async () => {
+    const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: null,
+      message: 'Not authorized to access this session',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionId: 'session-42',
+      boundSessionName: 'My Project',
+    })
+    assert.ok(result.success, 'Should validate full SESSION_TOKEN_MISMATCH payload')
+    assert.equal(result.data.code, 'SESSION_TOKEN_MISMATCH')
+    assert.equal(result.data.boundSessionId, 'session-42')
+    assert.equal(result.data.boundSessionName, 'My Project')
+  })
+
+  it('validates ServerWebTaskErrorSchema with null boundSessionId/boundSessionName', async () => {
+    const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: null,
+      message: 'Not authorized to access this session',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionId: null,
+      boundSessionName: null,
+    })
+    assert.ok(result.success, 'Should validate SESSION_TOKEN_MISMATCH with null bound fields')
+    assert.equal(result.data.boundSessionId, null)
+    assert.equal(result.data.boundSessionName, null)
+  })
+
+  it('rejects ServerWebTaskErrorSchema when code exceeds 64 chars', async () => {
+    const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: 'task-1',
+      message: 'oops',
+      code: 'X'.repeat(65),
+    })
+    assert.ok(!result.success, 'Should reject web_task_error code longer than 64 chars')
+  })
 })
