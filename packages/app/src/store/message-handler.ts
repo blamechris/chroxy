@@ -109,6 +109,31 @@ function getStore(): StoreApi {
 import { encrypt, decrypt } from '../utils/crypto';
 
 // ---------------------------------------------------------------------------
+// EncryptionContext — E2E encryption state grouped into a sub-interface so
+// it's reusable, discoverable, and resettable as a unit (#3049, phase 2 of
+// #2662). Combines the post-handshake `EncryptionState` (sharedKey + nonces,
+// imported via `../utils/crypto`, which re-exports the type from
+// `@chroxy/store-core`) with the in-flight key-exchange fields
+// (`pendingKeyPair`, `pendingSalt`) that the handshake produces and then
+// drops once a shared key is derived.
+// ---------------------------------------------------------------------------
+
+export interface EncryptionContext {
+  /** Post-handshake state: shared key + send/recv nonce counters. Null until handshake completes. */
+  encryptionState: EncryptionState | null;
+  /** Ephemeral X25519 keypair for the in-flight handshake. Cleared once the shared key is derived. */
+  pendingKeyPair: KeyPair | null;
+  /** Connection salt sent with the public key during the handshake. Cleared once the shared key is derived. */
+  pendingSalt: string | null;
+}
+
+const INITIAL_ENCRYPTION_CONTEXT: EncryptionContext = {
+  encryptionState: null,
+  pendingKeyPair: null,
+  pendingSalt: null,
+};
+
+// ---------------------------------------------------------------------------
 // MessageHandlerContext — all resettable per-connection mutable state
 //
 // Grouping these here makes it possible to reset the entire handler state
@@ -116,12 +141,7 @@ import { encrypt, decrypt } from '../utils/crypto';
 // extraction in future refactoring steps.
 // ---------------------------------------------------------------------------
 
-interface MessageHandlerContext {
-  // E2E encryption
-  encryptionState: EncryptionState | null;
-  pendingKeyPair: KeyPair | null;
-  pendingSalt: string | null;
-
+interface MessageHandlerContext extends EncryptionContext {
   // History replay
   receivingHistoryReplay: boolean;
   isSessionSwitchReplay: boolean;
@@ -151,9 +171,7 @@ interface MessageHandlerContext {
 
 function createDefaultContext(): MessageHandlerContext {
   return {
-    encryptionState: null,
-    pendingKeyPair: null,
-    pendingSalt: null,
+    ...INITIAL_ENCRYPTION_CONTEXT,
     receivingHistoryReplay: false,
     isSessionSwitchReplay: false,
     pendingSwitchSessionId: null,
