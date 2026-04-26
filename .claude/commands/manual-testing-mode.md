@@ -26,13 +26,13 @@ When the user is the sole tester driving real workflows through a working build,
    ```
    Bootstrapping manual-testing session.
      • Branch: manual-testing/v{NEXT}
-     • Version bump: {CURRENT} → {NEXT} across {N} files
+     • Version bump: {CURRENT} → {NEXT} across 9 files
      • What are you testing? (feature scope, surface, anything off-limits?)
    Proceed?
    ```
 4. **On confirmation**:
    - `git checkout -b manual-testing/v{NEXT}`
-   - Bump version across all version-bearing files: `package.json` (root), `packages/{app,desktop,protocol,dashboard,store-core}/package.json`, `packages/server/package.json`, `packages/desktop/src-tauri/Cargo.toml`, `packages/desktop/src-tauri/tauri.conf.json`
+   - Bump version across all version-bearing files: `package.json` (root), `packages/{app,desktop,protocol,dashboard,store-core,server}/package.json`, `packages/desktop/src-tauri/Cargo.toml`, `packages/desktop/src-tauri/tauri.conf.json`
    - Run `grep '"version":' package.json packages/*/package.json packages/desktop/src-tauri/tauri.conf.json && grep '^version' packages/desktop/src-tauri/Cargo.toml` and confirm each file shows the new version.
    - Commit: `chore(release): bump version to {NEXT}` with a body explaining why (so manual-testing builds are visibly distinct from main).
 5. **Save bootstrap state** to a session-scoped task list (use TaskCreate) for the running list of filed issues:
@@ -85,7 +85,43 @@ Discovered while dogfooding {version} on the {branch} branch.
 
 **Labels:** Always tag with one severity (`bug` / `enhancement` / `ux`) plus one or more surface labels: `desktop`, `app`, `server`, `tunnel`, `dashboard`.
 
-**Screenshots:** When the user attaches an image, copy it to a stable temp path (e.g., `/tmp/{repo}-{slug}.png`) and call out in the issue body: *"Screenshot at `<path>` — drag-drop into the issue from the web UI to attach."* The `gh` CLI cannot upload images to issues; the user has to do that step manually.
+**Screenshots:** When the user attaches an image, embed it inline in the issue body — no manual drag-drop step. GitHub's REST/CLI doesn't expose `user-attachments` upload, so use the **orphan `screenshots` branch** trick:
+
+```bash
+SLUG="$(date +%Y-%m-%d)-issue-NNNN-short-name.png"
+
+# 1. Build the blob payload as a JSON file — passing the base64 inline via
+#    `-f content=$B64` blows up "argument list too long" past ~250KB.
+python3 -c "
+import base64, json
+with open('/path/to/screenshot.png','rb') as f:
+    print(json.dumps({'content': base64.b64encode(f.read()).decode(), 'encoding': 'base64'}))
+" > /tmp/blob.json
+BLOB=$(gh api -X POST /repos/{OWNER}/{REPO}/git/blobs --input /tmp/blob.json -q '.sha')
+
+# 2. First-time-only: orphan branch (no parent, no base_tree).
+# Subsequent times: pass -f "parents[]=$PARENT" to the commit AND -f "base_tree=$PARENT" to the tree.
+PARENT=$(gh api /repos/{OWNER}/{REPO}/git/refs/heads/screenshots -q '.object.sha' 2>/dev/null || echo "")
+TREE_ARGS=( -f "tree[][path]=$SLUG" -f "tree[][mode]=100644" -f "tree[][type]=blob" -f "tree[][sha]=$BLOB" )
+[ -n "$PARENT" ] && TREE_ARGS=( -f "base_tree=$PARENT" "${TREE_ARGS[@]}" )
+TREE=$(gh api -X POST /repos/{OWNER}/{REPO}/git/trees "${TREE_ARGS[@]}" -q '.sha')
+
+COMMIT_ARGS=( -f "message=screenshots: add $SLUG" -f "tree=$TREE" )
+[ -n "$PARENT" ] && COMMIT_ARGS+=( -f "parents[]=$PARENT" )
+COMMIT=$(gh api -X POST /repos/{OWNER}/{REPO}/git/commits "${COMMIT_ARGS[@]}" -q '.sha')
+
+# 3. First time create the ref; after that PATCH it.
+if [ -z "$PARENT" ]; then
+  gh api -X POST /repos/{OWNER}/{REPO}/git/refs -f "ref=refs/heads/screenshots" -f "sha=$COMMIT" >/dev/null
+else
+  gh api -X PATCH /repos/{OWNER}/{REPO}/git/refs/heads/screenshots -f "sha=$COMMIT" >/dev/null
+fi
+rm /tmp/blob.json
+```
+
+Then embed in the issue body: `![desc](https://github.com/{OWNER}/{REPO}/raw/screenshots/$SLUG)`. The image renders inline.
+
+For *subsequent* screenshots, query the current `screenshots` HEAD, pass it as `parents[]` to the commit call, and PATCH the ref instead of POSTing.
 
 **After filing:**
 - Append to the tracker task's metadata: `{ issueNumber, title, severity, surface, status: 'open' }`.
@@ -180,4 +216,4 @@ A: ## Manual testing session: v0.6.11 (2026-04-26)
 
 Want me to open a PR for the fixes, or leave the branch local?
 ```
-<!-- skill-templates: manual-testing-mode  2026-04-26 -->
+<!-- skill-templates: manual-testing-mode 7298d6f 2026-04-26 -->
