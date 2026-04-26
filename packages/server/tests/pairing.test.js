@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -373,6 +373,65 @@ describe('PairingManager (#1836)', () => {
       pm.validatePairing('bogus') // invalid
       assert.equal(extraEmit, 0, 'failed validations must not trigger pairing_refreshed')
       assert.equal(pm.currentPairingId, idAfterFirstConsume, 'ID should remain stable on failures')
+      pm.destroy()
+    })
+  })
+
+  describe('autoRefresh timer reset on validatePairing (#3020)', () => {
+    beforeEach(() => {
+      mock.timers.reset()
+    })
+
+    afterEach(() => {
+      // Defensive reset: if an assertion fails mid-test after mock.timers were
+      // enabled, ensure subsequent tests/suites see real timers (otherwise
+      // mocked timers leak across the file and cause hard-to-debug failures).
+      mock.timers.reset()
+    })
+
+    it('resets the autoRefresh timer after consumption-triggered regen', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      const ttlMs = 60_000
+      const pm = new PairingManager({ ttlMs, autoRefresh: true })
+
+      // Refresh fires at max(ttlMs - 5000, ttlMs * 0.9) = 55_000ms
+      const refreshDelay = Math.max(ttlMs - 5000, ttlMs * 0.9)
+
+      const refreshedEvents = []
+      pm.on('pairing_refreshed', (e) => { refreshedEvents.push(e.pairingId) })
+
+      const originalId = pm.currentPairingId
+
+      // Advance partway through the refresh window, then consume the pairing.
+      mock.timers.tick(50_000)
+      const result = pm.validatePairing(originalId)
+      assert.equal(result.valid, true)
+      assert.equal(refreshedEvents.length, 1, 'consumption should emit exactly one pairing_refreshed')
+      const idAfterConsume = pm.currentPairingId
+      assert.notEqual(idAfterConsume, originalId)
+
+      // The OLD timer would have fired 5_000ms later (50_000 + 5_000 = 55_000
+      // since manager creation). If the timer wasn't reset, it would emit a
+      // second pairing_refreshed here.
+      mock.timers.tick(5_000)
+      assert.equal(refreshedEvents.length, 1, 'old timer must not fire after reset')
+      assert.equal(pm.currentPairingId, idAfterConsume, 'ID should not have rotated yet')
+
+      // The NEW timer should fire ~refreshDelay after the consumption regen.
+      // We've already ticked 5_000ms post-consume, so advance the rest.
+      mock.timers.tick(refreshDelay - 5_000 + 1)
+      assert.equal(refreshedEvents.length, 2, 'new timer should fire on its own schedule')
+      assert.notEqual(pm.currentPairingId, idAfterConsume, 'ID should rotate on new timer')
+
+      pm.destroy()
+    })
+
+    it('does not crash when validatePairing runs without an active timer', () => {
+      // autoRefresh: false → no _refreshTimer; the reset branch must be a no-op
+      const pm = new PairingManager({ autoRefresh: false })
+      const id = pm.currentPairingId
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, true)
       pm.destroy()
     })
   })
