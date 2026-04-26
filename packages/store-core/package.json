@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/store-core",
-  "version": "0.6.12",
+  "version": "0.6.13",
   "private": true,
   "description": "Shared store logic for Chroxy app and dashboard",
   "type": "module",
