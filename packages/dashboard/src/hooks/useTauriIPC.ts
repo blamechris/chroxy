@@ -6,6 +6,7 @@
  */
 
 import { getTauriInvoke } from '../utils/tauri-bridge'
+import { isTauri } from '../utils/tauri'
 
 interface ServerInfo {
   port: number
@@ -55,21 +56,39 @@ export async function setTunnelMode(mode: string): Promise<void> {
 
 /**
  * Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
- * Returns null when not in Tauri context (so the toggle can fall back
- * to a sensible default), false when the key is unset or the file
- * doesn't exist, true when explicitly enabled.
+ *
+ * Returns:
+ *   - `null` when not in a Tauri context (browser/dev) — caller should fall
+ *     back to a sensible default and skip rendering Tauri-only UI.
+ *   - `false` when the key is unset or the file doesn't exist.
+ *   - `true` when explicitly enabled.
+ *
+ * Throws when invoke is unavailable inside Tauri (corrupted webview state)
+ * or when the Rust side surfaces an IO/parse error — `null` is reserved for
+ * "not in Tauri" so the SettingsPanel `.catch()` can show real errors
+ * instead of silently presenting the wrong toggle state.
  */
 export async function getAllowAutoPermissionMode(): Promise<boolean | null> {
-  return tauriInvoke<boolean>('get_allow_auto_permission_mode')
+  if (!isTauri()) return null
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  return await invoke('get_allow_auto_permission_mode', undefined) as boolean
 }
 
 /**
- * Write `allowAutoPermissionMode` to `~/.chroxy/config.json`. Throws on
- * IO/parse errors so the UI can surface the failure instead of silently
- * leaving the toggle in the wrong state.
+ * Write `allowAutoPermissionMode` to `~/.chroxy/config.json`.
+ *
+ * Throws when invoke is unavailable inside Tauri (so the SettingsPanel can
+ * roll back the optimistic toggle state and surface the failure) or when
+ * the Rust side surfaces an IO/parse error. No-ops only outside Tauri.
  */
 export async function setAllowAutoPermissionMode(value: boolean): Promise<void> {
+  if (!isTauri()) return
   const invoke = getTauriInvoke()
-  if (!invoke) return
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
   await invoke('set_allow_auto_permission_mode', { value })
 }
