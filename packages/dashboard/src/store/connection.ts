@@ -133,6 +133,22 @@ export function isRuleEligibleTool(tool: string): boolean {
 }
 
 /**
+ * Whether a provider supports session-scoped permission rules (#3072).
+ * Reads the `sessionRules` capability surfaced by the server's provider_list
+ * message. Defaults to false when the provider is unknown so the UI fails
+ * closed (don't surface an "Allow for Session" button that the server will
+ * reject as "not supported by this provider").
+ */
+export function isRuleEligibleProvider(
+  provider: string | null | undefined,
+  availableProviders: { name: string; capabilities?: { sessionRules?: boolean } }[],
+): boolean {
+  if (!provider) return false;
+  const info = availableProviders.find((p) => p.name === provider);
+  return info?.capabilities?.sessionRules === true;
+}
+
+/**
  * Cap for `resolvedPermissions` to prevent unbounded growth over long sessions (#2838).
  * Exported for tests. LRU eviction: oldest insertion-order entry is dropped when
  * the map exceeds the cap. Re-resolving a requestId bumps it to the most-recent

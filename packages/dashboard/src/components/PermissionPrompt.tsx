@@ -19,7 +19,7 @@
  * fire onRespond twice before the store's answered state catches up.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useConnectionStore, isRuleEligibleTool } from '../store/connection'
+import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionDecision } from '../store/types'
 import { isMacPlatform } from '../utils/platform'
 
@@ -55,6 +55,19 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // primitive subscription — useShallow / stable refs not needed.
   const answered = useConnectionStore((s) => s.resolvedPermissions?.[requestId] ?? null)
 
+  // #3072: gate the "Allow for Session" affordance on whether the active
+  // session's provider supports session-scoped permission rules. Without
+  // this, the button shows for every prompt and clicking on a non-supporting
+  // provider (codex, gemini, claude-cli) hits a server "not supported" error.
+  const activeProvider = useConnectionStore((s) => {
+    const id = s.activeSessionId
+    if (!id) return null
+    const session = s.sessions.find((sess) => sess.sessionId === id)
+    return session?.provider ?? null
+  })
+  const availableProviders = useConnectionStore((s) => s.availableProviders)
+  const providerSupportsRules = isRuleEligibleProvider(activeProvider, availableProviders)
+
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current)
     setRemaining(remainingMs)
@@ -87,15 +100,18 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     if (submittingRef.current || answered || remaining <= 0) return
     submittingRef.current = true
     setSubmitting(true)
-    // 'allowSession' is only meaningful for rule-eligible tools; for other
-    // tools the server would reject the follow-up set_permission_rules.
-    // Silently coerce to a plain 'allow' so keyboard shortcut users on an
-    // ineligible prompt still get an Allow-equivalent decision.
+    // 'allowSession' is only meaningful when both the tool is rule-eligible
+    // (#2834) AND the active provider supports session rules (#3072). Either
+    // gate failing means the server would reject the follow-up
+    // set_permission_rules; silently coerce to a plain 'allow' so keyboard
+    // shortcut users on an ineligible prompt still get an Allow-equivalent
+    // decision.
+    const allowSessionOk = isRuleEligibleTool(tool) && providerSupportsRules
     const effective: PermissionDecision =
-      decision === 'allowSession' && !isRuleEligibleTool(tool) ? 'allow' : decision
+      decision === 'allowSession' && !allowSessionOk ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
     onRespond(requestId, effective)
-  }, [requestId, onRespond, answered, remaining, tool])
+  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules])
 
   // Keyboard shortcuts:
   //   Cmd/Ctrl+Y         -> allow
@@ -110,8 +126,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       if (e.key.toLowerCase() === 'y' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         if (e.shiftKey) {
-          // Allow for Session — no-op when the tool is not rule-eligible (#2834).
-          if (isRuleEligibleTool(tool)) {
+          // Allow for Session — no-op when the tool is not rule-eligible (#2834)
+          // or the active provider doesn't support session rules (#3072).
+          if (isRuleEligibleTool(tool) && providerSupportsRules) {
             respond('allowSession')
           }
         } else {
@@ -125,12 +142,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [respond, tool])
+  }, [respond, tool, providerSupportsRules])
 
   const isExpired = remaining <= 0
   const isUrgent = remaining > 0 && remaining <= 30000
   const showButtons = !answered && !isExpired
-  const showAllowSession = showButtons && isRuleEligibleTool(tool)
+  const showAllowSession = showButtons && isRuleEligibleTool(tool) && providerSupportsRules
   const [dismissed, setDismissed] = useState(false)
 
   // #2840: keyboard hint labels near the Allow / Allow-for-Session buttons
