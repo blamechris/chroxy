@@ -277,9 +277,13 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
 }
 
 /// Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
-/// Returns `false` if the config file doesn't exist or the key is missing.
-/// Surfaces parse errors so the UI can show a meaningful message instead
-/// of silently presenting the wrong toggle state.
+/// Returns `false` if the config file doesn't exist, is empty/whitespace-only,
+/// or the key is missing. Surfaces parse errors so the UI can show a meaningful
+/// message instead of silently presenting the wrong toggle state.
+///
+/// Empty/whitespace-only files are treated as `{}` to mirror the writer's
+/// behavior (`set_allow_auto_permission_mode_at`) — otherwise a truncated
+/// config (e.g. interrupted previous write) would surface as a parse error.
 #[tauri::command]
 fn get_allow_auto_permission_mode() -> Result<bool, String> {
     let path = config::config_path().ok_or("Could not determine home directory")?;
@@ -288,6 +292,9 @@ fn get_allow_auto_permission_mode() -> Result<bool, String> {
     }
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
+    if contents.trim().is_empty() {
+        return Ok(false);
+    }
     let cfg: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))?;
     Ok(cfg
