@@ -1701,6 +1701,48 @@ describe('audit trail for auto-deny resolution paths (#3057)', () => {
       'reason=user must not be audited from the pipeline; the inline path owns those')
   })
 
+  // #3061: defensive guard. Today the SdkSession re-emit gate at
+  // sdk-session.js:200 only re-emits when data.requestId is truthy, so these
+  // shapes never reach the audit listener via the real pipeline. The guard
+  // exists so that a future widening of the gate (e.g. to propagate
+  // AskUserQuestion lifecycle events) doesn't silently produce audit entries
+  // with requestId: undefined.
+  it('skips permission_resolved with null/undefined data (#3061)', () => {
+    const manager = makeManager()
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: null,
+    })
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      // data omitted entirely
+    })
+
+    assert.equal(server._permissionAudit.query().length, 0,
+      'null/undefined data must not crash and must not produce audit entries')
+  })
+
+  it('skips permission_resolved without requestId (#3061)', () => {
+    const manager = makeManager()
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    // Auto-deny shape but no requestId — represents the AskUserQuestion path
+    // emit shape (`{ reason: 'cleared' }` with no requestId) that today is
+    // gated out at sdk-session.js but could leak through if the gate widens.
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: { decision: 'deny', reason: 'cleared' },
+    })
+
+    assert.equal(server._permissionAudit.query().length, 0,
+      'missing requestId must short-circuit before logDecision is called')
+  })
+
   it('ignores non-permission_resolved session_event traffic', () => {
     const manager = makeManager()
     server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
