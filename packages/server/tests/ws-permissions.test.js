@@ -813,6 +813,8 @@ describe('createPermissionHandler', () => {
       handlePermissionResponseHttp(req, res)
       await new Promise(r => setImmediate(r))
       assert.equal(res.statusCode, 200)
+      assert.equal(audit.logDecision.mock.calls.length, 1,
+        'SDK HTTP deny path must record exactly one audit entry — guards against double-audit regression')
       assert.deepStrictEqual(audit.logDecision.mock.calls[0].arguments[0], {
         clientId: 'http',
         sessionId: 'sess-sdk',
