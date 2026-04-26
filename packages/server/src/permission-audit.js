@@ -52,8 +52,10 @@ export class PermissionAuditLog {
   /**
    * Record a permission decision (approve/deny).
    * @param {object} params
-   * @param {string|null} params.clientId - Client that responded. Null for
-   *   auto-deny paths (timeout / aborted / cleared) which have no responder.
+   * @param {string|null} params.clientId - Identifies the responder. Three states:
+   *   - WS-origin user response: the connection's synthetic id (e.g. an 8-char hex)
+   *   - HTTP-origin user response: the literal string 'http' (#3059)
+   *   - Auto-deny paths (timeout / aborted / cleared): null (no responder)
    * @param {string} params.sessionId - Session the permission belongs to
    * @param {string} params.requestId - The permission request ID
    * @param {string} params.decision - 'allow' or 'deny'

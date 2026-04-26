@@ -791,6 +791,37 @@ describe('createPermissionHandler', () => {
       })
     })
 
+    // #3065: pin the deny path on the SDK HTTP audit. The decision field is
+    // shared verbatim between the allow/deny code paths so this is low risk,
+    // but the explicit test prevents a future copy-paste regression that
+    // hardcodes 'allow' in the audit payload.
+    it('records audit entry for SDK HTTP user response with deny (#3065)', async () => {
+      const permissionSessionMap = new Map([['sdk-deny-req', 'sess-sdk']])
+      const respondToPermission = mock.fn(() => true)
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const audit = { logDecision: mock.fn() }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        getPermissionAudit: mock.fn(() => audit),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'sdk-deny-req', decision: 'deny' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.deepStrictEqual(audit.logDecision.mock.calls[0].arguments[0], {
+        clientId: 'http',
+        sessionId: 'sess-sdk',
+        requestId: 'sdk-deny-req',
+        decision: 'deny',
+        reason: 'user',
+      })
+    })
+
     it('records audit entry for legacy HTTP user response (#3059)', async () => {
       const pendingPermissions = new Map()
       pendingPermissions.set('leg-req', { resolve: mock.fn(), timer: null })
