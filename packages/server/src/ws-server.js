@@ -591,6 +591,11 @@ export class WsServer {
       this._sessionEventAuditHandler = ({ sessionId, event, data }) => {
         if (event !== 'permission_resolved') return
         if (!data || data.reason === 'user') return
+        // #3061: defensive — if the SdkSession requestId gate is ever widened
+        // (e.g. to propagate AskUserQuestion lifecycle events), don't silently
+        // write audit entries with requestId: undefined. Today this branch is
+        // unreachable because sdk-session.js gates the re-emit on data.requestId.
+        if (!data.requestId) return
         this._permissionAudit.logDecision({
           clientId: null,
           sessionId,
