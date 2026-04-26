@@ -99,7 +99,7 @@ describe('updateModels', () => {
     resetModels()
   })
 
-  it('updates getModels() to return new list', () => {
+  it('updates getModels() to return new list (with merged fallbacks + 1m variants)', () => {
     const sdkModels = [
       { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Fast and capable' },
       { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: 'Most capable' },
@@ -107,15 +107,24 @@ describe('updateModels', () => {
 
     const result = updateModels(sdkModels)
 
-    assert.equal(result.length, 2)
+    // SDK entries always come first, in the order returned.
     assert.equal(result[0].id, 'sonnet-4-6')
     assert.equal(result[0].label, 'Sonnet 4.6')
     assert.equal(result[0].fullId, 'claude-sonnet-4-6')
+    assert.equal(result[0].contextWindow, 200_000)
     assert.equal(result[1].id, 'opus-4-6')
     assert.equal(result[1].label, 'Opus 4.6')
     assert.equal(result[1].fullId, 'claude-opus-4-6')
-    assert.equal(result[0].contextWindow, 200_000)
     assert.equal(result[1].contextWindow, 1_000_000)
+
+    // Fallback entries the SDK didn't list are appended (Opus 4.7, Haiku 4.5).
+    const fullIds = result.map(m => m.fullId)
+    assert.ok(fullIds.includes('claude-opus-4-7'), 'opus 4.7 fallback should be merged in')
+    assert.ok(fullIds.includes('claude-haiku-4-5'), 'haiku 4.5 fallback should be merged in')
+
+    // 1M variants are synthesized for any 1M-context model that lacks one.
+    assert.ok(fullIds.includes('claude-opus-4-6[1m]'), 'opus 4.6 [1m] variant should be synthesized')
+    assert.ok(fullIds.includes('claude-opus-4-7[1m]'), 'opus 4.7 [1m] variant should be synthesized')
 
     const models = getModels()
     assert.deepEqual(models, result)
@@ -188,8 +197,11 @@ describe('updateModels', () => {
     ]
 
     const result = updateModels(sdkModels)
-    assert.equal(result.length, 1)
+    // Only one SDK entry passes validation; fallback merge + 1m synthesis
+    // adds the rest. Verify the SDK-derived entry, not the total length.
     assert.equal(result[0].fullId, 'claude-opus-4-6')
+    const fullIds = result.map(m => m.fullId)
+    assert.ok(fullIds.includes('claude-opus-4-6[1m]'), 'opus 4.6 should get a 1m variant')
   })
 
   it('returns empty array for empty input (preserves existing models)', () => {
@@ -207,12 +219,88 @@ describe('updateModels', () => {
   })
 })
 
+describe('1M-context variants and fallback merge (regression for #3075)', () => {
+  beforeEach(() => {
+    resetModels()
+  })
+
+  it('synthesizes [1m] chips for any model with a 1M context window', () => {
+    const result = updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    const fullIds = result.map(m => m.fullId)
+    assert.ok(fullIds.includes('claude-opus-4-7'), 'base model present')
+    assert.ok(fullIds.includes('claude-opus-4-7[1m]'), '1m variant synthesized')
+
+    const variant = result.find(m => m.fullId === 'claude-opus-4-7[1m]')
+    assert.equal(variant.contextWindow, 1_000_000)
+    assert.equal(variant.label, 'Opus 4.7 (1M)')
+    assert.equal(variant.id, 'opus-4-7[1m]')
+  })
+
+  it('does not duplicate a [1m] chip the SDK already reports', () => {
+    const result = updateModels([
+      { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' },
+      { value: 'claude-opus-4-6[1m]', displayName: 'Opus 4.6 (1M)', description: '' },
+    ])
+    const variants = result.filter(m => m.fullId === 'claude-opus-4-6[1m]')
+    assert.equal(variants.length, 1, 'SDK-reported [1m] entry must not be duplicated')
+  })
+
+  it('does not synthesize [1m] for sub-1M models', () => {
+    const result = updateModels([
+      { value: 'claude-haiku-4-5', displayName: 'Haiku 4.5', description: '' },
+    ])
+    const fullIds = result.map(m => m.fullId)
+    assert.ok(!fullIds.includes('claude-haiku-4-5[1m]'),
+      'haiku has 200k context — must not get a 1m chip')
+  })
+
+  it('merges fallback models the SDK omitted (Opus 4.7 missing → fallback merged)', () => {
+    // Reproduces the exact bug from #3075: SDK only reports 4.6 family, but
+    // fallback knows about Opus 4.7 — the picker should show all of them.
+    const result = updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
+      { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' },
+    ])
+    const fullIds = result.map(m => m.fullId)
+    assert.ok(fullIds.includes('claude-sonnet-4-6'))
+    assert.ok(fullIds.includes('claude-opus-4-6'))
+    assert.ok(fullIds.includes('claude-opus-4-7'), 'Opus 4.7 missing from SDK should be merged from fallback')
+    assert.ok(fullIds.includes('claude-haiku-4-5'))
+    // And both 1M-context models get [1m] chips.
+    assert.ok(fullIds.includes('claude-opus-4-6[1m]'))
+    assert.ok(fullIds.includes('claude-opus-4-7[1m]'))
+  })
+
+  it('1M variants are addressable via resolveModelId/toShortModelId', () => {
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(resolveModelId('opus-4-7[1m]'), 'claude-opus-4-7[1m]')
+    assert.equal(toShortModelId('claude-opus-4-7[1m]'), 'opus-4-7[1m]')
+    assert.ok(ALLOWED_MODEL_IDS.has('claude-opus-4-7[1m]'))
+    assert.ok(ALLOWED_MODEL_IDS.has('opus-4-7[1m]'))
+  })
+
+  it('SDK-reported [1m] entries get the 1M context window via the heuristic', () => {
+    const result = updateModels([
+      { value: 'claude-sonnet-4-5-20250929[1m]', displayName: 'Sonnet 4.5 (1M)', description: '' },
+    ])
+    const entry = result.find(m => m.fullId === 'claude-sonnet-4-5-20250929[1m]')
+    assert.equal(entry.contextWindow, 1_000_000)
+  })
+})
+
 describe('resetModels', () => {
   it('restores default models after update', () => {
     updateModels([
       { value: 'claude-test', displayName: 'Test', description: '' },
     ])
-    assert.equal(getModels().length, 1)
+    // After updateModels, the registry holds the SDK entry plus the merged
+    // fallback entries — exact length depends on FALLBACK_MODELS, so just
+    // verify the registry was mutated before reset.
+    assert.notDeepEqual(getModels(), FALLBACK_MODELS)
 
     resetModels()
     assert.deepEqual(getModels(), FALLBACK_MODELS)
