@@ -1552,13 +1552,13 @@
 .btn-retry:hover { opacity: 0.85; }
 
 /* ---- Tunnel Warming Banner (#2836) ---- */
-/* Always rendered as a fixed-height reserved slot so toggling the warming
-   message does not shift the header/toolbar below it (#2915). The slot
-   height is fixed regardless of content so the DOM height stays constant
-   across warming ↔ connected transitions. */
+/* Always rendered so toggling the warming message animates instead of
+   snapping (#2915, #3069). When idle, the slot collapses to max-height: 0
+   so it doesn't reserve a visible band between the title bar and header.
+   Animating max-height keeps the show/hide smooth without a content jolt. */
 .tunnel-warming-banner {
   box-sizing: border-box;
-  height: 2rem;
+  max-height: 2rem;
   padding: 0.5rem 1rem;
   background: var(--bg-secondary, #1a1a2e);
   color: var(--warning-fg, #fbbf24);
@@ -1569,17 +1569,16 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  transition: opacity 120ms ease-out;
+  transition: max-height 160ms ease-out, padding 160ms ease-out, opacity 120ms ease-out;
 }
 
-/* Reserved-slot placeholder: keeps the same geometry but is visually
-   neutral. Uses visibility:hidden so assistive tech skips it, while the
-   box itself continues to occupy layout space. The background/border are
-   removed so the placeholder is indistinguishable from the surrounding
-   chrome. aria-hidden is also set on the element in the React layer. */
+/* Idle state: collapse the slot to zero so it doesn't reserve a visible
+   band. The animated max-height/padding transition keeps the show/hide
+   smooth so the header below doesn't snap. */
 .tunnel-warming-banner--hidden {
-  visibility: hidden;
-  background: transparent;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
   border-bottom-color: transparent;
   color: transparent;
   opacity: 0;
