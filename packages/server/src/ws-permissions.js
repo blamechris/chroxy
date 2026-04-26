@@ -51,6 +51,7 @@ function sanitizeToolInput(input) {
  * @param {Map} opts.permissionSessionMap - requestId -> sessionId (owned by WsServer)
  * @param {Function} opts.getSessionManager - () => sessionManager (late-bound for test compat)
  * @param {Object|null} opts.pairingManager - PairingManager instance used to look up token→sessionId bindings for the HTTP permission-response fallback. Optional — when null, HTTP responses skip the binding check (single-token mode).
+ * @param {Function} [opts.findSessionByHookSecret] - (hookSecret) => session|null. Optional session lookup used during /permission handling to resolve the session associated with a per-session hook secret (#2831 — pause that session's inactivity timer while a hook permission is outstanding).
  * @param {Function} [opts.getPermissionAudit] - () => PermissionAuditLog or null (late-bound). When present, HTTP user-initiated permission responses are audited with `clientId: 'http'` and `reason: 'user'` (#3059). Optional for backwards compat with existing test fixtures.
  * @returns {Object} Permission handler methods
  */
