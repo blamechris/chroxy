@@ -145,6 +145,7 @@ export type {
   DevPreviewBuilder,
   ServerMode,
   AuthOkPayload,
+  CheckpointRestoredPayload,
 } from './handlers'
 
 export {
@@ -169,4 +170,7 @@ export {
   handleAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
+  handleCheckpointCreated,
+  handleCheckpointList,
+  handleCheckpointRestored,
 } from './handlers'

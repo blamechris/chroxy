@@ -24,8 +24,11 @@ import {
   handleAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
+  handleCheckpointCreated,
+  handleCheckpointList,
+  handleCheckpointRestored,
 } from './index'
-import type { DevPreview, SessionInfo } from '../types'
+import type { Checkpoint, DevPreview, SessionInfo } from '../types'
 
 // ---------------------------------------------------------------------------
 // resolveSessionId
@@ -474,6 +477,89 @@ describe('handleDevPreview', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleCheckpointCreated
+// ---------------------------------------------------------------------------
+describe('handleCheckpointCreated', () => {
+  const existing: Checkpoint[] = [
+    {
+      id: 'cp-1',
+      name: 'first',
+      description: '',
+      messageCount: 3,
+      createdAt: 1000,
+      hasGitSnapshot: false,
+    },
+  ]
+  const incoming: Checkpoint = {
+    id: 'cp-2',
+    name: 'second',
+    description: 'after edits',
+    messageCount: 7,
+    createdAt: 2000,
+    hasGitSnapshot: true,
+  }
+
+  it('appends a checkpoint when message targets the active session', () => {
+    const out = handleCheckpointCreated(
+      { sessionId: 'sess-1', checkpoint: incoming },
+      existing,
+      'sess-1',
+    )
+    expect(out).toEqual([...existing, incoming])
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const out = handleCheckpointCreated(
+      { checkpoint: incoming },
+      existing,
+      'sess-1',
+    )
+    expect(out).toEqual([...existing, incoming])
+  })
+
+  it('returns null when sessionId differs from active session', () => {
+    const out = handleCheckpointCreated(
+      { sessionId: 'other', checkpoint: incoming },
+      existing,
+      'sess-1',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('returns null when checkpoint payload is missing', () => {
+    expect(
+      handleCheckpointCreated({ sessionId: 'sess-1' }, existing, 'sess-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when checkpoint payload is not an object', () => {
+    expect(
+      handleCheckpointCreated(
+        { sessionId: 'sess-1', checkpoint: 'not-an-object' },
+        existing,
+        'sess-1',
+      ),
+    ).toBeNull()
+  })
+
+  it('returns null when checkpoint payload is null', () => {
+    expect(
+      handleCheckpointCreated(
+        { sessionId: 'sess-1', checkpoint: null },
+        existing,
+        'sess-1',
+      ),
+    ).toBeNull()
+  })
+
+  it('returns null when active session is null (no fallback target)', () => {
+    expect(
+      handleCheckpointCreated({ checkpoint: incoming }, existing, null),
+    ).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleDevPreviewStopped
 // ---------------------------------------------------------------------------
 describe('handleDevPreviewStopped', () => {
@@ -513,6 +599,74 @@ describe('handleDevPreviewStopped', () => {
   it('returns empty list when current previews is empty', () => {
     const builder = handleDevPreviewStopped({ sessionId: 'sess-1', port: 4000 }, null)
     expect(builder.applyTo([])).toEqual({ devPreviews: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleCheckpointList
+// ---------------------------------------------------------------------------
+describe('handleCheckpointList', () => {
+  const incoming: Checkpoint[] = [
+    {
+      id: 'cp-1',
+      name: 'first',
+      description: '',
+      messageCount: 3,
+      createdAt: 1000,
+      hasGitSnapshot: false,
+    },
+    {
+      id: 'cp-2',
+      name: 'second',
+      description: 'desc',
+      messageCount: 5,
+      createdAt: 2000,
+      hasGitSnapshot: true,
+    },
+  ]
+
+  it('returns the checkpoints array when message targets active session', () => {
+    const out = handleCheckpointList(
+      { sessionId: 'sess-1', checkpoints: incoming },
+      'sess-1',
+    )
+    expect(out).toEqual(incoming)
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const out = handleCheckpointList({ checkpoints: incoming }, 'sess-1')
+    expect(out).toEqual(incoming)
+  })
+
+  it('returns null when sessionId differs from active session', () => {
+    const out = handleCheckpointList(
+      { sessionId: 'other', checkpoints: incoming },
+      'sess-1',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('returns null when checkpoints field is missing', () => {
+    expect(handleCheckpointList({ sessionId: 'sess-1' }, 'sess-1')).toBeNull()
+  })
+
+  it('returns null when checkpoints field is not an array', () => {
+    expect(
+      handleCheckpointList(
+        { sessionId: 'sess-1', checkpoints: 'not-array' },
+        'sess-1',
+      ),
+    ).toBeNull()
+  })
+
+  it('returns empty array when checkpoints is an empty array', () => {
+    expect(
+      handleCheckpointList({ sessionId: 'sess-1', checkpoints: [] }, 'sess-1'),
+    ).toEqual([])
+  })
+
+  it('returns null when active session is null', () => {
+    expect(handleCheckpointList({ checkpoints: incoming }, null)).toBeNull()
   })
 })
 
@@ -661,5 +815,38 @@ describe('handleServerMode', () => {
     expect(handleServerMode({ mode: 'bogus' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 42 })).toEqual({ mode: null })
     expect(handleServerMode({})).toEqual({ mode: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleCheckpointRestored
+// ---------------------------------------------------------------------------
+describe('handleCheckpointRestored', () => {
+  it('extracts trimmed newSessionId', () => {
+    expect(handleCheckpointRestored({ newSessionId: 'sess-new' })).toEqual({
+      newSessionId: 'sess-new',
+    })
+  })
+
+  it('trims whitespace from newSessionId', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: '  sess-trim  ' }),
+    ).toEqual({ newSessionId: 'sess-trim' })
+  })
+
+  it('returns null when newSessionId is missing', () => {
+    expect(handleCheckpointRestored({})).toBeNull()
+  })
+
+  it('returns null when newSessionId is not a string', () => {
+    expect(handleCheckpointRestored({ newSessionId: 42 })).toBeNull()
+  })
+
+  it('returns null when newSessionId is empty string', () => {
+    expect(handleCheckpointRestored({ newSessionId: '' })).toBeNull()
+  })
+
+  it('returns null when newSessionId is whitespace only', () => {
+    expect(handleCheckpointRestored({ newSessionId: '   ' })).toBeNull()
   })
 })

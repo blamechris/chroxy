@@ -37,6 +37,8 @@ import {
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
+  handleCheckpointCreated as sharedCheckpointCreated,
+  handleCheckpointList as sharedCheckpointList,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -53,7 +55,6 @@ import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import type {
   ChatMessage,
-  Checkpoint,
   ConnectedClient,
   ConnectionContext,
   ConnectionState,
@@ -2163,21 +2164,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'checkpoint_created': {
-      const cpSid = (msg.sessionId as string) || get().activeSessionId;
-      if (cpSid !== get().activeSessionId) break;
-      if (msg.checkpoint && typeof msg.checkpoint === 'object') {
-        const cp = msg.checkpoint as Checkpoint;
-        set({ checkpoints: [...get().checkpoints, cp] });
-      }
+      const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
+      if (next) set({ checkpoints: next });
       break;
     }
 
     case 'checkpoint_list': {
-      const listSid = (msg.sessionId as string) || get().activeSessionId;
-      if (listSid !== get().activeSessionId) break;
-      if (Array.isArray(msg.checkpoints)) {
-        set({ checkpoints: msg.checkpoints as Checkpoint[] });
-      }
+      const next = sharedCheckpointList(msg, get().activeSessionId);
+      if (next) set({ checkpoints: next });
       break;
     }
 
