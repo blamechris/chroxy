@@ -347,6 +347,32 @@ export const ServerExtensionMessageSchema = z.object({
   sessionId: z.string().optional(),
 })
 
+// -- Prompt evaluator result (#3068, manual on-demand variant) --
+//
+// One of two shapes is populated per response:
+//   - Success: `verdict` set + verdict-specific fields
+//   - Failure: `error` set with code + message
+// Clients should branch on `error` first, then on `verdict`.
+
+export const ServerEvaluateDraftResultSchema = z.object({
+  type: z.literal('evaluate_draft_result'),
+  // Echoes the client's requestId so the dashboard can correlate to the click
+  // that triggered evaluation. Always present (null when client omitted it).
+  requestId: z.string().nullable(),
+  verdict: z.enum(['forward', 'rewrite', 'clarify']).optional(),
+  // Populated when verdict === 'rewrite'
+  rewritten: z.string().nullable().optional(),
+  // Populated when verdict === 'clarify'
+  clarification: z.string().nullable().optional(),
+  // 1-2 sentence explanation, always set on success
+  reasoning: z.string().optional(),
+  // Populated only on failure (missing API key, malformed model response, etc.)
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+  }).optional(),
+})
+
 // -- Inferred TypeScript types --
 
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>
@@ -356,3 +382,4 @@ export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>
+export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>

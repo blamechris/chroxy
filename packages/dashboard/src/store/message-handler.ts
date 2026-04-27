@@ -96,6 +96,30 @@ function getStore(): StoreApi {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt evaluator pending requests (#3068)
+// ---------------------------------------------------------------------------
+//
+// The evaluator round-trip is request→response with no streaming, so we keep
+// a simple Map of resolvers keyed by requestId. The store's evaluateDraft()
+// action registers a resolver here and waits on the returned Promise; this
+// module's `evaluate_draft_result` case looks up the resolver and resolves it.
+
+import type { EvaluatorResultPayload } from './types';
+
+const _evaluatorPending = new Map<string, (result: EvaluatorResultPayload) => void>();
+
+export function registerEvaluatorRequest(
+  requestId: string,
+  resolver: (result: EvaluatorResultPayload) => void,
+): void {
+  _evaluatorPending.set(requestId, resolver);
+}
+
+export function cancelEvaluatorRequest(requestId: string): void {
+  _evaluatorPending.delete(requestId);
+}
+
+// ---------------------------------------------------------------------------
 // E2E encryption state — reset on every new connection
 // ---------------------------------------------------------------------------
 let _encryptionState: EncryptionState | null = null;
@@ -1456,6 +1480,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
       if (convSessionId && get().sessionStates[convSessionId]) {
         updateSession(convSessionId, () => ({ conversationId }));
+      }
+      break;
+    }
+
+    case 'evaluate_draft_result': {
+      // #3068: route to the resolver registered by the matching evaluateDraft()
+      // call. Drop on the floor if there's no waiter — the request was
+      // cancelled or already timed out, so the late-arriving result is moot.
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (requestId) {
+        const resolver = _evaluatorPending.get(requestId);
+        if (resolver) {
+          _evaluatorPending.delete(requestId);
+          resolver({
+            verdict: msg.verdict as 'forward' | 'rewrite' | 'clarify' | undefined,
+            rewritten: typeof msg.rewritten === 'string' ? msg.rewritten : null,
+            clarification: typeof msg.clarification === 'string' ? msg.clarification : null,
+            reasoning: typeof msg.reasoning === 'string' ? msg.reasoning : '',
+            error: msg.error as { code: string; message: string } | undefined,
+          });
+        }
       }
       break;
     }

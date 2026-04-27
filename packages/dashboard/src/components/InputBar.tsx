@@ -10,7 +10,7 @@ import { FilePicker, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
-import type { SlashCommand } from '../store/types'
+import type { SlashCommand, EvaluatorResultPayload } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
 
 export interface FileAttachment {
@@ -56,9 +56,20 @@ export interface InputBarProps {
     start: () => void
     stop: () => void
   }
+  /** #3068 — When provided, renders an Evaluate button that runs the draft
+   * through the prompt evaluator before sending. The result is shown inline;
+   * for rewrite verdicts the user gets an "Apply rewrite" button that swaps
+   * the input value. */
+  onEvaluate?: (draft: string) => Promise<EvaluatorResultPayload>
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput }: InputBarProps) {
+type EvaluatorState =
+  | { kind: 'idle' }
+  | { kind: 'pending' }
+  | { kind: 'result', result: EvaluatorResultPayload }
+  | { kind: 'error', message: string }
+
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -69,6 +80,33 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   const [selectedIndex, setSelectedIndex] = useState(0)
   const shortcutsId = useId()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // #3068 — manual prompt evaluator state machine. Lives in InputBar because
+  // applying a rewrite has to swap the textarea value and re-focus it.
+  const [evaluatorState, setEvaluatorState] = useState<EvaluatorState>({ kind: 'idle' })
+
+  const handleEvaluate = useCallback(async () => {
+    if (!onEvaluate) return
+    const draft = value.trim()
+    if (!draft) return
+    setEvaluatorState({ kind: 'pending' })
+    try {
+      const result = await onEvaluate(draft)
+      setEvaluatorState({ kind: 'result', result })
+    } catch (err) {
+      setEvaluatorState({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
+    }
+  }, [onEvaluate, value])
+
+  const dismissEvaluator = useCallback(() => {
+    setEvaluatorState({ kind: 'idle' })
+  }, [])
+
+  const applyRewrite = useCallback((rewrite: string) => {
+    setValue(rewrite)
+    setEvaluatorState({ kind: 'idle' })
+    textareaRef.current?.focus()
+  }, [setValue])
 
   // Find the last qualifying @ (at start or after whitespace)
   const triggerAtIdx = useMemo(() => {
@@ -424,6 +462,13 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           <span className="thinking-text">Thinking...</span>
         </div>
       )}
+      {evaluatorState.kind !== 'idle' && (
+        <EvaluatorPanel
+          state={evaluatorState}
+          onApplyRewrite={applyRewrite}
+          onDismiss={dismissEvaluator}
+        />
+      )}
       <textarea
         ref={textareaRef}
         value={value}
@@ -459,6 +504,19 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             )}
           </button>
         )}
+        {onEvaluate && !((isStreaming || isBusy) && !value.trim()) && (
+          <button
+            data-testid="evaluate-button"
+            className="btn-evaluate"
+            onClick={handleEvaluate}
+            disabled={disabled || !value.trim() || evaluatorState.kind === 'pending'}
+            type="button"
+            aria-label="Evaluate this draft before sending"
+            title="Evaluate this draft message — Claude opus will check it for clarity before you send."
+          >
+            {evaluatorState.kind === 'pending' ? 'Evaluating…' : 'Evaluate'}
+          </button>
+        )}
         {(isStreaming || isBusy) && !value.trim() ? (
           <button
             data-testid="interrupt-button"
@@ -482,6 +540,129 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           </button>
         )}
       </div>
+    </div>
+  )
+}
+
+/**
+ * Inline evaluator result panel (#3068). Renders one of:
+ *   - pending spinner
+ *   - error banner
+ *   - verdict-specific result UI (forward / rewrite / clarify)
+ */
+function EvaluatorPanel({
+  state,
+  onApplyRewrite,
+  onDismiss,
+}: {
+  state: Exclude<EvaluatorState, { kind: 'idle' }>
+  onApplyRewrite: (rewrite: string) => void
+  onDismiss: () => void
+}) {
+  if (state.kind === 'pending') {
+    return (
+      <div className="evaluator-panel evaluator-panel--pending" data-testid="evaluator-panel">
+        <span className="evaluator-spinner" aria-hidden="true" />
+        <span className="evaluator-text">Evaluating draft…</span>
+      </div>
+    )
+  }
+
+  if (state.kind === 'error') {
+    return (
+      <div className="evaluator-panel evaluator-panel--error" data-testid="evaluator-panel" role="alert">
+        <span className="evaluator-label">Evaluator error:</span>
+        <span className="evaluator-text">{state.message}</span>
+        <button type="button" className="evaluator-dismiss" onClick={onDismiss} aria-label="Dismiss">×</button>
+      </div>
+    )
+  }
+
+  // state.kind === 'result'
+  const { result } = state
+
+  if (result.error) {
+    return (
+      <div className="evaluator-panel evaluator-panel--error" data-testid="evaluator-panel" role="alert">
+        <span className="evaluator-label">Evaluator error ({result.error.code}):</span>
+        <span className="evaluator-text">{result.error.message}</span>
+        <button type="button" className="evaluator-dismiss" onClick={onDismiss} aria-label="Dismiss">×</button>
+      </div>
+    )
+  }
+
+  const verdict = result.verdict
+  const reasoning = result.reasoning || ''
+
+  if (verdict === 'forward') {
+    return (
+      <div
+        className="evaluator-panel evaluator-panel--forward"
+        data-testid="evaluator-panel"
+        data-verdict="forward"
+      >
+        <span className="evaluator-label">Looks clear.</span>
+        {reasoning && <span className="evaluator-text">{reasoning}</span>}
+        <button type="button" className="evaluator-dismiss" onClick={onDismiss} aria-label="Dismiss">×</button>
+      </div>
+    )
+  }
+
+  if (verdict === 'rewrite' && result.rewritten) {
+    return (
+      <div
+        className="evaluator-panel evaluator-panel--rewrite"
+        data-testid="evaluator-panel"
+        data-verdict="rewrite"
+      >
+        <div className="evaluator-row">
+          <span className="evaluator-label">Suggested rewrite</span>
+          {reasoning && <span className="evaluator-text">— {reasoning}</span>}
+        </div>
+        <pre className="evaluator-rewrite-text">{result.rewritten}</pre>
+        <div className="evaluator-actions">
+          <button
+            type="button"
+            className="btn-evaluator-apply"
+            data-testid="evaluator-apply"
+            onClick={() => onApplyRewrite(result.rewritten!)}
+          >
+            Apply rewrite
+          </button>
+          <button type="button" className="btn-evaluator-dismiss" onClick={onDismiss}>
+            Keep original
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (verdict === 'clarify' && result.clarification) {
+    return (
+      <div
+        className="evaluator-panel evaluator-panel--clarify"
+        data-testid="evaluator-panel"
+        data-verdict="clarify"
+      >
+        <div className="evaluator-row">
+          <span className="evaluator-label">Clarification needed</span>
+          {reasoning && <span className="evaluator-text">— {reasoning}</span>}
+        </div>
+        <p className="evaluator-clarification">{result.clarification}</p>
+        <div className="evaluator-actions">
+          <button type="button" className="btn-evaluator-dismiss" onClick={onDismiss}>
+            Got it
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Unknown shape — fail safe by surfacing the raw reasoning.
+  return (
+    <div className="evaluator-panel evaluator-panel--forward" data-testid="evaluator-panel">
+      <span className="evaluator-text">{reasoning || 'Evaluator returned an unexpected response.'}</span>
+      <button type="button" className="evaluator-dismiss" onClick={onDismiss} aria-label="Dismiss">×</button>
     </div>
   )
 }

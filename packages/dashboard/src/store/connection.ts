@@ -98,7 +98,10 @@ import {
   clearSavedCredentials,
   loadConnection,
   CLIENT_PROTOCOL_VERSION,
+  registerEvaluatorRequest,
+  cancelEvaluatorRequest,
 } from './message-handler';
+import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
@@ -1000,6 +1003,37 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return 'sent';
     }
     return enqueueMessage('interrupt', payload);
+  },
+
+  // #3068 — manual prompt evaluator. Returns a Promise that resolves with the
+  // evaluator's result when the server replies, or rejects on disconnect /
+  // 60s timeout. The 60s ceiling is generous: an opus + thinking call plus
+  // network typically finishes in 5-10s, but we don't want a hung request to
+  // leak a resolver into the pending Map indefinitely.
+  evaluateDraft: (draft: string): Promise<EvaluatorResultPayload> => {
+    const { socket, activeSessionId } = get();
+    const requestId = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    return new Promise<EvaluatorResultPayload>((resolve, reject) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        reject(new Error('Not connected to server'));
+        return;
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        cancelEvaluatorRequest(requestId);
+        reject(new Error('Evaluator request timed out after 60s'));
+      }, 60_000);
+
+      registerEvaluatorRequest(requestId, (result) => {
+        window.clearTimeout(timeoutId);
+        resolve(result);
+      });
+
+      const payload: Record<string, unknown> = { type: 'evaluate_draft', draft, requestId };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    });
   },
 
   sendPermissionResponse: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {

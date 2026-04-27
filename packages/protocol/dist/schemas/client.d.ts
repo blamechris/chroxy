@@ -363,6 +363,12 @@ export declare const GetEnvironmentSchema: z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
     environmentId: z.ZodString;
 }, z.core.$strip>;
+export declare const EvaluateDraftSchema: z.ZodObject<{
+    type: z.ZodLiteral<"evaluate_draft">;
+    draft: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const EncryptedEnvelopeSchema: z.ZodObject<{
     type: z.ZodLiteral<"encrypted">;
     d: z.ZodString;
@@ -609,6 +615,11 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
     environmentId: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"evaluate_draft">;
+    draft: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>], "type">;
 export type AuthMessage = z.infer<typeof AuthSchema>;
 export type PairMessage = z.infer<typeof PairSchema>;
