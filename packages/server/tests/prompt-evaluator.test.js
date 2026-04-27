@@ -226,8 +226,10 @@ describe('evaluateDraft', () => {
       await assert.rejects(
         () => evaluateDraft({ draft: 'x', client }),
         (err) => {
+          assert.equal(err.code, 'EVALUATOR_API_ERROR')
           assert.equal(err.message, 'Evaluator authentication failed (check ANTHROPIC_API_KEY)')
           assert.ok(!/claude-opus-4-7/.test(err.message))
+          assert.equal(err.cause, original)
           return true
         },
       )
@@ -252,8 +254,10 @@ describe('evaluateDraft', () => {
       await assert.rejects(
         () => evaluateDraft({ draft: 'x', client }),
         (err) => {
+          assert.equal(err.code, 'EVALUATOR_API_ERROR')
           assert.equal(err.message, 'Evaluator service unavailable')
           assert.ok(!/edge-pop-syd/.test(err.message))
+          assert.equal(err.cause, original)
           return true
         },
       )

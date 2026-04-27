@@ -105,8 +105,13 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
       messages: [{ role: 'user', content: userMessage }],
     })
   } catch (err) {
-    log.warn(`Anthropic API call failed: ${err.message}`)
-    const wrapped = new Error(_sanitizeApiError(err))
+    // Log the sanitized bucket only — `log.warn` is fanned out to paired WS
+    // clients as `log_entry` events (see addLogListener in ws-server.js), so
+    // the raw upstream message is just as much of a leak channel as the
+    // `evaluate_draft_result.error.message` payload we already sanitize.
+    const sanitized = _sanitizeApiError(err)
+    log.warn(`Anthropic API call failed: ${sanitized}`)
+    const wrapped = new Error(sanitized)
     wrapped.code = 'EVALUATOR_API_ERROR'
     wrapped.cause = err
     throw wrapped
@@ -122,8 +127,10 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
  * The raw `err.message` from `@anthropic-ai/sdk` can leak internals — request
  * IDs, account/billing hints, IPs, model identifiers — that we don't want to
  * fan out to every paired WS client. We bucket on `err.status` (the SDK's
- * `APIError` exposes it) and fall back to a generic string. Server-side logs
- * still capture the raw error via `wrapped.cause`.
+ * `APIError` exposes it) and fall back to a generic string. The original
+ * error is attached to `wrapped.cause` for in-process propagation; the
+ * server logger is string-only and doesn't auto-stringify causes, so
+ * `wrapped.cause` is NOT visible in `log_entry` broadcasts.
  */
 function _sanitizeApiError(err) {
   const status = typeof err?.status === 'number' ? err.status : null
