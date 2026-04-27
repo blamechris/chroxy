@@ -31,6 +31,8 @@ import {
   handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
+  handleDevPreview as sharedDevPreview,
+  handleDevPreviewStopped as sharedDevPreviewStopped,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -52,7 +54,6 @@ import type {
   ConnectionContext,
   ConnectionState,
   CustomAgent,
-  DevPreview,
   DiffFile,
   DirectoryEntry,
   FileEntry,
@@ -2212,25 +2213,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'dev_preview': {
-      const previewSid = (msg.sessionId as string) || get().activeSessionId;
-      const preview: DevPreview = { port: msg.port as number, url: msg.url as string };
-      if (previewSid && get().sessionStates[previewSid]) {
-        updateSession(previewSid, (s) => {
-          // Avoid duplicates for same port
-          const existing = s.devPreviews.filter((p) => p.port !== preview.port);
-          return { devPreviews: [...existing, preview] };
-        });
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      const sessionState = targetId ? get().sessionStates[targetId] : undefined;
+      if (targetId && sessionState) {
+        const preview = sharedDevPreview(msg, targetId, sessionState.devPreviews);
+        updateSession(targetId, () => preview.patch);
       }
       break;
     }
 
     case 'dev_preview_stopped': {
-      const stoppedSid = (msg.sessionId as string) || get().activeSessionId;
-      const stoppedPort = msg.port as number;
-      if (stoppedSid && get().sessionStates[stoppedSid]) {
-        updateSession(stoppedSid, (s) => ({
-          devPreviews: s.devPreviews.filter((p) => p.port !== stoppedPort),
-        }));
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      const sessionState = targetId ? get().sessionStates[targetId] : undefined;
+      if (targetId && sessionState) {
+        const preview = sharedDevPreviewStopped(msg, targetId, sessionState.devPreviews);
+        updateSession(targetId, () => preview.patch);
       }
       break;
     }

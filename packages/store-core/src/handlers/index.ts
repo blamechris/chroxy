@@ -9,7 +9,7 @@
  * and web dashboard message handlers.
  */
 
-import type { ChatMessage, SessionInfo } from '../types'
+import type { ChatMessage, DevPreview, SessionInfo } from '../types'
 import { nextMessageId } from '../utils'
 
 // ---------------------------------------------------------------------------
@@ -308,6 +308,68 @@ export function handlePlanReady(
     patch: {
       isPlanPending: true,
       planAllowedPrompts: prompts,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dev_preview
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve target session and produce a patch appending (or replacing) a
+ * dev-preview entry by port. Both clients dedupe by port: a new preview for
+ * an already-tracked port replaces the existing entry, otherwise it is
+ * appended.
+ *
+ * Behaviour-preserving: `msg.port` and `msg.url` are forwarded verbatim with
+ * the same unsafe cast (`port as number, url as string`) the prior inline
+ * implementations used. Tightening to runtime validation would be a behaviour
+ * change and is out of scope for the #2661 mechanical migration.
+ *
+ * The current devPreviews array is a required input because the dedup needs
+ * read access to existing state; the call site passes `session.devPreviews`.
+ */
+export function handleDevPreview(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  currentPreviews: DevPreview[],
+): SessionPatch {
+  const preview: DevPreview = {
+    port: msg.port as number,
+    url: msg.url as string,
+  }
+  const filtered = currentPreviews.filter((p) => p.port !== preview.port)
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      devPreviews: [...filtered, preview],
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dev_preview_stopped
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve target session and produce a patch removing the dev-preview entry
+ * matching `msg.port`. If no entry matches the previews list is returned
+ * unchanged (matches both clients' prior `filter`-based inline implementation).
+ *
+ * Behaviour-preserving: `msg.port` is cast verbatim (`port as number`) without
+ * runtime validation, matching the prior inline behaviour.
+ */
+export function handleDevPreviewStopped(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  currentPreviews: DevPreview[],
+): SessionPatch {
+  const stoppedPort = msg.port as number
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      devPreviews: currentPreviews.filter((p) => p.port !== stoppedPort),
     },
   }
 }
