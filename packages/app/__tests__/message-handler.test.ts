@@ -99,10 +99,19 @@ import type { ConnectionState, SessionState } from '../src/store/types';
 
 const SESSION_ID = 'test-session-1';
 
-/** Build a minimal ConnectionState with one session. */
+/** Build a minimal ConnectionState with one session.
+ *
+ * Defaults the session's provider to claude-sdk and exposes a matching
+ * availableProviders entry with sessionRules: true so the permission_request
+ * handler emits the full {Allow, Deny, Allow for Session} option set
+ * (#3072 — without this gate, allowSession is filtered out as the provider
+ * is treated as not supporting session rules).
+ */
 function createMockState(overrides?: Partial<SessionState>): Partial<ConnectionState> {
   return {
     activeSessionId: SESSION_ID,
+    sessions: [{ sessionId: SESSION_ID, name: 'Test', provider: 'claude-sdk' } as any],
+    availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } } as any],
     sessionStates: {
       [SESSION_ID]: { ...createEmptySessionState(), ...overrides },
     },

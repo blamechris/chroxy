@@ -83,6 +83,11 @@ export interface ProviderCapabilities {
   resume: boolean;
   terminal: boolean;
   thinkingLevel?: boolean;
+  // True if the provider supports session-scoped permission rules
+  // (i.e. the "Allow for Session" affordance). Derived server-side from
+  // method existence — only providers whose session class implements
+  // setPermissionRules report this as true (#3072).
+  sessionRules?: boolean;
 }
 
 export interface ProviderInfo {

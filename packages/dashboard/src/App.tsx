@@ -25,6 +25,7 @@ import { SessionBar, type SessionTabData, type SessionStatus } from './component
 import { StatusBar } from './components/StatusBar'
 import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
 import { PermissionPrompt } from './components/PermissionPrompt'
+import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
 import { PlanApproval } from './components/PlanApproval'
@@ -332,6 +333,31 @@ export function App() {
   const [sidebarFilter, setSidebarFilter] = useState('')
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+
+  // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
+  const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const transcriptResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const handleCopyTranscript = useCallback(() => {
+    const text = formatTranscript(storeMessages)
+    if (!text) return
+    // navigator.clipboard is undefined in non-secure contexts (and some
+    // embedded webviews). Accessing .writeText on undefined would throw
+    // synchronously — bypass the .catch() and surface as a runtime error
+    // in the keyboard handler. Guard with the same pattern as the other
+    // dashboard copy paths.
+    if (!navigator.clipboard) return
+    void navigator.clipboard.writeText(text).then(() => {
+      setTranscriptCopied(true)
+      if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
+      transcriptResetTimerRef.current = setTimeout(() => setTranscriptCopied(false), 1500)
+    }).catch(() => {
+      // Clipboard rejected (e.g. user denied permissions). Surface the
+      // failure quietly — the user can copy manually from the chat view.
+    })
+  }, [storeMessages])
+  useEffect(() => () => {
+    if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
+  }, [])
   const [showConsoleTab, setShowConsoleTab] = useState(() => {
     return loadPersistedShowConsoleTab()
   })
@@ -443,6 +469,12 @@ export function App() {
         setSettingsOpen(prev => !prev)
         return
       }
+      // Cmd+Shift+T: copy chat transcript (#3073)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 't') {
+        e.preventDefault()
+        handleCopyTranscript()
+        return
+      }
       // Cmd+.: interrupt active session
       if ((e.metaKey || e.ctrlKey) && e.key === '.') {
         e.preventDefault()
@@ -480,7 +512,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt])
+  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -744,7 +776,7 @@ export function App() {
     setImageAttachments(prev => prev.filter((_, i) => i !== index))
   }, [])
 
-  const handleShowQr = useCallback(async () => {
+  const fetchQrInto = useCallback(async (path: string) => {
     setQrModalOpen(true)
     setQrLoading(true)
     setQrError(null)
@@ -756,7 +788,7 @@ export function App() {
       return
     }
     try {
-      const res = await fetch('/qr', {
+      const res = await fetch(path, {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!res.ok) {
@@ -775,6 +807,25 @@ export function App() {
       setQrLoading(false)
     }
   }, [])
+
+  const handleShowQr = useCallback(() => fetchQrInto('/qr'), [fetchQrInto])
+
+  // #3070: per-session "Share this session" QR. Issues a token bound to the
+  // active session — the scanner can chat into it but cannot list/switch
+  // others. Distinct from the linking-mode QR above, which lets the paired
+  // device manage every session.
+  const [qrShareMode, setQrShareMode] = useState<'link' | 'share'>('link')
+  const handleShareSession = useCallback(() => {
+    if (!activeSessionId) return
+    setQrShareMode('share')
+    void fetchQrInto(`/qr/session/${encodeURIComponent(activeSessionId)}`)
+  }, [activeSessionId, fetchQrInto])
+  // Reset share-mode label whenever the modal reopens via the regular QR
+  // button so the title reflects the actual content.
+  useEffect(() => {
+    if (qrModalOpen && qrShareMode === 'share') return
+    if (!qrModalOpen) setQrShareMode('link')
+  }, [qrModalOpen, qrShareMode])
 
   // Auto-refresh QR when the server regenerates the pairing ID (#2916).
   // Only refresh while the modal is open — guarding on qrSvg would reopen
@@ -1017,6 +1068,18 @@ export function App() {
           />
         </div>
         <div className="header-right">
+          {viewMode === 'chat' && storeMessages.length > 0 && (
+            <button
+              className="header-icon-btn"
+              onClick={handleCopyTranscript}
+              aria-label="Copy chat transcript"
+              data-testid="btn-copy-transcript"
+              title={transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`}
+              type="button"
+            >
+              {transcriptCopied ? '✓' : '⎘'}
+            </button>
+          )}
           <button
             className="header-icon-btn"
             onClick={() => setSettingsOpen(true)}
@@ -1285,6 +1348,7 @@ export function App() {
         isBusy={!isIdle}
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
+        onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
       />
 
       {/* Settings panel */}
@@ -1301,13 +1365,19 @@ export function App() {
       {/* Keyboard shortcut help */}
       <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />
 
-      {/* QR code modal */}
+      {/* QR code modal — shared by linking-mode QR and per-session "Share" QR (#3070) */}
       <QrModal
         open={qrModalOpen}
         onClose={() => setQrModalOpen(false)}
         qrSvg={qrSvg}
         loading={qrLoading}
         error={qrError ?? undefined}
+        title={qrShareMode === 'share' ? 'Share This Session' : 'Pair Mobile App'}
+        instructions={
+          qrShareMode === 'share'
+            ? 'Scan to chat into this session only — the scanner cannot list, switch, or destroy other sessions.'
+            : 'Scan with Chroxy app to pair your phone'
+        }
       />
 
       {/* Modals */}

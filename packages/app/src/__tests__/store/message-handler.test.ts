@@ -1684,6 +1684,35 @@ describe('stream_delta handler', () => {
     const toolUseMsg = ss.messages.find((m) => m.id === 'msg-1');
     expect(toolUseMsg?.content).toBe('ls');
   });
+
+  // #3071 — when stream_start is dropped (e.g., session not yet in store at the
+  // time it arrived), the next stream_delta with the same messageId must NOT
+  // concatenate onto the existing tool_use bubble. The delta handler defends
+  // by detecting the type collision and lazy-creating a suffixed response.
+  it('ID collision recovery: lazy-creates response when stream_start was missed', () => {
+    const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Skip stream_start — simulate the dropped/raced case
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'After tool ' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'response' });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responseMsg = ss.messages.find((m) => m.id === 'msg-1-response');
+    expect(responseMsg).toBeDefined();
+    expect(responseMsg?.type).toBe('response');
+    expect(responseMsg?.content).toBe('After tool response');
+    // tool_use bubble must remain pristine — no concatenated assistant text
+    const toolUseMsg = ss.messages.find((m) => m.id === 'msg-1');
+    expect(toolUseMsg?.content).toBe('ls');
+  });
 });
 
 describe('stream_end handler', () => {
@@ -1988,8 +2017,9 @@ describe('permission_request message handler', () => {
   it('adds a prompt message to the session with options populated', () => {
     const store = createMockStore({
       activeSessionId: 's1',
-      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessions: [{ sessionId: 's1', name: 'S1', provider: 'claude-sdk' } as any],
       sessionStates: { s1: createEmptySessionState() },
+      availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } } as any],
 
       sessionNotifications: [],
     });
@@ -2012,6 +2042,64 @@ describe('permission_request message handler', () => {
     expect(msgs[0].requestId).toBe('perm-1');
     expect(msgs[0].options).toHaveLength(3);
     expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowSession']);
+  });
+
+  // #3072: when the active session's provider does not declare the
+  // sessionRules capability, the "Allow for Session" option must be
+  // omitted entirely (the server would reject the follow-up
+  // set_permission_rules with "not supported").
+  it('omits the allowSession option when the active provider lacks the sessionRules capability', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1', provider: 'codex' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      availableProviders: [{ name: 'codex', capabilities: { sessionRules: false } } as any],
+
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-2',
+      tool: 'Read',
+      description: '/etc/hosts',
+      input: { path: '/etc/hosts' },
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].options).toHaveLength(2);
+    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny']);
+  });
+
+  it('omits the allowSession option when provider info is missing entirely (fail-closed)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any], // no provider field
+      sessionStates: { s1: createEmptySessionState() },
+      availableProviders: [],
+
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-3',
+      tool: 'Read',
+      description: 't',
+      input: {},
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny']);
   });
 
   it('sets expiresAt from remainingMs', () => {

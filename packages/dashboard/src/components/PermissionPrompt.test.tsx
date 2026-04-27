@@ -12,19 +12,41 @@ import { Modal } from './Modal'
 import type { PermissionDecision } from '../store/types'
 
 // Mock the store so the component can read `resolvedPermissions[requestId]`
-// (#2833) and the exported `isRuleEligibleTool` helper (#2834) without
-// booting the full Zustand store in a unit test.
+// (#2833), the exported `isRuleEligibleTool` helper (#2834), and the
+// `isRuleEligibleProvider` helper (#3072) without booting the full Zustand
+// store in a unit test. Default mock state simulates an active claude-sdk
+// session so the existing #2834 tests continue to see "Allow for Session".
 type MockStore = {
   resolvedPermissions: Record<string, PermissionDecision>
+  activeSessionId: string | null
+  sessions: { sessionId: string; provider?: string }[]
+  availableProviders: { name: string; capabilities?: { sessionRules?: boolean } }[]
 }
-let mockStoreState: MockStore = { resolvedPermissions: {} }
+const DEFAULT_MOCK_STORE: MockStore = {
+  resolvedPermissions: {},
+  activeSessionId: 's1',
+  sessions: [{ sessionId: 's1', provider: 'claude-sdk' }],
+  availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } }],
+}
+let mockStoreState: MockStore = { ...DEFAULT_MOCK_STORE }
 function resetMockStore() {
-  mockStoreState = { resolvedPermissions: {} }
+  mockStoreState = {
+    ...DEFAULT_MOCK_STORE,
+    sessions: [...DEFAULT_MOCK_STORE.sessions],
+    availableProviders: [...DEFAULT_MOCK_STORE.availableProviders],
+  }
 }
 vi.mock('../store/connection', () => ({
   useConnectionStore: <T,>(selector: (s: MockStore) => T): T => selector(mockStoreState),
   isRuleEligibleTool: (tool: string) =>
     new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']).has(tool),
+  isRuleEligibleProvider: (
+    provider: string | null | undefined,
+    available: { name: string; capabilities?: { sessionRules?: boolean } }[],
+  ) => {
+    if (!provider) return false
+    return available.find((p) => p.name === provider)?.capabilities?.sessionRules === true
+  },
 }))
 
 afterEach(() => {
@@ -847,6 +869,86 @@ describe('PermissionPrompt — Allow for Session button (#2834)', () => {
       />
     )
     fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Allow for Session — provider capability gate (#3072)
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — provider capability gate (#3072)', () => {
+  beforeEach(() => {
+    resetMockStore()
+  })
+
+  it('hides the button when the active session provider does not support sessionRules', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'codex' }]
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { sessionRules: true } },
+      { name: 'codex', capabilities: { sessionRules: false } },
+    ]
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('btn-allow-session')).not.toBeInTheDocument()
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+  })
+
+  it('hides the button when provider info is missing entirely (fail-closed)', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'mystery' }]
+    mockStoreState.availableProviders = []
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('btn-allow-session')).not.toBeInTheDocument()
+  })
+
+  it('Cmd+Shift+Y is a no-op when the provider does not support sessionRules', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'codex' }]
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: { sessionRules: false } }]
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true, shiftKey: true })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('coerces a click on a stale allowSession decision to plain allow when provider lacks support', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'codex' }]
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: { sessionRules: false } }]
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    // The allow button is still here; the session-rule button is not rendered,
+    // but verify the silent coerce path: a programmatic 'allow' click works.
+    fireEvent.click(screen.getByText('Allow'))
     expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
   })
 })

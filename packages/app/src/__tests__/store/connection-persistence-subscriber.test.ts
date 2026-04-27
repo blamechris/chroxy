@@ -19,7 +19,7 @@
  * single AsyncStorage write.
  */
 import { persistSessionMessages } from '../../store/persistence';
-import { useConnectionStore } from '../../store/connection';
+import { useConnectionStore, __test_getPrevMessagesCache } from '../../store/connection';
 import { createEmptySessionState } from '../../store/utils';
 import type { ChatMessage } from '../../store/types';
 
@@ -148,6 +148,33 @@ describe('persistence subscriber — issue #3076', () => {
     });
 
     expect(mockedPersist).not.toHaveBeenCalled();
+  });
+
+  // Regression for issue #3085: the subscriber tracks per-session messages
+  // references in module-level _prevMessages but never deleted entries when
+  // a session was removed from sessionStates. The ChatMessage[] arrays were
+  // therefore retained indefinitely (memory leak across the app's lifetime).
+  it('prunes _prevMessages entries when their session is removed from sessionStates', () => {
+    const userMsg: ChatMessage = {
+      id: 'u-1',
+      type: 'user_input',
+      content: 'hello',
+      timestamp: 1,
+    };
+    setupStoreWithSession([userMsg]);
+
+    // Sanity: the subscriber populated the cache for SESSION_ID
+    expect(__test_getPrevMessagesCache()[SESSION_ID]).toBeDefined();
+
+    // Remove the session from sessionStates (simulates session deletion)
+    useConnectionStore.setState({
+      activeSessionId: null,
+      sessions: [],
+      sessionStates: {},
+    });
+
+    // After the subscriber fires for the removal, the cache entry should be gone
+    expect(__test_getPrevMessagesCache()[SESSION_ID]).toBeUndefined();
   });
 
   it('persists the most recent content for a multi-delta stream (final write reflects full body)', () => {

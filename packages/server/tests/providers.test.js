@@ -70,6 +70,34 @@ describe('Provider Registry', () => {
     assert.equal(sdkEntry.capabilities.inProcessPermissions, true)
     assert.equal(sdkEntry.capabilities.resume, true)
   })
+
+  // #3072: clients gate the "Allow for Session" affordance on this capability
+  // so they don't surface a button that the server would reject as
+  // "not supported by this provider".
+  it('listProviders surfaces sessionRules capability derived from setPermissionRules', () => {
+    const list = listProviders()
+    const sdkEntry = list.find(p => p.name === 'claude-sdk')
+    assert.ok(sdkEntry, 'claude-sdk provider should be registered')
+    assert.equal(sdkEntry.capabilities.sessionRules, true,
+      'claude-sdk implements setPermissionRules so should report sessionRules: true')
+
+    const cliEntry = list.find(p => p.name === 'claude-cli')
+    assert.ok(cliEntry, 'claude-cli provider should be registered')
+    assert.equal(cliEntry.capabilities.sessionRules, false,
+      'claude-cli does not implement setPermissionRules so should report sessionRules: false')
+
+    const codexEntry = list.find(p => p.name === 'codex')
+    if (codexEntry) {
+      assert.equal(codexEntry.capabilities.sessionRules, false,
+        'codex does not implement setPermissionRules so should report sessionRules: false')
+    }
+
+    const geminiEntry = list.find(p => p.name === 'gemini')
+    if (geminiEntry) {
+      assert.equal(geminiEntry.capabilities.sessionRules, false,
+        'gemini does not implement setPermissionRules so should report sessionRules: false')
+    }
+  })
 })
 
 describe('Docker Provider Naming (#2475)', () => {

@@ -163,6 +163,85 @@ export function createHttpHandler(server) {
       return
     }
 
+    // Per-session QR endpoint (#3070): GET /qr/session/:sessionId returns a
+    // QR whose pairing URL issues a session-bound token. The scanner can chat
+    // into that one session but cannot list/switch/destroy others. Must be
+    // matched BEFORE the generic /qr handler since both share the prefix.
+    if (req.method === 'GET' && req.url?.startsWith('/qr/session/')) {
+      if (!server._validateBearerAuth(req, res)) return
+      const shareCors = matchAllowedOrigin(req.headers['origin'])
+      const sharePathParts = req.url.split('?')[0].split('/').filter(Boolean) // ['qr','session','<id>']
+      const writeShareErr = (status, body) => {
+        const headers = { 'Content-Type': 'application/json' }
+        if (shareCors) {
+          headers['Access-Control-Allow-Origin'] = shareCors
+          headers['Vary'] = 'Origin'
+        }
+        res.writeHead(status, headers)
+        res.end(JSON.stringify(body))
+      }
+      // decodeURIComponent throws URIError on malformed percent-encoding
+      // (e.g. /qr/session/%E0%A4). Without a guard the throw surfaces as an
+      // unhandled rejection in this async handler. Return 400 instead.
+      let sessionId = null
+      if (sharePathParts[2]) {
+        try {
+          sessionId = decodeURIComponent(sharePathParts[2])
+        } catch {
+          writeShareErr(400, { error: 'Invalid sessionId encoding' })
+          return
+        }
+      }
+      if (!sessionId) {
+        writeShareErr(400, { error: 'sessionId required' })
+        return
+      }
+      // Server-side existence check — fail-fast if the session is gone, so
+      // the scanner doesn't get a doomed token.
+      const sessionExists = server.sessionManager
+        ? !!server.sessionManager.getSession?.(sessionId)
+        : true // fall through if session manager isn't wired (test contexts)
+      if (!sessionExists) {
+        writeShareErr(404, { error: 'Session not found' })
+        return
+      }
+      if (!server._pairingManager) {
+        writeShareErr(503, { error: 'Pairing not available' })
+        return
+      }
+      let bound
+      try {
+        bound = server._pairingManager.generateBoundPairing(sessionId)
+      } catch (err) {
+        writeShareErr(500, { error: err?.message || 'Failed to generate share pairing' })
+        return
+      }
+      if (!bound.pairingUrl) {
+        writeShareErr(503, { error: 'Tunnel URL not yet available' })
+        return
+      }
+      try {
+        const svg = await QRCode.toString(bound.pairingUrl, {
+          type: 'svg',
+          color: { dark: '#e0e0e0', light: '#00000000' },
+          margin: 1,
+        })
+        const headers = {
+          'Content-Type': 'image/svg+xml',
+          'Cache-Control': 'no-store',
+        }
+        if (shareCors) {
+          headers['Access-Control-Allow-Origin'] = shareCors
+          headers['Vary'] = 'Origin'
+        }
+        res.writeHead(200, headers)
+        res.end(svg)
+      } catch (_err) {
+        writeShareErr(500, { error: 'Failed to generate QR code' })
+      }
+      return
+    }
+
     // QR code endpoint — uses live pairing URL (not stale file) when available
     if (req.method === 'GET' && req.url?.startsWith('/qr')) {
       if (!server._validateBearerAuth(req, res)) return

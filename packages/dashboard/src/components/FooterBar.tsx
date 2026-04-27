@@ -22,6 +22,8 @@ export interface FooterBarProps {
   isBusy?: boolean
   agentCount?: number
   onShowQr?: () => void
+  /** #3070: per-session "Share this session" QR. Undefined hides the button. */
+  onShareSession?: () => void
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -52,6 +54,7 @@ export function FooterBar({
   isBusy,
   agentCount,
   onShowQr,
+  onShareSession,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -85,6 +88,18 @@ export function FooterBar({
         {onShowQr && (
           <button className="footer-qr-btn" onClick={onShowQr} type="button" aria-label="Show QR code">
             QR
+          </button>
+        )}
+        {onShareSession && (
+          <button
+            className="footer-qr-btn"
+            onClick={onShareSession}
+            type="button"
+            aria-label="Share this session"
+            data-testid="btn-share-session"
+            title="Share this session — scanner gets a session-bound token (#3070)"
+          >
+            Share
           </button>
         )}
         {isBusy && <span className="footer-busy" />}

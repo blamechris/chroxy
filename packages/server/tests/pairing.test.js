@@ -435,4 +435,95 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // Per-session "Share this session" pairings (#3070)
+  // ---------------------------------------------------------------------------
+  describe('generateBoundPairing (#3070)', () => {
+    it('creates a fresh pairing entry that does not replace _current', () => {
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+      const linkingId = pm.currentPairingId
+      const { pairingId, pairingUrl } = pm.generateBoundPairing('sess-A')
+      assert.ok(pairingId)
+      assert.notEqual(pairingId, linkingId, 'bound pairing must have its own id')
+      assert.equal(pm.currentPairingId, linkingId, '_current (linking) must not change')
+      assert.ok(pairingUrl.startsWith('chroxy://example.com?pair='))
+      pm.destroy()
+    })
+
+    it('issues a session-bound token when validatePairing consumes the bound id', () => {
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+      const { pairingId } = pm.generateBoundPairing('sess-A')
+      const result = pm.validatePairing(pairingId)
+      assert.equal(result.valid, true)
+      assert.ok(result.sessionToken)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), 'sess-A')
+      pm.destroy()
+    })
+
+    it('the entry-level binding overrides any sessionId param at consume time', () => {
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+      const { pairingId } = pm.generateBoundPairing('sess-bound')
+      // The handlePairMessage path passes a sessionId from the auth-context
+      // shim — it's null in linking mode but could be non-null. The bound
+      // entry must win.
+      const result = pm.validatePairing(pairingId, 'sess-from-param')
+      assert.equal(result.valid, true)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), 'sess-bound')
+      pm.destroy()
+    })
+
+    it('linking-mode pairings still honor the param-based binding (back-compat)', () => {
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+      const linkingId = pm.currentPairingId
+      const result = pm.validatePairing(linkingId, 'sess-from-param')
+      assert.equal(result.valid, true)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), 'sess-from-param')
+      pm.destroy()
+    })
+
+    it('linking-mode pairings issue an unbound token when no sessionId is passed', () => {
+      const pm = new PairingManager({})
+      const linkingId = pm.currentPairingId
+      const result = pm.validatePairing(linkingId)
+      assert.equal(result.valid, true)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), null)
+      pm.destroy()
+    })
+
+    it('consuming a bound pairing does NOT rotate the linking-mode _current id', () => {
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+      const linkingId = pm.currentPairingId
+      const { pairingId } = pm.generateBoundPairing('sess-A')
+      pm.validatePairing(pairingId)
+      assert.equal(pm.currentPairingId, linkingId, 'linking ID must not rotate after bound consume')
+      pm.destroy()
+    })
+
+    it('a consumed bound pairing cannot be reused (one-time)', () => {
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
+      const { pairingId } = pm.generateBoundPairing('sess-A')
+      const first = pm.validatePairing(pairingId)
+      const second = pm.validatePairing(pairingId)
+      assert.equal(first.valid, true)
+      assert.equal(second.valid, false)
+      assert.equal(second.reason, 'already_used')
+      pm.destroy()
+    })
+
+    it('rejects empty / non-string sessionId', () => {
+      const pm = new PairingManager({})
+      assert.throws(() => pm.generateBoundPairing(''), /non-empty sessionId/)
+      assert.throws(() => pm.generateBoundPairing(null), /non-empty sessionId/)
+      assert.throws(() => pm.generateBoundPairing(undefined), /non-empty sessionId/)
+      assert.throws(() => pm.generateBoundPairing(42), /non-empty sessionId/)
+      pm.destroy()
+    })
+
+    it('throws after destroy', () => {
+      const pm = new PairingManager({})
+      pm.destroy()
+      assert.throws(() => pm.generateBoundPairing('sess-A'), /destroyed/)
+    })
+  })
 })

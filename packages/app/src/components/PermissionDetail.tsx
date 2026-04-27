@@ -603,10 +603,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentRedLight,
     borderColor: COLORS.accentRedBorder,
   },
-  permissionPillResolved: {
-    backgroundColor: COLORS.accentGrayLight,
-    borderColor: COLORS.accentGrayBorder,
-  },
   permissionPillTextAllowed: {
     color: COLORS.accentGreen,
     fontSize: 13,
@@ -614,11 +610,6 @@ const styles = StyleSheet.create({
   },
   permissionPillTextDenied: {
     color: COLORS.accentRed,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  permissionPillTextResolved: {
-    color: COLORS.accentGray,
     fontSize: 13,
     fontWeight: '600',
   },

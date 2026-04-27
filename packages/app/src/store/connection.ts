@@ -936,6 +936,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid, { haptic: false });
     // For allowSession: send set_permission_rules to register auto-approval for this tool.
     // Skip tools that the server won't accept as auto-allow rules (code execution, network).
+    // Also skip if the active provider doesn't support session rules (#3072) — the
+    // server would reject the set_permission_rules with "not supported".
     const RULE_ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']);
     if (decision === 'allowSession' && socket && socket.readyState === WebSocket.OPEN) {
       const sessionId = targetSid ?? activeSessionId;
@@ -943,7 +945,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const ss = sessionStates[sessionId];
         const permMsg = ss?.messages.find((m) => m.requestId === requestId && m.type === 'prompt');
         const permissionTool = permMsg?.tool;
-        if (permissionTool && RULE_ELIGIBLE_TOOLS.has(permissionTool)) {
+        const sessionInfo = get().sessions.find((s) => s.sessionId === sessionId);
+        const provider = sessionInfo?.provider ?? null;
+        const providerSupportsRules = !!provider &&
+          get().availableProviders.find((p) => p.name === provider)?.capabilities?.sessionRules === true;
+        if (permissionTool && RULE_ELIGIBLE_TOOLS.has(permissionTool) && providerSupportsRules) {
           const currentRules = ss?.sessionRules ?? [];
           wsSend(socket, {
             type: 'set_permission_rules',
@@ -1425,6 +1431,11 @@ let _prevActiveSessionId: string | null = null;
 const _prevMessages: Record<string, ChatMessage[]> = {};
 let _prevTerminalBufferLen = 0;
 let _prevSessions: SessionInfo[] = [];
+
+// Test-only accessor for the persistence subscriber's per-session cache.
+// Used by connection-persistence-subscriber.test.ts to verify that entries
+// for removed sessions are pruned (#3085). Not for production use.
+export const __test_getPrevMessagesCache = (): Record<string, ChatMessage[]> => _prevMessages;
 useConnectionStore.subscribe((state) => {
   // Persist active session ID changes
   if (state.activeSessionId !== _prevActiveSessionId) {
@@ -1447,6 +1458,17 @@ useConnectionStore.subscribe((state) => {
     if (ss.messages !== _prevMessages[sessionId]) {
       _prevMessages[sessionId] = ss.messages;
       persistSessionMessages(sessionId, ss.messages);
+    }
+  }
+
+  // Prune entries for sessions that no longer exist in state. Without this,
+  // _prevMessages held ChatMessage[] references alive forever after a session
+  // was removed from sessionStates — the array couldn't be GC'd. Cleanup runs
+  // once per subscriber fire (not inside the per-session loop) and only mutates
+  // the module-level cache; it does not trigger any persistence writes. (#3085)
+  for (const id of Object.keys(_prevMessages)) {
+    if (!state.sessionStates[id]) {
+      delete _prevMessages[id];
     }
   }
 

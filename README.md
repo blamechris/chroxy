@@ -66,9 +66,11 @@ Chroxy reads provider API keys from environment variables at server startup. The
 
 | Provider | Env var | Get a key |
 |----------|---------|-----------|
-| Claude (default) | Use `claude` CLI login *or* `ANTHROPIC_API_KEY` | https://console.anthropic.com/settings/keys |
+| Claude (default) | `ANTHROPIC_API_KEY` | https://console.anthropic.com/settings/keys |
 | Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
 | Codex (OpenAI) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
+
+> Claude can also authenticate via your existing `claude` CLI login if you'd rather not set `ANTHROPIC_API_KEY`.
 
 Add the keys you'll use to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 

@@ -166,6 +166,96 @@ describe('http-routes', () => {
     })
   })
 
+  // #3070: per-session "Share this session" QR endpoint
+  describe('per-session share QR endpoint', () => {
+    function makeSharedMock(overrides = {}) {
+      const issuedPairings = []
+      return createMockServer({
+        _pairingManager: {
+          extendCurrentId() {},
+          currentPairingUrl: null,
+          generateBoundPairing(sessionId) {
+            issuedPairings.push(sessionId)
+            return {
+              pairingId: 'bound-id-' + sessionId,
+              pairingUrl: 'chroxy://example.com?pair=bound-id-' + sessionId,
+            }
+          },
+        },
+        sessionManager: {
+          getSession: (id) => (id === 'sess-A' ? { sessionId: 'sess-A' } : null),
+        },
+        _issuedPairings: issuedPairings,
+        ...overrides,
+      })
+    }
+
+    it('GET /qr/session/sess-A returns SVG when session exists and pairing manager available', async () => {
+      const mock = makeSharedMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/sess-A`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      assert.equal(res.headers.get('content-type'), 'image/svg+xml')
+      const body = await res.text()
+      assert.ok(body.includes('<svg'), 'response body should be an SVG')
+      assert.deepEqual(mock._issuedPairings, ['sess-A'])
+    })
+
+    it('returns 403 without auth', async () => {
+      const mock = makeSharedMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/sess-A`)
+      assert.equal(res.status, 403)
+    })
+
+    it('returns 404 when the session does not exist', async () => {
+      const mock = makeSharedMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/missing`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 404)
+    })
+
+    it('returns 503 when the pairing manager is not available', async () => {
+      const mock = makeSharedMock({ _pairingManager: null })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/sess-A`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 503)
+    })
+
+    it('does not interfere with the linking-mode /qr route', async () => {
+      const mock = makeSharedMock()
+      await startWith(mock)
+      // /qr (no /session/) should still hit the linking handler — which 503s
+      // because the mock pairing manager has no currentPairingUrl getter and
+      // there's no connection info on disk.
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 503)
+    })
+
+    it('URL-decodes the sessionId path segment', async () => {
+      const mock = makeSharedMock({
+        sessionManager: {
+          getSession: (id) => (id === 'sess A/with spaces' ? { sessionId: id } : null),
+        },
+      })
+      await startWith(mock)
+      const encoded = encodeURIComponent('sess A/with spaces')
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/${encoded}`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      assert.deepEqual(mock._issuedPairings, ['sess A/with spaces'])
+    })
+  })
+
   describe('unknown routes', () => {
     it('returns 404 for unknown paths', async () => {
       const mock = createMockServer()

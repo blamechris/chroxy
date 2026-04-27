@@ -153,6 +153,11 @@ export function getProviderDataDirs() {
 /**
  * List all registered providers with their capabilities.
  * Excludes aliases (e.g. 'docker') to prevent duplicate entries in UI.
+ *
+ * `sessionRules` capability is derived from method existence: a provider
+ * supports session-scoped rules iff its prototype has `setPermissionRules`.
+ * Clients use this to gate the "Allow for Session" UI affordance (#3072).
+ *
  * @returns {Array<{ name: string, capabilities: object }>}
  */
 export function listProviders() {
@@ -161,7 +166,10 @@ export function listProviders() {
     if (HIDDEN.has(name)) continue
     list.push({
       name,
-      capabilities: ProviderClass.capabilities || {},
+      capabilities: {
+        ...(ProviderClass.capabilities || {}),
+        sessionRules: typeof ProviderClass.prototype.setPermissionRules === 'function',
+      },
     })
   }
   return list
