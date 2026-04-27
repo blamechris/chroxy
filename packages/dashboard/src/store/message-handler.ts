@@ -33,6 +33,10 @@ import {
   handlePlanReady as sharedPlanReady,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
+  handleAuthOk as sharedAuthOk,
+  handleAuthFail as sharedAuthFail,
+  handleKeyExchangeOk as sharedKeyExchangeOk,
+  handleServerMode as sharedServerMode,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1260,21 +1264,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _receivingHistoryReplay = false;
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context from auth_ok
-      const authServerMode: 'cli' | 'terminal' | null =
-        msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
-      const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
-      const authDefaultCwd = typeof msg.defaultCwd === 'string' ? msg.defaultCwd : null;
-      const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
-      const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
-      const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
-      const authProtocolVersion =
-        typeof msg.protocolVersion === 'number' &&
-        Number.isFinite(msg.protocolVersion) &&
-        Number.isInteger(msg.protocolVersion) &&
-        msg.protocolVersion >= 1
-          ? msg.protocolVersion
-          : null;
+      // Extract server context fields via shared handler (#3102)
+      const authPayload = sharedAuthOk(msg);
+      const authServerMode = authPayload.serverMode;
+      const authSessionCwd = authPayload.sessionCwd;
+      const authDefaultCwd = authPayload.defaultCwd;
+      const authServerVersion = authPayload.serverVersion;
+      const authLatestVersion = authPayload.latestVersion;
+      const authServerCommit = authPayload.serverCommit;
+      const authProtocolVersion = authPayload.protocolVersion;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
@@ -1362,7 +1360,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'key_exchange_ok': {
       if (_pendingKeyPair) {
-        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
+        const { publicKey: serverPublicKey } = sharedKeyExchangeOk(msg);
+        if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
@@ -1370,7 +1369,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           _pendingSalt = null;
           break;
         }
-        const rawSharedKey = deriveSharedKey(msg.publicKey, _pendingKeyPair.secretKey);
+        const rawSharedKey = deriveSharedKey(serverPublicKey, _pendingKeyPair.secretKey);
         const encryptionKey = _pendingSalt
           ? deriveConnectionKey(rawSharedKey, _pendingSalt)
           : rawSharedKey;
@@ -1386,20 +1385,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'auth_fail':
+    case 'auth_fail': {
       ctx.socket.close();
       set({ connectionPhase: 'disconnected', socket: null });
       if (!ctx.silent) {
-        _adapters.alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
+        const { reason } = sharedAuthFail(msg);
+        _adapters.alert.alert('Auth Failed', reason);
       }
       break;
+    }
 
     case 'server_mode': {
-      const mode = msg.mode;
-      if (mode === 'cli' || mode === 'terminal') {
+      const { mode } = sharedServerMode(msg);
+      if (mode) {
         set({ serverMode: mode });
       } else {
-        _adapters.alert.alert('Invalid Server Mode', `Ignoring invalid server_mode value: ${mode}`);
+        _adapters.alert.alert('Invalid Server Mode', `Ignoring invalid server_mode value: ${msg.mode}`);
       }
       break;
     }

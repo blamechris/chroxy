@@ -23,6 +23,34 @@ function parseStringField(msg: Record<string, unknown>, field: string): string |
   return null
 }
 
+/**
+ * Parse a string field WITHOUT trimming or empty-string coercion.
+ *
+ * Some legacy inline checks used `typeof v === 'string' ? v : null` — that
+ * passes through empty strings and whitespace verbatim. `auth_ok.cwd` is one
+ * such field; preserve the prior behaviour so this migration is mechanical.
+ */
+function parseRawStringField(msg: Record<string, unknown>, field: string): string | null {
+  const val = msg[field]
+  return typeof val === 'string' ? val : null
+}
+
+/**
+ * Build a small union-checking helper that returns the value when it matches
+ * one of the provided literals, else null. Used for enum fields like
+ * `serverMode` and `mode`.
+ */
+function parseEnumField<T extends string>(
+  msg: Record<string, unknown>,
+  field: string,
+  allowed: readonly T[],
+): T | null {
+  const val = msg[field]
+  return typeof val === 'string' && (allowed as readonly string[]).includes(val)
+    ? (val as T)
+    : null
+}
+
 // ---------------------------------------------------------------------------
 // Session-scoped state patches
 //
@@ -379,4 +407,119 @@ export function handleDevPreviewStopped(
       devPreviews: current.filter((p) => p.port !== stoppedPort),
     }),
   }
+}
+
+// ---------------------------------------------------------------------------
+// auth_ok / auth_fail / key_exchange_ok / server_mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Server modes the WS protocol can advertise.
+ *
+ * Both clients accept `'cli'`; only the dashboard surfaces `'terminal'` (the
+ * mobile app currently treats `'terminal'` as null because there is no
+ * terminal view). The shared handler returns the validated raw value; the
+ * call site decides whether to narrow further.
+ */
+export type ServerMode = 'cli' | 'terminal'
+
+const VALID_SERVER_MODES: readonly ServerMode[] = ['cli', 'terminal']
+
+/**
+ * Typed payload extracted from an `auth_ok` message.
+ *
+ * Side-effects (reset replay flags, save connection, start heartbeat, kick
+ * off key exchange, register push tokens, sync ConnectionLifecycleStore,
+ * update lastConnectedUrl, etc.) stay at the call site — every one of those
+ * is platform-specific (the mobile app has push notifications + biometric
+ * setup; the dashboard owns lastConnectedUrl tracking) and out of scope for
+ * the data-extraction seam.
+ *
+ * Intentionally NOT extracted into the shared payload:
+ *   - `clientId` + `connectedClients` (validation requires the
+ *     `ConnectedClient` type which lives at the consumer level)
+ *   - `webFeatures` (small but app/dashboard call sites already build it
+ *     with platform-specific defaults)
+ *   - `encryption` flag and `sessionToken` (only the app uses sessionToken
+ *     for the pairing flow; encryption gates a side effect, not state)
+ *
+ * Tightening any of these would be a behaviour change — see the parent
+ * #2661 plan.
+ */
+export interface AuthOkPayload {
+  /** Validated server mode (`'cli'`, `'terminal'`, or null). */
+  serverMode: ServerMode | null
+  /** Raw `cwd` string (NOT trimmed — empty string preserved). */
+  sessionCwd: string | null
+  /** Raw `defaultCwd` string. */
+  defaultCwd: string | null
+  /** Raw `serverVersion` string. */
+  serverVersion: string | null
+  /** Raw `latestVersion` string. */
+  latestVersion: string | null
+  /** Raw `serverCommit` string. */
+  serverCommit: string | null
+  /** Validated integer >= 1, else null. */
+  protocolVersion: number | null
+}
+
+/** Extract typed server-context fields from an `auth_ok` message. */
+export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
+  const protoRaw = msg.protocolVersion
+  const protocolVersion =
+    typeof protoRaw === 'number' &&
+    Number.isFinite(protoRaw) &&
+    Number.isInteger(protoRaw) &&
+    protoRaw >= 1
+      ? protoRaw
+      : null
+  return {
+    serverMode: parseEnumField(msg, 'serverMode', VALID_SERVER_MODES),
+    sessionCwd: parseRawStringField(msg, 'cwd'),
+    defaultCwd: parseRawStringField(msg, 'defaultCwd'),
+    serverVersion: parseRawStringField(msg, 'serverVersion'),
+    latestVersion: parseRawStringField(msg, 'latestVersion'),
+    serverCommit: parseRawStringField(msg, 'serverCommit'),
+    protocolVersion,
+  }
+}
+
+/**
+ * Extract the failure reason from an `auth_fail` message, falling back to
+ * `'Invalid token'` when missing or non-string. Matches the prior inline
+ * `(msg.reason as string) || 'Invalid token'` guard.
+ */
+export function handleAuthFail(msg: Record<string, unknown>): { reason: string } {
+  const raw = msg.reason
+  const reason = typeof raw === 'string' && raw ? raw : 'Invalid token'
+  return { reason }
+}
+
+/**
+ * Extract the validated `publicKey` from a `key_exchange_ok` message.
+ *
+ * Returns null when the field is missing, empty, or non-string — matches the
+ * prior inline guard `if (!msg.publicKey || typeof msg.publicKey !== 'string')`.
+ *
+ * The actual key-derivation side effects (deriveSharedKey, deriveConnectionKey,
+ * setting `_encryptionState`, sending post-auth WS messages) stay at the call
+ * site — they touch crypto state and the websocket directly.
+ */
+export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: string | null } {
+  const raw = msg.publicKey
+  return {
+    publicKey: typeof raw === 'string' && raw ? raw : null,
+  }
+}
+
+/**
+ * Extract and validate the mode enum from a `server_mode` message.
+ *
+ * Returns null for unknown modes; the call site is expected to surface an
+ * "Invalid Server Mode" alert (matches dashboard's prior inline behaviour;
+ * the app currently ignores `'terminal'` and sets null, which the call site
+ * can re-narrow if needed).
+ */
+export function handleServerMode(msg: Record<string, unknown>): { mode: ServerMode | null } {
+  return { mode: parseEnumField(msg, 'mode', VALID_SERVER_MODES) }
 }

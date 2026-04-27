@@ -143,6 +143,8 @@ export type {
   PlanAllowedPrompt,
   ThinkingLevel,
   DevPreviewBuilder,
+  ServerMode,
+  AuthOkPayload,
 } from './handlers'
 
 export {
@@ -163,4 +165,8 @@ export {
   handlePlanReady,
   handleDevPreview,
   handleDevPreviewStopped,
+  handleAuthOk,
+  handleAuthFail,
+  handleKeyExchangeOk,
+  handleServerMode,
 } from './handlers'

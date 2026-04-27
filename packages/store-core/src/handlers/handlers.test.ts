@@ -20,6 +20,10 @@ import {
   handlePlanReady,
   handleDevPreview,
   handleDevPreviewStopped,
+  handleAuthOk,
+  handleAuthFail,
+  handleKeyExchangeOk,
+  handleServerMode,
 } from './index'
 import type { DevPreview, SessionInfo } from '../types'
 
@@ -509,5 +513,153 @@ describe('handleDevPreviewStopped', () => {
   it('returns empty list when current previews is empty', () => {
     const builder = handleDevPreviewStopped({ sessionId: 'sess-1', port: 4000 }, null)
     expect(builder.applyTo([])).toEqual({ devPreviews: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAuthOk
+// ---------------------------------------------------------------------------
+describe('handleAuthOk', () => {
+  it('extracts all fields when valid', () => {
+    const result = handleAuthOk({
+      serverMode: 'cli',
+      cwd: '/home/me',
+      defaultCwd: '/home',
+      serverVersion: '0.6.12',
+      latestVersion: '0.6.13',
+      serverCommit: 'abc123',
+      protocolVersion: 2,
+    })
+    expect(result).toEqual({
+      serverMode: 'cli',
+      sessionCwd: '/home/me',
+      defaultCwd: '/home',
+      serverVersion: '0.6.12',
+      latestVersion: '0.6.13',
+      serverCommit: 'abc123',
+      protocolVersion: 2,
+    })
+  })
+
+  it('accepts terminal as serverMode', () => {
+    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBe('terminal')
+  })
+
+  it('rejects unknown serverMode values', () => {
+    expect(handleAuthOk({ serverMode: 'bogus' }).serverMode).toBeNull()
+    expect(handleAuthOk({ serverMode: 42 }).serverMode).toBeNull()
+    expect(handleAuthOk({}).serverMode).toBeNull()
+  })
+
+  it('returns null for non-string string fields', () => {
+    const result = handleAuthOk({
+      cwd: 42,
+      defaultCwd: null,
+      serverVersion: false,
+      latestVersion: {},
+      serverCommit: [],
+    })
+    expect(result.sessionCwd).toBeNull()
+    expect(result.defaultCwd).toBeNull()
+    expect(result.serverVersion).toBeNull()
+    expect(result.latestVersion).toBeNull()
+    expect(result.serverCommit).toBeNull()
+  })
+
+  it('preserves empty cwd strings (raw extract — not trimmed)', () => {
+    // Inline implementations used `typeof msg.cwd === 'string' ? msg.cwd : null`
+    // — empty string is preserved as-is, NOT coerced to null.
+    expect(handleAuthOk({ cwd: '' }).sessionCwd).toBe('')
+  })
+
+  it('rejects non-integer protocolVersion', () => {
+    expect(handleAuthOk({ protocolVersion: 1.5 }).protocolVersion).toBeNull()
+    expect(handleAuthOk({ protocolVersion: 0 }).protocolVersion).toBeNull()
+    expect(handleAuthOk({ protocolVersion: -1 }).protocolVersion).toBeNull()
+    expect(handleAuthOk({ protocolVersion: NaN }).protocolVersion).toBeNull()
+    expect(handleAuthOk({ protocolVersion: Infinity }).protocolVersion).toBeNull()
+    expect(handleAuthOk({ protocolVersion: '2' }).protocolVersion).toBeNull()
+    expect(handleAuthOk({}).protocolVersion).toBeNull()
+  })
+
+  it('accepts protocolVersion >= 1', () => {
+    expect(handleAuthOk({ protocolVersion: 1 }).protocolVersion).toBe(1)
+    expect(handleAuthOk({ protocolVersion: 5 }).protocolVersion).toBe(5)
+  })
+
+  it('returns all-null payload for an empty message', () => {
+    expect(handleAuthOk({})).toEqual({
+      serverMode: null,
+      sessionCwd: null,
+      defaultCwd: null,
+      serverVersion: null,
+      latestVersion: null,
+      serverCommit: null,
+      protocolVersion: null,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAuthFail
+// ---------------------------------------------------------------------------
+describe('handleAuthFail', () => {
+  it('extracts reason string', () => {
+    expect(handleAuthFail({ reason: 'expired token' })).toEqual({ reason: 'expired token' })
+  })
+
+  it('falls back to "Invalid token" when reason missing', () => {
+    expect(handleAuthFail({})).toEqual({ reason: 'Invalid token' })
+  })
+
+  it('falls back to "Invalid token" when reason is non-string', () => {
+    // Inline impls used `(msg.reason as string) || 'Invalid token'` — any falsy
+    // value (incl. empty string) falls back. Non-string values (numbers etc)
+    // are passed through as-is in the original cast, but our typed handler
+    // should treat them as missing.
+    expect(handleAuthFail({ reason: '' })).toEqual({ reason: 'Invalid token' })
+    expect(handleAuthFail({ reason: 42 })).toEqual({ reason: 'Invalid token' })
+    expect(handleAuthFail({ reason: null })).toEqual({ reason: 'Invalid token' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleKeyExchangeOk
+// ---------------------------------------------------------------------------
+describe('handleKeyExchangeOk', () => {
+  it('extracts publicKey string', () => {
+    expect(handleKeyExchangeOk({ publicKey: 'base64key==' })).toEqual({
+      publicKey: 'base64key==',
+    })
+  })
+
+  it('returns null publicKey when missing', () => {
+    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null })
+  })
+
+  it('returns null publicKey for non-string values', () => {
+    // Matches inline guard: `if (!msg.publicKey || typeof msg.publicKey !== 'string')`
+    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null })
+    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null })
+    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleServerMode
+// ---------------------------------------------------------------------------
+describe('handleServerMode', () => {
+  it('extracts cli mode', () => {
+    expect(handleServerMode({ mode: 'cli' })).toEqual({ mode: 'cli' })
+  })
+
+  it('extracts terminal mode', () => {
+    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: 'terminal' })
+  })
+
+  it('returns null for unknown mode (caller surfaces an alert)', () => {
+    expect(handleServerMode({ mode: 'bogus' })).toEqual({ mode: null })
+    expect(handleServerMode({ mode: 42 })).toEqual({ mode: null })
+    expect(handleServerMode({})).toEqual({ mode: null })
   })
 })
