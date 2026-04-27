@@ -139,6 +139,7 @@ export type {
 export type {
   SessionPatch,
   PermissionMode,
+  PendingPermissionConfirm,
   ThinkingLevel,
 } from './handlers'
 
@@ -148,6 +149,7 @@ export {
   handlePermissionModeChanged,
   handleAvailablePermissionModes,
   handleSessionUpdated,
+  handleConfirmPermissionMode,
   handleClaudeReady,
   handleAgentIdle,
   handleAgentBusy,
