@@ -142,6 +142,7 @@ export type {
   PendingPermissionConfirm,
   PlanAllowedPrompt,
   ThinkingLevel,
+  DevPreviewBuilder,
 } from './handlers'
 
 export {
@@ -160,4 +161,6 @@ export {
   handleBudgetResumed,
   handlePlanStarted,
   handlePlanReady,
+  handleDevPreview,
+  handleDevPreviewStopped,
 } from './handlers'

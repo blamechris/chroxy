@@ -18,8 +18,10 @@ import {
   handleBudgetResumed,
   handlePlanStarted,
   handlePlanReady,
+  handleDevPreview,
+  handleDevPreviewStopped,
 } from './index'
-import type { SessionInfo } from '../types'
+import type { DevPreview, SessionInfo } from '../types'
 
 // ---------------------------------------------------------------------------
 // resolveSessionId
@@ -382,5 +384,130 @@ describe('handlePlanReady', () => {
   it('returns null sessionId when neither is available', () => {
     const result = handlePlanReady({}, null)
     expect(result.sessionId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleDevPreview
+// ---------------------------------------------------------------------------
+describe('handleDevPreview', () => {
+  it('appends a new preview when no port collision exists', () => {
+    const existing: DevPreview[] = [{ port: 3000, url: 'http://localhost:3000' }]
+    const builder = handleDevPreview(
+      { sessionId: 'sess-1', port: 8080, url: 'http://localhost:8080' },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    expect(builder.applyTo(existing)).toEqual({
+      devPreviews: [
+        { port: 3000, url: 'http://localhost:3000' },
+        { port: 8080, url: 'http://localhost:8080' },
+      ],
+    })
+  })
+
+  it('replaces an existing preview entry with the same port (dedup)', () => {
+    const existing: DevPreview[] = [
+      { port: 3000, url: 'http://localhost:3000' },
+      { port: 8080, url: 'http://old-url:8080' },
+    ]
+    const builder = handleDevPreview(
+      { sessionId: 'sess-1', port: 8080, url: 'http://new-url:8080' },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toEqual({
+      devPreviews: [
+        { port: 3000, url: 'http://localhost:3000' },
+        { port: 8080, url: 'http://new-url:8080' },
+      ],
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleDevPreview(
+      { port: 4000, url: 'http://localhost:4000' },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('active-1')
+    expect(builder.applyTo([])).toEqual({
+      devPreviews: [{ port: 4000, url: 'http://localhost:4000' }],
+    })
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const builder = handleDevPreview({ port: 4000, url: 'http://localhost:4000' }, null)
+    expect(builder.sessionId).toBeNull()
+  })
+
+  it('forwards port/url verbatim — no validation tightening', () => {
+    // Matches prior inline behaviour: `msg.port as number, msg.url as string`.
+    // The original cast did no runtime validation, and tightening here would
+    // be a behaviour change (out of scope for the #2661 mechanical migration).
+    const builder = handleDevPreview(
+      { sessionId: 'sess-1', port: 'not-a-number', url: 42 },
+      null,
+    )
+    expect(builder.applyTo([])).toEqual({
+      devPreviews: [{ port: 'not-a-number', url: 42 } as unknown as DevPreview],
+    })
+  })
+
+  it('appends to the filtered tail (ordering invariant)', () => {
+    // The new entry is always last after filter; existing non-colliding
+    // entries keep their relative order. Pinning this so refactors that
+    // switch to a Map cannot silently change observable ordering.
+    const existing: DevPreview[] = [
+      { port: 3000, url: 'http://localhost:3000' },
+      { port: 4000, url: 'http://localhost:4000' },
+    ]
+    const builder = handleDevPreview(
+      { port: 5000, url: 'http://localhost:5000' },
+      'active-1',
+    )
+    const out = builder.applyTo(existing)
+    expect(out.devPreviews.map((p) => p.port)).toEqual([3000, 4000, 5000])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleDevPreviewStopped
+// ---------------------------------------------------------------------------
+describe('handleDevPreviewStopped', () => {
+  it('removes the matching port from previews', () => {
+    const existing: DevPreview[] = [
+      { port: 3000, url: 'http://localhost:3000' },
+      { port: 8080, url: 'http://localhost:8080' },
+    ]
+    const builder = handleDevPreviewStopped({ sessionId: 'sess-1', port: 8080 }, 'active-1')
+    expect(builder.sessionId).toBe('sess-1')
+    expect(builder.applyTo(existing)).toEqual({
+      devPreviews: [{ port: 3000, url: 'http://localhost:3000' }],
+    })
+  })
+
+  it('leaves previews unchanged when no port matches', () => {
+    const existing: DevPreview[] = [{ port: 3000, url: 'http://localhost:3000' }]
+    const builder = handleDevPreviewStopped({ sessionId: 'sess-1', port: 9999 }, 'active-1')
+    expect(builder.applyTo(existing)).toEqual({
+      devPreviews: [{ port: 3000, url: 'http://localhost:3000' }],
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const existing: DevPreview[] = [{ port: 4000, url: 'http://localhost:4000' }]
+    const builder = handleDevPreviewStopped({ port: 4000 }, 'active-1')
+    expect(builder.sessionId).toBe('active-1')
+    expect(builder.applyTo(existing)).toEqual({ devPreviews: [] })
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const builder = handleDevPreviewStopped({ port: 4000 }, null)
+    expect(builder.sessionId).toBeNull()
+    expect(builder.applyTo([])).toEqual({ devPreviews: [] })
+  })
+
+  it('returns empty list when current previews is empty', () => {
+    const builder = handleDevPreviewStopped({ sessionId: 'sess-1', port: 4000 }, null)
+    expect(builder.applyTo([])).toEqual({ devPreviews: [] })
   })
 })
