@@ -827,80 +827,92 @@ describe('InputBar attachments (#1287)', () => {
     expect(onSend).toHaveBeenCalledWith('', [{ path: 'src/App.tsx', name: 'App.tsx' }])
   })
 
-  // #3091 — evaluator result panels must announce themselves to screen readers.
-  // Pending / forward / rewrite / clarify use role="status" + aria-live="polite";
-  // error keeps role="alert" (implicit aria-live="assertive").
-  describe('evaluator panel ARIA live regions (#3091)', () => {
-    /**
-     * Trigger the evaluator and wait for the panel to render with the
-     * resolved verdict. Returns the rendered panel element.
-     */
-    async function renderAndEvaluate(payload: EvaluatorResultPayload) {
-      const onEvaluate = vi.fn().mockResolvedValue(payload)
-      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
-      const textarea = screen.getByRole('textbox')
-      fireEvent.change(textarea, { target: { value: 'draft text' } })
-      fireEvent.click(screen.getByTestId('evaluate-button'))
-      await waitFor(() => {
-        expect(onEvaluate).toHaveBeenCalled()
-      })
-      return await screen.findByTestId('evaluator-panel')
-    }
+})
 
-    it('pending panel exposes role="status" with aria-live="polite" and aria-busy', () => {
-      // Hold the promise open so the pending panel stays visible.
-      const onEvaluate = vi.fn().mockReturnValue(new Promise<EvaluatorResultPayload>(() => {}))
-      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
-      const textarea = screen.getByRole('textbox')
-      fireEvent.change(textarea, { target: { value: 'draft' } })
-      fireEvent.click(screen.getByTestId('evaluate-button'))
-
-      const panel = screen.getByTestId('evaluator-panel')
-      expect(panel).toHaveAttribute('role', 'status')
-      expect(panel).toHaveAttribute('aria-live', 'polite')
-      expect(panel).toHaveAttribute('aria-busy', 'true')
+// #3091 — evaluator result panels must announce themselves to screen readers.
+// Pending / forward / rewrite / clarify use role="status" + aria-live="polite";
+// error keeps role="alert" (implicit aria-live="assertive").
+//
+// Hoisted to a top-level describe (matching the file's other #issue blocks)
+// because evaluator behavior is unrelated to attachments.
+describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
+  /**
+   * Trigger the evaluator and wait for the verdict-specific result panel.
+   *
+   * Both the pending and resolved panels use the same `evaluator-panel`
+   * testid; without waiting for the verdict marker, `findByTestId` could
+   * return the pending panel before the resolved verdict renders. Asserting
+   * on `data-verdict` inside `waitFor` pins the test to the resolved state.
+   */
+  async function renderAndEvaluate(payload: EvaluatorResultPayload) {
+    const onEvaluate = vi.fn().mockResolvedValue(payload)
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'draft text' } })
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+    await waitFor(() => {
+      expect(onEvaluate).toHaveBeenCalled()
     })
-
-    it('forward verdict panel exposes role="status" + aria-live="polite"', async () => {
-      const panel = await renderAndEvaluate({ verdict: 'forward', reasoning: 'Looks good' })
-      expect(panel).toHaveAttribute('role', 'status')
-      expect(panel).toHaveAttribute('aria-live', 'polite')
-      expect(panel).toHaveAttribute('data-verdict', 'forward')
+    const panel = await screen.findByTestId('evaluator-panel')
+    await waitFor(() => {
+      expect(panel).toHaveAttribute('data-verdict', payload.verdict ?? '')
     })
+    return panel
+  }
 
-    it('rewrite verdict panel exposes role="status" + aria-live="polite"', async () => {
-      const panel = await renderAndEvaluate({
-        verdict: 'rewrite',
-        rewritten: 'Cleaner version',
-        reasoning: 'Tightened wording',
-      })
-      expect(panel).toHaveAttribute('role', 'status')
-      expect(panel).toHaveAttribute('aria-live', 'polite')
-      expect(panel).toHaveAttribute('data-verdict', 'rewrite')
+  it('pending panel exposes role="status" with aria-live="polite" and aria-busy', () => {
+    // Hold the promise open so the pending panel stays visible.
+    const onEvaluate = vi.fn().mockReturnValue(new Promise<EvaluatorResultPayload>(() => {}))
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'draft' } })
+    fireEvent.click(screen.getByTestId('evaluate-button'))
+
+    const panel = screen.getByTestId('evaluator-panel')
+    expect(panel).toHaveAttribute('role', 'status')
+    expect(panel).toHaveAttribute('aria-live', 'polite')
+    expect(panel).toHaveAttribute('aria-busy', 'true')
+  })
+
+  it('forward verdict panel exposes role="status" + aria-live="polite"', async () => {
+    const panel = await renderAndEvaluate({ verdict: 'forward', reasoning: 'Looks good' })
+    expect(panel).toHaveAttribute('role', 'status')
+    expect(panel).toHaveAttribute('aria-live', 'polite')
+    expect(panel).toHaveAttribute('data-verdict', 'forward')
+  })
+
+  it('rewrite verdict panel exposes role="status" + aria-live="polite"', async () => {
+    const panel = await renderAndEvaluate({
+      verdict: 'rewrite',
+      rewritten: 'Cleaner version',
+      reasoning: 'Tightened wording',
     })
+    expect(panel).toHaveAttribute('role', 'status')
+    expect(panel).toHaveAttribute('aria-live', 'polite')
+    expect(panel).toHaveAttribute('data-verdict', 'rewrite')
+  })
 
-    it('clarify verdict panel exposes role="status" + aria-live="polite"', async () => {
-      const panel = await renderAndEvaluate({
-        verdict: 'clarify',
-        clarification: 'Which file did you mean?',
-        reasoning: 'Ambiguous reference',
-      })
-      expect(panel).toHaveAttribute('role', 'status')
-      expect(panel).toHaveAttribute('aria-live', 'polite')
-      expect(panel).toHaveAttribute('data-verdict', 'clarify')
+  it('clarify verdict panel exposes role="status" + aria-live="polite"', async () => {
+    const panel = await renderAndEvaluate({
+      verdict: 'clarify',
+      clarification: 'Which file did you mean?',
+      reasoning: 'Ambiguous reference',
     })
+    expect(panel).toHaveAttribute('role', 'status')
+    expect(panel).toHaveAttribute('aria-live', 'polite')
+    expect(panel).toHaveAttribute('data-verdict', 'clarify')
+  })
 
-    it('error panel keeps role="alert" (assertive) for failure cases', async () => {
-      const onEvaluate = vi.fn().mockRejectedValue(new Error('network down'))
-      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
-      const textarea = screen.getByRole('textbox')
-      fireEvent.change(textarea, { target: { value: 'draft' } })
-      fireEvent.click(screen.getByTestId('evaluate-button'))
+  it('error panel keeps role="alert" (assertive) for failure cases', async () => {
+    const onEvaluate = vi.fn().mockRejectedValue(new Error('network down'))
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'draft' } })
+    fireEvent.click(screen.getByTestId('evaluate-button'))
 
-      const panel = await screen.findByTestId('evaluator-panel')
-      expect(panel).toHaveAttribute('role', 'alert')
-      // role="alert" implies aria-live="assertive"; we don't set it explicitly.
-      expect(panel).not.toHaveAttribute('aria-live', 'polite')
-    })
+    const panel = await screen.findByTestId('evaluator-panel')
+    expect(panel).toHaveAttribute('role', 'alert')
+    // role="alert" implies aria-live="assertive"; we don't set it explicitly.
+    expect(panel).not.toHaveAttribute('aria-live', 'polite')
   })
 })
