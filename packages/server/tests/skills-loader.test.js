@@ -182,6 +182,107 @@ describe('skills-loader', () => {
       // Should not match — we only accept directories.
       assert.equal(findRepoSkillsDir(repo), null)
     })
+
+    // ---------------------------------------------------------------------
+    // #3088: walk-up must not return ~/.chroxy/skills (the global tier) as
+    // a repo overlay. We point HOME at a temp dir and re-import the module
+    // with a unique query string so DEFAULT_SKILLS_DIR / homedir() pick up
+    // the fake home.
+    // ---------------------------------------------------------------------
+    describe('home-directory boundary (#3088)', () => {
+      let fakeHome
+      let originalHome
+      let originalUserprofile
+
+      beforeEach(() => {
+        fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-home-'))
+        originalHome = process.env.HOME
+        originalUserprofile = process.env.USERPROFILE
+        process.env.HOME = fakeHome
+        process.env.USERPROFILE = fakeHome
+      })
+
+      afterEach(() => {
+        if (originalHome === undefined) delete process.env.HOME
+        else process.env.HOME = originalHome
+        if (originalUserprofile === undefined) delete process.env.USERPROFILE
+        else process.env.USERPROFILE = originalUserprofile
+        rmSync(fakeHome, { recursive: true, force: true })
+      })
+
+      it('returns null when walk-up would otherwise hit ~/.chroxy/skills (global)', async () => {
+        // Plant the global skills dir at the fake home.
+        mkdirSync(join(fakeHome, '.chroxy', 'skills'), { recursive: true })
+
+        // Re-import with a unique query string to force a fresh module
+        // evaluation against the patched HOME env var.
+        const mod = await import(`../src/skills-loader.js?home=${encodeURIComponent(fakeHome)}`)
+
+        // Sanity: DEFAULT_SKILLS_DIR should now resolve under fakeHome.
+        assert.equal(mod.DEFAULT_SKILLS_DIR, join(fakeHome, '.chroxy', 'skills'))
+
+        // Session cwd is under $HOME but in a directory with no repo overlay.
+        const sessionCwd = join(fakeHome, 'scratch', 'project')
+        mkdirSync(sessionCwd, { recursive: true })
+
+        assert.equal(mod.findRepoSkillsDir(sessionCwd), null)
+      })
+
+      it('still finds a real repo overlay nested under $HOME', async () => {
+        const mod = await import(`../src/skills-loader.js?home2=${encodeURIComponent(fakeHome)}`)
+
+        // No global skills planted; a project under $HOME has its own overlay.
+        const project = join(fakeHome, 'code', 'my-app')
+        mkdirSync(join(project, '.chroxy', 'skills'), { recursive: true })
+
+        const nested = join(project, 'src', 'feature')
+        mkdirSync(nested, { recursive: true })
+
+        assert.equal(
+          mod.findRepoSkillsDir(nested),
+          join(project, '.chroxy', 'skills'),
+        )
+      })
+
+      it('refuses to return DEFAULT_SKILLS_DIR even when cwd is exactly $HOME', async () => {
+        mkdirSync(join(fakeHome, '.chroxy', 'skills'), { recursive: true })
+        const mod = await import(`../src/skills-loader.js?home3=${encodeURIComponent(fakeHome)}`)
+
+        assert.equal(mod.findRepoSkillsDir(fakeHome), null)
+      })
+
+      // #3098 review (Copilot): macOS HFS+/APFS and Windows NTFS are
+      // case-insensitive by default. A path like `/Users/Bob/proj` resolves
+      // equal to `/Users/bob/proj` on disk but unequal as strings, so the
+      // HOME boundary check needs case-insensitive comparison to catch it.
+      const isCaseInsensitivePlatform = process.platform === 'darwin' || process.platform === 'win32'
+      it(
+        'stops the walk at $HOME even when cwd disagrees in case (darwin/win32)',
+        { skip: !isCaseInsensitivePlatform },
+        async () => {
+          // Plant the global skills dir at the fake home so a missed HOME
+          // boundary would otherwise return it as a "repo overlay".
+          mkdirSync(join(fakeHome, '.chroxy', 'skills'), { recursive: true })
+
+          const mod = await import(`../src/skills-loader.js?case=${encodeURIComponent(fakeHome)}`)
+
+          // Build a cwd that's equivalent to fakeHome on disk but uppercased
+          // — on case-insensitive filesystems both paths name the same dir.
+          // We can't actually mkdir an uppercased copy on the same volume
+          // (would collide), so we just feed the uppercased string as cwd
+          // and trust path.resolve preserves it; the boundary check is what
+          // we're exercising, not the filesystem.
+          const upperHome = fakeHome.toUpperCase()
+          const sessionCwd = join(upperHome, 'scratch', 'project')
+
+          assert.equal(
+            mod.findRepoSkillsDir(sessionCwd),
+            null,
+            'walk-up should hit case-insensitive $HOME boundary and return null',
+          )
+        },
+      )
+    })
   })
 
   describe('loadActiveSkillsLayered', () => {
