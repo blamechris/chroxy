@@ -148,6 +148,10 @@ export type {
   CheckpointRestoredPayload,
   LogLevel,
   LogEntry,
+  ClientJoinedResult,
+  ClientLeftResult,
+  PrimaryChanged,
+  ClientFocusChanged,
 } from './handlers'
 
 export {
@@ -178,4 +182,8 @@ export {
   handleError,
   handleSessionError,
   handleLogEntry,
+  handleClientJoined,
+  handleClientLeft,
+  handlePrimaryChanged,
+  handleClientFocusChanged,
 } from './handlers'

@@ -42,6 +42,10 @@ import {
   handleError as sharedError,
   handleSessionError as sharedSessionError,
   handleLogEntry as sharedLogEntry,
+  handleClientJoined as sharedClientJoined,
+  handleClientLeft as sharedClientLeft,
+  handlePrimaryChanged as sharedPrimaryChanged,
+  handleClientFocusChanged as sharedClientFocusChanged,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1958,19 +1962,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Multi-client awareness ---
 
     case 'client_joined': {
-      if (!msg.client || typeof (msg.client as Record<string, unknown>).clientId !== 'string') break;
-      const client = msg.client as Record<string, unknown>;
-      const newClient: ConnectedClient = {
-        clientId: client.clientId as string,
-        deviceName: typeof client.deviceName === 'string' ? client.deviceName : null,
-        deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(client.deviceType as string) ? client.deviceType : 'unknown') as ConnectedClient['deviceType'],
-        platform: typeof client.platform === 'string' ? client.platform : 'unknown',
-        isSelf: false,
-      };
-      set((state: ConnectionState) => ({
-        connectedClients: [...state.connectedClients.filter((c) => c.clientId !== newClient.clientId), newClient],
-      }));
-      const deviceLabel = newClient.deviceName || 'A device';
+      const joined = sharedClientJoined(msg, get().connectedClients);
+      if (!joined) break;
+      set({ connectedClients: joined.roster });
+      const deviceLabel = joined.client.deviceName || 'A device';
       const joinMsg: ChatMessage = {
         id: nextMessageId('client'),
         type: 'system',
@@ -2000,12 +1995,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'client_left': {
-      if (typeof msg.clientId !== 'string') break;
-      const departingClient = get().connectedClients.find((c) => c.clientId === msg.clientId);
-      set((state: ConnectionState) => ({
-        connectedClients: state.connectedClients.filter((c) => c.clientId !== msg.clientId),
-      }));
-      const leftLabel = departingClient?.deviceName || 'A device';
+      const left = sharedClientLeft(msg, get().connectedClients);
+      if (!left) break;
+      set({ connectedClients: left.roster });
+      const leftLabel = left.departingClient?.deviceName || 'A device';
       const leftMsg: ChatMessage = {
         id: nextMessageId('client'),
         type: 'system',
@@ -2035,9 +2028,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'primary_changed': {
-      const primarySessionId = msg.sessionId as string;
-      const primaryClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      if (typeof primarySessionId === 'string' && get().sessionStates[primarySessionId]) {
+      const { sessionId: primarySessionId, primaryClientId } = sharedPrimaryChanged(msg);
+      if (primarySessionId && get().sessionStates[primarySessionId]) {
         updateSession(primarySessionId, () => ({
           primaryClientId,
         }));
@@ -2048,13 +2040,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'client_focus_changed': {
-      const focusClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const focusSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      if (!focusClientId || !focusSessionId) break;
+      const focus = sharedClientFocusChanged(msg);
+      if (!focus) break;
       // Auto-switch if follow mode is on, event is from another client, target session exists locally, and not already on it
       const { followMode, myClientId, activeSessionId, sessionStates } = get();
-      if (followMode && focusClientId !== myClientId && focusSessionId !== activeSessionId && sessionStates[focusSessionId]) {
-        get().switchSession(focusSessionId);
+      if (followMode && focus.clientId !== myClientId && focus.sessionId !== activeSessionId && sessionStates[focus.sessionId]) {
+        get().switchSession(focus.sessionId);
       }
       break;
     }
