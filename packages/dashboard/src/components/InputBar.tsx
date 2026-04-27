@@ -564,7 +564,13 @@ function EvaluatorPanel({
 }) {
   if (state.kind === 'pending') {
     return (
-      <div className="evaluator-panel evaluator-panel--pending" data-testid="evaluator-panel">
+      <div
+        className="evaluator-panel evaluator-panel--pending"
+        data-testid="evaluator-panel"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+      >
         <span className="evaluator-spinner" aria-hidden="true" />
         <span className="evaluator-text">Evaluating draft…</span>
       </div>
@@ -603,6 +609,8 @@ function EvaluatorPanel({
         className="evaluator-panel evaluator-panel--forward"
         data-testid="evaluator-panel"
         data-verdict="forward"
+        role="status"
+        aria-live="polite"
       >
         <span className="evaluator-label">Looks clear.</span>
         {reasoning && <span className="evaluator-text">{reasoning}</span>}
@@ -617,6 +625,8 @@ function EvaluatorPanel({
         className="evaluator-panel evaluator-panel--rewrite"
         data-testid="evaluator-panel"
         data-verdict="rewrite"
+        role="status"
+        aria-live="polite"
       >
         <div className="evaluator-row">
           <span className="evaluator-label">Suggested rewrite</span>
@@ -646,6 +656,8 @@ function EvaluatorPanel({
         className="evaluator-panel evaluator-panel--clarify"
         data-testid="evaluator-panel"
         data-verdict="clarify"
+        role="status"
+        aria-live="polite"
       >
         <div className="evaluator-row">
           <span className="evaluator-label">Clarification needed</span>
@@ -663,7 +675,12 @@ function EvaluatorPanel({
 
   // Unknown shape — fail safe by surfacing the raw reasoning.
   return (
-    <div className="evaluator-panel evaluator-panel--forward" data-testid="evaluator-panel">
+    <div
+      className="evaluator-panel evaluator-panel--forward"
+      data-testid="evaluator-panel"
+      role="status"
+      aria-live="polite"
+    >
       <span className="evaluator-text">{reasoning || 'Evaluator returned an unexpected response.'}</span>
       <button type="button" className="evaluator-dismiss" onClick={onDismiss} aria-label="Dismiss">×</button>
     </div>
