@@ -171,7 +171,6 @@ export function createHttpHandler(server) {
       if (!server._validateBearerAuth(req, res)) return
       const shareCors = matchAllowedOrigin(req.headers['origin'])
       const sharePathParts = req.url.split('?')[0].split('/').filter(Boolean) // ['qr','session','<id>']
-      const sessionId = sharePathParts[2] ? decodeURIComponent(sharePathParts[2]) : null
       const writeShareErr = (status, body) => {
         const headers = { 'Content-Type': 'application/json' }
         if (shareCors) {
@@ -180,6 +179,18 @@ export function createHttpHandler(server) {
         }
         res.writeHead(status, headers)
         res.end(JSON.stringify(body))
+      }
+      // decodeURIComponent throws URIError on malformed percent-encoding
+      // (e.g. /qr/session/%E0%A4). Without a guard the throw surfaces as an
+      // unhandled rejection in this async handler. Return 400 instead.
+      let sessionId = null
+      if (sharePathParts[2]) {
+        try {
+          sessionId = decodeURIComponent(sharePathParts[2])
+        } catch {
+          writeShareErr(400, { error: 'Invalid sessionId encoding' })
+          return
+        }
       }
       if (!sessionId) {
         writeShareErr(400, { error: 'sessionId required' })

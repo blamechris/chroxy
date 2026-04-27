@@ -68,11 +68,23 @@ export class PairingManager extends EventEmitter {
       throw new Error('PairingManager is destroyed')
     }
 
-    // Cap active pairings to prevent unbounded growth (same policy as the
-    // linking-mode generator).
+    // Cap active pairings to prevent unbounded growth. Skip _current.id
+    // when picking the eviction victim — the linking-mode QR's id is in
+    // _activePairings too, and dropping it would silently invalidate the
+    // main /qr (validatePairing on the linking id would return
+    // invalid_pairing_id even though currentPairingId still reports it).
+    // Falls back to evicting _current as a last resort if it's the only
+    // entry, which can only happen with a misconfigured cap.
     if (this._activePairings.size >= MAX_ACTIVE_PAIRINGS) {
-      const oldest = this._activePairings.keys().next().value
-      this._activePairings.delete(oldest)
+      const linkingId = this._current?.id || null
+      let victim = null
+      for (const id of this._activePairings.keys()) {
+        if (id !== linkingId) {
+          victim = id
+          break
+        }
+      }
+      this._activePairings.delete(victim ?? this._activePairings.keys().next().value)
     }
 
     const id = randomBytes(12).toString('base64url')

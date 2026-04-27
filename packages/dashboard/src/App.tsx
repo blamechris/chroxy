@@ -340,13 +340,19 @@ export function App() {
   const handleCopyTranscript = useCallback(() => {
     const text = formatTranscript(storeMessages)
     if (!text) return
+    // navigator.clipboard is undefined in non-secure contexts (and some
+    // embedded webviews). Accessing .writeText on undefined would throw
+    // synchronously — bypass the .catch() and surface as a runtime error
+    // in the keyboard handler. Guard with the same pattern as the other
+    // dashboard copy paths.
+    if (!navigator.clipboard) return
     void navigator.clipboard.writeText(text).then(() => {
       setTranscriptCopied(true)
       if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
       transcriptResetTimerRef.current = setTimeout(() => setTranscriptCopied(false), 1500)
     }).catch(() => {
-      // Clipboard rejected (denied permissions or insecure context). Surface
-      // the failure quietly — the user can copy manually from the chat view.
+      // Clipboard rejected (e.g. user denied permissions). Surface the
+      // failure quietly — the user can copy manually from the chat view.
     })
   }, [storeMessages])
   useEffect(() => () => {
