@@ -28,6 +28,8 @@ mkdir -p .chroxy/skills              # repo overlay (run from repo root)
 
 When a global file and a repo file share the same filename, the **repo file wins** — treat it as an override, not an addition. Filename-based dedup keeps the rule predictable.
 
+> **Trust note.** Repo-overlay skills are auto-loaded any time you start a session inside that repo's tree, and their content is injected directly into the model's system prompt. That means cloning or opening an *untrusted* repo can shape model behaviour — including potential prompt injection or guidance to exfiltrate data via tool calls. Treat `<repo>/.chroxy/skills/` like any other code in the repo: review it before working in an unfamiliar checkout, and avoid running Chroxy inside repos you don't trust. To opt out for a session, run Chroxy from a `cwd` that has no `.chroxy/skills/` in any ancestor (or temporarily rename the directory). A first-class trust model with provenance and per-skill enable/disable is tracked in #2959.
+
 ## Writing a skill
 
 A skill file is just Markdown — no frontmatter, no special syntax required. The filename (without `.md`) becomes the skill name. The first non-empty line is used as a short description in the `list_skills` response.

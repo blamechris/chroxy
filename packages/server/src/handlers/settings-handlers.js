@@ -372,22 +372,45 @@ function handleListProviders(ws, client, msg, ctx) {
  * same name. The payload includes a `source` ("global" or "repo") per skill so
  * clients can show which tier each one came from.
  *
- * If no session is active (or the message arrives before one), the repo layer
- * is skipped — returning the global set is the most useful informational answer.
+ * The session loaded skills at construction with whatever `globalDir`/`repoDir`
+ * it was given (including test overrides), so when an active session resolves
+ * we mirror its loaded set instead of re-scanning disk — that keeps the WS
+ * payload aligned with what's actually being injected and respects test-only
+ * skillsDir overrides. The disk scan is the fallback used only when no session
+ * is bound or it doesn't expose a skills accessor (e.g. mock sessions).
+ *
  * Disabling a skill remains a filesystem rename (`*.disabled.md`); there's no
  * enable/disable UI in v2 either.
  */
 function handleListSkills(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  const repoDir = entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null
-  const skills = loadActiveSkillsLayered({
-    globalDir: DEFAULT_SKILLS_DIR,
-    repoDir,
-  }).map((s) => ({
-    name: s.name,
-    description: s.description,
-    source: s.source,
-  }))
+
+  let skills
+  if (entry?.session && typeof entry.session._getSkills === 'function') {
+    const sessionSkills = entry.session._getSkills()
+    if (Array.isArray(sessionSkills)) {
+      skills = sessionSkills.map((s) => ({
+        name: s.name,
+        description: s.description,
+        // Skills loaded via the v2 layered loader always carry source; the
+        // `|| 'global'` fallback handles any v1-shape entries that slip in.
+        source: s.source || 'global',
+      }))
+    }
+  }
+
+  if (!skills) {
+    const repoDir = entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null
+    skills = loadActiveSkillsLayered({
+      globalDir: DEFAULT_SKILLS_DIR,
+      repoDir,
+    }).map((s) => ({
+      name: s.name,
+      description: s.description,
+      source: s.source,
+    }))
+  }
+
   ctx.send(ws, { type: 'skills_list', skills })
 }
 

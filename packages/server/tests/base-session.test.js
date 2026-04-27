@@ -12,7 +12,7 @@ describe('BaseSession', () => {
   beforeEach(() => {
     // Pin skillsDir + repoSkillsDir to empty temp dirs so the tests don't
     // pick up whatever lives in the developer's real ~/.chroxy/skills/ (#3067).
-    // cwd: '/tmp' is also passed an empty repoSkillsDir to bypass walk-up.
+    // cwd: '/tmp' is also passed repoSkillsDir: null to bypass walk-up.
     emptySkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-base-skills-'))
     session = new BaseSession({
       cwd: '/tmp',
