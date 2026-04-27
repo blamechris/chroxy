@@ -44,6 +44,10 @@ import {
   handlePlanReady as sharedPlanReady,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
+  handleAuthOk as sharedAuthOk,
+  handleAuthFail as sharedAuthFail,
+  handleKeyExchangeOk as sharedKeyExchangeOk,
+  handleServerMode as sharedServerMode,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -789,20 +793,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context from auth_ok
-      const authServerMode: 'cli' | null =
-        msg.serverMode === 'cli' ? 'cli' : null;
-      const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
-      const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
-      const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
-      const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
-      const authProtocolVersion =
-        typeof msg.protocolVersion === 'number' &&
-        Number.isFinite(msg.protocolVersion) &&
-        Number.isInteger(msg.protocolVersion) &&
-        msg.protocolVersion >= 1
-          ? msg.protocolVersion
-          : null;
+      // Extract server context fields via shared handler (#3102).
+      // The shared handler accepts both 'cli' and 'terminal'; the app has no
+      // terminal view so we narrow 'terminal' to null (matches prior inline
+      // `msg.serverMode === 'cli' ? 'cli' : null` behaviour).
+      const authPayload = sharedAuthOk(msg);
+      const authServerMode: 'cli' | null = authPayload.serverMode === 'cli' ? 'cli' : null;
+      const authSessionCwd = authPayload.sessionCwd;
+      const authServerVersion = authPayload.serverVersion;
+      const authLatestVersion = authPayload.latestVersion;
+      const authServerCommit = authPayload.serverCommit;
+      const authProtocolVersion = authPayload.protocolVersion;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
@@ -899,7 +900,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'key_exchange_ok': {
       if (_ctx.pendingKeyPair) {
-        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
+        const { publicKey: serverPublicKey } = sharedKeyExchangeOk(msg);
+        if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
           set({ socket: null });
@@ -908,7 +910,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           _ctx.pendingSalt = null;
           break;
         }
-        const rawSharedKey = deriveSharedKey(msg.publicKey, _ctx.pendingKeyPair.secretKey);
+        const rawSharedKey = deriveSharedKey(serverPublicKey, _ctx.pendingKeyPair.secretKey);
         const encryptionKey = _ctx.pendingSalt
           ? deriveConnectionKey(rawSharedKey, _ctx.pendingSalt)
           : rawSharedKey;
@@ -930,7 +932,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       // Surface the failure reason so the banner appears even on silent
       // (auto-)reconnect attempts where no Alert is shown (#2770).
-      const authFailReason = (msg.reason as string) || 'Invalid token';
+      const { reason: authFailReason } = sharedAuthFail(msg);
       useConnectionLifecycleStore.getState().setConnectionError(`Auth failed: ${authFailReason}`, 0);
       if (!ctx.silent) {
         Alert.alert('Auth Failed', authFailReason);
@@ -956,10 +958,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_mode': {
-      const newServerMode = msg.mode === 'cli' ? 'cli' as const : null;
+      // App has no terminal view, so 'terminal' is treated as null (matches
+      // prior inline behaviour `msg.mode === 'cli' ? 'cli' : null`).
+      const { mode } = sharedServerMode(msg);
+      const newServerMode: 'cli' | null = mode === 'cli' ? 'cli' : null;
       useConnectionLifecycleStore.getState().setServerInfo({ serverMode: newServerMode });
       // Force chat view in CLI mode (no terminal available)
-      if (msg.mode === 'cli' && get().viewMode === 'terminal') {
+      if (mode === 'cli' && get().viewMode === 'terminal') {
         set({ viewMode: 'chat' });
       }
       break;
