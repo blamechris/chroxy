@@ -260,3 +260,54 @@ export function handlePlanStarted(
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// plan_ready
+// ---------------------------------------------------------------------------
+
+/**
+ * Single allowed prompt the server attaches to a `plan_ready` message.
+ *
+ * Note: this is the *expected* server-side shape. The handler below validates
+ * only array-ness, NOT per-element shape — matches prior inline behaviour in
+ * both clients. Tightening element validation would be a behaviour change and
+ * is out of scope for the #2661 mechanical migration.
+ */
+export interface PlanAllowedPrompt {
+  tool: string
+  prompt: string
+}
+
+/**
+ * Resolve target session and produce a patch flipping plan state to "ready".
+ *
+ * Validates `msg.allowedPrompts` is an array; non-array values fall back to
+ * an empty array (matches the prior inline `Array.isArray(...) ? ... : []`).
+ * Per-element shape is NOT validated — the cast to `PlanAllowedPrompt[]` is
+ * unsafe and matches what both clients did before this migration. If a server
+ * regression emits malformed entries, downstream consumers see them verbatim.
+ *
+ * This handler intentionally produces ONLY the universal state patch. The
+ * mobile app additionally pushes a session notification on plan-ready via
+ * its own `pushSessionNotification` helper — that's a platform-specific UX
+ * concern (the dashboard has no equivalent surface) and stays at the call
+ * site. The shared handler exposes `sessionId` so the app can route the
+ * notification to the right session without re-resolving.
+ */
+export function handlePlanReady(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  // Behaviour-preserving unsafe cast (see docstring above). `as unknown as`
+  // makes it clear at the call site that the element shape isn't checked.
+  const prompts: PlanAllowedPrompt[] = Array.isArray(msg.allowedPrompts)
+    ? (msg.allowedPrompts as unknown as PlanAllowedPrompt[])
+    : []
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      isPlanPending: true,
+      planAllowedPrompts: prompts,
+    },
+  }
+}
