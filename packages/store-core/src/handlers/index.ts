@@ -260,3 +260,42 @@ export function handlePlanStarted(
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// plan_ready
+// ---------------------------------------------------------------------------
+
+/** Single allowed prompt the server attaches to a `plan_ready` message. */
+export interface PlanAllowedPrompt {
+  tool: string
+  prompt: string
+}
+
+/**
+ * Resolve target session and produce a patch flipping plan state to "ready".
+ *
+ * Validates `msg.allowedPrompts` is an array; bad-shaped values fall back to
+ * an empty array (matches the prior inline `Array.isArray(...) ? ... : []`).
+ *
+ * Note: this handler intentionally produces ONLY the universal state patch.
+ * The mobile app additionally pushes a session notification on plan-ready
+ * via its own `pushSessionNotification` helper — that's a platform-specific
+ * UX concern (the dashboard has no equivalent surface) and stays at the call
+ * site. The shared handler exposes `sessionId` so the app can route the
+ * notification to the right session without re-resolving.
+ */
+export function handlePlanReady(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  const prompts: PlanAllowedPrompt[] = Array.isArray(msg.allowedPrompts)
+    ? (msg.allowedPrompts as PlanAllowedPrompt[])
+    : []
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      isPlanPending: true,
+      planAllowedPrompts: prompts,
+    },
+  }
+}

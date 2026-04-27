@@ -17,6 +17,7 @@ import {
   handleBudgetExceeded,
   handleBudgetResumed,
   handlePlanStarted,
+  handlePlanReady,
 } from './index'
 import type { SessionInfo } from '../types'
 
@@ -331,5 +332,55 @@ describe('handlePlanStarted', () => {
     const result = handlePlanStarted({}, null)
     expect(result.sessionId).toBeNull()
     expect(result.patch).toEqual({ isPlanPending: false, planAllowedPrompts: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePlanReady
+// ---------------------------------------------------------------------------
+describe('handlePlanReady', () => {
+  it('uses explicit sessionId and forwards allowedPrompts verbatim', () => {
+    const prompts = [{ tool: 'Bash', prompt: 'rm -rf node_modules' }]
+    const result = handlePlanReady(
+      { sessionId: 'sess-1', allowedPrompts: prompts },
+      'active-1',
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { isPlanPending: true, planAllowedPrompts: prompts },
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const result = handlePlanReady({ allowedPrompts: [] }, 'active-1')
+    expect(result.sessionId).toBe('active-1')
+    expect(result.patch).toEqual({ isPlanPending: true, planAllowedPrompts: [] })
+  })
+
+  it('treats missing allowedPrompts as empty array', () => {
+    const result = handlePlanReady({ sessionId: 'sess-1' }, null)
+    expect(result.patch.planAllowedPrompts).toEqual([])
+  })
+
+  it('treats non-array allowedPrompts as empty array (matches prior inline guard)', () => {
+    const result = handlePlanReady(
+      { sessionId: 'sess-1', allowedPrompts: 'not an array' },
+      null,
+    )
+    expect(result.patch.planAllowedPrompts).toEqual([])
+  })
+
+  it('flips isPlanPending true (vs handlePlanStarted which flips false)', () => {
+    // Sanity check that the started/ready pair use opposite values for the
+    // same field — easy to copy-paste-typo, worth pinning explicitly.
+    const ready = handlePlanReady({}, 'active-1')
+    const started = handlePlanStarted({}, 'active-1')
+    expect(ready.patch.isPlanPending).toBe(true)
+    expect(started.patch.isPlanPending).toBe(false)
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const result = handlePlanReady({}, null)
+    expect(result.sessionId).toBeNull()
   })
 })

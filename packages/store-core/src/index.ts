@@ -140,6 +140,7 @@ export type {
   SessionPatch,
   PermissionMode,
   PendingPermissionConfirm,
+  PlanAllowedPrompt,
   ThinkingLevel,
 } from './handlers'
 
@@ -158,4 +159,5 @@ export {
   handleBudgetExceeded,
   handleBudgetResumed,
   handlePlanStarted,
+  handlePlanReady,
 } from './handlers'

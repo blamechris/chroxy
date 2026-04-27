@@ -30,6 +30,7 @@ import {
   handleBudgetExceeded as sharedBudgetExceeded,
   handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
+  handlePlanReady as sharedPlanReady,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1814,13 +1815,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'plan_ready': {
-      const planReadyTargetId = (msg.sessionId as string) || get().activeSessionId;
-      const prompts = Array.isArray(msg.allowedPrompts) ? msg.allowedPrompts as { tool: string; prompt: string }[] : [];
-      if (planReadyTargetId && get().sessionStates[planReadyTargetId]) {
-        updateSession(planReadyTargetId, () => ({
-          isPlanPending: true,
-          planAllowedPrompts: prompts,
-        }));
+      const planReady = sharedPlanReady(msg, get().activeSessionId);
+      if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
+        updateSession(planReady.sessionId, () => planReady.patch);
       }
       break;
     }

@@ -41,6 +41,7 @@ import {
   handleBudgetExceeded as sharedBudgetExceeded,
   handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
+  handlePlanReady as sharedPlanReady,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1641,16 +1642,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'plan_ready': {
-      const planReadyTargetId = (msg.sessionId as string) || get().activeSessionId;
-      const prompts = Array.isArray(msg.allowedPrompts) ? msg.allowedPrompts as { tool: string; prompt: string }[] : [];
-      if (planReadyTargetId && get().sessionStates[planReadyTargetId]) {
-        updateSession(planReadyTargetId, () => ({
-          isPlanPending: true,
-          planAllowedPrompts: prompts,
-        }));
+      const planReady = sharedPlanReady(msg, get().activeSessionId);
+      if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
+        updateSession(planReady.sessionId, () => planReady.patch);
       }
-      if (planReadyTargetId) {
-        pushSessionNotification(planReadyTargetId, 'plan', 'Plan ready for approval');
+      // Platform-specific UX: app surfaces a session notification on
+      // plan-ready (the dashboard has no equivalent surface). Kept at the
+      // call site so the shared handler stays free of platform concerns.
+      if (planReady.sessionId) {
+        pushSessionNotification(planReady.sessionId, 'plan', 'Plan ready for approval');
       }
       break;
     }
