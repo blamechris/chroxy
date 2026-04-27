@@ -615,11 +615,11 @@ const DEFAULT_ERROR_MESSAGE = 'An unexpected server error occurred'
  *
  * Mirrors the inline implementations in both clients:
  * - `code` defaults to "UNKNOWN" when missing/non-string
- * - `message` is ANSI-stripped and trimmed; empty/whitespace falls back to the
- *   default error string (matches the app's `(stripAnsi(...).trim() || ...)`
- *   pattern, which is also a safe widening of the dashboard's behaviour
- *   since `stripAnsi` on a non-empty input never produces an empty trimmed
- *   string in practice — this strict variant is the conservative choice).
+ * - `message` is ANSI-stripped and trimmed; if the result is empty (including
+ *   cases where a non-empty input becomes empty after stripping ANSI codes
+ *   and whitespace), it falls back to the default error string. This matches
+ *   the app's `(stripAnsi(...).trim() || ...)` pattern and is a safe widening
+ *   of the dashboard's behaviour.
  * - `requestId` is exposed so callers can correlate against in-flight
  *   requests (e.g. `set_permission_mode` rejection handling on the app).
  *
@@ -655,9 +655,11 @@ export function handleError(msg: Record<string, unknown>): {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the bound-token mismatch hint surfaced to users (#2904). Both clients
- * use the same wording — pulled into a constant so the dashboard alert and
- * the app's modal share a single source of truth.
+ * Build the default bound-token mismatch hint surfaced to users (#2904).
+ * This helper provides the shared/dashboard wording used when normalising
+ * `SESSION_TOKEN_MISMATCH`; other clients may intentionally present different
+ * copy at the call site (the app's modal mentions "from the desktop" and is
+ * built inline rather than consuming this string).
  */
 function boundSessionMismatchMessage(boundSessionName: string): string {
   return `This device is paired to session "${boundSessionName}" and can only talk to that session. Disconnect and scan a fresh QR code to create new sessions.`
@@ -717,7 +719,7 @@ export function handleSessionError(
   if (code === 'SESSION_TOKEN_MISMATCH' && boundSessionName) {
     message = boundSessionMismatchMessage(boundSessionName)
   } else {
-    message = typeof msg.message === 'string' ? msg.message : 'Unknown error'
+    message = parseStringField(msg, 'message') ?? 'Unknown error'
   }
 
   return {

@@ -669,6 +669,24 @@ describe('handleSessionError', () => {
     expect(result.systemMessage!.content).toBe('Unknown error')
   })
 
+  it('falls back to "Unknown error" when message is an empty string', () => {
+    const result = handleSessionError(
+      { category: 'rate_limit', message: '' },
+      null,
+    )
+    expect(result.message).toBe('Unknown error')
+    expect(result.systemMessage!.content).toBe('Unknown error')
+  })
+
+  it('falls back to "Unknown error" when message is whitespace only', () => {
+    const result = handleSessionError(
+      { category: 'rate_limit', message: '   \t\n  ' },
+      null,
+    )
+    expect(result.message).toBe('Unknown error')
+    expect(result.systemMessage!.content).toBe('Unknown error')
+  })
+
   it('treats SESSION_TOKEN_MISMATCH without boundSessionName as a generic error', () => {
     // boundSessionName is required for the rewrite — without it, fall through
     // to the generic msg.message path.

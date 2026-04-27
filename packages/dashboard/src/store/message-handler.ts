@@ -75,7 +75,6 @@ import type {
   SessionState,
   SlashCommand,
   FilePickerItem,
-  LogEntry,
   ConversationSummary,
   ProviderInfo,
   ToolResultImage,
@@ -2278,7 +2277,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'log_entry': {
       const { entry } = sharedLogEntry(msg);
       set((state: ConnectionState) => ({
-        logEntries: [...state.logEntries, entry as LogEntry].slice(-500),
+        logEntries: [...state.logEntries, entry].slice(-500),
       }));
       break;
     }
