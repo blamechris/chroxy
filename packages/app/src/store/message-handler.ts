@@ -32,6 +32,7 @@ import {
   handlePermissionModeChanged as sharedPermissionModeChanged,
   handleAvailablePermissionModes as sharedAvailablePermissionModes,
   handleSessionUpdated as sharedSessionUpdated,
+  handleConfirmPermissionMode as sharedConfirmPermissionMode,
   handleClaudeReady as sharedClaudeReady,
   handleAgentIdle as sharedAgentIdle,
   handleAgentBusy as sharedAgentBusy,
@@ -1546,10 +1547,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'confirm_permission_mode': {
-      const confirmMode = typeof msg.mode === 'string' ? msg.mode : null;
-      const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?';
-      if (confirmMode) {
-        set({ pendingPermissionConfirm: { mode: confirmMode, warning } });
+      const pending = sharedConfirmPermissionMode(msg);
+      if (pending) {
+        set({ pendingPermissionConfirm: pending });
       }
       break;
     }

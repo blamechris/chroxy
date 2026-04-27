@@ -8,6 +8,7 @@ import {
   handlePermissionModeChanged,
   handleAvailablePermissionModes,
   handleSessionUpdated,
+  handleConfirmPermissionMode,
   handleClaudeReady,
   handleAgentIdle,
   handleAgentBusy,
@@ -169,6 +170,47 @@ describe('handleSessionUpdated', () => {
     expect(result).not.toBeNull()
     expect(result![0].name).toBe('Old Name')
     expect(result![1].name).toBe('Other Session')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleConfirmPermissionMode
+// ---------------------------------------------------------------------------
+describe('handleConfirmPermissionMode', () => {
+  it('returns mode + warning when both are present', () => {
+    const out = handleConfirmPermissionMode({
+      mode: 'plan',
+      warning: 'This will discard pending edits.',
+    })
+    expect(out).toEqual({ mode: 'plan', warning: 'This will discard pending edits.' })
+  })
+
+  it('falls back to a default warning when warning is missing', () => {
+    expect(handleConfirmPermissionMode({ mode: 'plan' })).toEqual({
+      mode: 'plan',
+      warning: 'Are you sure?',
+    })
+  })
+
+  it('falls back to the default warning when warning is non-string', () => {
+    expect(handleConfirmPermissionMode({ mode: 'plan', warning: 42 })).toEqual({
+      mode: 'plan',
+      warning: 'Are you sure?',
+    })
+  })
+
+  it('returns null when mode is missing', () => {
+    expect(handleConfirmPermissionMode({})).toBeNull()
+  })
+
+  it('returns null when mode is non-string', () => {
+    expect(handleConfirmPermissionMode({ mode: 42 })).toBeNull()
+  })
+
+  it('returns null when mode is empty string (treated as missing by inline impls)', () => {
+    // The original inline check was `typeof msg.mode === 'string' ? msg.mode : null`
+    // followed by `if (confirmMode)` — empty string is falsy and would be skipped.
+    expect(handleConfirmPermissionMode({ mode: '' })).toBeNull()
   })
 })
 

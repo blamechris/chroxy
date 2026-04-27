@@ -113,6 +113,32 @@ export function handleSessionUpdated(
 }
 
 // ---------------------------------------------------------------------------
+// confirm_permission_mode
+// ---------------------------------------------------------------------------
+
+export interface PendingPermissionConfirm {
+  mode: string
+  warning: string
+}
+
+/**
+ * Extract the mode + warning text from a `confirm_permission_mode` message.
+ *
+ * Returns the pending-confirmation payload when the server included a valid
+ * `mode` string, or null when the message is malformed (caller should leave
+ * existing pending state alone in that case — matches both clients' prior
+ * inline behavior).
+ */
+export function handleConfirmPermissionMode(
+  msg: Record<string, unknown>,
+): PendingPermissionConfirm | null {
+  const mode = typeof msg.mode === 'string' ? msg.mode : null
+  if (!mode) return null
+  const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?'
+  return { mode, warning }
+}
+
+// ---------------------------------------------------------------------------
 // claude_ready
 // ---------------------------------------------------------------------------
 
