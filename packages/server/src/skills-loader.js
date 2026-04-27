@@ -129,7 +129,10 @@ export function findRepoSkillsDir(cwd) {
     }
     // Stop the walk at $HOME so we never consider `~/.chroxy/skills/` (the
     // global tier) as a candidate. Real repos don't live above $HOME.
-    if (home && dir === home) return null
+    // Use the same path comparator as the global guard so a darwin/win32 case
+    // mismatch (HFS+/APFS/NTFS are case-insensitive by default) doesn't slip
+    // past the boundary check.
+    if (home && _sameAbsolutePath(dir, home)) return null
     prev = dir
     dir = dirname(dir)
     iterations++
@@ -169,9 +172,23 @@ export function loadActiveSkillsLayered({ globalDir, repoDir } = {}) {
   )
 }
 
+// macOS (HFS+/APFS) and Windows (NTFS) are case-insensitive by default. A
+// `cwd` like `/Users/Bob/proj` and a homedir like `/Users/bob` resolve to the
+// same directory but compare unequal as strings, which would defeat both the
+// $HOME boundary check and the global-skills-dir guard. Lowercase before
+// compare on those platforms to make the equality check actually correspond
+// to "same directory on disk".
+const _PATH_COMPARE_CASE_INSENSITIVE =
+  process.platform === 'darwin' || process.platform === 'win32'
+
 function _sameAbsolutePath(a, b) {
   try {
-    return resolve(a) === resolve(b)
+    const ra = resolve(a)
+    const rb = resolve(b)
+    if (_PATH_COMPARE_CASE_INSENSITIVE) {
+      return ra.toLowerCase() === rb.toLowerCase()
+    }
+    return ra === rb
   } catch {
     return false
   }
