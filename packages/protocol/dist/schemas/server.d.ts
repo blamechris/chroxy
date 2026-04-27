@@ -177,6 +177,10 @@ export declare const ServerSkillsListSchema: z.ZodObject<{
     skills: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         description: z.ZodOptional<z.ZodString>;
+        source: z.ZodOptional<z.ZodEnum<{
+            global: "global";
+            repo: "repo";
+        }>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{

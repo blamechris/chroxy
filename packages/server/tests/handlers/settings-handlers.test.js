@@ -1,5 +1,8 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
@@ -588,6 +591,86 @@ describe('settings-handlers', () => {
       assert.equal(session.setPermissionRules.callCount, 1)
       assert.equal(ctx._sessionBroadcasts.length, 1)
       assert.equal(ctx._sessionBroadcasts[0].msg.type, 'permission_rules_updated')
+    })
+  })
+
+  // #3067: list_skills should walk up from the active session's cwd to pick up
+  // the per-repo .chroxy/skills/ overlay and tag each entry with its source.
+  // We can't stub the global ~/.chroxy/skills tier here — that's the user's
+  // real machine state — so this test only asserts on repo-tier behaviour.
+  describe('list_skills (#3067)', () => {
+    let repoRoot
+
+    afterEach(() => {
+      if (repoRoot) rmSync(repoRoot, { recursive: true, force: true })
+      repoRoot = null
+    })
+
+    it('emits a skill from <session.cwd>/.chroxy/skills with source: "repo"', () => {
+      repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-repo-'))
+      mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+      writeFileSync(
+        join(repoRoot, '.chroxy', 'skills', 'project-style.md'),
+        'Project-specific style guide.\n',
+      )
+
+      const sessions = new Map()
+      const session = createMockSession()
+      session.cwd = repoRoot
+      sessions.set('s1', { session, name: 'S', cwd: repoRoot })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      const msg = ctx._sent[0]
+      assert.equal(msg.type, 'skills_list')
+      const repoEntry = msg.skills.find((s) => s.name === 'project-style')
+      assert.ok(repoEntry, 'project-style skill from repo overlay should be in payload')
+      assert.equal(repoEntry.source, 'repo')
+    })
+
+    it('walks up from a nested session.cwd to find a repo-root .chroxy/skills', () => {
+      repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-nested-'))
+      mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+      writeFileSync(
+        join(repoRoot, '.chroxy', 'skills', 'walkup-marker.md'),
+        'Walk-up discovered skill.\n',
+      )
+      const nested = join(repoRoot, 'packages', 'app')
+      mkdirSync(nested, { recursive: true })
+
+      const sessions = new Map()
+      const session = createMockSession()
+      session.cwd = nested
+      sessions.set('s1', { session, name: 'S', cwd: nested })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+      const msg = ctx._sent[0]
+      const entry = msg.skills.find((s) => s.name === 'walkup-marker')
+      assert.ok(entry, 'walk-up should locate repo skill from nested cwd')
+      assert.equal(entry.source, 'repo')
+    })
+
+    it('returns skills with no repo source when no session is active', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+      const msg = ctx._sent[0]
+      assert.equal(msg.type, 'skills_list')
+      // Without a session we can't discover a repo overlay, so every entry —
+      // if any — must be source: 'global'. The global tier is the user's
+      // ~/.chroxy/skills which we can't fake here, so just assert the shape.
+      for (const s of msg.skills) {
+        assert.notEqual(s.source, 'repo',
+          `expected only global-sourced skills with no active session, got: ${JSON.stringify(s)}`)
+      }
     })
   })
 })
