@@ -30,8 +30,12 @@ import {
   handleError,
   handleSessionError,
   handleLogEntry,
+  handleClientJoined,
+  handleClientLeft,
+  handlePrimaryChanged,
+  handleClientFocusChanged,
 } from './index'
-import type { Checkpoint, DevPreview, SessionInfo } from '../types'
+import type { Checkpoint, ConnectedClient, DevPreview, SessionInfo } from '../types'
 
 // ---------------------------------------------------------------------------
 // resolveSessionId
@@ -713,6 +717,115 @@ describe('handleSessionError', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleClientJoined
+// ---------------------------------------------------------------------------
+describe('handleClientJoined', () => {
+  const existingClient: ConnectedClient = {
+    clientId: 'client-1',
+    deviceName: 'iPhone',
+    deviceType: 'phone',
+    platform: 'ios',
+    isSelf: false,
+  }
+
+  it('appends a new client to the roster', () => {
+    const result = handleClientJoined(
+      {
+        client: {
+          clientId: 'client-2',
+          deviceName: 'MacBook',
+          deviceType: 'desktop',
+          platform: 'darwin',
+        },
+      },
+      [existingClient],
+    )
+    expect(result).not.toBeNull()
+    expect(result!.client).toEqual({
+      clientId: 'client-2',
+      deviceName: 'MacBook',
+      deviceType: 'desktop',
+      platform: 'darwin',
+      isSelf: false,
+    })
+    expect(result!.roster).toHaveLength(2)
+    expect(result!.roster[0]).toEqual(existingClient)
+    expect(result!.roster[1]).toEqual(result!.client)
+  })
+
+  it('upserts when client with same id is already present', () => {
+    const result = handleClientJoined(
+      {
+        client: {
+          clientId: 'client-1',
+          deviceName: 'iPhone (renamed)',
+          deviceType: 'phone',
+          platform: 'ios',
+        },
+      },
+      [existingClient],
+    )
+    expect(result).not.toBeNull()
+    expect(result!.roster).toHaveLength(1)
+    expect(result!.roster[0].deviceName).toBe('iPhone (renamed)')
+  })
+
+  it('defaults missing deviceName to null', () => {
+    const result = handleClientJoined(
+      { client: { clientId: 'client-2' } },
+      [],
+    )
+    expect(result!.client.deviceName).toBeNull()
+  })
+
+  it('defaults invalid deviceType to "unknown"', () => {
+    const result = handleClientJoined(
+      { client: { clientId: 'client-2', deviceType: 'laptop' } },
+      [],
+    )
+    expect(result!.client.deviceType).toBe('unknown')
+  })
+
+  it('accepts all valid deviceType values', () => {
+    for (const dt of ['phone', 'tablet', 'desktop', 'unknown'] as const) {
+      const result = handleClientJoined(
+        { client: { clientId: 'c', deviceType: dt } },
+        [],
+      )
+      expect(result!.client.deviceType).toBe(dt)
+    }
+  })
+
+  it('defaults missing platform to "unknown"', () => {
+    const result = handleClientJoined(
+      { client: { clientId: 'client-2' } },
+      [],
+    )
+    expect(result!.client.platform).toBe('unknown')
+  })
+
+  it('returns null when client is missing', () => {
+    expect(handleClientJoined({}, [])).toBeNull()
+  })
+
+  it('returns null when client.clientId is missing', () => {
+    expect(handleClientJoined({ client: {} }, [])).toBeNull()
+  })
+
+  it('returns null when client.clientId is non-string', () => {
+    expect(handleClientJoined({ client: { clientId: 42 } }, [])).toBeNull()
+  })
+
+  it('always sets isSelf=false (new joiners are never us)', () => {
+    const result = handleClientJoined(
+      { client: { clientId: 'client-2', isSelf: true } },
+      [],
+    )
+    expect(result!.client.isSelf).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleDevPreviewStopped
 // ---------------------------------------------------------------------------
 describe('handleDevPreviewStopped', () => {
@@ -1059,5 +1172,130 @@ describe('handleLogEntry', () => {
     const result = handleLogEntry({ component: 'ws', sessionId: 42 })
     expect(result.entry.sessionId).toBeUndefined()
     expect('sessionId' in result.entry).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleClientLeft
+// ---------------------------------------------------------------------------
+describe('handleClientLeft', () => {
+  const roster: ConnectedClient[] = [
+    {
+      clientId: 'client-1',
+      deviceName: 'iPhone',
+      deviceType: 'phone',
+      platform: 'ios',
+      isSelf: false,
+    },
+    {
+      clientId: 'client-2',
+      deviceName: 'MacBook',
+      deviceType: 'desktop',
+      platform: 'darwin',
+      isSelf: false,
+    },
+  ]
+
+  it('removes the matching client and reports the departing entry', () => {
+    const result = handleClientLeft({ clientId: 'client-1' }, roster)
+    expect(result).not.toBeNull()
+    expect(result!.clientId).toBe('client-1')
+    expect(result!.departingClient).toEqual(roster[0])
+    expect(result!.roster).toHaveLength(1)
+    expect(result!.roster[0].clientId).toBe('client-2')
+  })
+
+  it('returns roster unchanged when clientId does not match', () => {
+    const result = handleClientLeft({ clientId: 'nonexistent' }, roster)
+    expect(result).not.toBeNull()
+    expect(result!.departingClient).toBeUndefined()
+    expect(result!.roster).toHaveLength(2)
+  })
+
+  it('returns null when clientId is missing', () => {
+    expect(handleClientLeft({}, roster)).toBeNull()
+  })
+
+  it('returns null when clientId is non-string', () => {
+    expect(handleClientLeft({ clientId: 42 }, roster)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePrimaryChanged
+// ---------------------------------------------------------------------------
+describe('handlePrimaryChanged', () => {
+  it('extracts sessionId and clientId', () => {
+    expect(
+      handlePrimaryChanged({ sessionId: 'sess-1', clientId: 'client-1' }),
+    ).toEqual({ sessionId: 'sess-1', primaryClientId: 'client-1' })
+  })
+
+  it('returns null primaryClientId when missing', () => {
+    expect(handlePrimaryChanged({ sessionId: 'sess-1' })).toEqual({
+      sessionId: 'sess-1',
+      primaryClientId: null,
+    })
+  })
+
+  it('returns null primaryClientId when non-string', () => {
+    expect(
+      handlePrimaryChanged({ sessionId: 'sess-1', clientId: 42 }),
+    ).toEqual({ sessionId: 'sess-1', primaryClientId: null })
+  })
+
+  it('returns null sessionId when missing or non-string', () => {
+    expect(handlePrimaryChanged({ clientId: 'c' })).toEqual({
+      sessionId: null,
+      primaryClientId: 'c',
+    })
+    expect(handlePrimaryChanged({ sessionId: 42, clientId: 'c' })).toEqual({
+      sessionId: null,
+      primaryClientId: 'c',
+    })
+  })
+
+  it('preserves the literal "default" sessionId verbatim (caller decides routing)', () => {
+    // Both clients special-case `sessionId === 'default'` to apply globally.
+    // The shared handler does NOT do that branching — it just hands the value
+    // back as-is and the call site decides.
+    expect(
+      handlePrimaryChanged({ sessionId: 'default', clientId: 'c' }),
+    ).toEqual({ sessionId: 'default', primaryClientId: 'c' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleClientFocusChanged
+// ---------------------------------------------------------------------------
+describe('handleClientFocusChanged', () => {
+  it('extracts both fields when valid', () => {
+    expect(
+      handleClientFocusChanged({ clientId: 'client-1', sessionId: 'sess-1' }),
+    ).toEqual({ clientId: 'client-1', sessionId: 'sess-1' })
+  })
+
+  it('returns null when clientId is missing', () => {
+    expect(handleClientFocusChanged({ sessionId: 'sess-1' })).toBeNull()
+  })
+
+  it('returns null when sessionId is missing', () => {
+    expect(handleClientFocusChanged({ clientId: 'client-1' })).toBeNull()
+  })
+
+  it('returns null when clientId is non-string', () => {
+    expect(
+      handleClientFocusChanged({ clientId: 42, sessionId: 'sess-1' }),
+    ).toBeNull()
+  })
+
+  it('returns null when sessionId is non-string', () => {
+    expect(
+      handleClientFocusChanged({ clientId: 'client-1', sessionId: 42 }),
+    ).toBeNull()
+  })
+
+  it('returns null when both are missing', () => {
+    expect(handleClientFocusChanged({})).toBeNull()
   })
 })
