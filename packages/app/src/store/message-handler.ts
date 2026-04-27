@@ -48,6 +48,9 @@ import {
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
+  handleCheckpointCreated as sharedCheckpointCreated,
+  handleCheckpointList as sharedCheckpointList,
+  handleCheckpointRestored as sharedCheckpointRestored,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -2208,22 +2211,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'checkpoint_created': {
-      const cpSid = (msg.sessionId as string) || get().activeSessionId;
-      if (cpSid !== get().activeSessionId) break;
-      if (msg.checkpoint && typeof msg.checkpoint === 'object') {
-        const cp = msg.checkpoint as Checkpoint;
-        set({ checkpoints: [...get().checkpoints, cp] });
-        useConversationStore.getState().addCheckpoint(cp);
+      const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
+      if (next) {
+        set({ checkpoints: next });
+        // Side effect: dual-write into the conversation store. The shared
+        // handler validated the payload, so we can safely treat the appended
+        // entry as the message's `checkpoint` field.
+        useConversationStore.getState().addCheckpoint(msg.checkpoint as Checkpoint);
       }
       break;
     }
 
     case 'checkpoint_list': {
-      const listSid = (msg.sessionId as string) || get().activeSessionId;
-      if (listSid !== get().activeSessionId) break;
-      if (Array.isArray(msg.checkpoints)) {
-        set({ checkpoints: msg.checkpoints as Checkpoint[] });
-        useConversationStore.getState().setCheckpoints(msg.checkpoints as Checkpoint[]);
+      const next = sharedCheckpointList(msg, get().activeSessionId);
+      if (next) {
+        set({ checkpoints: next });
+        useConversationStore.getState().setCheckpoints(next);
       }
       break;
     }
@@ -2231,11 +2234,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'checkpoint_restored': {
       // Server created a new session at the checkpoint state.
       // Auto-switch to it; session_list update follows from server.
-      const rawNewSid = msg.newSessionId;
-      const restoredNewSid =
-        typeof rawNewSid === 'string' ? rawNewSid.trim() : '';
-      if (restoredNewSid.length > 0) {
-        get().switchSession(restoredNewSid, { serverNotify: false, haptic: false });
+      const restored = sharedCheckpointRestored(msg);
+      if (restored) {
+        get().switchSession(restored.newSessionId, { serverNotify: false, haptic: false });
       }
       break;
     }
