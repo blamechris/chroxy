@@ -36,6 +36,7 @@ export type {
   QueuedMessage,
   Checkpoint,
   BaseSessionState,
+  PendingPermissionConfirm,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
@@ -53,6 +54,7 @@ import type {
   McpServer,
   MessageAttachment,
   ModelInfo,
+  PendingPermissionConfirm,
   SearchResult,
   SessionContext,
   SessionHealth,
@@ -254,7 +256,7 @@ export interface ModelsAndPermissionsData {
   // Available providers from server (for session creation UI)
   availableProviders: ProviderInfo[];
   // Pending auto permission mode confirmation from server
-  pendingPermissionConfirm: { mode: string; warning: string } | null;
+  pendingPermissionConfirm: PendingPermissionConfirm | null;
 }
 
 /**

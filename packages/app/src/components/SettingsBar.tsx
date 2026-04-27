@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
+import type { PendingPermissionConfirm } from '@chroxy/store-core';
 import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -38,7 +39,7 @@ export interface SettingsBarProps {
   onInvokeAgent?: (agentName: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
-  pendingPermissionConfirm?: { mode: string; warning: string } | null;
+  pendingPermissionConfirm?: PendingPermissionConfirm | null;
   onConfirmPermissionMode?: (mode: string) => void;
   onCancelPermissionConfirm?: () => void;
   conversationId?: string | null;

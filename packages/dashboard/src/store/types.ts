@@ -36,6 +36,7 @@ export type {
   QueuedMessage,
   Checkpoint,
   BaseSessionState,
+  PendingPermissionConfirm,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
@@ -51,6 +52,7 @@ import type {
   InputSettings,
   MessageAttachment,
   ModelInfo,
+  PendingPermissionConfirm,
   SavedConnection,
   SearchResult,
   SessionInfo,
@@ -370,7 +372,7 @@ export interface ConnectionState {
   restartingSince: number | null;
 
   // Pending auto permission mode confirmation from server
-  pendingPermissionConfirm: { mode: string; warning: string } | null;
+  pendingPermissionConfirm: PendingPermissionConfirm | null;
 
   // Slash commands from server
   slashCommands: SlashCommand[];
