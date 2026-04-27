@@ -40,6 +40,7 @@ import {
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
   handleBudgetResumed as sharedBudgetResumed,
+  handlePlanStarted as sharedPlanStarted,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1632,12 +1633,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'plan_started': {
-      const planStartTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (planStartTargetId && get().sessionStates[planStartTargetId]) {
-        updateSession(planStartTargetId, () => ({
-          isPlanPending: false,
-          planAllowedPrompts: [],
-        }));
+      const planStarted = sharedPlanStarted(msg, get().activeSessionId);
+      if (planStarted.sessionId && get().sessionStates[planStarted.sessionId]) {
+        updateSession(planStarted.sessionId, () => planStarted.patch);
       }
       break;
     }
