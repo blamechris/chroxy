@@ -127,7 +127,7 @@ export interface PendingPermissionConfirm {
  * Returns the pending-confirmation payload when the server included a valid
  * `mode` string, or null when the message is malformed (caller should leave
  * existing pending state alone in that case — matches both clients' prior
- * inline behaviour).
+ * inline behavior).
  */
 export function handleConfirmPermissionMode(
   msg: Record<string, unknown>,
