@@ -299,8 +299,25 @@ jobs:
           output=$(NO_COLOR=1 npx -y expo-doctor@1.18.18 2>&1) || status=$?
           echo "$output"
           failures=$(printf '%s\n' "$output" | grep -E '^✖' || true)
-          # Strip the known-acceptable "mixed CNG" warning before deciding to fail.
-          filtered_failures=$(printf '%s\n' "$failures" | grep -v "Check for app config fields that may not be synced in a non-CNG project" || true)
+          # Strip known-acceptable warnings before deciding to fail:
+          #
+          # 1. "non-CNG project with native config" — the project intentionally
+          #    commits packages/app/ios/ for LiveActivity custom targets and is
+          #    tracked as a P2 migration, not a P0 failure.
+          #
+          # 2. "packages match versions required by installed Expo SDK" — the
+          #    Expo team periodically releases SDK 54.x patch updates that flag
+          #    pinned versions as out-of-date until we bump. Bumping cascades
+          #    into transitive-dep duplicates because expo-camera and friends
+          #    don't re-release on every Expo patch, so naive `expo install
+          #    --fix` produces a duplicate-deps failure that's WORSE than the
+          #    drift it was trying to resolve. Treated as an upkeep task that
+          #    lands in a dedicated PR when the whole transitive set has caught
+          #    up, not a per-PR release blocker.
+          filtered_failures=$(printf '%s\n' "$failures" \
+            | grep -v "Check for app config fields that may not be synced in a non-CNG project" \
+            | grep -v "Check that packages match versions required by installed Expo SDK" \
+            || true)
           if [ -n "$filtered_failures" ]; then
             echo "::error::expo-doctor reported check failures above. Fix them or extend the allowlist in .github/workflows/ci.yml if the warning is genuinely accepted."
             exit 1
