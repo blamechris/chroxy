@@ -326,6 +326,7 @@ function _isSecureRequest(req) {
  *   { type: 'environment_destroyed', environmentId }    — environment destroyed
  *   { type: 'environment_info', environment: {...} }    — single environment details
  *   { type: 'environment_error', error, environmentId? } — environment operation error
+ *   { type: 'evaluate_draft_result', requestId, verdict?, rewritten?, clarification?, reasoning?, error? } — prompt evaluator response (#3068)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
