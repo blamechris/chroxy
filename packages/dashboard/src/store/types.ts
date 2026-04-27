@@ -188,6 +188,16 @@ export interface PermissionRule {
  */
 export type PermissionDecision = 'allow' | 'deny' | 'allowSession';
 
+// #3068: payload returned by the prompt evaluator. One of `verdict` or `error`
+// is populated per response — clients should check `error` first.
+export interface EvaluatorResultPayload {
+  verdict?: 'forward' | 'rewrite' | 'clarify';
+  rewritten?: string | null;
+  clarification?: string | null;
+  reasoning?: string;
+  error?: { code: string; message: string };
+}
+
 export interface LogEntry {
   id: string;
   component: string;
@@ -435,6 +445,10 @@ export interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
+  /** #3068 — Run the prompt evaluator on a draft. Resolves with the verdict
+   * payload, or rejects on disconnect / 60s timeout. Errors from the server
+   * arrive as the `error` field on the resolved value, not as a Promise reject. */
+  evaluateDraft: (draft: string) => Promise<EvaluatorResultPayload>;
   sendPermissionResponse: (requestId: string, decision: PermissionDecision) => 'sent' | 'queued' | false;
   /** Mark a permission request as resolved in the store (separate from the
    * wire-level response). Used by PermissionPrompt to render its answered

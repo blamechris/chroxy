@@ -72,6 +72,7 @@ const PLATFORM_SPECIFIC = {
   'environment_destroyed': 'dashboard', // environment panel is dashboard-only
   'environment_info': 'dashboard',    // environment panel is dashboard-only
   'environment_error': 'dashboard',   // environment panel is dashboard-only
+  'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
 }
 
 // ---------------------------------------------------------------------------

@@ -320,6 +320,19 @@ export const GetEnvironmentSchema = z.object({
     type: z.literal('get_environment'),
     environmentId: z.string().max(256),
 });
+// -- Prompt evaluator (#3068, manual on-demand variant) --
+export const EvaluateDraftSchema = z.object({
+    type: z.literal('evaluate_draft'),
+    // The draft message the user is considering sending. Capped server-side
+    // to ~50KB to bound model cost and message-pump throughput.
+    draft: z.string().min(1).max(50_000),
+    // Optional sessionId to scope the evaluator's contextual hints (e.g. cwd).
+    // Falls back to the client's active session when omitted.
+    sessionId: z.string().optional(),
+    // Optional correlation id so the dashboard can match the result to the
+    // specific Evaluate click that triggered it.
+    requestId: z.string().max(128).optional(),
+});
 // -- Encrypted envelope --
 export const EncryptedEnvelopeSchema = z.object({
     type: z.literal('encrypted'),
@@ -385,4 +398,5 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ListEnvironmentsSchema,
     DestroyEnvironmentSchema,
     GetEnvironmentSchema,
+    EvaluateDraftSchema,
 ]);

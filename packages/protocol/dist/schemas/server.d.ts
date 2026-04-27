@@ -319,6 +319,30 @@ export declare const ServerExtensionMessageSchema: z.ZodObject<{
     data: z.ZodUnknown;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerEvaluateDraftResultSchema: z.ZodUnion<readonly [z.ZodObject<{
+    type: z.ZodLiteral<"evaluate_draft_result">;
+    requestId: z.ZodNullable<z.ZodString>;
+    verdict: z.ZodEnum<{
+        forward: "forward";
+        rewrite: "rewrite";
+        clarify: "clarify";
+    }>;
+    rewritten: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    clarification: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    reasoning: z.ZodString;
+    error: z.ZodOptional<z.ZodNever>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"evaluate_draft_result">;
+    requestId: z.ZodNullable<z.ZodString>;
+    error: z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>;
+    verdict: z.ZodOptional<z.ZodNever>;
+    rewritten: z.ZodOptional<z.ZodNever>;
+    clarification: z.ZodOptional<z.ZodNever>;
+    reasoning: z.ZodOptional<z.ZodNever>;
+}, z.core.$strip>]>;
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>;
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>;
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>;
@@ -326,3 +350,4 @@ export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>;
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
+export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;

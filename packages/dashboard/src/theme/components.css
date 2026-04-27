@@ -2138,6 +2138,146 @@
   outline-offset: 2px;
 }
 
+/* #3068 — manual prompt evaluator button + inline result panel. */
+.btn-evaluate {
+  padding: 8px 12px;
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-md);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-evaluate:hover:not(:disabled) {
+  border-color: var(--accent-blue);
+  color: var(--text-bright);
+}
+.btn-evaluate:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-evaluate:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.evaluator-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--scrollbar-thumb);
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+  font-size: var(--text-sm);
+}
+.evaluator-panel--pending {
+  flex-direction: row;
+  align-items: center;
+  color: var(--text-dim);
+}
+.evaluator-panel--forward {
+  flex-direction: row;
+  align-items: center;
+  border-color: var(--accent-blue);
+}
+.evaluator-panel--rewrite {
+  border-color: #f59e0b;
+}
+.evaluator-panel--clarify {
+  border-color: var(--accent-blue);
+}
+.evaluator-panel--error {
+  flex-direction: row;
+  align-items: center;
+  border-color: var(--accent-red);
+  color: var(--text-bright);
+}
+.evaluator-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+.evaluator-label {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.evaluator-text {
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 0;
+}
+.evaluator-rewrite-text {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-elevated, rgba(0, 0, 0, 0.2));
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.evaluator-clarification {
+  margin: 0;
+  color: var(--text-bright);
+  line-height: 1.4;
+}
+.evaluator-actions {
+  display: flex;
+  gap: 8px;
+}
+.btn-evaluator-apply {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent-blue);
+  color: #fff;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn-evaluator-apply:hover { background: #3a8eef; }
+.btn-evaluator-dismiss {
+  padding: 6px 12px;
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.btn-evaluator-dismiss:hover {
+  color: var(--text-bright);
+  border-color: var(--text-dim);
+}
+.evaluator-dismiss {
+  margin-left: auto;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.evaluator-dismiss:hover { color: var(--text-bright); }
+.evaluator-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--scrollbar-thumb);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: evaluator-spin 0.8s linear infinite;
+}
+@keyframes evaluator-spin {
+  to { transform: rotate(360deg); }
+}
+
 .input-bar-actions {
   display: flex;
   align-items: center;

@@ -282,6 +282,7 @@ export function App() {
   const connect = useConnectionStore(s => s.connect)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
+  const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
   const sendPermissionResponse = useConnectionStore(s => s.sendPermissionResponse)
   const switchSession = useConnectionStore(s => s.switchSession)
   const destroySession = useConnectionStore(s => s.destroySession)
@@ -1328,6 +1329,7 @@ export function App() {
               onFileAttach={handleFileSelect}
               sendOnEnter={inputSettings.chatEnterToSend}
               voiceInput={voiceInput.isAvailable ? voiceInput : undefined}
+              onEvaluate={isConnected ? evaluateDraft : undefined}
             />
           </>
         )}

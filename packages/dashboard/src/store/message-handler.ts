@@ -96,6 +96,58 @@ function getStore(): StoreApi {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt evaluator pending requests (#3068)
+// ---------------------------------------------------------------------------
+//
+// The evaluator round-trip is request→response with no streaming, so we keep
+// a Map of pending entries keyed by requestId. Each entry carries the
+// Promise's resolve + reject + the timeout handle so we can both:
+//   - resolve when the matching `evaluate_draft_result` arrives, and
+//   - reject on disconnect / explicit cancellation, clearing the timeout
+//     so it doesn't fire after the request is gone.
+
+import type { EvaluatorResultPayload } from './types';
+
+interface PendingEvaluatorEntry {
+  resolve: (result: EvaluatorResultPayload) => void;
+  reject: (err: Error) => void;
+  timeoutId: number;
+}
+
+const _evaluatorPending = new Map<string, PendingEvaluatorEntry>();
+
+export function registerEvaluatorRequest(
+  requestId: string,
+  entry: PendingEvaluatorEntry,
+): void {
+  _evaluatorPending.set(requestId, entry);
+}
+
+export function cancelEvaluatorRequest(requestId: string): void {
+  const entry = _evaluatorPending.get(requestId);
+  if (entry) {
+    window.clearTimeout(entry.timeoutId);
+    _evaluatorPending.delete(requestId);
+  }
+}
+
+/**
+ * Reject every in-flight evaluator request with the given reason and clear
+ * their timeouts. Called from the connection store when the WebSocket closes
+ * (or the user explicitly disconnects) so callers don't have to wait the
+ * 60s timeout to learn the request will never complete (#3068 review).
+ */
+export function rejectAllEvaluatorRequests(reason: string): void {
+  if (_evaluatorPending.size === 0) return;
+  const err = new Error(reason);
+  for (const entry of _evaluatorPending.values()) {
+    window.clearTimeout(entry.timeoutId);
+    entry.reject(err);
+  }
+  _evaluatorPending.clear();
+}
+
+// ---------------------------------------------------------------------------
 // E2E encryption state — reset on every new connection
 // ---------------------------------------------------------------------------
 let _encryptionState: EncryptionState | null = null;
@@ -1456,6 +1508,28 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
       if (convSessionId && get().sessionStates[convSessionId]) {
         updateSession(convSessionId, () => ({ conversationId }));
+      }
+      break;
+    }
+
+    case 'evaluate_draft_result': {
+      // #3068: route to the resolver registered by the matching evaluateDraft()
+      // call. Drop on the floor if there's no waiter — the request was
+      // cancelled or already timed out, so the late-arriving result is moot.
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (requestId) {
+        const entry = _evaluatorPending.get(requestId);
+        if (entry) {
+          _evaluatorPending.delete(requestId);
+          window.clearTimeout(entry.timeoutId);
+          entry.resolve({
+            verdict: msg.verdict as 'forward' | 'rewrite' | 'clarify' | undefined,
+            rewritten: typeof msg.rewritten === 'string' ? msg.rewritten : null,
+            clarification: typeof msg.clarification === 'string' ? msg.clarification : null,
+            reasoning: typeof msg.reasoning === 'string' ? msg.reasoning : '',
+            error: msg.error as { code: string; message: string } | undefined,
+          });
+        }
       }
       break;
     }

@@ -302,3 +302,40 @@ export const ServerExtensionMessageSchema = z.object({
     data: z.unknown(),
     sessionId: z.string().optional(),
 });
+// -- Prompt evaluator result (#3068, manual on-demand variant) --
+//
+// Modelled as a union of two mutually-exclusive shapes so clients can rely on
+// the contract: a parsed value either carries a `verdict` (and verdict-specific
+// fields) OR an `error`, never both. The `z.never().optional()` guards on each
+// branch reject payloads that try to set both — earlier permissive shape would
+// happily parse mixed payloads and let bugs slip through.
+const ServerEvaluateDraftSuccessSchema = z.object({
+    type: z.literal('evaluate_draft_result'),
+    // Echoes the client's requestId so the dashboard can correlate to the click
+    // that triggered evaluation. Always present (null when client omitted it).
+    requestId: z.string().nullable(),
+    verdict: z.enum(['forward', 'rewrite', 'clarify']),
+    // Populated when verdict === 'rewrite'
+    rewritten: z.string().nullable().optional(),
+    // Populated when verdict === 'clarify'
+    clarification: z.string().nullable().optional(),
+    // 1-2 sentence explanation, always set on success
+    reasoning: z.string(),
+    error: z.never().optional(),
+});
+const ServerEvaluateDraftErrorSchema = z.object({
+    type: z.literal('evaluate_draft_result'),
+    requestId: z.string().nullable(),
+    error: z.object({
+        code: z.string(),
+        message: z.string(),
+    }),
+    verdict: z.never().optional(),
+    rewritten: z.never().optional(),
+    clarification: z.never().optional(),
+    reasoning: z.never().optional(),
+});
+export const ServerEvaluateDraftResultSchema = z.union([
+    ServerEvaluateDraftSuccessSchema,
+    ServerEvaluateDraftErrorSchema,
+]);
