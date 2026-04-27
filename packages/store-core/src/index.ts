@@ -142,6 +142,7 @@ export type {
   PendingPermissionConfirm,
   PlanAllowedPrompt,
   ThinkingLevel,
+  DevPreviewBuilder,
 } from './handlers'
 
 export {

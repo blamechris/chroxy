@@ -2213,21 +2213,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'dev_preview': {
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      const sessionState = targetId ? get().sessionStates[targetId] : undefined;
-      if (targetId && sessionState) {
-        const preview = sharedDevPreview(msg, targetId, sessionState.devPreviews);
-        updateSession(targetId, () => preview.patch);
+      const builder = sharedDevPreview(msg, get().activeSessionId);
+      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
+      if (builder.sessionId && target) {
+        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
       }
       break;
     }
 
     case 'dev_preview_stopped': {
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      const sessionState = targetId ? get().sessionStates[targetId] : undefined;
-      if (targetId && sessionState) {
-        const preview = sharedDevPreviewStopped(msg, targetId, sessionState.devPreviews);
-        updateSession(targetId, () => preview.patch);
+      const builder = sharedDevPreviewStopped(msg, get().activeSessionId);
+      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
+      if (builder.sessionId && target) {
+        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
       }
       break;
     }
