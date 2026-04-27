@@ -7,7 +7,7 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
-import { loadActiveSkills, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
+import { loadActiveSkillsLayered, findRepoSkillsDir, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -364,16 +364,29 @@ function handleListProviders(ws, client, msg, ctx) {
 }
 
 /**
- * Shared skills system MVP (#2957) — return the list of active skills found
- * in `~/.chroxy/skills/`. The payload includes each skill's filename and a
- * short description (first non-empty line of the body) so the client can
- * display them informationally. v1 has no enable/disable UI — disabling is
- * done by renaming the file to `*.disabled.md`.
+ * Return the active skills the running session is using.
+ *
+ * v1 (#2957) sourced skills only from `~/.chroxy/skills/`. v2 (#3067) layers a
+ * repo-scoped overlay on top: walk up from the active session's cwd looking
+ * for `.chroxy/skills/`, and let any repo file override a global file with the
+ * same name. The payload includes a `source` ("global" or "repo") per skill so
+ * clients can show which tier each one came from.
+ *
+ * If no session is active (or the message arrives before one), the repo layer
+ * is skipped — returning the global set is the most useful informational answer.
+ * Disabling a skill remains a filesystem rename (`*.disabled.md`); there's no
+ * enable/disable UI in v2 either.
  */
 function handleListSkills(ws, client, msg, ctx) {
-  const skills = loadActiveSkills(DEFAULT_SKILLS_DIR).map((s) => ({
+  const entry = resolveSession(ctx, msg, client)
+  const repoDir = entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null
+  const skills = loadActiveSkillsLayered({
+    globalDir: DEFAULT_SKILLS_DIR,
+    repoDir,
+  }).map((s) => ({
     name: s.name,
     description: s.description,
+    source: s.source,
   }))
   ctx.send(ws, { type: 'skills_list', skills })
 }

@@ -170,6 +170,9 @@ export const ServerSkillsListSchema = z.object({
     skills: z.array(z.object({
         name: z.string(),
         description: z.string().optional(),
+        // #3067: 'global' for ~/.chroxy/skills, 'repo' for <cwd>/.chroxy/skills.
+        // Optional so v1 clients keep parsing pre-#3067 payloads cleanly.
+        source: z.enum(['global', 'repo']).optional(),
     })),
 });
 export const ServerErrorSchema = z.object({

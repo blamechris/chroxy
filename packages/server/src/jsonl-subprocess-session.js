@@ -82,8 +82,8 @@ export class JsonlSubprocessSession extends BaseSession {
   // Lifecycle
   // ------------------------------------------------------------------
 
-  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
-    super({ cwd, model, permissionMode: permissionMode || 'auto', skillsDir })
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir } = {}) {
+    super({ cwd, model, permissionMode: permissionMode || 'auto', skillsDir, repoSkillsDir })
     this.resumeSessionId = null
     this._process = null
     // Skills MVP (#2957) — providers without a system-prompt flag (Codex,

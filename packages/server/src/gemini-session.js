@@ -185,8 +185,8 @@ export class GeminiSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir })
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir } = {}) {
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir })
   }
 
   setModel(model) {

@@ -153,8 +153,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir } = {}) {
-    super({ cwd, model, permissionMode, skillsDir })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null

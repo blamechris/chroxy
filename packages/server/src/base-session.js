@@ -8,7 +8,12 @@
  */
 import { EventEmitter } from 'events'
 import { resolveModelId } from './models.js'
-import { loadActiveSkills, formatSkillsForPrompt, DEFAULT_SKILLS_DIR } from './skills-loader.js'
+import {
+  loadActiveSkillsLayered,
+  formatSkillsForPrompt,
+  findRepoSkillsDir,
+  DEFAULT_SKILLS_DIR,
+} from './skills-loader.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
@@ -27,7 +32,7 @@ export class BaseSession extends EventEmitter {
     return []
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
@@ -41,10 +46,19 @@ export class BaseSession extends EventEmitter {
     this._activeAgents = new Map()
     this._resultTimeout = null
 
-    // Skills MVP (#2957) — scanned once at construction.
-    // skillsDir is injectable for tests; defaults to ~/.chroxy/skills.
+    // Skills are scanned once at construction.
+    // - skillsDir overrides the global directory (#2957) — primarily for tests.
+    // - repoSkillsDir overrides the per-repo directory walk-up (#3067) so tests
+    //   can pin both layers without touching the real filesystem; if omitted,
+    //   walk up from this.cwd looking for the nearest .chroxy/skills/.
     this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
-    this._skills = loadActiveSkills(this._skillsDir)
+    this._repoSkillsDir = repoSkillsDir !== undefined
+      ? repoSkillsDir
+      : findRepoSkillsDir(this.cwd)
+    this._skills = loadActiveSkillsLayered({
+      globalDir: this._skillsDir,
+      repoDir: this._repoSkillsDir,
+    })
     this._skillsText = formatSkillsForPrompt(this._skills)
   }
 

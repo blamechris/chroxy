@@ -4,20 +4,29 @@ Skills are reusable instruction snippets that Chroxy injects into every session 
 
 ## Where skill files live
 
-Chroxy reads skills from `~/.chroxy/skills/`. Each skill is a plain Markdown file:
+Chroxy looks for skills in two places, then merges them at session start:
+
+1. **Global** — `~/.chroxy/skills/*.md` — applied to every session on this machine.
+2. **Repo overlay** — `<repo>/.chroxy/skills/*.md` — discovered by walking up from the session's working directory (same lookup pattern as `.git`). Applied only to sessions started inside that repo.
 
 ```
-~/.chroxy/skills/
+~/.chroxy/skills/                   # global, every session
 ├── coding-style.md
-├── commit-format.md
 └── debugging-approach.md
+
+my-project/.chroxy/skills/          # repo overlay, only sessions in my-project
+├── coding-style.md                 # overrides the global file with the same name
+└── commit-format.md
 ```
 
-Create the directory if it does not exist:
+Create either directory if it does not exist:
 
 ```bash
-mkdir -p ~/.chroxy/skills
+mkdir -p ~/.chroxy/skills            # global
+mkdir -p .chroxy/skills              # repo overlay (run from repo root)
 ```
+
+When a global file and a repo file share the same filename, the **repo file wins** — treat it as an override, not an addition. Filename-based dedup keeps the rule predictable.
 
 ## Writing a skill
 
@@ -56,14 +65,14 @@ Skills are combined under a `# User skills` header, separated by `---` dividers,
 
 ## Listing active skills
 
-Send a `list_skills` WebSocket message from any connected client to receive the current skill list. The server replies with a `skills_list` message containing each skill's name and description.
+Send a `list_skills` WebSocket message from any connected client to receive the current skill list. The server replies with a `skills_list` message containing each skill's name, description, and `source` (`"global"` or `"repo"`) so clients can show which tier the skill came from. If no session is active, only global skills are returned (the repo overlay is per-session).
 
 ## Sharing skills
 
 Because skills are plain files in a directory, sharing them is straightforward:
 
 ```bash
-# Share via git
+# Share global skills via git
 cd ~/.chroxy/skills
 git init
 git remote add origin git@github.com:you/my-chroxy-skills.git
@@ -73,9 +82,11 @@ git push -u origin main
 git clone git@github.com:you/my-chroxy-skills.git ~/.chroxy/skills
 ```
 
+Repo-overlay skills (`<repo>/.chroxy/skills/`) are intended to live alongside the project — commit them to the repo so every contributor's Chroxy session inherits the same conventions automatically.
+
 ## Scope
 
-Skills in this release (v1, issue #2957) are global — they apply to every session regardless of provider or project. Per-skill metadata (author, version, trust level) and a UI toggle are planned for v2 (#2958, #2959).
+Skills span two tiers: machine-wide global (#2957) and per-repo overlay (#3067). Per-skill metadata (author, version, trust level) and a UI toggle are planned for a future release (#2958, #2959).
 
 ## Example skill files
 

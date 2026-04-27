@@ -1,12 +1,31 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { BaseSession } from '../src/base-session.js'
 
 describe('BaseSession', () => {
   let session
+  let emptySkillsDir
 
   beforeEach(() => {
-    session = new BaseSession({ cwd: '/tmp', model: 'test-model', permissionMode: 'approve' })
+    // Pin skillsDir + repoSkillsDir to empty temp dirs so the tests don't
+    // pick up whatever lives in the developer's real ~/.chroxy/skills/ (#3067).
+    // cwd: '/tmp' is also passed an empty repoSkillsDir to bypass walk-up.
+    emptySkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-base-skills-'))
+    session = new BaseSession({
+      cwd: '/tmp',
+      model: 'test-model',
+      permissionMode: 'approve',
+      skillsDir: emptySkillsDir,
+      repoSkillsDir: null,
+    })
+  })
+
+  afterEach(() => {
+    if (emptySkillsDir) rmSync(emptySkillsDir, { recursive: true, force: true })
+    emptySkillsDir = null
   })
 
   describe('constructor defaults', () => {
