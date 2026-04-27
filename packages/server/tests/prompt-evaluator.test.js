@@ -187,11 +187,89 @@ describe('evaluateDraft', () => {
   })
 
   describe('API errors', () => {
-    it('wraps SDK errors as EVALUATOR_API_ERROR', async () => {
-      const client = makeThrowingClient(new Error('rate limit'))
+    it('wraps SDK errors as EVALUATOR_API_ERROR with sanitized message', async () => {
+      // Plain Error has no .status — should bucket as a network error and
+      // MUST NOT leak the raw upstream message.
+      const original = new Error('account-12345 hit token bucket; request_id=req_abc; ip=10.0.0.1')
+      const client = makeThrowingClient(original)
       await assert.rejects(
         () => evaluateDraft({ draft: 'x', client }),
-        (err) => err.code === 'EVALUATOR_API_ERROR' && /rate limit/.test(err.message),
+        (err) => {
+          assert.equal(err.code, 'EVALUATOR_API_ERROR')
+          assert.equal(err.message, 'Evaluator network error')
+          assert.ok(!/account-12345/.test(err.message))
+          assert.ok(!/request_id/.test(err.message))
+          // Original error preserved for server-side logging.
+          assert.equal(err.cause, original)
+          return true
+        },
+      )
+    })
+
+    it('maps 401 to authentication-failed message', async () => {
+      const original = Object.assign(new Error('invalid x-api-key (request_id=req_xyz)'), { status: 401 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.code, 'EVALUATOR_API_ERROR')
+          assert.equal(err.message, 'Evaluator authentication failed (check ANTHROPIC_API_KEY)')
+          assert.equal(err.cause, original)
+          return true
+        },
+      )
+    })
+
+    it('maps 403 to authentication-failed message', async () => {
+      const original = Object.assign(new Error('forbidden — your account does not have access to claude-opus-4-7'), { status: 403 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.message, 'Evaluator authentication failed (check ANTHROPIC_API_KEY)')
+          assert.ok(!/claude-opus-4-7/.test(err.message))
+          return true
+        },
+      )
+    })
+
+    it('maps 429 to rate-limited message', async () => {
+      const original = Object.assign(new Error('rate_limit_exceeded; tier=build; reset=2026-04-26T12:00:00Z'), { status: 429 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.message, 'Evaluator rate limited')
+          assert.equal(err.cause, original)
+          return true
+        },
+      )
+    })
+
+    it('maps 5xx to service-unavailable message', async () => {
+      const original = Object.assign(new Error('upstream timeout at edge-pop-syd'), { status: 503 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.message, 'Evaluator service unavailable')
+          assert.ok(!/edge-pop-syd/.test(err.message))
+          return true
+        },
+      )
+    })
+
+    it('falls through to generic message for other statuses (e.g. 400)', async () => {
+      const original = Object.assign(new Error('messages.0.content: too long'), { status: 400 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.code, 'EVALUATOR_API_ERROR')
+          assert.equal(err.message, 'Evaluator API call failed')
+          assert.equal(err.cause, original)
+          return true
+        },
       )
     })
   })

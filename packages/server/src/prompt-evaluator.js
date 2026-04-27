@@ -106,7 +106,7 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
     })
   } catch (err) {
     log.warn(`Anthropic API call failed: ${err.message}`)
-    const wrapped = new Error(`Evaluator API call failed: ${err.message}`)
+    const wrapped = new Error(_sanitizeApiError(err))
     wrapped.code = 'EVALUATOR_API_ERROR'
     wrapped.cause = err
     throw wrapped
@@ -114,6 +114,32 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
 
   const text = _extractText(response)
   return _parseEvaluatorResponse(text)
+}
+
+/**
+ * Map an Anthropic SDK / network error to a sanitized, client-safe message.
+ *
+ * The raw `err.message` from `@anthropic-ai/sdk` can leak internals — request
+ * IDs, account/billing hints, IPs, model identifiers — that we don't want to
+ * fan out to every paired WS client. We bucket on `err.status` (the SDK's
+ * `APIError` exposes it) and fall back to a generic string. Server-side logs
+ * still capture the raw error via `wrapped.cause`.
+ */
+function _sanitizeApiError(err) {
+  const status = typeof err?.status === 'number' ? err.status : null
+  if (status === 401 || status === 403) {
+    return 'Evaluator authentication failed (check ANTHROPIC_API_KEY)'
+  }
+  if (status === 429) {
+    return 'Evaluator rate limited'
+  }
+  if (status !== null && status >= 500 && status < 600) {
+    return 'Evaluator service unavailable'
+  }
+  if (status === null) {
+    return 'Evaluator network error'
+  }
+  return 'Evaluator API call failed'
 }
 
 /**
