@@ -235,3 +235,28 @@ export function handleBudgetResumed(): { systemMessage: ChatMessage } {
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// plan_started
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve target session and produce a patch resetting plan state to idle.
+ *
+ * Both clients clear `isPlanPending` and `planAllowedPrompts` when the server
+ * announces a new plan run is starting. The caller should only apply the
+ * patch when `sessionId` is non-null AND maps to an existing session in its
+ * own state (matches the prior inline `if (... && sessionStates[id])` guard).
+ */
+export function handlePlanStarted(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      isPlanPending: false,
+      planAllowedPrompts: [],
+    },
+  }
+}

@@ -16,6 +16,7 @@ import {
   handleBudgetWarning,
   handleBudgetExceeded,
   handleBudgetResumed,
+  handlePlanStarted,
 } from './index'
 import type { SessionInfo } from '../types'
 
@@ -303,5 +304,32 @@ describe('handleBudgetResumed', () => {
     expect(result.systemMessage.type).toBe('system')
     expect(result.systemMessage.content).toBe('Cost budget override — session resumed')
     expect(result.systemMessage.id).toMatch(/^system-/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePlanStarted
+// ---------------------------------------------------------------------------
+describe('handlePlanStarted', () => {
+  it('uses explicit sessionId from message', () => {
+    const result = handlePlanStarted({ sessionId: 'sess-1' }, 'active-1')
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { isPlanPending: false, planAllowedPrompts: [] },
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const result = handlePlanStarted({}, 'active-1')
+    expect(result).toEqual({
+      sessionId: 'active-1',
+      patch: { isPlanPending: false, planAllowedPrompts: [] },
+    })
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const result = handlePlanStarted({}, null)
+    expect(result.sessionId).toBeNull()
+    expect(result.patch).toEqual({ isPlanPending: false, planAllowedPrompts: [] })
   })
 })
