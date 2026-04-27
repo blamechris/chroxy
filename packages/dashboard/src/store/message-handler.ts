@@ -39,6 +39,9 @@ import {
   handleServerMode as sharedServerMode,
   handleCheckpointCreated as sharedCheckpointCreated,
   handleCheckpointList as sharedCheckpointList,
+  handleError as sharedError,
+  handleSessionError as sharedSessionError,
+  handleLogEntry as sharedLogEntry,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1541,28 +1544,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'session_error': {
-      const errorSessionId = (msg.sessionId as string) || get().activeSessionId;
-      if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
-        updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
-        pushSessionNotification(errorSessionId, 'error', 'Session crashed');
-      }
-      if (msg.category !== 'crash') {
-        // Rewrite the bound-token error into something actionable (#2904).
-        // The raw server message ("Not authorized: client is bound to a
-        // specific session") tells the user nothing — replace with a note
-        // that names the bound session and hints at the remediation.
-        let errorMsg: string;
-        if (
-          msg.code === 'SESSION_TOKEN_MISMATCH' &&
-          typeof msg.boundSessionName === 'string' &&
-          msg.boundSessionName.length > 0
-        ) {
-          errorMsg = `This device is paired to session "${msg.boundSessionName}" and can only talk to that session. Disconnect and scan a fresh QR code to create new sessions.`;
-        } else {
-          errorMsg = (msg.message as string) || 'Unknown error';
+      // Crash branch: flip session health + notify; non-crash branch: rewrite
+      // SESSION_TOKEN_MISMATCH into the actionable bound-session hint (#2904)
+      // and surface via toast/banner. Parser is shared via store-core; the
+      // platform-specific surfaces (notification, alert, server error banner)
+      // stay here.
+      const parsed = sharedSessionError(msg, get().activeSessionId);
+      if (parsed.category === 'crash' && parsed.sessionPatch) {
+        const crashedId = parsed.sessionPatch.sessionId;
+        if (crashedId && get().sessionStates[crashedId]) {
+          updateSession(crashedId, () => ({ health: 'crashed' as const }));
+          pushSessionNotification(crashedId, 'error', 'Session crashed');
         }
-        _adapters.alert.alert('Session Error', errorMsg);
-        get().addServerError(errorMsg);
+      } else if (parsed.message) {
+        _adapters.alert.alert('Session Error', parsed.message);
+        get().addServerError(parsed.message);
       }
       break;
     }
@@ -2280,23 +2276,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'log_entry': {
-      const component = typeof msg.component === 'string' ? msg.component : 'unknown';
-      const level = (['debug', 'info', 'warn', 'error'] as const).includes(msg.level as LogEntry['level'])
-        ? (msg.level as LogEntry['level'])
-        : 'info';
-      const logMessage = typeof msg.message === 'string' ? stripAnsi(msg.message as string) : '';
-      const timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
-      const logSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
-      const entry: LogEntry = {
-        id: nextMessageId('log'),
-        component,
-        level,
-        message: logMessage,
-        timestamp,
-        ...(logSessionId && { sessionId: logSessionId }),
-      };
+      const { entry } = sharedLogEntry(msg);
       set((state: ConnectionState) => ({
-        logEntries: [...state.logEntries, entry].slice(-500),
+        logEntries: [...state.logEntries, entry as LogEntry].slice(-500),
       }));
       break;
     }
@@ -2401,10 +2383,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface it as a server error notification.
-      const errCode = typeof msg.code === 'string' ? msg.code : 'UNKNOWN';
-      const errMsg = typeof msg.message === 'string'
-        ? stripAnsi(msg.message as string)
-        : 'An unexpected server error occurred';
+      const { code: errCode, message: errMsg } = sharedError(msg);
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
       get().addServerError(errMsg);
       break;

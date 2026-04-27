@@ -10,7 +10,7 @@
  */
 
 import type { ChatMessage, Checkpoint, DevPreview, SessionInfo } from '../types'
-import { nextMessageId } from '../utils'
+import { nextMessageId, stripAnsi } from '../utils'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -602,4 +602,186 @@ export function handleCheckpointRestored(
   const trimmed = raw.trim()
   if (trimmed.length === 0) return null
   return { newSessionId: trimmed }
+}
+
+// ---------------------------------------------------------------------------
+// error
+// ---------------------------------------------------------------------------
+
+const DEFAULT_ERROR_MESSAGE = 'An unexpected server error occurred'
+
+/**
+ * Parse an `error` message into its display fields and a system ChatMessage.
+ *
+ * Mirrors the inline implementations in both clients:
+ * - `code` defaults to "UNKNOWN" when missing/non-string
+ * - `message` is ANSI-stripped and trimmed; empty/whitespace falls back to the
+ *   default error string (matches the app's `(stripAnsi(...).trim() || ...)`
+ *   pattern, which is also a safe widening of the dashboard's behaviour
+ *   since `stripAnsi` on a non-empty input never produces an empty trimmed
+ *   string in practice — this strict variant is the conservative choice).
+ * - `requestId` is exposed so callers can correlate against in-flight
+ *   requests (e.g. `set_permission_mode` rejection handling on the app).
+ *
+ * Toast/banner placement and request-correlation logic stays at the call
+ * site — this handler only normalises the payload.
+ */
+export function handleError(msg: Record<string, unknown>): {
+  code: string
+  message: string
+  requestId: string | null
+  systemMessage: ChatMessage
+} {
+  const code = typeof msg.code === 'string' ? msg.code : 'UNKNOWN'
+  const rawMessage =
+    typeof msg.message === 'string' ? stripAnsi(msg.message).trim() : ''
+  const message = rawMessage.length > 0 ? rawMessage : DEFAULT_ERROR_MESSAGE
+  const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
+  return {
+    code,
+    message,
+    requestId,
+    systemMessage: {
+      id: nextMessageId('system'),
+      type: 'system',
+      content: message,
+      timestamp: Date.now(),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// session_error
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the bound-token mismatch hint surfaced to users (#2904). Both clients
+ * use the same wording — pulled into a constant so the dashboard alert and
+ * the app's modal share a single source of truth.
+ */
+function boundSessionMismatchMessage(boundSessionName: string): string {
+  return `This device is paired to session "${boundSessionName}" and can only talk to that session. Disconnect and scan a fresh QR code to create new sessions.`
+}
+
+/**
+ * Parse a `session_error` message.
+ *
+ * Two distinct shapes flow through the same WS message type:
+ *
+ * 1. `category === 'crash'` — the session crashed server-side. Returns a
+ *    `sessionPatch` flipping the target session's health to `'crashed'`.
+ *    Callers additionally push a session notification (platform-specific UX
+ *    that stays at the call site).
+ *
+ * 2. Everything else — a user-visible error. Returns `message` (rewritten to
+ *    the bound-session hint when the server signals SESSION_TOKEN_MISMATCH
+ *    with a `boundSessionName`) and a system ChatMessage. Callers display the
+ *    error via their preferred surface (web toast, native Alert, etc.).
+ *
+ * The two shapes are disjoint: when `category === 'crash'`, `message` and
+ * `systemMessage` are null; otherwise `sessionPatch` is null.
+ */
+export function handleSessionError(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): {
+  category: string | null
+  code: string | null
+  boundSessionName: string | null
+  message: string | null
+  sessionPatch: SessionPatch | null
+  systemMessage: ChatMessage | null
+} {
+  const category = typeof msg.category === 'string' ? msg.category : null
+  const code = typeof msg.code === 'string' ? msg.code : null
+  const boundSessionName =
+    typeof msg.boundSessionName === 'string' && msg.boundSessionName.length > 0
+      ? msg.boundSessionName
+      : null
+
+  if (category === 'crash') {
+    return {
+      category,
+      code,
+      boundSessionName,
+      message: null,
+      sessionPatch: {
+        sessionId: resolveSessionId(msg, activeSessionId),
+        patch: { health: 'crashed' },
+      },
+      systemMessage: null,
+    }
+  }
+
+  let message: string
+  if (code === 'SESSION_TOKEN_MISMATCH' && boundSessionName) {
+    message = boundSessionMismatchMessage(boundSessionName)
+  } else {
+    message = typeof msg.message === 'string' ? msg.message : 'Unknown error'
+  }
+
+  return {
+    category,
+    code,
+    boundSessionName,
+    message,
+    sessionPatch: null,
+    systemMessage: {
+      id: nextMessageId('system'),
+      type: 'system',
+      content: message,
+      timestamp: Date.now(),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// log_entry
+// ---------------------------------------------------------------------------
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+const VALID_LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error'])
+
+export interface LogEntry {
+  id: string
+  component: string
+  level: LogLevel
+  message: string
+  timestamp: number
+  sessionId?: string
+}
+
+/**
+ * Parse a `log_entry` message into a typed `LogEntry`.
+ *
+ * - `component` defaults to `"unknown"` when missing/non-string
+ * - `level` is validated against the `LogLevel` enum, falling back to `"info"`
+ * - `message` is ANSI-stripped (logs from the server can contain colour codes)
+ * - `timestamp` defaults to `Date.now()` when not a number
+ * - `sessionId` is omitted entirely when not a string (matches inline impl)
+ *
+ * Today only the dashboard consumes `log_entry`; the app does not subscribe to
+ * server logs. Extracting the parser here lets the app adopt without
+ * duplicating logic later.
+ */
+export function handleLogEntry(msg: Record<string, unknown>): {
+  entry: LogEntry
+} {
+  const component = typeof msg.component === 'string' ? msg.component : 'unknown'
+  const level: LogLevel = VALID_LOG_LEVELS.has(msg.level as LogLevel)
+    ? (msg.level as LogLevel)
+    : 'info'
+  const message = typeof msg.message === 'string' ? stripAnsi(msg.message) : ''
+  const timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now()
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined
+  const entry: LogEntry = {
+    id: nextMessageId('log'),
+    component,
+    level,
+    message,
+    timestamp,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  }
+  return { entry }
 }
