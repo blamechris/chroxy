@@ -25,7 +25,9 @@ const log = createLogger('prompt-evaluator')
 // Stable default; user can override via CHROXY_EVALUATOR_MODEL. We default to
 // opus because the evaluator's job is to catch things a cheaper session model
 // would miss — using a less capable evaluator defeats the point of the feature.
-const DEFAULT_MODEL = 'claude-opus-4-5'
+// Kept in sync with the canonical Opus id used elsewhere in the server
+// (see packages/server/src/models.js — `claude-opus-4-7`).
+const DEFAULT_MODEL = 'claude-opus-4-7'
 
 // Cap the response so a runaway evaluator can't burn the whole context window
 // on its 'reasoning' field.

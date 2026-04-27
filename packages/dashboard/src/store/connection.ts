@@ -100,6 +100,7 @@ import {
   CLIENT_PROTOCOL_VERSION,
   registerEvaluatorRequest,
   cancelEvaluatorRequest,
+  rejectAllEvaluatorRequests,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
@@ -656,6 +657,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
+      // #3068: any in-flight evaluator request is now a guaranteed no-op —
+      // reject them so awaiters get a fast error instead of waiting 60s for
+      // the timeout to fire.
+      rejectAllEvaluatorRequests('Connection closed before evaluator response arrived');
+
       const wasConnected = get().connectionPhase === 'connected';
       set({ socket: null });
 
@@ -712,6 +718,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Clear saved connection so ConnectScreen doesn't auto-reconnect
     setLastConnectedUrl(null);
     stopHeartbeat();
+    // #3068: same as the onclose handler — fail any pending evaluator
+    // requests fast instead of waiting on the 60s timeout. We do this both
+    // here (user-initiated) and in onclose (transport drop) because we null
+    // out socket.onclose below to suppress auto-reconnect.
+    rejectAllEvaluatorRequests('Disconnected before evaluator response arrived');
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -1009,7 +1020,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // evaluator's result when the server replies, or rejects on disconnect /
   // 60s timeout. The 60s ceiling is generous: an opus + thinking call plus
   // network typically finishes in 5-10s, but we don't want a hung request to
-  // leak a resolver into the pending Map indefinitely.
+  // leak an entry into the pending Map indefinitely.
   evaluateDraft: (draft: string): Promise<EvaluatorResultPayload> => {
     const { socket, activeSessionId } = get();
     const requestId = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1025,10 +1036,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         reject(new Error('Evaluator request timed out after 60s'));
       }, 60_000);
 
-      registerEvaluatorRequest(requestId, (result) => {
-        window.clearTimeout(timeoutId);
-        resolve(result);
-      });
+      registerEvaluatorRequest(requestId, { resolve, reject, timeoutId });
 
       const payload: Record<string, unknown> = { type: 'evaluate_draft', draft, requestId };
       if (activeSessionId) payload.sessionId = activeSessionId;

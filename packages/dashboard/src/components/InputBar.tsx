@@ -182,6 +182,9 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     setFileSelectedIndex(0)
     setPickerOpen(false)
     setSelectedIndex(0)
+    // #3068: drop any visible evaluator panel — its draft has been sent so the
+    // result no longer applies to the current input value.
+    setEvaluatorState({ kind: 'idle' })
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
