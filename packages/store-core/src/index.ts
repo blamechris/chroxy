@@ -146,6 +146,8 @@ export type {
   ServerMode,
   AuthOkPayload,
   CheckpointRestoredPayload,
+  LogLevel,
+  LogEntry,
 } from './handlers'
 
 export {
@@ -173,4 +175,7 @@ export {
   handleCheckpointCreated,
   handleCheckpointList,
   handleCheckpointRestored,
+  handleError,
+  handleSessionError,
+  handleLogEntry,
 } from './handlers'

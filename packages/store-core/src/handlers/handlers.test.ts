@@ -27,6 +27,9 @@ import {
   handleCheckpointCreated,
   handleCheckpointList,
   handleCheckpointRestored,
+  handleError,
+  handleSessionError,
+  handleLogEntry,
 } from './index'
 import type { Checkpoint, DevPreview, SessionInfo } from '../types'
 
@@ -560,6 +563,156 @@ describe('handleCheckpointCreated', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleError
+// ---------------------------------------------------------------------------
+describe('handleError', () => {
+  it('extracts code + message and builds a system ChatMessage', () => {
+    const result = handleError({ code: 'BAD_THING', message: 'Something broke' })
+    expect(result.code).toBe('BAD_THING')
+    expect(result.message).toBe('Something broke')
+    expect(result.systemMessage.type).toBe('system')
+    expect(result.systemMessage.content).toBe('Something broke')
+    expect(result.systemMessage.id).toMatch(/^system-/)
+    expect(result.systemMessage.timestamp).toBeGreaterThan(0)
+  })
+
+  it('strips ANSI escape sequences from message', () => {
+    const result = handleError({ message: '[31mred error[0m' })
+    expect(result.message).toBe('red error')
+    expect(result.systemMessage.content).toBe('red error')
+  })
+
+  it('falls back to default message when missing or non-string', () => {
+    const r1 = handleError({})
+    expect(r1.message).toBe('An unexpected server error occurred')
+    expect(r1.systemMessage.content).toBe('An unexpected server error occurred')
+
+    const r2 = handleError({ message: 42 })
+    expect(r2.message).toBe('An unexpected server error occurred')
+  })
+
+  it('falls back to default message when stripped value is empty/whitespace', () => {
+    // The app inline implementation explicitly trims and falls back when the
+    // result is empty — preserve that behaviour here.
+    const result = handleError({ message: '   ' })
+    expect(result.message).toBe('An unexpected server error occurred')
+  })
+
+  it('defaults code to "UNKNOWN" when missing or non-string', () => {
+    expect(handleError({}).code).toBe('UNKNOWN')
+    expect(handleError({ code: 42 }).code).toBe('UNKNOWN')
+  })
+
+  it('extracts requestId when string, otherwise null', () => {
+    expect(handleError({ requestId: 'req-1' }).requestId).toBe('req-1')
+    expect(handleError({}).requestId).toBeNull()
+    expect(handleError({ requestId: 42 }).requestId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionError
+// ---------------------------------------------------------------------------
+describe('handleSessionError', () => {
+  it('returns crash patch when category is "crash" and resolves session', () => {
+    const result = handleSessionError({ sessionId: 'sess-1', category: 'crash' }, 'active-1')
+    expect(result.category).toBe('crash')
+    expect(result.sessionPatch).toEqual({
+      sessionId: 'sess-1',
+      patch: { health: 'crashed' },
+    })
+    expect(result.message).toBeNull()
+    expect(result.systemMessage).toBeNull()
+  })
+
+  it('falls back to active session for crash without explicit sessionId', () => {
+    const result = handleSessionError({ category: 'crash' }, 'active-1')
+    expect(result.sessionPatch).toEqual({
+      sessionId: 'active-1',
+      patch: { health: 'crashed' },
+    })
+  })
+
+  it('builds bound-session-mismatch message when SESSION_TOKEN_MISMATCH + boundSessionName', () => {
+    const result = handleSessionError(
+      {
+        category: 'auth',
+        code: 'SESSION_TOKEN_MISMATCH',
+        boundSessionName: 'My Session',
+        message: 'Not authorized',
+      },
+      null,
+    )
+    expect(result.category).toBe('auth')
+    expect(result.code).toBe('SESSION_TOKEN_MISMATCH')
+    expect(result.boundSessionName).toBe('My Session')
+    expect(result.message).toContain('"My Session"')
+    expect(result.message).toContain('Disconnect')
+    expect(result.systemMessage).not.toBeNull()
+    expect(result.systemMessage!.type).toBe('system')
+    expect(result.sessionPatch).toBeNull()
+  })
+
+  it('uses raw msg.message for non-crash, non-bound errors', () => {
+    const result = handleSessionError(
+      { category: 'rate_limit', message: 'Slow down' },
+      null,
+    )
+    expect(result.message).toBe('Slow down')
+    expect(result.systemMessage!.content).toBe('Slow down')
+    expect(result.sessionPatch).toBeNull()
+  })
+
+  it('falls back to "Unknown error" when non-crash has no message', () => {
+    const result = handleSessionError({ category: 'rate_limit' }, null)
+    expect(result.message).toBe('Unknown error')
+    expect(result.systemMessage!.content).toBe('Unknown error')
+  })
+
+  it('falls back to "Unknown error" when message is an empty string', () => {
+    const result = handleSessionError(
+      { category: 'rate_limit', message: '' },
+      null,
+    )
+    expect(result.message).toBe('Unknown error')
+    expect(result.systemMessage!.content).toBe('Unknown error')
+  })
+
+  it('falls back to "Unknown error" when message is whitespace only', () => {
+    const result = handleSessionError(
+      { category: 'rate_limit', message: '   \t\n  ' },
+      null,
+    )
+    expect(result.message).toBe('Unknown error')
+    expect(result.systemMessage!.content).toBe('Unknown error')
+  })
+
+  it('treats SESSION_TOKEN_MISMATCH without boundSessionName as a generic error', () => {
+    // boundSessionName is required for the rewrite — without it, fall through
+    // to the generic msg.message path.
+    const result = handleSessionError(
+      { code: 'SESSION_TOKEN_MISMATCH', message: 'Not authorized' },
+      null,
+    )
+    expect(result.message).toBe('Not authorized')
+    expect(result.boundSessionName).toBeNull()
+  })
+
+  it('treats empty boundSessionName as missing (matches inline guard)', () => {
+    const result = handleSessionError(
+      {
+        code: 'SESSION_TOKEN_MISMATCH',
+        boundSessionName: '',
+        message: 'Not authorized',
+      },
+      null,
+    )
+    expect(result.message).toBe('Not authorized')
+    expect(result.boundSessionName).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleDevPreviewStopped
 // ---------------------------------------------------------------------------
 describe('handleDevPreviewStopped', () => {
@@ -848,5 +1001,63 @@ describe('handleCheckpointRestored', () => {
 
   it('returns null when newSessionId is whitespace only', () => {
     expect(handleCheckpointRestored({ newSessionId: '   ' })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleLogEntry
+// ---------------------------------------------------------------------------
+describe('handleLogEntry', () => {
+  it('parses all fields and strips ANSI from message', () => {
+    const result = handleLogEntry({
+      component: 'ws',
+      level: 'info',
+      message: '[33mhello[0m world',
+      timestamp: 12345,
+      sessionId: 'sess-1',
+    })
+    expect(result.entry.component).toBe('ws')
+    expect(result.entry.level).toBe('info')
+    expect(result.entry.message).toBe('hello world')
+    expect(result.entry.timestamp).toBe(12345)
+    expect(result.entry.sessionId).toBe('sess-1')
+    expect(result.entry.id).toMatch(/^log-/)
+  })
+
+  it('defaults missing component to "unknown"', () => {
+    const result = handleLogEntry({ level: 'info', message: 'x' })
+    expect(result.entry.component).toBe('unknown')
+  })
+
+  it('defaults invalid level to "info"', () => {
+    expect(handleLogEntry({ level: 'bogus' }).entry.level).toBe('info')
+    expect(handleLogEntry({}).entry.level).toBe('info')
+    expect(handleLogEntry({ level: 42 }).entry.level).toBe('info')
+  })
+
+  it('accepts each valid level', () => {
+    expect(handleLogEntry({ level: 'debug' }).entry.level).toBe('debug')
+    expect(handleLogEntry({ level: 'info' }).entry.level).toBe('info')
+    expect(handleLogEntry({ level: 'warn' }).entry.level).toBe('warn')
+    expect(handleLogEntry({ level: 'error' }).entry.level).toBe('error')
+  })
+
+  it('defaults missing message to empty string', () => {
+    const result = handleLogEntry({ component: 'ws' })
+    expect(result.entry.message).toBe('')
+  })
+
+  it('defaults non-number timestamp to a recent value', () => {
+    const before = Date.now()
+    const result = handleLogEntry({})
+    const after = Date.now()
+    expect(result.entry.timestamp).toBeGreaterThanOrEqual(before)
+    expect(result.entry.timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('omits sessionId when not a string', () => {
+    const result = handleLogEntry({ component: 'ws', sessionId: 42 })
+    expect(result.entry.sessionId).toBeUndefined()
+    expect('sessionId' in result.entry).toBe(false)
   })
 })

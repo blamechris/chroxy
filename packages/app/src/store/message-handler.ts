@@ -51,6 +51,8 @@ import {
   handleCheckpointCreated as sharedCheckpointCreated,
   handleCheckpointList as sharedCheckpointList,
   handleCheckpointRestored as sharedCheckpointRestored,
+  handleError as sharedError,
+  handleSessionError as sharedSessionError,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1138,26 +1140,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'session_error': {
-      const errorSessionId = (msg.sessionId as string) || get().activeSessionId;
-      if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
-        updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
-        pushSessionNotification(errorSessionId, 'error', 'Session crashed');
-      }
-      if (msg.category !== 'crash') {
-        // Special-case the bound-token error — the generic "Not authorized"
-        // gives the user no idea why or how to fix it (#2904). If the server
-        // included a bound session name, surface it and offer a Disconnect
-        // shortcut so the user can re-pair with an unbound token.
-        if (
-          msg.code === 'SESSION_TOKEN_MISMATCH' &&
-          typeof msg.boundSessionName === 'string' &&
-          msg.boundSessionName.length > 0
-        ) {
+      // Crash branch: flip session health + notify; non-crash branch: special-
+      // case SESSION_TOKEN_MISMATCH with the platform-native disconnect flow,
+      // otherwise show a generic Alert. Parser is shared via store-core; the
+      // shared `message` field uses the dashboard's wording, but the app's
+      // disconnect modal phrases the bound-session hint slightly differently
+      // (mentions "from the desktop") — keep that wording at the call site.
+      const parsed = sharedSessionError(msg, get().activeSessionId);
+      if (parsed.category === 'crash' && parsed.sessionPatch) {
+        const crashedId = parsed.sessionPatch.sessionId;
+        if (crashedId && get().sessionStates[crashedId]) {
+          updateSession(crashedId, () => ({ health: 'crashed' as const }));
+          pushSessionNotification(crashedId, 'error', 'Session crashed');
+        }
+      } else if (parsed.category !== 'crash') {
+        if (parsed.code === 'SESSION_TOKEN_MISMATCH' && parsed.boundSessionName) {
           showBoundSessionMismatchAlert(
-            `This device is paired to session "${msg.boundSessionName}" and can only talk to that session. To create or open other sessions, disconnect and scan a fresh QR code from the desktop.`,
+            `This device is paired to session "${parsed.boundSessionName}" and can only talk to that session. To create or open other sessions, disconnect and scan a fresh QR code from the desktop.`,
           );
         } else {
-          Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
+          Alert.alert('Session Error', parsed.message ?? 'Unknown error');
         }
       }
       break;
@@ -2542,11 +2544,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface a modal alert so the user knows something failed.
-      const errCode = typeof msg.code === 'string' ? msg.code : 'UNKNOWN';
-      const errMsg = typeof msg.message === 'string'
-        ? (stripAnsi(msg.message as string).trim() || 'An unexpected server error occurred')
-        : 'An unexpected server error occurred';
-      const errRequestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const { code: errCode, message: errMsg, requestId: errRequestId } = sharedError(msg);
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
 
       // Match against an in-flight set_permission_mode request — if the
