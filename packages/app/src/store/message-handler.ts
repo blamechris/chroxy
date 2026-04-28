@@ -61,6 +61,11 @@ import {
   handleConversationsList as sharedConversationsList,
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
+  handlePermissionRequest as sharedPermissionRequest,
+  handlePermissionResolved as sharedPermissionResolved,
+  handlePermissionExpired as sharedPermissionExpired,
+  handlePermissionTimeout as sharedPermissionTimeout,
+  handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1689,9 +1694,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'permission_request': {
+      const permPayload = sharedPermissionRequest(msg);
       // Split streaming response at permission boundary (#554)
       {
-        const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+        const permTargetId = permPayload.sessionId || get().activeSessionId;
         const permSs = permTargetId ? get().sessionStates[permTargetId] : null;
         const currentStreamId = permSs ? permSs.streamingMessageId : null;
         if (currentStreamId && currentStreamId !== 'pending') {
@@ -1713,12 +1719,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           }
         }
       }
-      const permRequestId = msg.requestId as string;
+      const permRequestId = permPayload.requestId as string;
       // #3072: only expose "Allow for Session" when the active session's
       // provider supports session-scoped permission rules. Without this gate,
       // tapping the option on codex/gemini/claude-cli sessions hits a server
       // "not supported" error.
-      const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+      const permTargetId = permPayload.sessionId || get().activeSessionId;
       const permSession = permTargetId
         ? get().sessions.find((s) => s.sessionId === permTargetId)
         : null;
@@ -1731,7 +1737,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         { label: 'Deny', value: 'deny' },
         ...(providerSupportsRules ? [{ label: 'Allow for Session', value: 'allowSession' }] : []),
       ];
-      const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
+      const newExpiresAt = permPayload.remainingMs !== null ? Date.now() + permPayload.remainingMs : undefined;
 
       const targetMessages = getSessionMessages(permTargetId);
       const existingIdx = targetMessages.findIndex(
@@ -1756,10 +1762,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const permMsg: ChatMessage = {
           id: nextMessageId('perm'),
           type: 'prompt',
-          content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
-          tool: msg.tool as string | undefined,
+          content: permPayload.tool ? `${permPayload.tool}: ${permPayload.description}` : (permPayload.description || 'Permission required'),
+          tool: permPayload.tool ?? undefined,
           requestId: permRequestId,
-          toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
+          toolInput: permPayload.input ?? undefined,
           options: newOptions,
           expiresAt: newExpiresAt,
           timestamp: Date.now(),
@@ -1774,11 +1780,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
       if (permTargetId) {
-        const toolName = typeof msg.tool === 'string' ? msg.tool : undefined;
+        const toolName = permPayload.tool ?? undefined;
         const toolDesc = toolName ?? 'Permission needed';
-        const toolDescription = typeof msg.description === 'string' ? msg.description : undefined;
-        const inputPreview = msg.input && typeof msg.input === 'object'
-          ? truncateInput(msg.input as Record<string, unknown>)
+        const toolDescription = permPayload.description ?? undefined;
+        const inputPreview = permPayload.input
+          ? truncateInput(permPayload.input)
           : undefined;
         pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId, {
           tool: toolName,
@@ -1793,13 +1799,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Another client resolved this permission — dismiss the prompt on this client.
       // The permission_request may have been stored in ANY session state (whichever tab
       // was active when it arrived), so search all session states for the matching requestId.
-      const resolvedRequestId = msg.requestId as string;
-      const resolvedDecision = msg.decision as string;
+      const { requestId: resolvedRequestId, decision: resolvedDecision } =
+        sharedPermissionResolved(msg);
       if (resolvedRequestId) {
         const updater = (ss: { messages: ChatMessage[] }) => ({
           messages: ss.messages.map((m) =>
             m.requestId === resolvedRequestId && m.type === 'prompt'
-              ? { ...m, answered: resolvedDecision, answeredAt: Date.now(), options: undefined }
+              ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
               : m
           ),
         });
@@ -1822,7 +1828,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'permission_expired': {
-      const expiredRequestId = msg.requestId as string;
+      const { requestId: expiredRequestId, systemMessage: expiredSystemMsg } =
+        sharedPermissionExpired(msg);
       if (expiredRequestId) {
         console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
         const expTargetId = (msg.sessionId as string) || get().activeSessionId;
@@ -1830,7 +1837,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(expTargetId, (ss) => ({
             messages: ss.messages.map((m) =>
               m.requestId === expiredRequestId && m.type === 'prompt'
-                ? { ...m, content: `${m.content}\n(Expired — this permission was already handled or timed out)`, options: undefined }
+                ? { ...m, content: `${m.content}\n${expiredSystemMsg.content}`, options: undefined }
                 : m
             ),
           }));
@@ -1846,8 +1853,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'permission_timeout': {
-      const timeoutRequestId = msg.requestId as string;
-      const timeoutTool = typeof msg.tool === 'string' ? msg.tool : 'permission';
+      const { requestId: timeoutRequestId, systemMessage: timeoutSystemMsg } =
+        sharedPermissionTimeout(msg);
       // Mark matching prompt as timed-out — scan all session states (the prompt may have
       // been stored in any session, mirroring the permission_resolved all-sessions search)
       if (timeoutRequestId) {
@@ -1877,10 +1884,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           .forEach((n) => notifState.dismissSessionNotification(n.id));
       }
       // Show a dismissible server error banner so users know the permission was auto-denied
+      // (system message text comes from the shared handler so wording stays in sync)
       const timeoutError: ServerError = {
         id: nextMessageId('permission_timeout'),
         category: 'permission',
-        message: `Permission for "${timeoutTool}" was auto-denied (timed out)`,
+        message: timeoutSystemMsg.content,
         recoverable: true,
         timestamp: Date.now(),
       };
@@ -1892,12 +1900,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'permission_rules_updated': {
-      const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
-      const rules = Array.isArray(msg.rules)
-        ? (msg.rules as PermissionRule[])
-        : [];
+      const { sessionId: rulesExplicitSessionId, rules } =
+        sharedPermissionRulesUpdated(msg);
+      const rulesSessionId = rulesExplicitSessionId || get().activeSessionId;
       if (rulesSessionId && get().sessionStates[rulesSessionId]) {
-        updateSession(rulesSessionId, () => ({ sessionRules: rules }));
+        updateSession(rulesSessionId, () => ({ sessionRules: rules as PermissionRule[] }));
       }
       break;
     }
