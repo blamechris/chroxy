@@ -987,8 +987,8 @@ export interface SessionTimeoutPayload {
  * than the app, and the persistence adapter differs per client).
  */
 export function handleSessionTimeout(msg: Record<string, unknown>): SessionTimeoutPayload {
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
-  const name = typeof msg.name === 'string' ? msg.name : 'Unknown'
+  const sessionId = parseStringField(msg, 'sessionId')
+  const name = parseStringField(msg, 'name') ?? 'Unknown'
   return {
     sessionId,
     name,
@@ -1083,11 +1083,10 @@ export interface SessionWarningPayload {
  * the parts they need; nothing is forced on either side.
  */
 export function handleSessionWarning(msg: Record<string, unknown>): SessionWarningPayload {
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
-  const sessionName = typeof msg.name === 'string' ? msg.name : 'Session'
+  const sessionId = parseStringField(msg, 'sessionId')
+  const sessionName = parseStringField(msg, 'name') ?? 'Session'
   const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : 120000
-  const message =
-    typeof msg.message === 'string' ? msg.message : 'Session will timeout soon'
+  const message = parseStringField(msg, 'message') ?? 'Session will timeout soon'
   return {
     sessionId,
     sessionName,
@@ -1108,9 +1107,9 @@ export function handleSessionWarning(msg: Record<string, unknown>): SessionWarni
 
 /** Parsed payload from a `session_switched` message. */
 export interface SessionSwitchedPayload {
-  /** The new active session id (renamed from `sessionId` for clarity). */
+  /** The new active session id (trimmed; renamed from `sessionId` for clarity). */
   newSessionId: string
-  /** Optional resume conversation id from the server, or null. */
+  /** Optional resume conversation id from the server (trimmed), or null. */
   conversationId: string | null
 }
 
@@ -1118,10 +1117,11 @@ export interface SessionSwitchedPayload {
  * Extract the new active session id (and optional conversationId) from a
  * `session_switched` message.
  *
- * Returns null when `msg.sessionId` is missing, non-string, or empty — matches
- * the prior implicit behaviour (the cast `msg.sessionId as string` would
- * propagate a non-string into `set({activeSessionId: ...})` which the rest of
- * the store can't recover from).
+ * Returns null when `msg.sessionId` is missing, non-string, empty, or
+ * whitespace-only — matches the prior implicit behaviour (the cast
+ * `msg.sessionId as string` would propagate a non-string into
+ * `set({activeSessionId: ...})` which the rest of the store can't recover
+ * from) and tightens validation against malformed payloads.
  *
  * Both clients consume this handler today. Side effects (replay-dedup gating
  * via `_ctx.pendingSwitchSessionId` on the app, flat-field sync on the
@@ -1131,10 +1131,10 @@ export interface SessionSwitchedPayload {
 export function handleSessionSwitched(
   msg: Record<string, unknown>,
 ): SessionSwitchedPayload | null {
-  const raw = msg.sessionId
-  if (typeof raw !== 'string' || raw.length === 0) return null
-  const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null
-  return { newSessionId: raw, conversationId }
+  const newSessionId = parseStringField(msg, 'sessionId')
+  if (newSessionId === null) return null
+  const conversationId = parseStringField(msg, 'conversationId')
+  return { newSessionId, conversationId }
 }
 
 /** Parsed payload for a `client_focus_changed` message. */

@@ -1695,6 +1695,18 @@ describe('handleSessionTimeout', () => {
     expect(handleSessionTimeout({}).sessionId).toBeNull()
     expect(handleSessionTimeout({ sessionId: 42 }).sessionId).toBeNull()
   })
+
+  it('trims whitespace from sessionId and name', () => {
+    const result = handleSessionTimeout({ sessionId: '  sess-1  ', name: '  Editor  ' })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.name).toBe('Editor')
+  })
+
+  it('returns null sessionId and "Unknown" name when whitespace-only', () => {
+    const result = handleSessionTimeout({ sessionId: '   ', name: '   ' })
+    expect(result.sessionId).toBeNull()
+    expect(result.name).toBe('Unknown')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1940,6 +1952,24 @@ describe('handleSessionWarning', () => {
     expect(result.sessionName).toBe('Session')
     expect(result.remainingMs).toBe(120000)
   })
+
+  it('trims whitespace from sessionId/name/message', () => {
+    const result = handleSessionWarning({
+      sessionId: '  sess-1  ',
+      name: '  Editor  ',
+      message: '  ending soon  ',
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.sessionName).toBe('Editor')
+    expect(result.message).toBe('ending soon')
+  })
+
+  it('falls back to defaults when fields are whitespace-only', () => {
+    const result = handleSessionWarning({ sessionId: '   ', name: '   ', message: '   ' })
+    expect(result.sessionId).toBeNull()
+    expect(result.sessionName).toBe('Session')
+    expect(result.message).toBe('Session will timeout soon')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1969,6 +1999,16 @@ describe('handleSessionSwitched', () => {
 
   it('returns null when sessionId is empty', () => {
     expect(handleSessionSwitched({ sessionId: '' })).toBeNull()
+  })
+
+  it('returns null when sessionId is whitespace only', () => {
+    expect(handleSessionSwitched({ sessionId: '   ' })).toBeNull()
+  })
+
+  it('trims whitespace from sessionId and conversationId', () => {
+    expect(
+      handleSessionSwitched({ sessionId: '  sess-1  ', conversationId: '  conv-1  ' }),
+    ).toEqual({ newSessionId: 'sess-1', conversationId: 'conv-1' })
   })
 
   it('returns null conversationId when non-string', () => {
