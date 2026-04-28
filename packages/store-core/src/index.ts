@@ -167,6 +167,11 @@ export type {
   FileListingPayload,
   FileContentPayload,
   WriteFileResultPayload,
+  DiffResultPayload,
+  GitStatusResultPayload,
+  GitBranchesResultPayload,
+  GitStageResultPayload,
+  GitCommitResultPayload,
 } from './handlers'
 
 export {
@@ -224,4 +229,9 @@ export {
   handleAgentList,
   handleProviderList,
   handleFileList,
+  handleDiffResult,
+  handleGitStatusResult,
+  handleGitBranchesResult,
+  handleGitStageResult,
+  handleGitCommitResult,
 } from './handlers'

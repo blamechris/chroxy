@@ -1723,3 +1723,156 @@ export function handleFileList(msg: Record<string, unknown>): { files: unknown[]
   const files: unknown[] = Array.isArray(msg.files) ? (msg.files as unknown[]) : []
   return { files }
 }
+
+// ---------------------------------------------------------------------------
+// Git operation results (diff_result / git_status_result / git_branches_result /
+// git_stage_result / git_unstage_result / git_commit_result)
+//
+// All five share the callback-style shape: parse the wire payload into a
+// normalized object, then the call site invokes the corresponding registered
+// callback. The dashboard wires only `diff_result` and `git_status_result`
+// today; the app wires all five (with stage/unstage sharing one handler since
+// their payloads are identical — only `error`).
+//
+// Element types (`DiffFile`, `GitFileStatus`, `GitBranch`) live downstream in
+// each consumer — the shared handlers keep entries as `unknown[]` to avoid
+// pulling concrete types up into store-core. Per-element shape is NOT
+// validated here; matches the inline `as DiffFile[]` casts both clients used
+// prior to this migration. Tightening would be a behaviour change and is out
+// of scope for the #2661 mechanical migration.
+// ---------------------------------------------------------------------------
+
+/** Parsed payload from a `diff_result` message. */
+export interface DiffResultPayload {
+  /** File entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
+  files: unknown[]
+  /** Error string from the server, or null when missing/non-string. */
+  error: string | null
+}
+
+/**
+ * Parse a `diff_result` message.
+ *
+ * Mirrors the inline `Array.isArray(msg.files) ? msg.files as DiffFile[] : []`
+ * + `typeof msg.error === 'string' ? msg.error : null` guards in both clients.
+ * The callback dispatch (`get()._diffCallback` / `getCallback('diff')`) stays
+ * platform-specific.
+ */
+export function handleDiffResult(msg: Record<string, unknown>): DiffResultPayload {
+  return {
+    files: Array.isArray(msg.files) ? (msg.files as unknown[]) : [],
+    error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}
+
+/** Parsed payload from a `git_status_result` message. */
+export interface GitStatusResultPayload {
+  /** Current branch name, or null when missing/non-string. */
+  branch: string | null
+  /** Staged file entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
+  staged: unknown[]
+  /** Unstaged file entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
+  unstaged: unknown[]
+  /** Untracked file paths (validated as array); elements are left as `unknown[]` and cast/handled by consumers. */
+  untracked: unknown[]
+  /** Error string from the server, or null when missing/non-string. */
+  error: string | null
+}
+
+/**
+ * Parse a `git_status_result` message.
+ *
+ * Behaviour-preserving: `branch` and `error` use bare `typeof === 'string'`
+ * (no trim, empty strings preserved verbatim) to match the inline guards in
+ * both clients prior to this migration. Tightening to `parseStringField`
+ * would be a behaviour change.
+ */
+export function handleGitStatusResult(
+  msg: Record<string, unknown>,
+): GitStatusResultPayload {
+  return {
+    branch: typeof msg.branch === 'string' ? msg.branch : null,
+    staged: Array.isArray(msg.staged) ? (msg.staged as unknown[]) : [],
+    unstaged: Array.isArray(msg.unstaged) ? (msg.unstaged as unknown[]) : [],
+    untracked: Array.isArray(msg.untracked) ? (msg.untracked as unknown[]) : [],
+    error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}
+
+/** Parsed payload from a `git_branches_result` message (app-only today). */
+export interface GitBranchesResultPayload {
+  /** Branch entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
+  branches: unknown[]
+  /** Currently checked-out branch name, or null when missing/non-string. */
+  currentBranch: string | null
+  /** Error string from the server, or null when missing/non-string. */
+  error: string | null
+}
+
+/**
+ * Parse a `git_branches_result` message.
+ *
+ * App-only handler today (the dashboard does not subscribe to git branches).
+ * Extracted here so the dashboard can adopt the same parser later.
+ */
+export function handleGitBranchesResult(
+  msg: Record<string, unknown>,
+): GitBranchesResultPayload {
+  return {
+    branches: Array.isArray(msg.branches) ? (msg.branches as unknown[]) : [],
+    currentBranch: typeof msg.currentBranch === 'string' ? msg.currentBranch : null,
+    error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}
+
+/**
+ * Parsed payload from a `git_stage_result` or `git_unstage_result` message.
+ *
+ * Both messages share the same shape: only an optional `error` string. The
+ * call site dispatches both cases to the same callback (`getCallback('gitStage')`).
+ */
+export interface GitStageResultPayload {
+  /** Error string from the server, or null when missing/non-string. */
+  error: string | null
+}
+
+/**
+ * Parse a `git_stage_result` or `git_unstage_result` message.
+ *
+ * App-only today; both message types share this handler since the payloads
+ * are identical.
+ */
+export function handleGitStageResult(
+  msg: Record<string, unknown>,
+): GitStageResultPayload {
+  return {
+    error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}
+
+/** Parsed payload from a `git_commit_result` message (app-only today). */
+export interface GitCommitResultPayload {
+  /** Newly created commit hash, or null when missing/non-string. */
+  hash: string | null
+  /** Commit message echoed by the server, or null when missing/non-string. */
+  message: string | null
+  /** Error string from the server, or null when missing/non-string. */
+  error: string | null
+}
+
+/**
+ * Parse a `git_commit_result` message.
+ *
+ * App-only handler today. Behaviour-preserving: bare `typeof === 'string'`
+ * checks (no trim, empty strings preserved verbatim) matching the inline
+ * guards in the app prior to this migration.
+ */
+export function handleGitCommitResult(
+  msg: Record<string, unknown>,
+): GitCommitResultPayload {
+  return {
+    hash: typeof msg.hash === 'string' ? msg.hash : null,
+    message: typeof msg.message === 'string' ? msg.message : null,
+    error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}

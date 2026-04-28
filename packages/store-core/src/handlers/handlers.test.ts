@@ -57,6 +57,11 @@ import {
   handleAgentList,
   handleProviderList,
   handleFileList,
+  handleDiffResult,
+  handleGitStatusResult,
+  handleGitBranchesResult,
+  handleGitStageResult,
+  handleGitCommitResult,
 } from './index'
 import type {
   Checkpoint,
@@ -2485,5 +2490,195 @@ describe('handleFileList', () => {
   it('ignores session id on message (no guard)', () => {
     const files = [{ path: 'a.ts' }]
     expect(handleFileList({ sessionId: 'whatever', files })).toEqual({ files })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleDiffResult
+// ---------------------------------------------------------------------------
+describe('handleDiffResult', () => {
+  it('extracts files array and error verbatim', () => {
+    const files = [{ path: 'a.txt', additions: 1, deletions: 0 }]
+    const result = handleDiffResult({ files, error: null })
+    expect(result.files).toBe(files)
+    expect(result.error).toBeNull()
+  })
+
+  it('defaults to [] for missing/non-array files', () => {
+    expect(handleDiffResult({}).files).toEqual([])
+    expect(handleDiffResult({ files: 'oops' }).files).toEqual([])
+    expect(handleDiffResult({ files: null }).files).toEqual([])
+  })
+
+  it('extracts error string when present', () => {
+    expect(handleDiffResult({ error: 'no diff' }).error).toBe('no diff')
+  })
+
+  it('preserves empty-string error verbatim', () => {
+    expect(handleDiffResult({ error: '' }).error).toBe('')
+  })
+
+  it('coerces non-string error to null', () => {
+    expect(handleDiffResult({ error: 0 }).error).toBeNull()
+    expect(handleDiffResult({ error: false }).error).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleGitStatusResult
+// ---------------------------------------------------------------------------
+describe('handleGitStatusResult', () => {
+  it('extracts all fields from a valid payload', () => {
+    expect(
+      handleGitStatusResult({
+        branch: 'main',
+        staged: [{ path: 'a' }],
+        unstaged: [{ path: 'b' }],
+        untracked: ['c'],
+        error: null,
+      }),
+    ).toEqual({
+      branch: 'main',
+      staged: [{ path: 'a' }],
+      unstaged: [{ path: 'b' }],
+      untracked: ['c'],
+      error: null,
+    })
+  })
+
+  it('defaults to nulls and empty arrays when missing', () => {
+    expect(handleGitStatusResult({})).toEqual({
+      branch: null,
+      staged: [],
+      unstaged: [],
+      untracked: [],
+      error: null,
+    })
+  })
+
+  it('coerces non-string branch/error to null', () => {
+    expect(handleGitStatusResult({ branch: 1, error: false })).toEqual({
+      branch: null,
+      staged: [],
+      unstaged: [],
+      untracked: [],
+      error: null,
+    })
+  })
+
+  it('coerces non-array list fields to []', () => {
+    expect(handleGitStatusResult({ staged: 'no', unstaged: {}, untracked: null })).toEqual({
+      branch: null,
+      staged: [],
+      unstaged: [],
+      untracked: [],
+      error: null,
+    })
+  })
+
+  it('preserves empty-string branch/error verbatim', () => {
+    expect(handleGitStatusResult({ branch: '', error: '' })).toEqual({
+      branch: '',
+      staged: [],
+      unstaged: [],
+      untracked: [],
+      error: '',
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleGitBranchesResult
+// ---------------------------------------------------------------------------
+describe('handleGitBranchesResult', () => {
+  it('extracts all fields from a valid payload', () => {
+    const branches = [{ name: 'main' }, { name: 'feat/x' }]
+    expect(
+      handleGitBranchesResult({ branches, currentBranch: 'main', error: null }),
+    ).toEqual({ branches, currentBranch: 'main', error: null })
+  })
+
+  it('defaults to nulls and empty array when missing', () => {
+    expect(handleGitBranchesResult({})).toEqual({
+      branches: [],
+      currentBranch: null,
+      error: null,
+    })
+  })
+
+  it('coerces non-string currentBranch/error to null', () => {
+    expect(handleGitBranchesResult({ currentBranch: 1, error: false })).toEqual({
+      branches: [],
+      currentBranch: null,
+      error: null,
+    })
+  })
+
+  it('preserves empty-string currentBranch/error verbatim', () => {
+    expect(handleGitBranchesResult({ currentBranch: '', error: '' })).toEqual({
+      branches: [],
+      currentBranch: '',
+      error: '',
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleGitStageResult (also handles git_unstage_result)
+// ---------------------------------------------------------------------------
+describe('handleGitStageResult', () => {
+  it('extracts error when present', () => {
+    expect(handleGitStageResult({ error: 'EACCES' })).toEqual({ error: 'EACCES' })
+  })
+
+  it('defaults to null when missing', () => {
+    expect(handleGitStageResult({})).toEqual({ error: null })
+  })
+
+  it('coerces non-string error to null', () => {
+    expect(handleGitStageResult({ error: false })).toEqual({ error: null })
+  })
+
+  it('preserves empty-string error verbatim', () => {
+    expect(handleGitStageResult({ error: '' })).toEqual({ error: '' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleGitCommitResult
+// ---------------------------------------------------------------------------
+describe('handleGitCommitResult', () => {
+  it('extracts all fields from a valid payload', () => {
+    expect(
+      handleGitCommitResult({ hash: 'abc1234', message: 'fix: x', error: null }),
+    ).toEqual({ hash: 'abc1234', message: 'fix: x', error: null })
+  })
+
+  it('defaults to nulls when missing', () => {
+    expect(handleGitCommitResult({})).toEqual({
+      hash: null,
+      message: null,
+      error: null,
+    })
+  })
+
+  it('coerces non-string fields to null', () => {
+    expect(handleGitCommitResult({ hash: 1, message: false, error: 0 })).toEqual({
+      hash: null,
+      message: null,
+      error: null,
+    })
+  })
+
+  it('preserves empty-string fields verbatim', () => {
+    expect(handleGitCommitResult({ hash: '', message: '', error: '' })).toEqual({
+      hash: '',
+      message: '',
+      error: '',
+    })
+  })
+
+  it('extracts error when present', () => {
+    expect(handleGitCommitResult({ error: 'merge conflict' }).error).toBe('merge conflict')
   })
 })

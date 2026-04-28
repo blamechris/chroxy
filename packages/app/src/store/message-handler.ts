@@ -79,6 +79,11 @@ import {
   handleSlashCommands as sharedSlashCommands,
   handleAgentList as sharedAgentList,
   handleProviderList as sharedProviderList,
+  handleDiffResult as sharedDiffResult,
+  handleGitStatusResult as sharedGitStatusResult,
+  handleGitBranchesResult as sharedGitBranchesResult,
+  handleGitStageResult as sharedGitStageResult,
+  handleGitCommitResult as sharedGitCommitResult,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -2111,9 +2116,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'diff_result': {
       const diffCb = getCallback('diff');
       if (diffCb) {
+        const payload = sharedDiffResult(msg);
         diffCb({
-          files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
+          files: payload.files as DiffFile[],
+          error: payload.error,
         });
       }
       break;
@@ -2122,12 +2128,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'git_status_result': {
       const cb = getCallback('gitStatus');
       if (cb) {
+        const payload = sharedGitStatusResult(msg);
         cb({
-          branch: typeof msg.branch === 'string' ? msg.branch : null,
-          staged: Array.isArray(msg.staged) ? msg.staged as GitFileStatus[] : [],
-          unstaged: Array.isArray(msg.unstaged) ? msg.unstaged as GitFileStatus[] : [],
-          untracked: Array.isArray(msg.untracked) ? msg.untracked as string[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
+          branch: payload.branch,
+          staged: payload.staged as GitFileStatus[],
+          unstaged: payload.unstaged as GitFileStatus[],
+          untracked: payload.untracked as string[],
+          error: payload.error,
         });
       }
       break;
@@ -2136,10 +2143,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'git_branches_result': {
       const cb = getCallback('gitBranches');
       if (cb) {
+        const payload = sharedGitBranchesResult(msg);
         cb({
-          branches: Array.isArray(msg.branches) ? msg.branches as GitBranch[] : [],
-          currentBranch: typeof msg.currentBranch === 'string' ? msg.currentBranch : null,
-          error: typeof msg.error === 'string' ? msg.error : null,
+          branches: payload.branches as GitBranch[],
+          currentBranch: payload.currentBranch,
+          error: payload.error,
         });
       }
       break;
@@ -2149,7 +2157,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'git_unstage_result': {
       const cb = getCallback('gitStage');
       if (cb) {
-        cb({ error: typeof msg.error === 'string' ? msg.error : null });
+        cb(sharedGitStageResult(msg));
       }
       break;
     }
@@ -2157,11 +2165,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'git_commit_result': {
       const cb = getCallback('gitCommit');
       if (cb) {
-        cb({
-          hash: typeof msg.hash === 'string' ? msg.hash : null,
-          message: typeof msg.message === 'string' ? msg.message : null,
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        cb(sharedGitCommitResult(msg));
       }
       break;
     }
