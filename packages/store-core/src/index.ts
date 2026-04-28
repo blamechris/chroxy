@@ -184,6 +184,8 @@ export type {
   WebFeatureStatusPayload,
   SearchResultsPayload,
   UserQuestionPayload,
+  UserInputPayload,
+  MessagePayload,
 } from './handlers'
 
 export {
@@ -262,4 +264,6 @@ export {
   handleWebFeatureStatus,
   handleSearchResults,
   handleUserQuestion,
+  handleUserInput,
+  handleMessage,
 } from './handlers'

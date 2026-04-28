@@ -22,6 +22,8 @@ import type {
   WebTask,
 } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
+import { parseUserInputMessage } from '../user-input-handler'
+import { isReplayDuplicate } from '../replay-dedup'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2625,4 +2627,173 @@ export function handleUserQuestion(
   const sessionId = msgSessionId ?? activeSessionId
   const questionText = questionContent.slice(0, 60)
   return { sessionId, chatMessage, questionText }
+}
+
+// ---------------------------------------------------------------------------
+// user_input
+//
+// Server broadcasts `user_input` to all OTHER clients when someone sends a
+// message. Both the app and dashboard render it identically; the dashboard
+// additionally writes the prompt to the terminal buffer (handled at the call
+// site via the returned `content` field).
+// ---------------------------------------------------------------------------
+
+export interface UserInputPayload {
+  /** Resolved session for the user_input. */
+  sessionId: string
+  /**
+   * Pre-built `user_input`-typed ChatMessage. Adopts the server's stable
+   * `messageId` when present so a later replay of the same entry dedups by
+   * id against this live-echo copy (#2902).
+   */
+  chatMessage: ChatMessage
+  /**
+   * Original user prompt content. The dashboard uses this to write the
+   * terminal buffer (`appendTerminalData`). The app ignores it.
+   */
+  content: string
+}
+
+/**
+ * Validate a `user_input` message and build the renderable ChatMessage.
+ *
+ * Returns `null` when `parseUserInputMessage` returns null — i.e. when the
+ * message originated from this client (already shown via optimistic UI) or
+ * when no target session can be resolved.
+ */
+export function handleUserInput(
+  msg: Record<string, unknown>,
+  myClientId: string | null,
+  activeSessionId: string | null,
+): UserInputPayload | null {
+  const parsed = parseUserInputMessage(msg, myClientId, activeSessionId)
+  if (!parsed) return null
+  const { sessionId: parsedSessionId, ...parsedMsg } = parsed
+  const stableId = typeof msg.messageId === 'string' ? msg.messageId : undefined
+  const chatMessage: ChatMessage = {
+    id: stableId || nextMessageId('user_input'),
+    ...parsedMsg,
+  }
+  return {
+    sessionId: parsedSessionId,
+    chatMessage,
+    content: parsed.content,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// message
+//
+// Generic forwarded message. The shared handler resolves the message type,
+// applies the user_input live-echo gate, applies replay-dedup, and builds
+// the ChatMessage. The caller dispatches to the session (preserving the
+// thinking-placeholder filter) and shows the platform-specific rate-limit
+// alert when `isRateLimitError` is true.
+// ---------------------------------------------------------------------------
+
+export interface MessagePayload {
+  /** Whether the caller should dispatch the chat message. */
+  shouldDispatch: boolean
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** Pre-built ChatMessage when `shouldDispatch` is true, else null. */
+  chatMessage: ChatMessage | null
+  /** True when the error message contains rate-limit / quota / overloaded text. */
+  isRateLimitError: boolean
+  /**
+   * Original error content when `isRateLimitError` is true (so caller can
+   * surface it via `Alert.alert('Usage Limit', errorContent)`). Null otherwise.
+   */
+  errorContent: string | null
+}
+
+const RATE_LIMIT_KEYWORDS = ['rate limit', 'usage limit', 'quota', 'overloaded']
+
+/**
+ * Validate, gate, and normalize a generic forwarded `message` event.
+ *
+ * - Resolves `msgType = msg.messageType || msg.type`.
+ * - Returns `shouldDispatch: false` when `msgType === 'user_input'` outside
+ *   replay (live echoes are handled by `handleUserInput`).
+ * - Returns `shouldDispatch: false` during replay when `isReplayDuplicate`
+ *   matches an entry already in `cachedMessages`.
+ * - Builds a ChatMessage with `id = stableMessageId || nextMessageId(msgType)`
+ *   for ALL message types (canonical #2902 behaviour — adopt dashboard's
+ *   semantics across both clients; this is a fix for the app).
+ * - Detects rate-limit / quota / overloaded errors via case-insensitive
+ *   substring match on the error content; returns `isRateLimitError: true`
+ *   and `errorContent` so the caller can surface a platform-specific alert.
+ */
+export function handleMessage(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  receivingHistoryReplay: boolean,
+  cachedMessages: readonly ChatMessage[],
+): MessagePayload {
+  const msgType = (msg.messageType || msg.type) as string
+  const sessionId =
+    (typeof msg.sessionId === 'string' && msg.sessionId.length > 0
+      ? (msg.sessionId as string)
+      : null) ?? activeSessionId
+
+  const empty: MessagePayload = {
+    shouldDispatch: false,
+    sessionId,
+    chatMessage: null,
+    isRateLimitError: false,
+    errorContent: null,
+  }
+
+  // Live user_input echoes from other clients arrive as top-level
+  // `type: 'user_input'` and are handled by `handleUserInput`. Anything that
+  // reaches here with `messageType === 'user_input'` outside replay should
+  // be dropped to avoid double-rendering.
+  if (msgType === 'user_input' && !receivingHistoryReplay) return empty
+
+  const stableMessageId = typeof msg.messageId === 'string' ? msg.messageId : undefined
+
+  // Replay dedup: skip if an equivalent entry already exists in cache.
+  if (receivingHistoryReplay) {
+    if (
+      isReplayDuplicate(cachedMessages, {
+        messageType: msgType,
+        messageId: stableMessageId,
+        content: msg.content,
+        timestamp: msg.timestamp as number | undefined,
+        tool: msg.tool as string | undefined,
+        options: msg.options as ChatMessage['options'],
+      })
+    ) {
+      return empty
+    }
+  }
+
+  const chatMessage: ChatMessage = {
+    // Canonical: preserve server-stamped messageId for ALL types (#2902).
+    id: stableMessageId || nextMessageId(msgType),
+    type: msgType as ChatMessage['type'],
+    content: msg.content as string,
+    tool: msg.tool as string | undefined,
+    options: msg.options as ChatMessage['options'],
+    timestamp: msg.timestamp as number,
+  }
+
+  // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).
+  let isRateLimitError = false
+  let errorContent: string | null = null
+  if (msgType === 'error' && typeof msg.content === 'string') {
+    const lower = (msg.content as string).toLowerCase()
+    if (RATE_LIMIT_KEYWORDS.some((kw) => lower.includes(kw))) {
+      isRateLimitError = true
+      errorContent = msg.content as string
+    }
+  }
+
+  return {
+    shouldDispatch: true,
+    sessionId,
+    chatMessage,
+    isRateLimitError,
+    errorContent,
+  }
 }
