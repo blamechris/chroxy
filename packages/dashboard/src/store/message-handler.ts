@@ -66,6 +66,10 @@ import {
   handleFileList as sharedFileList,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
+  handleAgentSpawned as sharedAgentSpawned,
+  handleAgentCompleted as sharedAgentCompleted,
+  handleEnvironmentList as sharedEnvironmentList,
+  handleEnvironmentError as sharedEnvironmentError,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -88,6 +92,7 @@ import type {
   CustomAgent,
   DiffFile,
   DirectoryEntry,
+  EnvironmentInfo,
   FileEntry,
   GitStatusEntry,
   McpServer,
@@ -1802,31 +1807,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'agent_spawned': {
-      const spawnTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (spawnTargetId && get().sessionStates[spawnTargetId]) {
-        updateSession(spawnTargetId, (ss) => {
-          if (ss.activeAgents.some((a) => a.toolUseId === msg.toolUseId)) return {};
-          return {
-            activeAgents: [...ss.activeAgents, {
-              toolUseId: msg.toolUseId as string,
-              description: (msg.description as string) || 'Background task',
-              startedAt: (msg.startedAt as number) || Date.now(),
-            }],
-          };
+      const builder = sharedAgentSpawned(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.activeAgents);
+          return next === ss.activeAgents ? {} : { activeAgents: next };
         });
       }
       break;
     }
 
     case 'agent_completed': {
-      const completeTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (completeTargetId && get().sessionStates[completeTargetId]) {
-        updateSession(completeTargetId, (ss) => {
-          const filtered = ss.activeAgents.filter(
-            (a) => a.toolUseId !== msg.toolUseId
-          );
-          if (filtered.length === ss.activeAgents.length) return {};
-          return { activeAgents: filtered };
+      const builder = sharedAgentCompleted(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.activeAgents);
+          return next === ss.activeAgents ? {} : { activeAgents: next };
         });
       }
       break;
@@ -2354,8 +2350,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // -- Environment messages --
     case 'environment_list': {
-      const environments = Array.isArray(msg.environments) ? msg.environments : [];
-      set({ environments });
+      const { environments } = sharedEnvironmentList(msg);
+      set({ environments: environments as EnvironmentInfo[] });
       break;
     }
     case 'environment_created':
@@ -2364,7 +2360,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Handled implicitly via the environment_list broadcast that follows
       break;
     case 'environment_error': {
-      console.error('[ws] Environment error:', msg.error);
+      const { error } = sharedEnvironmentError(msg);
+      console.error('[ws] Environment error:', error);
       break;
     }
 

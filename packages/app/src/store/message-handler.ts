@@ -84,6 +84,8 @@ import {
   handleGitBranchesResult as sharedGitBranchesResult,
   handleGitStageResult as sharedGitStageResult,
   handleGitCommitResult as sharedGitCommitResult,
+  handleAgentSpawned as sharedAgentSpawned,
+  handleAgentCompleted as sharedAgentCompleted,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1649,31 +1651,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'agent_spawned': {
-      const spawnTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (spawnTargetId && get().sessionStates[spawnTargetId]) {
-        updateSession(spawnTargetId, (ss) => {
-          if (ss.activeAgents.some((a) => a.toolUseId === msg.toolUseId)) return {};
-          return {
-            activeAgents: [...ss.activeAgents, {
-              toolUseId: msg.toolUseId as string,
-              description: (msg.description as string) || 'Background task',
-              startedAt: (msg.startedAt as number) || Date.now(),
-            }],
-          };
+      const builder = sharedAgentSpawned(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.activeAgents);
+          return next === ss.activeAgents ? {} : { activeAgents: next };
         });
       }
       break;
     }
 
     case 'agent_completed': {
-      const completeTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (completeTargetId && get().sessionStates[completeTargetId]) {
-        updateSession(completeTargetId, (ss) => {
-          const filtered = ss.activeAgents.filter(
-            (a) => a.toolUseId !== msg.toolUseId
-          );
-          if (filtered.length === ss.activeAgents.length) return {};
-          return { activeAgents: filtered };
+      const builder = sharedAgentCompleted(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.activeAgents);
+          return next === ss.activeAgents ? {} : { activeAgents: next };
         });
       }
       break;

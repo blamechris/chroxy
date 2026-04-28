@@ -143,6 +143,7 @@ export type {
   PlanAllowedPrompt,
   ThinkingLevel,
   DevPreviewBuilder,
+  AgentInfoBuilder,
   ServerMode,
   AuthOkPayload,
   CheckpointRestoredPayload,
@@ -234,4 +235,8 @@ export {
   handleGitBranchesResult,
   handleGitStageResult,
   handleGitCommitResult,
+  handleAgentSpawned,
+  handleAgentCompleted,
+  handleEnvironmentList,
+  handleEnvironmentError,
 } from './handlers'
