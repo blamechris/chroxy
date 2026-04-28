@@ -14,7 +14,6 @@
  */
 import {
   consoleAlert, noopHaptic, noopPush, createStorageAdapter,
-  resolveStreamId,
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
@@ -36,6 +35,8 @@ import {
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
+  handleStreamStart as sharedStreamStart,
+  handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
@@ -800,43 +801,34 @@ function handleAgentBusy(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
 }
 
 function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const streamId = msg.messageId as string;
   const targetId = (msg.sessionId as string) || get().activeSessionId;
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, (ss) => {
-      const existing = ss.messages.find((m) => m.id === streamId);
-      const { resolvedId, remap } = resolveStreamId(existing, streamId);
-      if (existing && existing.type === 'response') {
-        // Reuse existing response message (reconnect replay dedup)
-        return { streamingMessageId: resolvedId };
+      const out = sharedStreamStart(msg, get().activeSessionId, ss.messages);
+      if (out.remap) {
+        _deltaIdRemaps.set(out.remap.from, out.remap.to);
       }
-      if (remap) {
-        _deltaIdRemaps.set(remap.from, remap.to);
+      if (!out.isNewMessage) {
+        // Reuse existing response message (reconnect replay dedup)
+        return { streamingMessageId: out.streamingMessageId };
       }
       return {
-        streamingMessageId: resolvedId,
-        messages: [
-          ...filterThinking(ss.messages),
-          { id: resolvedId, type: 'response' as const, content: '', timestamp: Date.now() },
-        ],
+        streamingMessageId: out.streamingMessageId,
+        messages: [...filterThinking(ss.messages), out.newMessage!],
       };
     });
   } else {
     set((state: ConnectionState) => {
-      const existing = state.messages.find((m) => m.id === streamId);
-      const { resolvedId, remap } = resolveStreamId(existing, streamId);
-      if (existing && existing.type === 'response') {
-        return { streamingMessageId: resolvedId };
+      const out = sharedStreamStart(msg, get().activeSessionId, state.messages);
+      if (out.remap) {
+        _deltaIdRemaps.set(out.remap.from, out.remap.to);
       }
-      if (remap) {
-        _deltaIdRemaps.set(remap.from, remap.to);
+      if (!out.isNewMessage) {
+        return { streamingMessageId: out.streamingMessageId };
       }
       return {
-        streamingMessageId: resolvedId,
-        messages: [
-          ...filterThinking(state.messages),
-          { id: resolvedId, type: 'response' as const, content: '', timestamp: Date.now() },
-        ],
+        streamingMessageId: out.streamingMessageId,
+        messages: [...filterThinking(state.messages), out.newMessage!],
       };
     });
   }
@@ -897,10 +889,11 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   flushPendingDeltas();
   // Add newline separator after response ends for Output view readability
   get().appendTerminalData('\r\n');
+  const out = sharedStreamEnd(msg, get().activeSessionId);
   // Clean up permission boundary split tracking
-  _postPermissionSplits.delete(msg.messageId as string);
-  _deltaIdRemaps.delete(msg.messageId as string);
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  _postPermissionSplits.delete(out.messageId);
+  _deltaIdRemaps.delete(out.messageId);
+  const targetId = out.sessionId;
   if (targetId && get().sessionStates[targetId]) {
     // Force a new messages array reference so selectors detect the change,
     // even when flushPendingDeltas() was a no-op (timer already flushed).

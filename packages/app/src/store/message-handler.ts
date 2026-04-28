@@ -24,7 +24,6 @@ import {
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import {
-  resolveStreamId,
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
@@ -46,6 +45,8 @@ import {
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
+  handleStreamStart as sharedStreamStart,
+  handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
@@ -1297,25 +1298,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'stream_start': {
-      const streamId = msg.messageId as string;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, (ss) => {
-          const existing = ss.messages.find((m) => m.id === streamId);
-          const { resolvedId, remap } = resolveStreamId(existing, streamId);
-          if (existing && existing.type === 'response') {
-            // Reuse existing response message (reconnect replay dedup)
-            return { streamingMessageId: resolvedId };
+          const out = sharedStreamStart(msg, get().activeSessionId, ss.messages);
+          if (out.remap) {
+            _ctx.deltaIdRemaps.set(out.remap.from, out.remap.to);
           }
-          if (remap) {
-            _ctx.deltaIdRemaps.set(remap.from, remap.to);
+          if (!out.isNewMessage) {
+            // Reuse existing response message (reconnect replay dedup)
+            return { streamingMessageId: out.streamingMessageId };
           }
           return {
-            streamingMessageId: resolvedId,
-            messages: [
-              ...filterThinking(ss.messages),
-              { id: resolvedId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
+            streamingMessageId: out.streamingMessageId,
+            messages: [...filterThinking(ss.messages), out.newMessage!],
           };
         });
       }
@@ -1393,11 +1389,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         clearTimeout(_ctx.deltaFlushTimer);
       }
       flushPendingDeltas();
-      // Clean up permission boundary split tracking
-      _ctx.postPermissionSplits.delete(msg.messageId as string);
-      _ctx.deltaIdRemaps.delete(msg.messageId as string);
       {
-        const targetId = (msg.sessionId as string) || get().activeSessionId;
+        const out = sharedStreamEnd(msg, get().activeSessionId);
+        // Clean up permission boundary split tracking
+        _ctx.postPermissionSplits.delete(out.messageId);
+        _ctx.deltaIdRemaps.delete(out.messageId);
+        const targetId = out.sessionId;
         if (targetId && get().sessionStates[targetId]) {
           // Force a new messages array reference so selectors detect the change,
           // even when flushPendingDeltas() was a no-op (timer already flushed).

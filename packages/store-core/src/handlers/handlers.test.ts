@@ -82,6 +82,8 @@ import {
   handleMessage,
   handleToolStart,
   handleToolResult,
+  handleStreamStart,
+  handleStreamEnd,
 } from './index'
 import { nextMessageId } from '../utils'
 import type {
@@ -4822,5 +4824,135 @@ describe('handleToolResult', () => {
       const updated = out!.applyTo(baseMessages)
       expect(updated[1]!.toolResultImages).toEqual(images)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleStreamStart
+// ---------------------------------------------------------------------------
+describe('handleStreamStart', () => {
+  it('reuses existing response message (no new message, no remap)', () => {
+    const existing: ChatMessage[] = [
+      { id: 'msg-1', type: 'response', content: 'partial', timestamp: 1 },
+    ]
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 'sess-1' },
+      'sess-active',
+      existing,
+    )
+    expect(out.sessionId).toBe('sess-1')
+    expect(out.streamingMessageId).toBe('msg-1')
+    expect(out.isNewMessage).toBe(false)
+    expect(out.newMessage).toBeNull()
+    expect(out.remap).toBeNull()
+  })
+
+  it('creates a new response message when no existing message matches', () => {
+    const before = Date.now()
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 'sess-1' },
+      'sess-active',
+      [],
+    )
+    const after = Date.now()
+    expect(out.sessionId).toBe('sess-1')
+    expect(out.streamingMessageId).toBe('msg-1')
+    expect(out.isNewMessage).toBe(true)
+    expect(out.remap).toBeNull()
+    expect(out.newMessage).not.toBeNull()
+    expect(out.newMessage!.id).toBe('msg-1')
+    expect(out.newMessage!.type).toBe('response')
+    expect(out.newMessage!.content).toBe('')
+    expect(out.newMessage!.timestamp).toBeGreaterThanOrEqual(before)
+    expect(out.newMessage!.timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('returns a remap when existing message of different type collides with stream id', () => {
+    const existing: ChatMessage[] = [
+      { id: 'msg-1', type: 'tool_use', content: 'Bash', timestamp: 1 },
+    ]
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 'sess-1' },
+      'sess-active',
+      existing,
+    )
+    expect(out.sessionId).toBe('sess-1')
+    expect(out.streamingMessageId).toBe('msg-1-response')
+    expect(out.isNewMessage).toBe(true)
+    expect(out.remap).toEqual({ from: 'msg-1', to: 'msg-1-response' })
+    expect(out.newMessage).not.toBeNull()
+    expect(out.newMessage!.id).toBe('msg-1-response')
+    expect(out.newMessage!.type).toBe('response')
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const out = handleStreamStart(
+      { messageId: 'msg-1' },
+      'sess-active',
+      [],
+    )
+    expect(out.sessionId).toBe('sess-active')
+  })
+
+  it('uses message sessionId when present', () => {
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 'sess-from-msg' },
+      'sess-active',
+      [],
+    )
+    expect(out.sessionId).toBe('sess-from-msg')
+  })
+
+  it('returns null sessionId when neither active nor message provides one', () => {
+    const out = handleStreamStart(
+      { messageId: 'msg-1' },
+      null,
+      [],
+    )
+    expect(out.sessionId).toBeNull()
+    expect(out.streamingMessageId).toBe('msg-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleStreamEnd
+// ---------------------------------------------------------------------------
+describe('handleStreamEnd', () => {
+  it('resolves sessionId from message when present', () => {
+    const out = handleStreamEnd(
+      { messageId: 'msg-1', sessionId: 'sess-from-msg' },
+      'sess-active',
+    )
+    expect(out.sessionId).toBe('sess-from-msg')
+    expect(out.messageId).toBe('msg-1')
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const out = handleStreamEnd(
+      { messageId: 'msg-1' },
+      'sess-active',
+    )
+    expect(out.sessionId).toBe('sess-active')
+    expect(out.messageId).toBe('msg-1')
+  })
+
+  it('returns null sessionId when neither active nor message provides one', () => {
+    const out = handleStreamEnd(
+      { messageId: 'msg-1' },
+      null,
+    )
+    expect(out.sessionId).toBeNull()
+    expect(out.messageId).toBe('msg-1')
+  })
+
+  it('passes through messageId verbatim (cast as string for non-string values)', () => {
+    const out = handleStreamEnd(
+      { messageId: 42 },
+      'sess-active',
+    )
+    // The current call sites use `msg.messageId as string` against the
+    // _deltaIdRemaps Map and _postPermissionSplits Set; preserve that shape
+    // by passing the value through unchanged.
+    expect(out.messageId as unknown).toBe(42)
   })
 })
