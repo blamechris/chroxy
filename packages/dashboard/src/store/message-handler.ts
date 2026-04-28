@@ -60,6 +60,10 @@ import {
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
+  handleSlashCommands as sharedSlashCommands,
+  handleAgentList as sharedAgentList,
+  handleProviderList as sharedProviderList,
+  handleFileList as sharedFileList,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -2119,35 +2123,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'slash_commands': {
-      const slashSid = get().activeSessionId;
-      if (msg.sessionId && slashSid && msg.sessionId !== slashSid) break;
-      if (Array.isArray(msg.commands)) {
-        set({ slashCommands: msg.commands as SlashCommand[] });
-      }
+      const slashResult = sharedSlashCommands(msg, get().activeSessionId);
+      if (!slashResult) break;
+      set({ slashCommands: slashResult.commands as SlashCommand[] });
       break;
     }
 
     case 'file_list': {
-      const files = Array.isArray(msg.files)
-        ? (msg.files as FilePickerItem[])
-        : [];
-      set({ filePickerFiles: files });
+      const fileResult = sharedFileList(msg);
+      set({ filePickerFiles: fileResult.files as FilePickerItem[] });
       break;
     }
 
     case 'agent_list': {
-      const agentSid = get().activeSessionId;
-      if (msg.sessionId && agentSid && msg.sessionId !== agentSid) break;
-      if (Array.isArray(msg.agents)) {
-        set({ customAgents: msg.agents as CustomAgent[] });
-      }
+      const agentResult = sharedAgentList(msg, get().activeSessionId);
+      if (!agentResult) break;
+      set({ customAgents: agentResult.agents as CustomAgent[] });
       break;
     }
 
     case 'provider_list': {
-      if (Array.isArray(msg.providers)) {
-        set({ availableProviders: msg.providers as ProviderInfo[] });
-      }
+      const providerResult = sharedProviderList(msg);
+      if (!providerResult) break;
+      set({ availableProviders: providerResult.providers as ProviderInfo[] });
       break;
     }
 

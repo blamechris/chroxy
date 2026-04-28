@@ -1624,3 +1624,102 @@ export function handleWriteFileResult(
     error: typeof msg.error === 'string' ? msg.error : null,
   }
 }
+
+// ---------------------------------------------------------------------------
+// slash_commands / agent_list / provider_list / file_list
+//
+// All four are list-replacement handlers: validate `Array.isArray(...)`, then
+// hand the array back to the caller for `set({ ...: arr as Concrete[] })`.
+// `slash_commands` and `agent_list` additionally apply a session-id guard (skip
+// when `msg.sessionId` is set AND `activeSessionId` is set AND they differ).
+//
+// Element shape is NOT validated by these handlers — the cast to the concrete
+// list element type stays at the call site (matches both clients' prior inline
+// behaviour). The mobile app additionally tightens `provider_list` element
+// validation; that extra filtering stays at the call site, layered on top of
+// the array returned here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply the `if (msg.sessionId && active && msg.sessionId !== active) skip`
+ * guard used by `slash_commands` and `agent_list`. Returns true when the
+ * caller should skip the message.
+ *
+ * Mirrors the prior inline truthiness-based guard exactly: any truthy
+ * `msg.sessionId` (including non-string values like `123`) counts as "set",
+ * any truthy `activeSessionId` counts as "active", and the strict-inequality
+ * comparison is then applied. Non-string `sessionId` values are still
+ * skipped when they don't match an active session — preserving the
+ * dashboard/app behaviour.
+ */
+function shouldSkipForSessionMismatch(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): boolean {
+  return (
+    !!msg.sessionId &&
+    !!activeSessionId &&
+    msg.sessionId !== activeSessionId
+  )
+}
+
+/**
+ * Parse a `slash_commands` message into the replacement array.
+ *
+ * Returns null when the session-id guard rejects the message OR when
+ * `msg.commands` is missing/non-array — caller should `if (!result) break`.
+ * Element shape is NOT validated; downstream casts to the concrete
+ * `SlashCommand[]` type.
+ */
+export function handleSlashCommands(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): { commands: unknown[] } | null {
+  if (shouldSkipForSessionMismatch(msg, activeSessionId)) return null
+  if (!Array.isArray(msg.commands)) return null
+  return { commands: msg.commands as unknown[] }
+}
+
+/**
+ * Parse an `agent_list` message into the replacement array.
+ *
+ * Returns null when the session-id guard rejects the message OR when
+ * `msg.agents` is missing/non-array — caller should `if (!result) break`.
+ * Element shape is NOT validated; downstream casts to the concrete
+ * `CustomAgent[]` type.
+ */
+export function handleAgentList(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): { agents: unknown[] } | null {
+  if (shouldSkipForSessionMismatch(msg, activeSessionId)) return null
+  if (!Array.isArray(msg.agents)) return null
+  return { agents: msg.agents as unknown[] }
+}
+
+/**
+ * Parse a `provider_list` message into the replacement array.
+ *
+ * No session-id guard — provider lists are server-wide. Returns null when
+ * `msg.providers` is missing/non-array. The mobile app additionally tightens
+ * element validation at the call site; this handler only handles the
+ * shared array-ness check.
+ */
+export function handleProviderList(
+  msg: Record<string, unknown>,
+): { providers: unknown[] } | null {
+  if (!Array.isArray(msg.providers)) return null
+  return { providers: msg.providers as unknown[] }
+}
+
+/**
+ * Parse a `file_list` message into the replacement array.
+ *
+ * Dashboard-only consumer today. No session-id guard. Always returns the
+ * `{ files }` shape — defaulting to `[]` when the field is missing or
+ * non-array (matches the dashboard's prior inline `Array.isArray(...) ? ... : []`).
+ */
+export function handleFileList(msg: Record<string, unknown>): { files: unknown[] } {
+  const files: unknown[] = Array.isArray(msg.files) ? (msg.files as unknown[]) : []
+  return { files }
+}

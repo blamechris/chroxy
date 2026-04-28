@@ -76,6 +76,9 @@ import {
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
+  handleSlashCommands as sharedSlashCommands,
+  handleAgentList as sharedAgentList,
+  handleProviderList as sharedProviderList,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -2164,46 +2167,44 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'slash_commands': {
-      const slashSid = get().activeSessionId;
-      if (msg.sessionId && slashSid && msg.sessionId !== slashSid) break;
-      if (Array.isArray(msg.commands)) {
-        set({ slashCommands: msg.commands as SlashCommand[] });
-        useConversationStore.getState().setSlashCommands(msg.commands as SlashCommand[]);
-      }
+      const slashResult = sharedSlashCommands(msg, get().activeSessionId);
+      if (!slashResult) break;
+      const slashCommands = slashResult.commands as SlashCommand[];
+      set({ slashCommands });
+      useConversationStore.getState().setSlashCommands(slashCommands);
       break;
     }
 
     case 'provider_list': {
-      if (Array.isArray(msg.providers)) {
-        // Validate element shape before storing — guard against misbehaving
-        // servers / malicious endpoints that might send non-objects or
-        // objects without a string `name`.
-        const providers: ProviderInfo[] = msg.providers
-          .filter(
-            (p): p is { name: string; capabilities?: unknown } =>
-              !!p &&
-              typeof p === 'object' &&
-              typeof (p as { name?: unknown }).name === 'string',
-          )
-          .map((p) => {
-            const entry: ProviderInfo = { name: p.name };
-            if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
-              entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
-            }
-            return entry;
-          });
-        set({ availableProviders: providers });
-      }
+      const providerResult = sharedProviderList(msg);
+      if (!providerResult) break;
+      // Validate element shape before storing — guard against misbehaving
+      // servers / malicious endpoints that might send non-objects or
+      // objects without a string `name`.
+      const providers: ProviderInfo[] = providerResult.providers
+        .filter(
+          (p): p is { name: string; capabilities?: unknown } =>
+            !!p &&
+            typeof p === 'object' &&
+            typeof (p as { name?: unknown }).name === 'string',
+        )
+        .map((p) => {
+          const entry: ProviderInfo = { name: p.name };
+          if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
+            entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
+          }
+          return entry;
+        });
+      set({ availableProviders: providers });
       break;
     }
 
     case 'agent_list': {
-      const agentSid = get().activeSessionId;
-      if (msg.sessionId && agentSid && msg.sessionId !== agentSid) break;
-      if (Array.isArray(msg.agents)) {
-        set({ customAgents: msg.agents as CustomAgent[] });
-        useConversationStore.getState().setCustomAgents(msg.agents as CustomAgent[]);
-      }
+      const agentResult = sharedAgentList(msg, get().activeSessionId);
+      if (!agentResult) break;
+      const customAgents = agentResult.agents as CustomAgent[];
+      set({ customAgents });
+      useConversationStore.getState().setCustomAgents(customAgents);
       break;
     }
 
