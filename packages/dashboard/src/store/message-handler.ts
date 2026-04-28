@@ -80,6 +80,8 @@ import {
   handleWebTaskError as sharedWebTaskError,
   handleWebTaskList as sharedWebTaskList,
   handleWebFeatureStatus as sharedWebFeatureStatus,
+  handleSearchResults as sharedSearchResults,
+  handleUserQuestion as sharedUserQuestion,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -114,6 +116,7 @@ import type {
   FilePickerItem,
   ConversationSummary,
   ProviderInfo,
+  SearchResult,
   ToolResultImage,
   WebTask,
 } from './types';
@@ -1849,26 +1852,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'user_question': {
-      const questions = msg.questions as unknown[];
-      if (!Array.isArray(questions) || questions.length === 0) break;
-      const q = questions[0] as Record<string, unknown>;
-      if (!q || typeof q !== 'object' || typeof q.question !== 'string') break;
-      const questionMsg: ChatMessage = {
-        id: nextMessageId('question'),
-        type: 'prompt',
-        content: q.question as string,
-        toolUseId: msg.toolUseId as string,
-        options: Array.isArray(q.options)
-          ? (q.options as unknown[])
-              .filter((o: unknown): o is { label: string } => !!o && typeof o === 'object' && typeof (o as Record<string, unknown>).label === 'string')
-              .map((o: { label: string }) => ({
-                label: o.label,
-                value: o.label,
-              }))
-          : [],
-        timestamp: Date.now(),
-      };
-      const questionTargetId = (msg.sessionId as string) || get().activeSessionId;
+      const parsed = sharedUserQuestion(msg, get().activeSessionId);
+      if (!parsed) break;
+      const { sessionId: questionTargetId, chatMessage: questionMsg, questionText } = parsed;
       if (questionTargetId && get().sessionStates[questionTargetId]) {
         updateSession(questionTargetId, (ss) => ({
           messages: [...ss.messages, questionMsg],
@@ -1877,7 +1863,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         get().addMessage(questionMsg);
       }
       if (questionTargetId) {
-        const questionText = (q.question as string).slice(0, 60);
         pushSessionNotification(questionTargetId, 'question', questionText);
       }
       break;
@@ -2197,13 +2182,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'search_results': {
-      const results = Array.isArray(msg.results) ? msg.results : [];
-      const msgQuery = typeof msg.query === 'string' ? msg.query : null;
       const currentQuery = (get() as ConnectionState).searchQuery;
-      if (msgQuery !== null && currentQuery && msgQuery !== currentQuery) {
-        break; // Stale response for an older query — ignore
-      }
-      set({ searchResults: results, searchLoading: false });
+      const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
+      if (!shouldApply) break; // Stale response for an older query — ignore
+      set({ searchResults: results as SearchResult[], searchLoading: false });
       break;
     }
 

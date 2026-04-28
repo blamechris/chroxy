@@ -182,6 +182,8 @@ export type {
   WebTaskErrorPayload,
   WebTaskListPayload,
   WebFeatureStatusPayload,
+  SearchResultsPayload,
+  UserQuestionPayload,
 } from './handlers'
 
 export {
@@ -258,4 +260,6 @@ export {
   handleWebTaskError,
   handleWebTaskList,
   handleWebFeatureStatus,
+  handleSearchResults,
+  handleUserQuestion,
 } from './handlers'
