@@ -2198,8 +2198,10 @@ const SERVER_ERROR_CATEGORIES: readonly ServerError['category'][] = [
  *
  * - `category`: one of {tunnel, session, permission, general}; anything else
  *   (including missing or non-string) defaults to `'general'`.
- * - `message`: trimmed + non-empty + ANSI-stripped; defaults to
- *   `'Unknown server error'`.
+ * - `message`: ANSI-stripped from the raw input when it's a string whose
+ *   trimmed length is non-zero (the trim is used as the empty-check only —
+ *   surrounding whitespace is preserved on the stored value). Defaults to
+ *   `'Unknown server error'` when missing, non-string, or whitespace-only.
  * - `recoverable`: boolean type-check; defaults to `true` when missing or
  *   non-boolean.
  * - `sessionId`: included on the ServerError only when the message had a
@@ -2289,7 +2291,8 @@ export function handleServerShutdown(
 // The dashboard's structured `phase`-based branch (tunnel_warming/ready) stays
 // inline at the call site. This helper covers ONLY the legacy plain-message
 // branch shared by app + dashboard: a system-typed ChatMessage carrying the
-// (ANSI-stripped, trimmed-or-defaulted) status text.
+// ANSI-stripped status text (or `'Status update'` when the input is missing,
+// non-string, or whitespace-only).
 // ---------------------------------------------------------------------------
 
 export interface ServerStatusLegacyPayload {
@@ -2300,8 +2303,10 @@ export interface ServerStatusLegacyPayload {
  * Build the system-typed ChatMessage for a legacy plain-message
  * `server_status` event.
  *
- * - `message`: trimmed + non-empty + ANSI-stripped; defaults to
- *   `'Status update'`.
+ * - `message`: ANSI-stripped from the raw input when it's a string whose
+ *   trimmed length is non-zero (the trim is used as the empty-check only —
+ *   surrounding whitespace is preserved on the stored value). Defaults to
+ *   `'Status update'` when missing, non-string, or whitespace-only.
  * - The ChatMessage is of type `'system'`. Callers route it to the active
  *   session's message list, falling back to the global log.
  */
