@@ -1449,6 +1449,29 @@ describe('handleHistoryReplayStart', () => {
       handleHistoryReplayStart({ fullHistory: true }, null).sessionId,
     ).toBeNull()
   })
+
+  it('preserves whitespace in sessionId verbatim (matches prior inline logic)', () => {
+    // Prior inline logic was `(msg.sessionId as string) || activeSessionId`,
+    // which does NOT trim. Verify we keep parity — `'  sess-1  '` should be
+    // returned unchanged so it's compared against `sessionStates[targetId]`
+    // exactly as the call site previously did.
+    expect(
+      handleHistoryReplayStart(
+        { fullHistory: true, sessionId: '  sess-1  ' },
+        'active-1',
+      ).sessionId,
+    ).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    // `'' || 'active-1'` → `'active-1'` — matches the prior inline logic.
+    expect(
+      handleHistoryReplayStart(
+        { fullHistory: true, sessionId: '' },
+        'active-1',
+      ).sessionId,
+    ).toBe('active-1')
+  })
 })
 
 // ---------------------------------------------------------------------------

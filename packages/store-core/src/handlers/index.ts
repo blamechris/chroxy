@@ -1022,9 +1022,11 @@ export interface HistoryReplayStartPayload {
    * Resolved target session id for the full-history clearing branch.
    *
    * Falls back to `activeSessionId` when the message omits `sessionId`,
-   * matching `(msg.sessionId as string) || get().activeSessionId`. The call
-   * site only consults this when `fullHistory` is true and only applies the
-   * patch when the resolved id maps to an existing session in its store.
+   * matching `(msg.sessionId as string) || get().activeSessionId` exactly —
+   * including no whitespace trimming, so `'  sess-1  '` is preserved verbatim
+   * and an empty string `''` falls back to `activeSessionId`. The call site
+   * only consults this when `fullHistory` is true and only applies the patch
+   * when the resolved id maps to an existing session in its store.
    */
   sessionId: string | null
 }
@@ -1036,15 +1038,23 @@ export interface HistoryReplayStartPayload {
  * `fullHistory` flag, and the resolved target session id for the clearing
  * branch. Module-level flag mutation, transient-state clearing, and the
  * existence guard on the resolved sessionId stay at the call site.
+ *
+ * Note: this handler intentionally does NOT use `resolveSessionId()` because
+ * the prior inline logic was `(msg.sessionId as string) || activeSessionId`,
+ * which preserves whitespace. Switching to the trimming helper would change
+ * behaviour (e.g. `'  sess-1  '` would be normalised), and this migration is
+ * mechanical.
  */
 export function handleHistoryReplayStart(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): HistoryReplayStartPayload {
+  const rawSessionId =
+    typeof msg.sessionId === 'string' ? msg.sessionId : null
   return {
     receivingHistoryReplay: true,
     fullHistory: msg.fullHistory === true,
-    sessionId: resolveSessionId(msg, activeSessionId),
+    sessionId: rawSessionId || activeSessionId,
   }
 }
 
