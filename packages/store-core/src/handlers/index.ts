@@ -3157,15 +3157,19 @@ export interface ResultUsagePayload {
 /**
  * Normalize the payload-pure parts of a `result` message.
  *
- * - `sessionId`: resolved via the legacy `(msg.sessionId as string) || activeSessionId`
- *   pattern (raw cast — no trim, no whitespace coercion). Mirrors
- *   `handleMcpServers` / `handleCostUpdate` behaviour exactly so a
- *   whitespace-only `sessionId` is preserved verbatim and downstream
- *   `sessionStates[id]` lookups miss rather than silently falling back to the
- *   active session.
- * - `contextUsage`: built from `msg.usage` when it's a plain object, with each
- *   field defaulting to `0` via `|| 0`. Returns `null` when `usage` is missing
- *   or not a plain object (defensive: rejects strings, numbers, arrays, null).
+ * - `sessionId`: resolved via `typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId`,
+ *   then `|| activeSessionId` to preserve the legacy "empty-string falls back"
+ *   behaviour. Matches the guarded-raw-string pattern used by
+ *   `handleMcpServers` / `handleCostUpdate`: a whitespace-only string is
+ *   preserved verbatim (so downstream `sessionStates[id]` lookups miss rather
+ *   than silently falling back to the active session), but non-string runtime
+ *   values (numbers, booleans, objects) are rejected — keeping the declared
+ *   `string | null` return type honest.
+ * - `contextUsage`: built from `msg.usage` when it's a plain object. Each
+ *   numeric field is coerced via `typeof === 'number' && Number.isFinite(...)`,
+ *   defaulting to `0` for missing, non-number, or `NaN` inputs. Returns `null`
+ *   when `usage` is missing or not a plain object (defensive: rejects strings,
+ *   numbers, arrays, null).
  * - `lastResultCost`: `typeof msg.cost === 'number' ? msg.cost : null`. The
  *   dashboard's Codex/Gemini fallback (`calculateCost(...)`) stays inline at
  *   the call site and overrides this when the helper returned null but usage
@@ -3183,20 +3187,24 @@ export function handleResultUsage(
     !Array.isArray(rawUsage)
       ? (rawUsage as Record<string, unknown>)
       : null
+  const numField = (v: unknown): number =>
+    typeof v === 'number' && Number.isFinite(v) ? v : 0
   const contextUsage: ContextUsage | null = usage
     ? {
-        inputTokens: (usage.input_tokens as number) || 0,
-        outputTokens: (usage.output_tokens as number) || 0,
-        cacheCreation: (usage.cache_creation_input_tokens as number) || 0,
-        cacheRead: (usage.cache_read_input_tokens as number) || 0,
+        inputTokens: numField(usage.input_tokens),
+        outputTokens: numField(usage.output_tokens),
+        cacheCreation: numField(usage.cache_creation_input_tokens),
+        cacheRead: numField(usage.cache_read_input_tokens),
       }
     : null
   const lastResultCost =
     typeof msg.cost === 'number' ? msg.cost : null
   const lastResultDuration =
     typeof msg.duration === 'number' ? msg.duration : null
+  const rawSessionId =
+    typeof msg.sessionId === 'string' ? msg.sessionId : null
   return {
-    sessionId: (msg.sessionId as string) || activeSessionId,
+    sessionId: rawSessionId || activeSessionId,
     contextUsage,
     lastResultCost,
     lastResultDuration,

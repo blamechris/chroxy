@@ -5050,6 +5050,34 @@ describe('handleResultUsage', () => {
     expect(handleResultUsage({ usage: 'oops' }, 'active-1').contextUsage).toBeNull()
     expect(handleResultUsage({ usage: 42 }, 'active-1').contextUsage).toBeNull()
     expect(handleResultUsage({ usage: null }, 'active-1').contextUsage).toBeNull()
+    expect(handleResultUsage({ usage: [] }, 'active-1').contextUsage).toBeNull()
+    expect(
+      handleResultUsage({ usage: [1, 2, 3] }, 'active-1').contextUsage,
+    ).toBeNull()
+  })
+
+  it('coerces non-numeric usage fields to 0 (typeof guard rejects strings/objects/NaN)', () => {
+    // Each field uses `typeof === 'number' && Number.isFinite(...)` so that a
+    // malformed payload like `input_tokens: '100'` does not flow a string into
+    // ContextUsage's numeric contract (would later poison `calculateCost`
+    // arithmetic on the dashboard).
+    const out = handleResultUsage(
+      {
+        usage: {
+          input_tokens: '100',
+          output_tokens: { x: 1 },
+          cache_creation_input_tokens: NaN,
+          cache_read_input_tokens: null,
+        },
+      },
+      'active-1',
+    )
+    expect(out.contextUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreation: 0,
+      cacheRead: 0,
+    })
   })
 
   it('passes a numeric cost through', () => {
@@ -5102,10 +5130,9 @@ describe('handleResultUsage', () => {
     expect(handleResultUsage({}, null).sessionId).toBeNull()
   })
 
-  it('preserves whitespace-padded sessionId verbatim (raw cast, no trim)', () => {
-    // Matches legacy `(msg.sessionId as string) || activeSessionId` semantics:
-    // a non-empty whitespace-padded string is truthy, so it's used as-is and
-    // we do NOT fall back to activeSessionId. Mirrors `handleMcpServers` /
+  it('preserves whitespace-padded sessionId verbatim (no trim)', () => {
+    // A non-empty whitespace-padded string is truthy, so it's used as-is and
+    // we do NOT fall back to activeSessionId. Matches `handleMcpServers` /
     // `handleCostUpdate` behaviour exactly.
     const out = handleResultUsage(
       { sessionId: '  sess-1  ' },
@@ -5115,11 +5142,29 @@ describe('handleResultUsage', () => {
   })
 
   it('falls back to activeSessionId when sessionId is empty string', () => {
-    // Empty string is falsy, so the legacy `||` falls back to activeSessionId.
+    // Empty string is falsy, so `|| activeSessionId` kicks in.
     const out = handleResultUsage(
       { sessionId: '' },
       'active-1',
     )
     expect(out.sessionId).toBe('active-1')
+  })
+
+  it('falls back to activeSessionId when sessionId is non-string runtime value', () => {
+    // The `typeof === 'string'` guard rejects numbers/booleans/objects so
+    // the declared `string | null` return type stays honest at runtime, even
+    // for protocol-violating payloads.
+    expect(
+      handleResultUsage({ sessionId: 42 }, 'active-1').sessionId,
+    ).toBe('active-1')
+    expect(
+      handleResultUsage({ sessionId: true }, 'active-1').sessionId,
+    ).toBe('active-1')
+    expect(
+      handleResultUsage({ sessionId: { id: 'x' } }, 'active-1').sessionId,
+    ).toBe('active-1')
+    expect(
+      handleResultUsage({ sessionId: null }, 'active-1').sessionId,
+    ).toBe('active-1')
   })
 })
