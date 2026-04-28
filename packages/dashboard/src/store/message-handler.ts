@@ -64,6 +64,8 @@ import {
   handleAgentList as sharedAgentList,
   handleProviderList as sharedProviderList,
   handleFileList as sharedFileList,
+  handleDiffResult as sharedDiffResult,
+  handleGitStatusResult as sharedGitStatusResult,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -2100,9 +2102,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'diff_result': {
       const diffCb = get()._diffCallback;
       if (diffCb) {
+        const payload = sharedDiffResult(msg);
         diffCb({
-          files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
+          files: payload.files as DiffFile[],
+          error: payload.error,
         });
       }
       break;
@@ -2111,12 +2114,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'git_status_result': {
       const gitStatusCb = get()._gitStatusCallback;
       if (gitStatusCb) {
+        const payload = sharedGitStatusResult(msg);
         gitStatusCb({
-          branch: typeof msg.branch === 'string' ? msg.branch : null,
-          staged: Array.isArray(msg.staged) ? msg.staged as GitStatusEntry[] : [],
-          unstaged: Array.isArray(msg.unstaged) ? msg.unstaged as GitStatusEntry[] : [],
-          untracked: Array.isArray(msg.untracked) ? msg.untracked as string[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
+          branch: payload.branch,
+          staged: payload.staged as GitStatusEntry[],
+          unstaged: payload.unstaged as GitStatusEntry[],
+          untracked: payload.untracked as string[],
+          error: payload.error,
         });
       }
       break;
