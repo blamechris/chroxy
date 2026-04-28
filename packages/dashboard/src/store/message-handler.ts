@@ -34,6 +34,8 @@ import {
   handlePlanReady as sharedPlanReady,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
+  handleToolStart as sharedToolStart,
+  handleToolResult as sharedToolResult,
   handleAuthOk as sharedAuthOk,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
@@ -118,7 +120,6 @@ import type {
   ConversationSummary,
   ProviderInfo,
   SearchResult,
-  ToolResultImage,
   WebTask,
 } from './types';
 import { createEmptySessionState } from './utils';
@@ -913,34 +914,21 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
 }
 
 function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
-  // Forward tool invocation to terminal view
-  {
-    const toolName = (msg.tool as string) || 'tool';
-    get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
-  }
-  // Use server messageId as stable identifier for dedup (same ID on live + replay)
-  const toolId = (msg.messageId as string) || nextMessageId('tool');
-  // During ANY history replay (plain reconnect or session-switch), skip if a
-  // tool_use with the same stable id is already in the per-session cache.
-  // The legacy blanket `messages.length > 0` guard was removed (#2901): with
-  // multi-session state the legacy flat array is empty, so the guard never
-  // fired and reconnect replay duplicated tool_use entries that the client
-  // already had. Per-id dedup is the correct check on both replay paths.
-  if (_receivingHistoryReplay) {
+  // Forward tool invocation to terminal view (dashboard-only side effect).
+  // Performed unconditionally and BEFORE sharedToolStart so a JSON.stringify
+  // throw on a non-serialisable msg.input (circular ref) cannot suppress the
+  // terminal preview write — matches the prior inline ordering.
+  const toolName = typeof msg.tool === 'string' ? msg.tool : 'tool';
+  get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+  const cached = (() => {
+    const targetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
     const targetState = targetId ? get().sessionStates[targetId] : null;
-    const cached = targetState ? targetState.messages : get().messages;
-    if (cached.some((m) => m.id === toolId)) return;
-  }
-  const toolMsg: ChatMessage = {
-    id: toolId,
-    type: 'tool_use',
-    content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
-    tool: msg.tool as string | undefined,
-    toolUseId: msg.toolUseId as string | undefined,
-    serverName: msg.serverName as string | undefined,
-    timestamp: Date.now(),
-  };
+    return targetState ? targetState.messages : get().messages;
+  })();
+  const result = sharedToolStart(msg, get().activeSessionId, _receivingHistoryReplay, cached);
+  if (!result.shouldDispatch || !result.chatMessage) return;
+  const toolMsg = result.chatMessage;
+  const targetId = result.sessionId;
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, (ss) => ({
       messages: [...ss.messages, toolMsg],
@@ -951,38 +939,25 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
 }
 
 function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const toolUseId = msg.toolUseId as string;
-  if (!toolUseId) return;
-  const resultText = (msg.result as string) || '';
-  const truncated = !!(msg.truncated as boolean);
-  // Forward tool result to terminal view
-  if (resultText) {
-    const preview = resultText.length > 500 ? resultText.slice(0, 500) + '...' : resultText;
+  const result = sharedToolResult(msg, get().activeSessionId);
+  if (!result) return;
+  // Forward tool result to terminal view (dashboard-only side effect).
+  if (result.resultText) {
+    const preview = result.resultText.length > 500
+      ? result.resultText.slice(0, 500) + '...'
+      : result.resultText;
     get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
   }
-  const images = Array.isArray(msg.images) ? msg.images as ToolResultImage[] : undefined;
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
-  // Find the matching tool_use message and attach the result
-  const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
-  if (images?.length) patch.toolResultImages = images;
-  const patchResult = (ss: SessionState) => {
-    const idx = ss.messages.findIndex(
-      (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-    );
-    if (idx === -1) return {};
-    const updated = [...ss.messages];
-    updated[idx] = { ...updated[idx]!, ...patch };
-    return { messages: updated };
-  };
+  const targetId = result.sessionId;
   if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, patchResult);
+    updateSession(targetId, (ss: SessionState) => {
+      const updated = result.applyTo(ss.messages);
+      if (updated === ss.messages) return {};
+      return { messages: updated };
+    });
   } else {
-    const idx = get().messages.findIndex(
-      (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-    );
-    if (idx !== -1) {
-      const updated = [...get().messages];
-      updated[idx] = { ...updated[idx]!, ...patch };
+    const updated = result.applyTo(get().messages);
+    if (updated !== get().messages) {
       set({ messages: updated });
     }
   }

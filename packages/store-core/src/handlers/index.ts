@@ -19,6 +19,7 @@ import type {
   ModelInfo,
   ServerError,
   SessionInfo,
+  ToolResultImage,
   WebTask,
 } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
@@ -2815,5 +2816,173 @@ export function handleMessage(
     chatMessage,
     isRateLimitError,
     errorContent,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// tool_start
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleToolStart}. */
+export interface ToolStartPayload {
+  /** Whether the caller should dispatch the chat message. */
+  shouldDispatch: boolean
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** Pre-built ChatMessage when `shouldDispatch` is true, else null. */
+  chatMessage: ChatMessage | null
+  /**
+   * Resolved tool name (`(msg.tool as string) || 'tool'`), exposed for the
+   * dashboard's terminal-data side-effect at the call site. Always a string.
+   */
+  toolName: string
+}
+
+/**
+ * Validate, dedup, and normalize a `tool_start` message.
+ *
+ * - Resolves `sessionId` from `msg.sessionId` (string-typed) falling back to
+ *   `activeSessionId`. Non-string `msg.sessionId` is ignored.
+ * - Resolves `toolId` from `msg.messageId` (string-typed) falling back to
+ *   `nextMessageId('tool')`. The server's stable messageId enables per-id
+ *   dedup across the live path and history replay (#2901).
+ * - During `receivingHistoryReplay`, returns `shouldDispatch: false` when an
+ *   entry with the same `id` is already present in `cachedMessages`. The
+ *   legacy blanket `messages.length > 0` guard was removed (#2901): with
+ *   multi-session state the legacy flat array is empty, so the guard never
+ *   fired and reconnect replay duplicated tool_use entries that the client
+ *   already had. Per-id dedup is the correct check on both replay paths.
+ * - Builds a `tool_use` ChatMessage. `content` falls through input → tool
+ *   name → empty string.
+ * - Exposes `toolName` (string-validated `msg.tool` or `'tool'` fallback) so
+ *   the dashboard can write it to terminal data at the call site without
+ *   re-parsing.
+ *
+ * Per-field validation uses `typeof === 'string'` guards rather than
+ * `as string` casts so non-string runtime values are coerced to safe defaults
+ * (matches the pattern used in `handleHistoryReplayStart` / `handleMcpServers`
+ * elsewhere in this file). `ChatMessage.id`, `tool`, `toolUseId`, `serverName`,
+ * and `ToolStartPayload.toolName` are guaranteed string-typed at the type
+ * level.
+ *
+ * Side-effects (terminal-data write, message dispatch) stay at the call site;
+ * this helper only returns the data needed to perform them.
+ */
+export function handleToolStart(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  receivingHistoryReplay: boolean,
+  cachedMessages: readonly ChatMessage[],
+): ToolStartPayload {
+  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const sessionId = msgSessionId || activeSessionId
+  const tool = typeof msg.tool === 'string' ? msg.tool : undefined
+  const toolName = tool || 'tool'
+  const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
+  const toolId = messageId || nextMessageId('tool')
+
+  if (receivingHistoryReplay) {
+    if (cachedMessages.some((m) => m.id === toolId)) {
+      return { shouldDispatch: false, sessionId, chatMessage: null, toolName }
+    }
+  }
+
+  const chatMessage: ChatMessage = {
+    id: toolId,
+    type: 'tool_use',
+    content: msg.input ? JSON.stringify(msg.input) : tool || '',
+    tool,
+    toolUseId: typeof msg.toolUseId === 'string' ? msg.toolUseId : undefined,
+    serverName: typeof msg.serverName === 'string' ? msg.serverName : undefined,
+    timestamp: Date.now(),
+  }
+
+  return { shouldDispatch: true, sessionId, chatMessage, toolName }
+}
+
+// ---------------------------------------------------------------------------
+// tool_result
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleToolResult} when the message is well-formed. */
+export interface ToolResultPayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** The `toolUseId` that was matched against the tool_use entry. */
+  toolUseId: string
+  /** Patch to merge onto the matching tool_use ChatMessage. */
+  patch: Partial<ChatMessage>
+  /**
+   * Raw result text (`(msg.result as string) || ''`), exposed for the
+   * dashboard's terminal-data preview write at the call site. The caller
+   * slices to ~500 chars before writing.
+   */
+  resultText: string
+  /**
+   * Apply the patch to a session's `messages` array. Returns a new array with
+   * the patch merged onto the matching `tool_use` entry, or the same array
+   * reference when no match was found (caller treats same-reference as a
+   * no-op).
+   */
+  applyTo: (messages: ChatMessage[]) => ChatMessage[]
+}
+
+/**
+ * Validate and build a patch for a `tool_result` message.
+ *
+ * Returns `null` when `toolUseId` is missing or non-string (skip behaviour
+ * matches both clients' prior inline `if (!toolUseId) return` guard).
+ *
+ * Otherwise returns a payload with:
+ * - `sessionId`: resolved from string-typed `msg.sessionId` falling back to
+ *   `activeSessionId`. Non-string values are ignored.
+ * - `patch`: `{ toolResult, toolResultTruncated }`, plus `toolResultImages`
+ *   only when `msg.images` is a non-empty array.
+ * - `resultText`: the raw result string (string-validated) for the caller's
+ *   terminal preview.
+ * - `applyTo(messages)`: locates the matching `tool_use` entry by
+ *   `toolUseId`, returns a new array with the patch merged at that index.
+ *   When no match is found the same array reference is returned so callers
+ *   can detect the no-op (used to skip pointless state writes).
+ *
+ * Per-field validation uses `typeof === 'string'` / `=== 'boolean'` guards
+ * rather than `as string` casts so non-string runtime values are coerced to
+ * safe defaults; `ChatMessage.toolResult` and `ToolResultPayload.resultText`
+ * are guaranteed string-typed at the type level.
+ */
+export function handleToolResult(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): ToolResultPayload | null {
+  if (typeof msg.toolUseId !== 'string' || !msg.toolUseId) return null
+  const toolUseId = msg.toolUseId
+  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const sessionId = msgSessionId || activeSessionId
+  const resultText = typeof msg.result === 'string' ? msg.result : ''
+  const truncated = typeof msg.truncated === 'boolean' ? msg.truncated : false
+  const images = Array.isArray(msg.images)
+    ? (msg.images as ToolResultImage[])
+    : undefined
+
+  const patch: Partial<ChatMessage> = {
+    toolResult: resultText,
+    toolResultTruncated: truncated,
+  }
+  if (images?.length) patch.toolResultImages = images
+
+  return {
+    sessionId,
+    toolUseId,
+    patch,
+    resultText,
+    applyTo: (messages) => {
+      const idx = messages.findIndex(
+        (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+      )
+      if (idx === -1) return messages
+      const updated = [...messages]
+      updated[idx] = { ...updated[idx]!, ...patch }
+      return updated
+    },
   }
 }

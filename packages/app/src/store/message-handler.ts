@@ -44,6 +44,8 @@ import {
   handlePlanReady as sharedPlanReady,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
+  handleToolStart as sharedToolStart,
+  handleToolResult as sharedToolResult,
   handleAuthOk as sharedAuthOk,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
@@ -121,7 +123,6 @@ import type {
   ProviderInfo,
   ConversationSummary,
   SearchResult,
-  ToolResultImage,
   WebTask,
   GitFileStatus,
   GitBranch,
@@ -1412,57 +1413,38 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'tool_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // Use server messageId as stable identifier for dedup (same ID on live + replay)
-      const toolId = (msg.messageId as string) || nextMessageId('tool');
-      // During any history replay, skip if tool already in cache (dedup by stable ID)
-      if (_ctx.receivingHistoryReplay) {
-        const cached = getSessionMessages(targetId);
-        if (cached.some((m) => m.id === toolId)) break;
-      }
-      const toolMsg: ChatMessage = {
-        id: toolId,
-        type: 'tool_use',
-        content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
-        tool: msg.tool as string | undefined,
-        toolUseId: msg.toolUseId as string | undefined,
-        serverName: msg.serverName as string | undefined,
-        timestamp: Date.now(),
-      };
-      {
-        const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
-        if (effectiveId && get().sessionStates[effectiveId]) {
-          updateSession(effectiveId, (ss) => ({
-            messages: [...ss.messages, toolMsg],
-          }));
-        }
+      const cached = getSessionMessages(targetId);
+      const result = sharedToolStart(
+        msg,
+        get().activeSessionId,
+        _ctx.receivingHistoryReplay,
+        cached,
+      );
+      if (!result.shouldDispatch || !result.chatMessage) break;
+      const toolMsg = result.chatMessage;
+      const effectiveId = (result.sessionId && get().sessionStates[result.sessionId])
+        ? result.sessionId
+        : get().activeSessionId;
+      if (effectiveId && get().sessionStates[effectiveId]) {
+        updateSession(effectiveId, (ss) => ({
+          messages: [...ss.messages, toolMsg],
+        }));
       }
       break;
     }
 
     case 'tool_result': {
-      const toolUseId = msg.toolUseId as string;
-      if (!toolUseId) break;
-      const resultText = (msg.result as string) || '';
-      const truncated = !!(msg.truncated as boolean);
-      const images = Array.isArray(msg.images) ? msg.images as ToolResultImage[] : undefined;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // Find the matching tool_use message and attach the result
-      const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
-      if (images?.length) patch.toolResultImages = images;
-      const patchResult = (ss: SessionState) => {
-        const idx = ss.messages.findIndex(
-          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-        );
-        if (idx === -1) return {};
-        const updated = [...ss.messages];
-        updated[idx] = { ...updated[idx], ...patch };
-        return { messages: updated };
-      };
-      {
-        const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
-        if (effectiveId && get().sessionStates[effectiveId]) {
-          updateSession(effectiveId, patchResult);
-        }
+      const result = sharedToolResult(msg, get().activeSessionId);
+      if (!result) break;
+      const effectiveId = (result.sessionId && get().sessionStates[result.sessionId])
+        ? result.sessionId
+        : get().activeSessionId;
+      if (effectiveId && get().sessionStates[effectiveId]) {
+        updateSession(effectiveId, (ss: SessionState) => {
+          const updated = result.applyTo(ss.messages);
+          if (updated === ss.messages) return {};
+          return { messages: updated };
+        });
       }
       break;
     }
