@@ -2482,3 +2482,147 @@ export function handleWebFeatureStatus(
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// search_results
+//
+// Server emits search results in response to a search query. The shared
+// handler validates the array shape and applies the stale-query guard so the
+// client does not overwrite newer results with a late response. Callers do
+// the platform-specific `set(...)` (the app additionally clears `searchError`
+// and mirrors the results into `useConversationStore`).
+// ---------------------------------------------------------------------------
+
+export interface SearchResultsPayload {
+  /**
+   * Validated results array (non-array `msg.results` defaults to `[]`).
+   * Element type stays `unknown` — callers cast to `SearchResult[]` where
+   * useful. Always defined; meaningful only when `shouldApply` is `true`.
+   */
+  results: unknown[]
+  /**
+   * Whether the caller should apply the results. Returns `false` when the
+   * server-echoed `query` no longer matches the current in-flight `query`,
+   * preserving the prior inline stale-response guard.
+   */
+  shouldApply: boolean
+}
+
+/**
+ * Validate and stale-check a `search_results` message.
+ *
+ * - `results`: pass-through when `msg.results` is an array, else `[]`.
+ * - `shouldApply`:
+ *   - `false` only when the message included a non-null `query` AND the
+ *     current in-flight `currentQuery` is truthy AND the two strings differ.
+ *   - `true` otherwise — including when the message omits `query` (broadcast)
+ *     or when the client has already cleared its `currentQuery` (no in-flight
+ *     query to be stale against).
+ *
+ * Callers use the boolean to short-circuit before applying state. The handler
+ * does not mutate or clone the array; the original reference is returned.
+ */
+export function handleSearchResults(
+  msg: Record<string, unknown>,
+  currentQuery: string | null,
+): SearchResultsPayload {
+  const results: unknown[] = Array.isArray(msg.results)
+    ? (msg.results as unknown[])
+    : []
+  const msgQuery: string | null =
+    typeof msg.query === 'string' ? (msg.query as string) : null
+  if (msgQuery !== null && currentQuery && msgQuery !== currentQuery) {
+    return { results, shouldApply: false }
+  }
+  return { results, shouldApply: true }
+}
+
+// ---------------------------------------------------------------------------
+// user_question
+//
+// Server forwards a `user_question` event when Claude wants to prompt the
+// user with multiple-choice options. The shared handler validates the
+// message shape and pre-builds the `prompt`-typed ChatMessage, the resolved
+// session ID for routing, and the truncated notification text.
+//
+// Side-effects (dispatching the chat message, calling
+// `pushSessionNotification`) stay at the call site.
+// ---------------------------------------------------------------------------
+
+export interface UserQuestionPayload {
+  /**
+   * Resolved session for the question. Falls back to the active session
+   * when the message omits an explicit `sessionId`. May be `null` when both
+   * sources are empty (caller routes the chat message to the global log).
+   */
+  sessionId: string | null
+  /**
+   * Pre-built `prompt`-typed ChatMessage. The caller dispatches it to the
+   * resolved session (or the global log) without further transformation.
+   */
+  chatMessage: ChatMessage
+  /**
+   * The first 60 characters of the question text — used by the caller for
+   * the `pushSessionNotification` body.
+   */
+  questionText: string
+}
+
+/**
+ * Validate and normalize a `user_question` message.
+ *
+ * Returns `null` when the message is malformed:
+ * - `msg.questions` missing, not an array, or empty
+ * - first `questions[0]` not a non-null object
+ * - `q.question` not a string
+ *
+ * Otherwise returns:
+ * - `sessionId`: `msg.sessionId` when a non-empty string, else `activeSessionId`.
+ *   Non-string `msg.sessionId` falls through to `activeSessionId`.
+ * - `chatMessage`: `prompt`-typed with a fresh `nextMessageId('question')`,
+ *   `content` = `q.question`, `toolUseId` populated only when `msg.toolUseId`
+ *   is a string (otherwise omitted), and `options` filtered to objects with
+ *   a string `label` (mapped to `{label, value}` where `value === label`).
+ *   Missing/non-array `q.options` yields `[]`.
+ * - `questionText`: `q.question.slice(0, 60)`.
+ *
+ * Each non-`questions` field is validated at runtime so the returned payload
+ * matches its declared TypeScript types regardless of what the server sends.
+ */
+export function handleUserQuestion(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): UserQuestionPayload | null {
+  const questions = msg.questions as unknown[]
+  if (!Array.isArray(questions) || questions.length === 0) return null
+  const q = questions[0] as Record<string, unknown>
+  if (!q || typeof q !== 'object' || typeof q.question !== 'string') return null
+  const questionContent = q.question as string
+  const options = Array.isArray(q.options)
+    ? (q.options as unknown[])
+        .filter(
+          (o: unknown): o is { label: string } =>
+            !!o &&
+            typeof o === 'object' &&
+            typeof (o as Record<string, unknown>).label === 'string',
+        )
+        .map((o: { label: string }) => ({ label: o.label, value: o.label }))
+    : []
+  const chatMessage: ChatMessage = {
+    id: nextMessageId('question'),
+    type: 'prompt',
+    content: questionContent,
+    options,
+    timestamp: Date.now(),
+  }
+  if (typeof msg.toolUseId === 'string') {
+    chatMessage.toolUseId = msg.toolUseId
+  }
+  const msgSessionId =
+    typeof msg.sessionId === 'string' && msg.sessionId.length > 0
+      ? msg.sessionId
+      : null
+  const sessionId = msgSessionId ?? activeSessionId
+  const questionText = questionContent.slice(0, 60)
+  return { sessionId, chatMessage, questionText }
+}

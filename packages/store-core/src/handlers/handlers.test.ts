@@ -76,6 +76,8 @@ import {
   handleWebTaskError,
   handleWebTaskList,
   handleWebFeatureStatus,
+  handleSearchResults,
+  handleUserQuestion,
 } from './index'
 import { nextMessageId } from '../utils'
 import type {
@@ -3725,5 +3727,265 @@ describe('handleWebFeatureStatus', () => {
     expect(handleWebFeatureStatus({ available: true })).toEqual({
       webFeatures: { available: true, remote: false, teleport: false },
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSearchResults
+// ---------------------------------------------------------------------------
+describe('handleSearchResults', () => {
+  it('passes results through and applies when query matches currentQuery', () => {
+    const results = [
+      {
+        conversationId: 'c1',
+        projectName: 'p',
+        project: null,
+        cwd: null,
+        preview: null,
+        snippet: 's',
+        matchCount: 1,
+      },
+    ]
+    const out = handleSearchResults({ results, query: 'foo' }, 'foo')
+    expect(out.shouldApply).toBe(true)
+    expect(out.results).toBe(results)
+  })
+
+  it('returns shouldApply=false when message query is stale vs currentQuery', () => {
+    const results = [{ conversationId: 'c1' }]
+    const out = handleSearchResults({ results, query: 'old' }, 'new')
+    expect(out.shouldApply).toBe(false)
+    expect(out.results).toBe(results)
+  })
+
+  it('returns shouldApply=true when message has no query (broadcast)', () => {
+    const results = [{ conversationId: 'c1' }]
+    const out = handleSearchResults({ results }, 'still-typing')
+    expect(out.shouldApply).toBe(true)
+    expect(out.results).toBe(results)
+  })
+
+  it('returns shouldApply=true when currentQuery is null', () => {
+    const results = [{ conversationId: 'c1' }]
+    const out = handleSearchResults({ results, query: 'foo' }, null)
+    expect(out.shouldApply).toBe(true)
+    expect(out.results).toBe(results)
+  })
+
+  it('returns shouldApply=true when currentQuery is empty string', () => {
+    const results = [{ conversationId: 'c1' }]
+    const out = handleSearchResults({ results, query: 'foo' }, '')
+    expect(out.shouldApply).toBe(true)
+  })
+
+  it('defaults results to [] when missing', () => {
+    const out = handleSearchResults({ query: 'foo' }, 'foo')
+    expect(out.results).toEqual([])
+    expect(out.shouldApply).toBe(true)
+  })
+
+  it('defaults results to [] when non-array', () => {
+    expect(handleSearchResults({ results: 'oops' }, null).results).toEqual([])
+    expect(handleSearchResults({ results: 42 }, null).results).toEqual([])
+    expect(handleSearchResults({ results: null }, null).results).toEqual([])
+    expect(handleSearchResults({ results: {} }, null).results).toEqual([])
+  })
+
+  it('treats non-string query as null (always applies, even when currentQuery set)', () => {
+    const results = [{ conversationId: 'c1' }]
+    const out = handleSearchResults({ results, query: 42 }, 'new')
+    expect(out.shouldApply).toBe(true)
+    expect(out.results).toBe(results)
+  })
+
+  it('returns shouldApply=true when message and current queries are identical', () => {
+    const out = handleSearchResults({ results: [], query: 'same' }, 'same')
+    expect(out.shouldApply).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleUserQuestion
+// ---------------------------------------------------------------------------
+describe('handleUserQuestion', () => {
+  it('returns null when questions field is missing', () => {
+    expect(handleUserQuestion({}, 'sess-1')).toBeNull()
+  })
+
+  it('returns null when questions is not an array', () => {
+    expect(handleUserQuestion({ questions: 'nope' }, 'sess-1')).toBeNull()
+    expect(handleUserQuestion({ questions: null }, 'sess-1')).toBeNull()
+    expect(handleUserQuestion({ questions: {} }, 'sess-1')).toBeNull()
+  })
+
+  it('returns null when questions array is empty', () => {
+    expect(handleUserQuestion({ questions: [] }, 'sess-1')).toBeNull()
+  })
+
+  it('returns null when first question is not an object', () => {
+    expect(handleUserQuestion({ questions: ['plain string'] }, 'sess-1')).toBeNull()
+    expect(handleUserQuestion({ questions: [42] }, 'sess-1')).toBeNull()
+    expect(handleUserQuestion({ questions: [null] }, 'sess-1')).toBeNull()
+  })
+
+  it('returns null when q.question is not a string', () => {
+    expect(handleUserQuestion({ questions: [{ question: 42 }] }, 'sess-1')).toBeNull()
+    expect(handleUserQuestion({ questions: [{}] }, 'sess-1')).toBeNull()
+    expect(handleUserQuestion({ questions: [{ question: null }] }, 'sess-1')).toBeNull()
+  })
+
+  it('builds a prompt-typed ChatMessage for a valid question', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Pick a colour', options: [{ label: 'red' }, { label: 'blue' }] }],
+        toolUseId: 'tu-1',
+        sessionId: 'sess-9',
+      },
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.type).toBe('prompt')
+    expect(out!.chatMessage.content).toBe('Pick a colour')
+    expect(out!.chatMessage.toolUseId).toBe('tu-1')
+    expect(typeof out!.chatMessage.id).toBe('string')
+    expect(out!.chatMessage.id.length).toBeGreaterThan(0)
+    expect(typeof out!.chatMessage.timestamp).toBe('number')
+  })
+
+  it('uses msg.sessionId when present', () => {
+    const out = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: 'sess-9' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-9')
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is missing', () => {
+    const out = handleUserQuestion(
+      { questions: [{ question: 'Q?' }] },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is empty string', () => {
+    const out = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: '' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  it('returns null sessionId when both msg.sessionId and activeSessionId are missing', () => {
+    const out = handleUserQuestion({ questions: [{ question: 'Q?' }] }, null)
+    expect(out!.sessionId).toBeNull()
+  })
+
+  it('filters options to only objects with string label and sets value=label', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [
+          {
+            question: 'Pick',
+            options: [
+              { label: 'a' },
+              { label: 'b', other: 1 },
+              null,
+              'string-not-object',
+              { notLabel: 'x' },
+              { label: 42 },
+              { label: 'c' },
+            ],
+          },
+        ],
+      },
+      null,
+    )
+    expect(out!.chatMessage.options).toEqual([
+      { label: 'a', value: 'a' },
+      { label: 'b', value: 'b' },
+      { label: 'c', value: 'c' },
+    ])
+  })
+
+  it('options defaults to [] when q.options is missing or non-array', () => {
+    const out1 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }] },
+      null,
+    )
+    expect(out1!.chatMessage.options).toEqual([])
+    const out2 = handleUserQuestion(
+      { questions: [{ question: 'Q?', options: 'oops' }] },
+      null,
+    )
+    expect(out2!.chatMessage.options).toEqual([])
+    const out3 = handleUserQuestion(
+      { questions: [{ question: 'Q?', options: {} }] },
+      null,
+    )
+    expect(out3!.chatMessage.options).toEqual([])
+  })
+
+  it('truncates questionText to 60 characters', () => {
+    const long = 'x'.repeat(120)
+    const out = handleUserQuestion(
+      { questions: [{ question: long }] },
+      null,
+    )
+    expect(out!.questionText).toBe('x'.repeat(60))
+    // The full text is preserved on the chat message itself.
+    expect(out!.chatMessage.content).toBe(long)
+  })
+
+  it('passes shorter question text through unchanged', () => {
+    const out = handleUserQuestion(
+      { questions: [{ question: 'short' }] },
+      null,
+    )
+    expect(out!.questionText).toBe('short')
+  })
+
+  it('toolUseId is taken from msg.toolUseId verbatim', () => {
+    const out = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], toolUseId: 'tu-42' },
+      null,
+    )
+    expect(out!.chatMessage.toolUseId).toBe('tu-42')
+  })
+
+  it('omits toolUseId when msg.toolUseId is non-string', () => {
+    const out1 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], toolUseId: 42 },
+      null,
+    )
+    expect(out1!.chatMessage.toolUseId).toBeUndefined()
+    const out2 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], toolUseId: null },
+      null,
+    )
+    expect(out2!.chatMessage.toolUseId).toBeUndefined()
+    const out3 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }] },
+      null,
+    )
+    expect(out3!.chatMessage.toolUseId).toBeUndefined()
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is non-string', () => {
+    const out1 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: 42 },
+      'sess-active',
+    )
+    expect(out1!.sessionId).toBe('sess-active')
+    const out2 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: { id: 'x' } },
+      'sess-active',
+    )
+    expect(out2!.sessionId).toBe('sess-active')
+    const out3 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: null },
+      'sess-active',
+    )
+    expect(out3!.sessionId).toBe('sess-active')
   })
 })
