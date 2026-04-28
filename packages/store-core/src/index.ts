@@ -25,6 +25,7 @@ export type {
   SessionHealth,
   SessionContext,
   McpServer,
+  ServerError,
   DevPreview,
   WebTask,
   WebFeatureStatus,
@@ -174,6 +175,9 @@ export type {
   GitStageResultPayload,
   GitCommitResultPayload,
   AvailableModelsPayload,
+  ServerErrorPayload,
+  ServerShutdownPayload,
+  ServerStatusLegacyPayload,
 } from './handlers'
 
 export {
@@ -243,4 +247,7 @@ export {
   handleAvailableModels,
   handleMcpServers,
   handleCostUpdate,
+  handleServerError,
+  handleServerShutdown,
+  handleServerStatusLegacy,
 } from './handlers'

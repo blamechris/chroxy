@@ -69,6 +69,9 @@ import {
   handleAvailableModels,
   handleMcpServers,
   handleCostUpdate,
+  handleServerError,
+  handleServerShutdown,
+  handleServerStatusLegacy,
 } from './index'
 import type {
   AgentInfo,
@@ -3243,5 +3246,224 @@ describe('handleCostUpdate', () => {
       'active-1',
     )
     expect(result.sessionId).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleServerError
+// ---------------------------------------------------------------------------
+describe('handleServerError', () => {
+  it('passes a valid category through', () => {
+    const result = handleServerError({
+      category: 'tunnel',
+      message: 'tunnel down',
+      recoverable: false,
+    })
+    expect(result.serverError.category).toBe('tunnel')
+  })
+
+  it('accepts all four allow-list values', () => {
+    for (const cat of ['tunnel', 'session', 'permission', 'general'] as const) {
+      const result = handleServerError({ category: cat, message: 'm' })
+      expect(result.serverError.category).toBe(cat)
+    }
+  })
+
+  it('coerces an invalid category to "general"', () => {
+    expect(
+      handleServerError({ category: 'bogus', message: 'm' }).serverError.category,
+    ).toBe('general')
+  })
+
+  it('coerces a non-string category to "general"', () => {
+    expect(
+      handleServerError({ category: 42, message: 'm' }).serverError.category,
+    ).toBe('general')
+  })
+
+  it('defaults missing category to "general"', () => {
+    expect(handleServerError({ message: 'm' }).serverError.category).toBe(
+      'general',
+    )
+  })
+
+  it('strips ANSI escape codes from message', () => {
+    const result = handleServerError({
+      message: '\x1b[31mboom\x1b[0m',
+    })
+    expect(result.serverError.message).toBe('boom')
+    expect(result.chatMessage.content).toBe('boom')
+  })
+
+  it('defaults to "Unknown server error" when message is missing', () => {
+    expect(handleServerError({}).serverError.message).toBe('Unknown server error')
+  })
+
+  it('defaults to "Unknown server error" when message is whitespace-only', () => {
+    expect(handleServerError({ message: '   ' }).serverError.message).toBe(
+      'Unknown server error',
+    )
+  })
+
+  it('defaults to "Unknown server error" when message is non-string', () => {
+    expect(handleServerError({ message: 123 }).serverError.message).toBe(
+      'Unknown server error',
+    )
+  })
+
+  it('passes recoverable through when boolean', () => {
+    expect(
+      handleServerError({ recoverable: false }).serverError.recoverable,
+    ).toBe(false)
+    expect(
+      handleServerError({ recoverable: true }).serverError.recoverable,
+    ).toBe(true)
+  })
+
+  it('defaults recoverable to true when missing', () => {
+    expect(handleServerError({}).serverError.recoverable).toBe(true)
+  })
+
+  it('defaults recoverable to true when non-boolean', () => {
+    expect(
+      handleServerError({ recoverable: 'yes' }).serverError.recoverable,
+    ).toBe(true)
+  })
+
+  it('includes optional sessionId when provided', () => {
+    const result = handleServerError({ sessionId: 'sess-9', message: 'm' })
+    expect(result.serverError.sessionId).toBe('sess-9')
+  })
+
+  it('omits sessionId when missing', () => {
+    const result = handleServerError({ message: 'm' })
+    expect('sessionId' in result.serverError).toBe(false)
+  })
+
+  it('omits sessionId when not a string', () => {
+    const result = handleServerError({ sessionId: 42, message: 'm' })
+    expect('sessionId' in result.serverError).toBe(false)
+  })
+
+  it('populates id and timestamp on serverError', () => {
+    const before = Date.now()
+    const result = handleServerError({ message: 'm' })
+    const after = Date.now()
+    expect(typeof result.serverError.id).toBe('string')
+    expect(result.serverError.id.length).toBeGreaterThan(0)
+    expect(result.serverError.timestamp).toBeGreaterThanOrEqual(before)
+    expect(result.serverError.timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('builds a ChatMessage of type "error" with the same content as serverError.message', () => {
+    const result = handleServerError({
+      category: 'session',
+      message: 'something went wrong',
+    })
+    expect(result.chatMessage.type).toBe('error')
+    expect(result.chatMessage.content).toBe('something went wrong')
+    expect(typeof result.chatMessage.id).toBe('string')
+    expect(result.chatMessage.id.length).toBeGreaterThan(0)
+    expect(typeof result.chatMessage.timestamp).toBe('number')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleServerShutdown
+// ---------------------------------------------------------------------------
+describe('handleServerShutdown', () => {
+  it('passes "restart" reason through', () => {
+    expect(handleServerShutdown({ reason: 'restart' }).shutdownReason).toBe(
+      'restart',
+    )
+  })
+
+  it('passes "shutdown" reason through', () => {
+    expect(handleServerShutdown({ reason: 'shutdown' }).shutdownReason).toBe(
+      'shutdown',
+    )
+  })
+
+  it('passes "crash" reason through', () => {
+    expect(handleServerShutdown({ reason: 'crash' }).shutdownReason).toBe(
+      'crash',
+    )
+  })
+
+  it('defaults invalid reason to "shutdown"', () => {
+    expect(handleServerShutdown({ reason: 'bogus' }).shutdownReason).toBe(
+      'shutdown',
+    )
+  })
+
+  it('defaults missing reason to "shutdown"', () => {
+    expect(handleServerShutdown({}).shutdownReason).toBe('shutdown')
+  })
+
+  it('defaults non-string reason to "shutdown"', () => {
+    expect(handleServerShutdown({ reason: 42 }).shutdownReason).toBe('shutdown')
+  })
+
+  it('passes numeric restartEtaMs through (including 0)', () => {
+    expect(handleServerShutdown({ restartEtaMs: 5000 }).restartEtaMs).toBe(5000)
+    expect(handleServerShutdown({ restartEtaMs: 0 }).restartEtaMs).toBe(0)
+  })
+
+  it('defaults missing restartEtaMs to 0', () => {
+    expect(handleServerShutdown({}).restartEtaMs).toBe(0)
+  })
+
+  it('defaults non-number restartEtaMs to 0', () => {
+    expect(handleServerShutdown({ restartEtaMs: '500' }).restartEtaMs).toBe(0)
+    expect(handleServerShutdown({ restartEtaMs: null }).restartEtaMs).toBe(0)
+  })
+
+  it('populates restartingSince with the current timestamp', () => {
+    const before = Date.now()
+    const result = handleServerShutdown({})
+    const after = Date.now()
+    expect(result.restartingSince).toBeGreaterThanOrEqual(before)
+    expect(result.restartingSince).toBeLessThanOrEqual(after)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleServerStatusLegacy
+// ---------------------------------------------------------------------------
+describe('handleServerStatusLegacy', () => {
+  it('uses the message text when present', () => {
+    const result = handleServerStatusLegacy({ message: 'Hello there' })
+    expect(result.chatMessage.content).toBe('Hello there')
+  })
+
+  it('strips ANSI escape codes from message', () => {
+    const result = handleServerStatusLegacy({
+      message: '\x1b[32mok\x1b[0m',
+    })
+    expect(result.chatMessage.content).toBe('ok')
+  })
+
+  it('defaults to "Status update" when message is missing', () => {
+    expect(handleServerStatusLegacy({}).chatMessage.content).toBe('Status update')
+  })
+
+  it('defaults to "Status update" when message is whitespace-only', () => {
+    expect(
+      handleServerStatusLegacy({ message: '   ' }).chatMessage.content,
+    ).toBe('Status update')
+  })
+
+  it('defaults to "Status update" when message is non-string', () => {
+    expect(
+      handleServerStatusLegacy({ message: 42 }).chatMessage.content,
+    ).toBe('Status update')
+  })
+
+  it('builds a ChatMessage of type "system"', () => {
+    const result = handleServerStatusLegacy({ message: 'hi' })
+    expect(result.chatMessage.type).toBe('system')
+    expect(typeof result.chatMessage.id).toBe('string')
+    expect(result.chatMessage.id.length).toBeGreaterThan(0)
+    expect(typeof result.chatMessage.timestamp).toBe('number')
   })
 })

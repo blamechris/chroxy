@@ -17,6 +17,7 @@ import type {
   ConversationSummary,
   DevPreview,
   ModelInfo,
+  ServerError,
   SessionInfo,
 } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
@@ -2164,4 +2165,158 @@ export function handleCostUpdate(
     sessionId: rawSessionId || activeSessionId,
     patch: { sessionCost },
   }
+}
+
+// ---------------------------------------------------------------------------
+// server_error
+//
+// Builds the ServerError + ChatMessage pair for a `server_error` message.
+// Routing/dispatch decisions stay at the call site:
+//   - The dashboard slices a 10-deep `serverErrors` array and routes the
+//     ChatMessage to the matched session, the active session, or the global
+//     message log.
+//   - The app does the same plus adds the ServerError to its
+//     `useNotificationStore`. The optional `Alert.alert` for non-recoverable
+//     errors is also a side-effect kept at the call site.
+// ---------------------------------------------------------------------------
+
+export interface ServerErrorPayload {
+  serverError: ServerError
+  chatMessage: ChatMessage
+}
+
+const SERVER_ERROR_CATEGORIES: readonly ServerError['category'][] = [
+  'tunnel',
+  'session',
+  'permission',
+  'general',
+]
+
+/**
+ * Normalize a `server_error` message into a ServerError record and a paired
+ * ChatMessage of type `'error'`.
+ *
+ * - `category`: one of {tunnel, session, permission, general}; anything else
+ *   (including missing or non-string) defaults to `'general'`.
+ * - `message`: trimmed + non-empty + ANSI-stripped; defaults to
+ *   `'Unknown server error'`.
+ * - `recoverable`: boolean type-check; defaults to `true` when missing or
+ *   non-boolean.
+ * - `sessionId`: included on the ServerError only when the message had a
+ *   string `sessionId`. Callers compare against `sessionStates[id]` to decide
+ *   whether to route the ChatMessage to that session, the active session, or
+ *   the global log.
+ */
+export function handleServerError(
+  msg: Record<string, unknown>,
+): ServerErrorPayload {
+  const category: ServerError['category'] =
+    typeof msg.category === 'string' &&
+    (SERVER_ERROR_CATEGORIES as readonly string[]).includes(msg.category)
+      ? (msg.category as ServerError['category'])
+      : 'general'
+  const message: string =
+    typeof msg.message === 'string' && (msg.message as string).trim().length > 0
+      ? stripAnsi(msg.message as string)
+      : 'Unknown server error'
+  const recoverable: boolean =
+    typeof msg.recoverable === 'boolean' ? msg.recoverable : true
+  const errSessionId =
+    typeof msg.sessionId === 'string' ? (msg.sessionId as string) : undefined
+  const now = Date.now()
+  const serverError: ServerError = {
+    id: nextMessageId('err'),
+    category,
+    message,
+    recoverable,
+    timestamp: now,
+    ...(errSessionId ? { sessionId: errSessionId } : {}),
+  }
+  const chatMessage: ChatMessage = {
+    id: nextMessageId('err'),
+    type: 'error',
+    content: message,
+    timestamp: now,
+  }
+  return { serverError, chatMessage }
+}
+
+// ---------------------------------------------------------------------------
+// server_shutdown
+//
+// Returns the shutdown patch fields. App callers additionally invoke
+// `useNotificationStore.getState().setShutdown(...)` — that side-effect stays
+// at the call site since it's app-only.
+// ---------------------------------------------------------------------------
+
+export interface ServerShutdownPayload {
+  shutdownReason: 'restart' | 'shutdown' | 'crash'
+  restartEtaMs: number
+  restartingSince: number
+}
+
+/**
+ * Normalize a `server_shutdown` message into the shutdown state patch.
+ *
+ * - `reason`: one of {restart, shutdown, crash}; anything else defaults to
+ *   `'shutdown'`.
+ * - `restartEtaMs`: numeric pass-through (including `0`); non-numbers default
+ *   to `0`.
+ * - `restartingSince`: always set to `Date.now()` so the UI can compute
+ *   countdowns relative to message receipt.
+ */
+export function handleServerShutdown(
+  msg: Record<string, unknown>,
+): ServerShutdownPayload {
+  const reason: ServerShutdownPayload['shutdownReason'] =
+    msg.reason === 'restart' ||
+    msg.reason === 'shutdown' ||
+    msg.reason === 'crash'
+      ? (msg.reason as ServerShutdownPayload['shutdownReason'])
+      : 'shutdown'
+  const restartEtaMs =
+    typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0
+  return {
+    shutdownReason: reason,
+    restartEtaMs,
+    restartingSince: Date.now(),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// server_status (legacy plain-message branch)
+//
+// The dashboard's structured `phase`-based branch (tunnel_warming/ready) stays
+// inline at the call site. This helper covers ONLY the legacy plain-message
+// branch shared by app + dashboard: a system-typed ChatMessage carrying the
+// (ANSI-stripped, trimmed-or-defaulted) status text.
+// ---------------------------------------------------------------------------
+
+export interface ServerStatusLegacyPayload {
+  chatMessage: ChatMessage
+}
+
+/**
+ * Build the system-typed ChatMessage for a legacy plain-message
+ * `server_status` event.
+ *
+ * - `message`: trimmed + non-empty + ANSI-stripped; defaults to
+ *   `'Status update'`.
+ * - The ChatMessage is of type `'system'`. Callers route it to the active
+ *   session's message list, falling back to the global log.
+ */
+export function handleServerStatusLegacy(
+  msg: Record<string, unknown>,
+): ServerStatusLegacyPayload {
+  const statusMessage: string =
+    typeof msg.message === 'string' && (msg.message as string).trim().length > 0
+      ? stripAnsi(msg.message as string)
+      : 'Status update'
+  const chatMessage: ChatMessage = {
+    id: nextMessageId('status'),
+    type: 'system',
+    content: statusMessage,
+    timestamp: Date.now(),
+  }
+  return { chatMessage }
 }
