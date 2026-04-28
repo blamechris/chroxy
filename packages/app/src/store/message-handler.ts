@@ -24,10 +24,10 @@ import {
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import {
-  parseUserInputMessage,
   resolveStreamId,
   resolveSessionId,
-  isReplayDuplicate,
+  handleUserInput as sharedUserInput,
+  handleMessage as sharedMessageHandler,
   handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
   handleAvailablePermissionModes as sharedAvailablePermissionModes,
@@ -1261,15 +1261,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- User input echoed from other clients ---
 
     case 'user_input': {
-      const parsed = parseUserInputMessage(msg, get().myClientId, get().activeSessionId);
-      if (!parsed) break;
-      const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
-      // Adopt the server's stable messageId (issue #2902) so a later replay
-      // of the same entry dedups by id against this live-echo copy.
-      const stableId = typeof msg.messageId === 'string' ? msg.messageId : undefined;
-      const uiMsg: ChatMessage = { id: stableId || nextMessageId('user_input'), ...parsedMsg };
-      updateSession(parsedSessionId, (ss) => ({
-        messages: [...ss.messages, uiMsg],
+      const userInput = sharedUserInput(msg, get().myClientId, get().activeSessionId);
+      if (!userInput) break;
+      updateSession(userInput.sessionId, (ss) => ({
+        messages: [...ss.messages, userInput.chatMessage],
       }));
       break;
     }
@@ -1277,38 +1272,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Existing message handlers (now session-aware) ---
 
     case 'message': {
-      const msgType = (msg.messageType || msg.type) as string;
-      // Live echoes from other clients arrive as top-level `type: 'user_input'`
-      // and are handled above. Anything reaching here with
-      // messageType === 'user_input' is a history-replay entry and must be
-      // rendered so the prompts that triggered past responses are visible.
-      if (msgType === 'user_input' && !_ctx.receivingHistoryReplay) break;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      const stableMessageId = typeof msg.messageId === 'string' ? (msg.messageId as string) : undefined;
-      // During any history replay, skip if an equivalent message is already in cache (dedup).
-      // This prevents duplicates when the app already received messages via real-time
-      // subscription before switching to the session (which triggers history replay).
-      // Shared helper lives in @chroxy/store-core (#2903).
-      if (_ctx.receivingHistoryReplay) {
-        const cached = getSessionMessages(targetId);
-        if (isReplayDuplicate(cached, {
-          messageType: msgType,
-          messageId: stableMessageId,
-          content: msg.content,
-          timestamp: msg.timestamp as number | undefined,
-          tool: msg.tool as string | undefined,
-          options: msg.options as ChatMessage['options'],
-        })) break;
-      }
-      const newMsg: ChatMessage = {
-        // Preserve the server-assigned messageId so future replays can still dedup by id.
-        id: (stableMessageId && msgType === 'user_input') ? stableMessageId : nextMessageId(msgType),
-        type: msgType as ChatMessage['type'],
-        content: msg.content as string,
-        tool: msg.tool as string | undefined,
-        options: msg.options as ChatMessage['options'],
-        timestamp: msg.timestamp as number,
-      };
+      // Use the shared resolver so trim / empty-string normalization stays
+      // consistent with sharedMessageHandler and the rest of store-core.
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      const cached = getSessionMessages(targetId);
+      const result = sharedMessageHandler(msg, get().activeSessionId, _ctx.receivingHistoryReplay, cached);
+      if (!result.shouldDispatch) break;
+      const newMsg = result.chatMessage!;
       const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
       if (effectiveId && get().sessionStates[effectiveId]) {
         updateSession(effectiveId, (ss) => ({
@@ -1319,11 +1289,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       }
       // Surface rate limit / usage limit errors prominently (#616)
-      if (msgType === 'error' && typeof msg.content === 'string') {
-        const content = (msg.content as string).toLowerCase();
-        if (content.includes('rate limit') || content.includes('usage limit') || content.includes('quota') || content.includes('overloaded')) {
-          Alert.alert('Usage Limit', msg.content as string);
-        }
+      if (result.isRateLimitError && result.errorContent) {
+        Alert.alert('Usage Limit', result.errorContent);
       }
       break;
     }

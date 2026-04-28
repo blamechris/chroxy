@@ -78,10 +78,13 @@ import {
   handleWebFeatureStatus,
   handleSearchResults,
   handleUserQuestion,
+  handleUserInput,
+  handleMessage,
 } from './index'
 import { nextMessageId } from '../utils'
 import type {
   AgentInfo,
+  ChatMessage,
   Checkpoint,
   ConnectedClient,
   ConversationSummary,
@@ -3987,5 +3990,417 @@ describe('handleUserQuestion', () => {
       'sess-active',
     )
     expect(out3!.sessionId).toBe('sess-active')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleUserInput
+// ---------------------------------------------------------------------------
+describe('handleUserInput', () => {
+  it('returns null when parseUserInputMessage returns null (own client echo)', () => {
+    const out = handleUserInput(
+      { clientId: 'me', text: 'hello', sessionId: 'sess-1' },
+      'me',
+      'sess-active',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('returns null when no target session can be resolved', () => {
+    const out = handleUserInput(
+      { clientId: 'them', text: 'hello' },
+      'me',
+      null,
+    )
+    expect(out).toBeNull()
+  })
+
+  it('builds a ChatMessage using the server-stamped messageId when present', () => {
+    const out = handleUserInput(
+      {
+        clientId: 'them',
+        text: 'hello world',
+        sessionId: 'sess-1',
+        messageId: 'srv-stable-id',
+        timestamp: 12345,
+      },
+      'me',
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.sessionId).toBe('sess-1')
+    expect(out!.content).toBe('hello world')
+    expect(out!.chatMessage.id).toBe('srv-stable-id')
+    expect(out!.chatMessage.type).toBe('user_input')
+    expect(out!.chatMessage.content).toBe('hello world')
+    expect(out!.chatMessage.timestamp).toBe(12345)
+  })
+
+  it('generates a fresh message id when no stable messageId is provided', () => {
+    const out = handleUserInput(
+      {
+        clientId: 'them',
+        text: 'hi',
+        sessionId: 'sess-1',
+      },
+      'me',
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.id).toMatch(/^user_input-\d+-\d+$/)
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is missing', () => {
+    const out = handleUserInput(
+      { clientId: 'them', text: 'hi' },
+      'me',
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  it('exposes parsed.content separately so the dashboard can write the terminal buffer', () => {
+    const out = handleUserInput(
+      { clientId: 'them', text: 'terminal text', sessionId: 'sess-1' },
+      'me',
+      null,
+    )
+    expect(out!.content).toBe('terminal text')
+  })
+
+  it('treats non-string messageId as missing (generates id instead)', () => {
+    const out = handleUserInput(
+      {
+        clientId: 'them',
+        text: 'hi',
+        sessionId: 'sess-1',
+        messageId: 42,
+      },
+      'me',
+      null,
+    )
+    expect(out!.chatMessage.id).not.toBe(42)
+    expect(out!.chatMessage.id).toMatch(/^user_input-\d+-\d+$/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleMessage
+// ---------------------------------------------------------------------------
+describe('handleMessage', () => {
+  it('uses messageType field when present, falling back to type', () => {
+    const out1 = handleMessage(
+      { messageType: 'response', type: 'message', content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out1.shouldDispatch).toBe(true)
+    expect(out1.chatMessage!.type).toBe('response')
+
+    const out2 = handleMessage(
+      { type: 'error', content: 'oh no', timestamp: 2 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out2.shouldDispatch).toBe(true)
+    expect(out2.chatMessage!.type).toBe('error')
+  })
+
+  it('skips user_input outside replay (live echo handled elsewhere)', () => {
+    const out = handleMessage(
+      { messageType: 'user_input', content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('renders user_input during replay', () => {
+    const out = handleMessage(
+      { messageType: 'user_input', content: 'hi', timestamp: 1 },
+      'sess-active',
+      true,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.type).toBe('user_input')
+  })
+
+  it('skips replay duplicates', () => {
+    const cached: ChatMessage[] = [
+      { id: 'srv-1', type: 'response', content: 'hello', timestamp: 100 },
+    ]
+    const out = handleMessage(
+      {
+        messageType: 'response',
+        messageId: 'srv-1',
+        content: 'hello',
+        timestamp: 100,
+      },
+      'sess-active',
+      true,
+      cached,
+    )
+    expect(out.shouldDispatch).toBe(false)
+  })
+
+  it('does NOT run replay-dedup outside replay', () => {
+    const cached: ChatMessage[] = [
+      { id: 'srv-1', type: 'response', content: 'hello', timestamp: 100 },
+    ]
+    const out = handleMessage(
+      {
+        messageType: 'response',
+        messageId: 'srv-1',
+        content: 'hello',
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      cached,
+    )
+    expect(out.shouldDispatch).toBe(true)
+  })
+
+  it('uses stableMessageId for ALL message types when present (canonical #2902 behaviour)', () => {
+    const out1 = handleMessage(
+      {
+        messageType: 'response',
+        messageId: 'srv-resp-1',
+        content: 'hello',
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out1.chatMessage!.id).toBe('srv-resp-1')
+
+    const out2 = handleMessage(
+      {
+        messageType: 'user_input',
+        messageId: 'srv-input-1',
+        content: 'hi',
+        timestamp: 2,
+      },
+      'sess-active',
+      true,
+      [],
+    )
+    expect(out2.chatMessage!.id).toBe('srv-input-1')
+
+    const out3 = handleMessage(
+      {
+        messageType: 'error',
+        messageId: 'srv-err-1',
+        content: 'oops',
+        timestamp: 3,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out3.chatMessage!.id).toBe('srv-err-1')
+  })
+
+  it('generates a fresh id when no stableMessageId is provided', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 'hello', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.id).toMatch(/^response-\d+-\d+$/)
+  })
+
+  it('builds ChatMessage with content, tool, options, timestamp passed through', () => {
+    const opts = [{ label: 'a', value: '1' }]
+    const out = handleMessage(
+      {
+        messageType: 'tool_use',
+        content: 'using bash',
+        tool: 'Bash',
+        options: opts,
+        timestamp: 999,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.content).toBe('using bash')
+    expect(out.chatMessage!.tool).toBe('Bash')
+    expect(out.chatMessage!.options).toBe(opts)
+    expect(out.chatMessage!.timestamp).toBe(999)
+  })
+
+  it('detects rate-limit errors (case-insensitive)', () => {
+    const cases = [
+      'Rate Limit exceeded',
+      'usage limit hit',
+      'You have exceeded your QUOTA',
+      'API is overloaded right now',
+    ]
+    for (const content of cases) {
+      const out = handleMessage(
+        { messageType: 'error', content, timestamp: 1 },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.isRateLimitError).toBe(true)
+      expect(out.errorContent).toBe(content)
+    }
+  })
+
+  it('does not flag non-rate-limit errors', () => {
+    const out = handleMessage(
+      { messageType: 'error', content: 'random failure', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.isRateLimitError).toBe(false)
+    expect(out.errorContent).toBeNull()
+  })
+
+  it('only flags rate-limit when msgType is error', () => {
+    const out = handleMessage(
+      {
+        messageType: 'response',
+        content: 'rate limit mention in response',
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.isRateLimitError).toBe(false)
+  })
+
+  it('does not flag rate-limit when content is non-string', () => {
+    const out = handleMessage(
+      { messageType: 'error', content: 42, timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.isRateLimitError).toBe(false)
+  })
+
+  it('resolves sessionId from message when present', () => {
+    const out = handleMessage(
+      {
+        messageType: 'response',
+        sessionId: 'sess-1',
+        content: 'hi',
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.sessionId).toBe('sess-1')
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is missing', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.sessionId).toBe('sess-active')
+  })
+
+  it('returns null sessionId when neither msg.sessionId nor activeSessionId is set', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 'hi', timestamp: 1 },
+      null,
+      false,
+      [],
+    )
+    expect(out.sessionId).toBeNull()
+  })
+
+  // Runtime validation guards (Copilot review on PR #3148): handleMessage now
+  // rejects malformed payloads up front rather than building an invalid
+  // ChatMessage and letting it crash render paths.
+  it('drops dispatch when messageType / type is missing', () => {
+    const out = handleMessage(
+      { content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('drops dispatch when messageType is non-string', () => {
+    const out = handleMessage(
+      { messageType: 7, content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+  })
+
+  it('drops dispatch when content is non-string', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 42, timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('drops dispatch when timestamp is non-number', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 'hi', timestamp: 'now' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('uses resolveSessionId — rejects whitespace-only sessionId', () => {
+    const out = handleMessage(
+      {
+        messageType: 'response',
+        sessionId: '   ',
+        content: 'hi',
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    // Whitespace is not a valid sessionId — should fall back to activeSessionId.
+    expect(out.sessionId).toBe('sess-active')
+  })
+
+  it('drops dispatch when tool is non-string (sanitises rather than passing through)', () => {
+    const out = handleMessage(
+      {
+        messageType: 'tool_use',
+        content: 'using bash',
+        tool: 99,
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.tool).toBeUndefined()
   })
 })
