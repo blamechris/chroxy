@@ -53,6 +53,10 @@ import {
   handleFileListing,
   handleFileContent,
   handleWriteFileResult,
+  handleSlashCommands,
+  handleAgentList,
+  handleProviderList,
+  handleFileList,
 } from './index'
 import type {
   Checkpoint,
@@ -2101,6 +2105,55 @@ describe('handleDirectoryListing', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleSlashCommands
+// ---------------------------------------------------------------------------
+describe('handleSlashCommands', () => {
+  it('returns commands array when valid and no session id on message (broadcast)', () => {
+    const cmds = [{ name: '/help' }, { name: '/clear' }]
+    expect(handleSlashCommands({ commands: cmds }, 'active-1')).toEqual({ commands: cmds })
+  })
+
+  it('returns commands array when session id matches active', () => {
+    const cmds = [{ name: '/help' }]
+    expect(
+      handleSlashCommands({ sessionId: 'active-1', commands: cmds }, 'active-1'),
+    ).toEqual({ commands: cmds })
+  })
+
+  it('returns empty commands array verbatim', () => {
+    expect(handleSlashCommands({ commands: [] }, 'active-1')).toEqual({ commands: [] })
+  })
+
+  it('returns commands when message has session id but no active session', () => {
+    const cmds = [{ name: '/help' }]
+    expect(handleSlashCommands({ sessionId: 'sess-1', commands: cmds }, null)).toEqual({
+      commands: cmds,
+    })
+  })
+
+  it('returns null when session id mismatches active session', () => {
+    expect(
+      handleSlashCommands({ sessionId: 'other', commands: [{ name: '/help' }] }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when commands is missing', () => {
+    expect(handleSlashCommands({}, 'active-1')).toBeNull()
+  })
+
+  it('returns null when commands is non-array', () => {
+    expect(handleSlashCommands({ commands: 'oops' }, 'active-1')).toBeNull()
+    expect(handleSlashCommands({ commands: { x: 1 } }, 'active-1')).toBeNull()
+    expect(handleSlashCommands({ commands: null }, 'active-1')).toBeNull()
+  })
+
+  it('returns commands when no active session and no session id on message', () => {
+    const cmds = [{ name: '/help' }]
+    expect(handleSlashCommands({ commands: cmds }, null)).toEqual({ commands: cmds })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleFileListing
 // ---------------------------------------------------------------------------
 describe('handleFileListing', () => {
@@ -2163,6 +2216,53 @@ describe('handleFileListing', () => {
       entries: [],
       error: 'not found',
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAgentList
+// ---------------------------------------------------------------------------
+describe('handleAgentList', () => {
+  it('returns agents array when valid and no session id on message (broadcast)', () => {
+    const agents = [{ name: 'reviewer' }, { name: 'planner' }]
+    expect(handleAgentList({ agents }, 'active-1')).toEqual({ agents })
+  })
+
+  it('returns agents array when session id matches active', () => {
+    const agents = [{ name: 'reviewer' }]
+    expect(
+      handleAgentList({ sessionId: 'active-1', agents }, 'active-1'),
+    ).toEqual({ agents })
+  })
+
+  it('returns empty agents array verbatim', () => {
+    expect(handleAgentList({ agents: [] }, 'active-1')).toEqual({ agents: [] })
+  })
+
+  it('returns agents when message has session id but no active session', () => {
+    const agents = [{ name: 'reviewer' }]
+    expect(handleAgentList({ sessionId: 'sess-1', agents }, null)).toEqual({ agents })
+  })
+
+  it('returns null when session id mismatches active session', () => {
+    expect(
+      handleAgentList({ sessionId: 'other', agents: [{ name: 'r' }] }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when agents is missing', () => {
+    expect(handleAgentList({}, 'active-1')).toBeNull()
+  })
+
+  it('returns null when agents is non-array', () => {
+    expect(handleAgentList({ agents: 'oops' }, 'active-1')).toBeNull()
+    expect(handleAgentList({ agents: { x: 1 } }, 'active-1')).toBeNull()
+    expect(handleAgentList({ agents: null }, 'active-1')).toBeNull()
+  })
+
+  it('returns agents when no active session and no session id on message', () => {
+    const agents = [{ name: 'reviewer' }]
+    expect(handleAgentList({ agents }, null)).toEqual({ agents })
   })
 })
 
@@ -2268,6 +2368,35 @@ describe('handleFileContent', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleProviderList
+// ---------------------------------------------------------------------------
+describe('handleProviderList', () => {
+  it('returns providers array when valid', () => {
+    const providers = [{ name: 'anthropic' }, { name: 'openai' }]
+    expect(handleProviderList({ providers })).toEqual({ providers })
+  })
+
+  it('returns empty providers array verbatim', () => {
+    expect(handleProviderList({ providers: [] })).toEqual({ providers: [] })
+  })
+
+  it('ignores session id on message (no guard)', () => {
+    const providers = [{ name: 'anthropic' }]
+    expect(handleProviderList({ sessionId: 'whatever', providers })).toEqual({ providers })
+  })
+
+  it('returns null when providers is missing', () => {
+    expect(handleProviderList({})).toBeNull()
+  })
+
+  it('returns null when providers is non-array', () => {
+    expect(handleProviderList({ providers: 'oops' })).toBeNull()
+    expect(handleProviderList({ providers: { x: 1 } })).toBeNull()
+    expect(handleProviderList({ providers: null })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleWriteFileResult
 // ---------------------------------------------------------------------------
 describe('handleWriteFileResult', () => {
@@ -2296,5 +2425,34 @@ describe('handleWriteFileResult', () => {
 
   it('preserves empty-string path verbatim', () => {
     expect(handleWriteFileResult({ path: '' })).toEqual({ path: '', error: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleFileList
+// ---------------------------------------------------------------------------
+describe('handleFileList', () => {
+  it('returns files array when valid', () => {
+    const files = [{ path: 'a.ts' }, { path: 'b.ts' }]
+    expect(handleFileList({ files })).toEqual({ files })
+  })
+
+  it('returns empty files array verbatim', () => {
+    expect(handleFileList({ files: [] })).toEqual({ files: [] })
+  })
+
+  it('returns empty array when files is missing (matches dashboard default)', () => {
+    expect(handleFileList({})).toEqual({ files: [] })
+  })
+
+  it('returns empty array when files is non-array (matches dashboard default)', () => {
+    expect(handleFileList({ files: 'oops' })).toEqual({ files: [] })
+    expect(handleFileList({ files: { x: 1 } })).toEqual({ files: [] })
+    expect(handleFileList({ files: null })).toEqual({ files: [] })
+  })
+
+  it('ignores session id on message (no guard)', () => {
+    const files = [{ path: 'a.ts' }]
+    expect(handleFileList({ sessionId: 'whatever', files })).toEqual({ files })
   })
 })

@@ -220,4 +220,8 @@ export {
   handleFileListing,
   handleFileContent,
   handleWriteFileResult,
+  handleSlashCommands,
+  handleAgentList,
+  handleProviderList,
+  handleFileList,
 } from './handlers'
