@@ -188,6 +188,8 @@ export type {
   MessagePayload,
   ToolStartPayload,
   ToolResultPayload,
+  StreamStartPayload,
+  StreamEndPayload,
 } from './handlers'
 
 export {
@@ -270,4 +272,6 @@ export {
   handleMessage,
   handleToolStart,
   handleToolResult,
+  handleStreamStart,
+  handleStreamEnd,
 } from './handlers'

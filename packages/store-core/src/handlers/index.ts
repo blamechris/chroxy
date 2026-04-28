@@ -25,6 +25,7 @@ import type {
 import { nextMessageId, stripAnsi } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
 import { isReplayDuplicate } from '../replay-dedup'
+import { resolveStreamId } from '../stream-id'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2985,4 +2986,145 @@ export function handleToolResult(
       return updated
     },
   }
+}
+
+// ---------------------------------------------------------------------------
+// stream_start
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleStreamStart}. */
+export interface StreamStartPayload {
+  /**
+   * Resolved target session, falling back to activeSessionId. May be null when
+   * neither the message nor the active session provides one.
+   */
+  sessionId: string | null
+  /** ID to set as `streamingMessageId` (resolved against any collision). */
+  streamingMessageId: string
+  /**
+   * Whether the caller should append a new response message to the session
+   * messages array. When false, the call site's existing response message is
+   * being reused (reconnect replay dedup) and only the streamingMessageId
+   * needs to be updated.
+   */
+  isNewMessage: boolean
+  /** Pre-built ChatMessage when `isNewMessage` is true, else null. */
+  newMessage: ChatMessage | null
+  /**
+   * Stream-id remap directive when an existing non-response message (e.g.
+   * tool_use) collides with the incoming stream id. Caller registers this in
+   * its module-local `_deltaIdRemaps` Map so future stream_delta messages
+   * route to the suffixed response id.
+   */
+  remap: { from: string; to: string } | null
+}
+
+/**
+ * Validate and resolve a `stream_start` message into a session patch.
+ *
+ * - Resolves `sessionId` from `msg.sessionId` (validated as `string`), falling
+ *   back to `activeSessionId` when the field is missing or not a string.
+ * - Resolves `streamingMessageId` via {@link resolveStreamId} against the
+ *   existing session messages. When `msg.messageId` is missing or not a
+ *   string, falls back to a freshly generated id (`nextMessageId('msg')`) so
+ *   the resolved id is always a real string. When the stream id collides
+ *   with an existing non-response message, returns a suffixed id and a
+ *   `remap` directive so the caller can register it in its module-local
+ *   `_deltaIdRemaps`.
+ * - When the existing message is already a `response` (reconnect replay
+ *   dedup), returns `isNewMessage: false` and `newMessage: null` so the
+ *   caller only updates `streamingMessageId`.
+ * - Otherwise builds a fresh `{ type: 'response', content: '', timestamp: now
+ *   }` ChatMessage at the resolved id.
+ *
+ * Module-local state mutations (`_deltaIdRemaps.set`) and side-effects (the
+ * `filterThinking(messages)` array transform that drops the thinking
+ * placeholder before appending) stay at the call site — this helper just
+ * computes the patch shape.
+ *
+ * Mirrors the `typeof === 'string'` guard pattern used in {@link
+ * handleToolStart} so the returned `ChatMessage.id` and `sessionId` are
+ * always honest strings, matching the protocol schema (`messageId:
+ * z.string()` in `ServerStreamStartSchema`).
+ */
+export function handleStreamStart(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  existingMessages: readonly ChatMessage[],
+): StreamStartPayload {
+  const streamId = typeof msg.messageId === 'string' ? msg.messageId : nextMessageId('msg')
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
+  const existing = existingMessages.find((m) => m.id === streamId)
+  const { resolvedId, remap } = resolveStreamId(existing, streamId)
+
+  if (existing && existing.type === 'response') {
+    // Reuse existing response message (reconnect replay dedup) — caller only
+    // updates streamingMessageId.
+    return {
+      sessionId,
+      streamingMessageId: resolvedId,
+      isNewMessage: false,
+      newMessage: null,
+      remap: null,
+    }
+  }
+
+  const newMessage: ChatMessage = {
+    id: resolvedId,
+    type: 'response',
+    content: '',
+    timestamp: Date.now(),
+  }
+
+  return {
+    sessionId,
+    streamingMessageId: resolvedId,
+    isNewMessage: true,
+    newMessage,
+    remap: remap ?? null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// stream_end
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleStreamEnd}. */
+export interface StreamEndPayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /**
+   * The messageId from the stream_end message. Used by the caller to clean
+   * up `_deltaIdRemaps` and `_postPermissionSplits` entries. Returns `null`
+   * when the incoming `msg.messageId` is missing or not a string — the
+   * caller-side `Map.delete(null)` / `Set.delete(null)` is a safe no-op.
+   *
+   * The protocol schema (`ServerStreamEndSchema.messageId: z.string()`)
+   * guarantees this is a string for well-formed payloads; the `null` arm
+   * exists only so malformed payloads cannot poison the call-site Maps with
+   * non-string keys.
+   */
+  messageId: string | null
+}
+
+/**
+ * Resolve session + message ids for a `stream_end` message.
+ *
+ * Side-effects (flushing pending deltas, terminal data writes, clearing
+ * streamingMessageId, forcing a new messages array reference, deleting
+ * `_deltaIdRemaps` / `_postPermissionSplits` entries) all stay at the call
+ * site — they touch module-local state and platform-specific store APIs.
+ * This helper only resolves the two ids the caller needs.
+ *
+ * Mirrors the `typeof === 'string'` guard pattern used in {@link
+ * handleToolStart} so the returned `messageId` and `sessionId` are honest
+ * strings (or `null`), matching the protocol schema.
+ */
+export function handleStreamEnd(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): StreamEndPayload {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
+  const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
+  return { sessionId, messageId }
 }
