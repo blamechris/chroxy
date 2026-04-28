@@ -1914,9 +1914,14 @@ export interface AgentInfoBuilder {
  *
  * Note on session resolution: this uses `resolveSessionId` (the shared trim +
  * fallback helper), matching every other migrated handler. The prior inline
- * code was `(msg.sessionId as string) || activeSessionId`; in practice the
- * wire protocol always sends a string `sessionId` so the two paths are
- * equivalent.
+ * code was `(msg.sessionId as string) || activeSessionId`. The two paths
+ * differ only for whitespace-only `sessionId` values (e.g. `'   '`):
+ * `resolveSessionId` trims and falls back to `activeSessionId`, while the
+ * prior code would have used the whitespace string verbatim and then
+ * harmlessly missed the `sessionStates[id]` lookup. Server-emitted
+ * `agent_spawned` messages do not include `sessionId` in the message body
+ * (it is injected by `broadcastToSession` for SDK mode and absent for
+ * legacy CLI mode), so the divergence is theoretical only.
  */
 export function handleAgentSpawned(
   msg: Record<string, unknown>,

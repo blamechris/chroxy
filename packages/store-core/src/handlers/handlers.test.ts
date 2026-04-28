@@ -2762,8 +2762,8 @@ describe('handleAgentSpawned', () => {
   it('defaults startedAt to current time when missing', () => {
     const before = Date.now()
     const builder = handleAgentSpawned({ toolUseId: 'tu-1' }, 'active-1')
-    const after = Date.now()
     const out = builder.applyTo([])
+    const after = Date.now()
     expect(out).toHaveLength(1)
     const startedAt = out[0]?.startedAt
     expect(typeof startedAt).toBe('number')
@@ -2778,8 +2778,8 @@ describe('handleAgentSpawned', () => {
       { toolUseId: 'tu-1', startedAt: 0 },
       'active-1',
     )
-    const after = Date.now()
     const startedAt = builder.applyTo([])[0]?.startedAt as number
+    const after = Date.now()
     expect(startedAt).toBeGreaterThanOrEqual(before)
     expect(startedAt).toBeLessThanOrEqual(after)
   })
