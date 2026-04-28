@@ -1552,7 +1552,7 @@ describe('handlePermissionRequest', () => {
     ).toBe(0)
   })
 
-  it('treats array input as not-an-object (matches inline guard)', () => {
+  it('forwards array input verbatim (arrays pass the inline object guard)', () => {
     // Inline guard: `msg.input && typeof msg.input === 'object'` — arrays pass
     // this guard. Preserve that behaviour: forward arrays verbatim.
     const arr = [1, 2, 3]
