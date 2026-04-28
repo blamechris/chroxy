@@ -24,6 +24,7 @@ export type {
   SessionHealth,
   SessionContext,
   McpServer,
+  ServerError,
   DevPreview,
   WebTask,
   WebFeatureStatus,
@@ -55,6 +56,7 @@ import type {
   PendingPermissionConfirm,
   SavedConnection,
   SearchResult,
+  ServerError,
   SessionInfo,
   SlashCommand,
   WebFeatureStatus,
@@ -205,15 +207,6 @@ export interface LogEntry {
   component: string;
   level: 'debug' | 'info' | 'warn' | 'error';
   message: string;
-  timestamp: number;
-  sessionId?: string;
-}
-
-export interface ServerError {
-  id: string;
-  category: 'tunnel' | 'session' | 'permission' | 'general';
-  message: string;
-  recoverable: boolean;
   timestamp: number;
   sessionId?: string;
 }

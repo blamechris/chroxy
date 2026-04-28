@@ -24,6 +24,7 @@ export type {
   SessionHealth,
   SessionContext,
   McpServer,
+  ServerError,
   DevPreview,
   WebTask,
   WebFeatureStatus,
@@ -56,6 +57,7 @@ import type {
   ModelInfo,
   PendingPermissionConfirm,
   SearchResult,
+  ServerError,
   SessionContext,
   SessionHealth,
   SessionInfo,
@@ -194,14 +196,6 @@ export interface ProviderInfo {
 export interface SessionState extends BaseSessionState {
   activityState: SessionActivity;
   sessionRules?: PermissionRule[];
-}
-
-export interface ServerError {
-  id: string;
-  category: 'tunnel' | 'session' | 'permission' | 'general';
-  message: string;
-  recoverable: boolean;
-  timestamp: number;
 }
 
 export interface SessionNotification {

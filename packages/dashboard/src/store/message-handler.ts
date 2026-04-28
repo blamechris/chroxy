@@ -73,6 +73,9 @@ import {
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
+  handleServerError as sharedServerError,
+  handleServerShutdown as sharedServerShutdown,
+  handleServerStatusLegacy as sharedServerStatusLegacy,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -85,7 +88,7 @@ import {
   type EncryptionState,
   type KeyPair,
 } from './crypto';
-import { stripAnsi, filterThinking, nextMessageId } from './utils';
+import { filterThinking, nextMessageId } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import type {
   ChatMessage,
@@ -100,7 +103,6 @@ import type {
   GitStatusEntry,
   McpServer,
   QueuedMessage,
-  ServerError,
   SessionInfo,
   SessionNotification,
   SessionState,
@@ -1159,38 +1161,11 @@ function handleBudgetResumed(msg: Record<string, unknown>, get: MsgGet, _set: Ms
 }
 
 function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const allowedCategories = new Set<ServerError['category']>([
-    'tunnel', 'session', 'permission', 'general',
-  ]);
-  const category: ServerError['category'] =
-    typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
-      ? (msg.category as ServerError['category'])
-      : 'general';
-  const message: string =
-    typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-      ? stripAnsi(msg.message as string)
-      : 'Unknown server error';
-  const recoverable: boolean =
-    typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
-
-  const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
-  const serverError: ServerError = {
-    id: nextMessageId('err'),
-    category,
-    message,
-    recoverable,
-    timestamp: Date.now(),
-    ...(errSessionId ? { sessionId: errSessionId } : {}),
-  };
+  const { serverError, chatMessage: errorMsg } = sharedServerError(msg);
   set((state: ConnectionState) => ({
     serverErrors: [...state.serverErrors, serverError].slice(-10),
   }));
-  const errorMsg: ChatMessage = {
-    id: nextMessageId('err'),
-    type: 'error',
-    content: serverError.message,
-    timestamp: Date.now(),
-  };
+  const errSessionId = serverError.sessionId;
   if (errSessionId && get().sessionStates[errSessionId]) {
     // Scoped error — route to the specific session only
     updateSession(errSessionId, (ss) => ({
@@ -1215,13 +1190,7 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 }
 
 function handleServerShutdown(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const reason = msg.reason === 'restart' || msg.reason === 'shutdown' || msg.reason === 'crash' ? msg.reason : 'shutdown';
-  const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
-  set({
-    shutdownReason: reason,
-    restartEtaMs: eta,
-    restartingSince: Date.now(),
-  });
+  set(sharedServerShutdown(msg));
 }
 
 /**
@@ -1938,17 +1907,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         break;
       }
 
-      // Legacy plain-message server_status (no phase field)
-      const statusMessage: string =
-        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-          ? stripAnsi(msg.message as string)
-          : 'Status update';
-      const statusMsg: ChatMessage = {
-        id: nextMessageId('status'),
-        type: 'system',
-        content: statusMessage,
-        timestamp: Date.now(),
-      };
+      // Legacy plain-message server_status (no phase field, or unknown phase)
+      const { chatMessage: statusMsg } = sharedServerStatusLegacy(msg);
       const activeStatusId = get().activeSessionId;
       if (activeStatusId && get().sessionStates[activeStatusId]) {
         updateActiveSession((ss) => ({

@@ -89,6 +89,9 @@ import {
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
+  handleServerError as sharedServerError,
+  handleServerShutdown as sharedServerShutdown,
+  handleServerStatusLegacy as sharedServerStatusLegacy,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1945,16 +1948,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Ignore structured startup phase events (phase field) — only the dashboard uses these
       if (typeof msg.phase === 'string') break;
 
-      const statusMessage: string =
-        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-          ? stripAnsi(msg.message as string)
-          : 'Status update';
-      const statusMsg: ChatMessage = {
-        id: nextMessageId('status'),
-        type: 'system',
-        content: statusMessage,
-        timestamp: Date.now(),
-      };
+      const { chatMessage: statusMsg } = sharedServerStatusLegacy(msg);
       const activeStatusId = get().activeSessionId;
       if (activeStatusId && get().sessionStates[activeStatusId]) {
         updateActiveSession((ss) => ({
@@ -1967,15 +1961,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_shutdown': {
-      const reason = msg.reason === 'restart' || msg.reason === 'shutdown' || msg.reason === 'crash' ? msg.reason : 'shutdown';
-      const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
-      const shutdownSince = Date.now();
-      set({
-        shutdownReason: reason,
-        restartEtaMs: eta,
-        restartingSince: shutdownSince,
-      });
-      useNotificationStore.getState().setShutdown(reason, eta, shutdownSince);
+      const shutdownPatch = sharedServerShutdown(msg);
+      set(shutdownPatch);
+      useNotificationStore
+        .getState()
+        .setShutdown(
+          shutdownPatch.shutdownReason,
+          shutdownPatch.restartEtaMs,
+          shutdownPatch.restartingSince,
+        );
       break;
     }
 
@@ -2423,38 +2417,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_error': {
-      const allowedCategories = new Set<ServerError['category']>([
-        'tunnel', 'session', 'permission', 'general',
-      ]);
-      const category: ServerError['category'] =
-        typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
-          ? (msg.category as ServerError['category'])
-          : 'general';
-      const message: string =
-        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-          ? stripAnsi(msg.message as string)
-          : 'Unknown server error';
-      const recoverable: boolean =
-        typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
-
-      const serverError: ServerError = {
-        id: nextMessageId('err'),
-        category,
-        message,
-        recoverable,
-        timestamp: Date.now(),
-      };
+      const { serverError, chatMessage: errorMsg } = sharedServerError(msg);
       set((state: ConnectionState) => ({
         serverErrors: [...state.serverErrors, serverError].slice(-10),
       }));
       useNotificationStore.getState().addServerError(serverError);
-      const errorMsg: ChatMessage = {
-        id: nextMessageId('err'),
-        type: 'error',
-        content: serverError.message,
-        timestamp: Date.now(),
-      };
-      const activeErrId = get().activeSessionId;
       updateActiveSession((ss) => ({
         messages: filterThinking([...ss.messages, errorMsg]),
         streamingMessageId: null,

@@ -115,6 +115,23 @@ export interface McpServer {
   status: string;
 }
 
+/**
+ * Server-emitted error captured for the notification/toast UI.
+ *
+ * Produced by the shared `handleServerError` helper from a `server_error`
+ * message. Callers slice an array of these into their `serverErrors` state
+ * (typically capped at the most recent 10 entries).
+ */
+export interface ServerError {
+  id: string;
+  category: 'tunnel' | 'session' | 'permission' | 'general';
+  message: string;
+  recoverable: boolean;
+  timestamp: number;
+  /** Set when the server scoped the error to a specific session. */
+  sessionId?: string;
+}
+
 export interface DevPreview {
   port: number;
   url: string;
