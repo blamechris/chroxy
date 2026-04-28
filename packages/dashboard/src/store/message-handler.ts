@@ -915,16 +915,17 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
 
 function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   // Forward tool invocation to terminal view (dashboard-only side effect).
-  // Performed unconditionally (matches prior inline behaviour): the terminal
-  // preview should reflect the tool start even when the chat dispatch is
-  // deduped during replay.
+  // Performed unconditionally and BEFORE sharedToolStart so a JSON.stringify
+  // throw on a non-serialisable msg.input (circular ref) cannot suppress the
+  // terminal preview write — matches the prior inline ordering.
+  const toolName = typeof msg.tool === 'string' ? msg.tool : 'tool';
+  get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
   const cached = (() => {
-    const targetId = (msg.sessionId as string) || get().activeSessionId;
+    const targetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
     const targetState = targetId ? get().sessionStates[targetId] : null;
     return targetState ? targetState.messages : get().messages;
   })();
   const result = sharedToolStart(msg, get().activeSessionId, _receivingHistoryReplay, cached);
-  get().appendTerminalData(`\r\n\x1b[36m⏺ ${result.toolName}\x1b[0m\r\n`);
   if (!result.shouldDispatch || !result.chatMessage) return;
   const toolMsg = result.chatMessage;
   const targetId = result.sessionId;

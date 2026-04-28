@@ -2841,11 +2841,11 @@ export interface ToolStartPayload {
 /**
  * Validate, dedup, and normalize a `tool_start` message.
  *
- * - Resolves `targetId` via `(msg.sessionId as string) || activeSessionId`
- *   (matches both clients' prior inline behaviour — verbatim cast, no trim).
- * - Resolves `toolId = (msg.messageId as string) || nextMessageId('tool')`.
- *   Using the server's stable messageId enables per-id dedup across the live
- *   path and history replay (#2901).
+ * - Resolves `sessionId` from `msg.sessionId` (string-typed) falling back to
+ *   `activeSessionId`. Non-string `msg.sessionId` is ignored.
+ * - Resolves `toolId` from `msg.messageId` (string-typed) falling back to
+ *   `nextMessageId('tool')`. The server's stable messageId enables per-id
+ *   dedup across the live path and history replay (#2901).
  * - During `receivingHistoryReplay`, returns `shouldDispatch: false` when an
  *   entry with the same `id` is already present in `cachedMessages`. The
  *   legacy blanket `messages.length > 0` guard was removed (#2901): with
@@ -2854,8 +2854,16 @@ export interface ToolStartPayload {
  *   already had. Per-id dedup is the correct check on both replay paths.
  * - Builds a `tool_use` ChatMessage. `content` falls through input → tool
  *   name → empty string.
- * - Exposes `toolName` (`(msg.tool as string) || 'tool'`) so the dashboard
- *   can write it to terminal data at the call site without re-parsing.
+ * - Exposes `toolName` (string-validated `msg.tool` or `'tool'` fallback) so
+ *   the dashboard can write it to terminal data at the call site without
+ *   re-parsing.
+ *
+ * Per-field validation uses `typeof === 'string'` guards rather than
+ * `as string` casts so non-string runtime values are coerced to safe defaults
+ * (matches the pattern used in `handleHistoryReplayStart` / `handleMcpServers`
+ * elsewhere in this file). `ChatMessage.id`, `tool`, `toolUseId`, `serverName`,
+ * and `ToolStartPayload.toolName` are guaranteed string-typed at the type
+ * level.
  *
  * Side-effects (terminal-data write, message dispatch) stay at the call site;
  * this helper only returns the data needed to perform them.
@@ -2866,9 +2874,12 @@ export function handleToolStart(
   receivingHistoryReplay: boolean,
   cachedMessages: readonly ChatMessage[],
 ): ToolStartPayload {
-  const sessionId = (msg.sessionId as string) || activeSessionId
-  const toolName = (msg.tool as string) || 'tool'
-  const toolId = (msg.messageId as string) || nextMessageId('tool')
+  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const sessionId = msgSessionId || activeSessionId
+  const tool = typeof msg.tool === 'string' ? msg.tool : undefined
+  const toolName = tool || 'tool'
+  const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
+  const toolId = messageId || nextMessageId('tool')
 
   if (receivingHistoryReplay) {
     if (cachedMessages.some((m) => m.id === toolId)) {
@@ -2879,8 +2890,8 @@ export function handleToolStart(
   const chatMessage: ChatMessage = {
     id: toolId,
     type: 'tool_use',
-    content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
-    tool: typeof msg.tool === 'string' ? msg.tool : undefined,
+    content: msg.input ? JSON.stringify(msg.input) : tool || '',
+    tool,
     toolUseId: typeof msg.toolUseId === 'string' ? msg.toolUseId : undefined,
     serverName: typeof msg.serverName === 'string' ? msg.serverName : undefined,
     timestamp: Date.now(),
@@ -2923,14 +2934,21 @@ export interface ToolResultPayload {
  * matches both clients' prior inline `if (!toolUseId) return` guard).
  *
  * Otherwise returns a payload with:
- * - `sessionId`: resolved via `(msg.sessionId as string) || activeSessionId`.
+ * - `sessionId`: resolved from string-typed `msg.sessionId` falling back to
+ *   `activeSessionId`. Non-string values are ignored.
  * - `patch`: `{ toolResult, toolResultTruncated }`, plus `toolResultImages`
  *   only when `msg.images` is a non-empty array.
- * - `resultText`: the raw result string for the caller's terminal preview.
+ * - `resultText`: the raw result string (string-validated) for the caller's
+ *   terminal preview.
  * - `applyTo(messages)`: locates the matching `tool_use` entry by
  *   `toolUseId`, returns a new array with the patch merged at that index.
  *   When no match is found the same array reference is returned so callers
  *   can detect the no-op (used to skip pointless state writes).
+ *
+ * Per-field validation uses `typeof === 'string'` / `=== 'boolean'` guards
+ * rather than `as string` casts so non-string runtime values are coerced to
+ * safe defaults; `ChatMessage.toolResult` and `ToolResultPayload.resultText`
+ * are guaranteed string-typed at the type level.
  */
 export function handleToolResult(
   msg: Record<string, unknown>,
@@ -2938,9 +2956,10 @@ export function handleToolResult(
 ): ToolResultPayload | null {
   if (typeof msg.toolUseId !== 'string' || !msg.toolUseId) return null
   const toolUseId = msg.toolUseId
-  const sessionId = (msg.sessionId as string) || activeSessionId
-  const resultText = (msg.result as string) || ''
-  const truncated = !!(msg.truncated as boolean)
+  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const sessionId = msgSessionId || activeSessionId
+  const resultText = typeof msg.result === 'string' ? msg.result : ''
+  const truncated = typeof msg.truncated === 'boolean' ? msg.truncated : false
   const images = Array.isArray(msg.images)
     ? (msg.images as ToolResultImage[])
     : undefined

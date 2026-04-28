@@ -4593,6 +4593,39 @@ describe('handleToolStart', () => {
     )
     expect(out.toolName).toBe('tool')
   })
+
+  it('coerces non-string msg.tool to undefined and toolName to fallback', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 123 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.tool).toBeUndefined()
+    expect(out.toolName).toBe('tool')
+    // content fallback also coerces: no input + non-string tool → ''
+    expect(out.chatMessage!.content).toBe('')
+  })
+
+  it('coerces non-string msg.messageId to a generated id', () => {
+    const out = handleToolStart(
+      { messageId: 42, tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.id).toMatch(/^tool-\d+-\d+$/)
+  })
+
+  it('coerces non-string msg.sessionId to activeSessionId fallback', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', sessionId: 42, tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.sessionId).toBe('sess-active')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -4683,6 +4716,36 @@ describe('handleToolResult', () => {
       'sess-active',
     )
     expect(out!.toolUseId).toBe('tu-99')
+  })
+
+  it('coerces non-string msg.result to empty string', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 123 },
+      'sess-active',
+    )
+    expect(out!.resultText).toBe('')
+    expect(out!.patch.toolResult).toBe('')
+  })
+
+  it('coerces non-boolean msg.truncated to false', () => {
+    // Behaviour-defensive: matches the convention used by handleFileContent
+    // (truthy non-boolean values do not flip truncated to true).
+    expect(
+      handleToolResult({ toolUseId: 'tu-1', truncated: 'yes' }, 'sess-active')!
+        .patch.toolResultTruncated,
+    ).toBe(false)
+    expect(
+      handleToolResult({ toolUseId: 'tu-1', truncated: 1 }, 'sess-active')!
+        .patch.toolResultTruncated,
+    ).toBe(false)
+  })
+
+  it('coerces non-string msg.sessionId to activeSessionId fallback', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', sessionId: 42, result: 'ok' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
   })
 
   describe('applyTo()', () => {
