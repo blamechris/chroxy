@@ -1695,6 +1695,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'permission_request': {
       const permPayload = sharedPermissionRequest(msg);
+      // Skip malformed messages with missing/non-string requestId — without
+      // this, we'd insert a prompt with `requestId === null` (the handler
+      // contract) and the cast on the next line would mask the issue.
+      if (!permPayload.requestId) break;
       // Split streaming response at permission boundary (#554)
       {
         const permTargetId = permPayload.sessionId || get().activeSessionId;
@@ -1719,7 +1723,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           }
         }
       }
-      const permRequestId = permPayload.requestId as string;
+      const permRequestId = permPayload.requestId;
       // #3072: only expose "Allow for Session" when the active session's
       // provider supports session-scoped permission rules. Without this gate,
       // tapping the option on codex/gemini/claude-cli sessions hits a server

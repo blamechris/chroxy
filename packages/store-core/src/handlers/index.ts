@@ -1107,7 +1107,11 @@ export interface PermissionRule {
  *   "Permission required" fallback at the call site.
  * - `input`: the raw message payload's `input` when it is a non-null object;
  *   null otherwise. Matches `msg.input && typeof msg.input === 'object'` —
- *   note that arrays satisfy this guard and are forwarded verbatim.
+ *   note that arrays satisfy this guard and are forwarded verbatim. The
+ *   declared `Record<string, unknown> | null` type is a known shallow lie
+ *   for the array case; tightening either the type or the guard requires
+ *   downstream changes (`ChatMessage.toolInput`, PermissionDetail) and is
+ *   out of scope for this mechanical migration.
  * - `sessionId`: explicit sessionId from the message (no active-session
  *   fallback here — pending-permission routing is platform-specific).
  * - `remainingMs`: numeric value forwarded verbatim, including 0; null for
