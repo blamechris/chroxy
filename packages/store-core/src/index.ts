@@ -163,6 +163,10 @@ export type {
   SessionRestoreFailedPayload,
   SessionWarningPayload,
   SessionSwitchedPayload,
+  DirectoryListingPayload,
+  FileListingPayload,
+  FileContentPayload,
+  WriteFileResultPayload,
 } from './handlers'
 
 export {
@@ -212,4 +216,8 @@ export {
   handleSessionRestoreFailed,
   handleSessionWarning,
   handleSessionSwitched,
+  handleDirectoryListing,
+  handleFileListing,
+  handleFileContent,
+  handleWriteFileResult,
 } from './handlers'

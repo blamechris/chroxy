@@ -49,6 +49,10 @@ import {
   handleSessionRestoreFailed,
   handleSessionWarning,
   handleSessionSwitched,
+  handleDirectoryListing,
+  handleFileListing,
+  handleFileContent,
+  handleWriteFileResult,
 } from './index'
 import type {
   Checkpoint,
@@ -2016,5 +2020,281 @@ describe('handleSessionSwitched', () => {
       newSessionId: 'sess-1',
       conversationId: null,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleDirectoryListing
+// ---------------------------------------------------------------------------
+describe('handleDirectoryListing', () => {
+  it('extracts all fields from a valid payload', () => {
+    const entries = [{ name: 'src', isDirectory: true }, { name: 'README.md', isDirectory: false }]
+    expect(
+      handleDirectoryListing({
+        path: '/repo',
+        parentPath: '/',
+        entries,
+        error: null,
+      }),
+    ).toEqual({
+      path: '/repo',
+      parentPath: '/',
+      entries,
+      error: null,
+    })
+  })
+
+  it('defaults to nulls and empty array when fields are missing', () => {
+    expect(handleDirectoryListing({})).toEqual({
+      path: null,
+      parentPath: null,
+      entries: [],
+      error: null,
+    })
+  })
+
+  it('coerces non-string path/parentPath/error to null', () => {
+    expect(
+      handleDirectoryListing({
+        path: 123,
+        parentPath: false,
+        entries: 'nope',
+        error: 0,
+      }),
+    ).toEqual({
+      path: null,
+      parentPath: null,
+      entries: [],
+      error: null,
+    })
+  })
+
+  it('forwards entries verbatim without per-element validation', () => {
+    const malformed = [{ wat: true }, 42, null]
+    expect(handleDirectoryListing({ entries: malformed })).toEqual({
+      path: null,
+      parentPath: null,
+      entries: malformed,
+      error: null,
+    })
+  })
+
+  it('extracts error string when present', () => {
+    expect(handleDirectoryListing({ error: 'permission denied' })).toEqual({
+      path: null,
+      parentPath: null,
+      entries: [],
+      error: 'permission denied',
+    })
+  })
+
+  it('preserves empty-string path verbatim (no trim/empty coercion)', () => {
+    // Behaviour-preserving: matches inline `typeof === 'string' ? msg.path : null`.
+    // Empty string is still a string, so it passes through.
+    expect(handleDirectoryListing({ path: '', parentPath: '' })).toEqual({
+      path: '',
+      parentPath: '',
+      entries: [],
+      error: null,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleFileListing
+// ---------------------------------------------------------------------------
+describe('handleFileListing', () => {
+  it('extracts all fields from a valid payload', () => {
+    const entries = [{ name: 'index.ts', size: 1024 }, { name: 'app.ts', size: 2048 }]
+    expect(
+      handleFileListing({
+        path: '/repo/src',
+        parentPath: '/repo',
+        entries,
+        error: null,
+      }),
+    ).toEqual({
+      path: '/repo/src',
+      parentPath: '/repo',
+      entries,
+      error: null,
+    })
+  })
+
+  it('defaults to nulls and empty array when fields are missing', () => {
+    expect(handleFileListing({})).toEqual({
+      path: null,
+      parentPath: null,
+      entries: [],
+      error: null,
+    })
+  })
+
+  it('coerces non-string path/parentPath/error to null and non-array entries to []', () => {
+    expect(
+      handleFileListing({
+        path: 42,
+        parentPath: {},
+        entries: 'nope',
+        error: false,
+      }),
+    ).toEqual({
+      path: null,
+      parentPath: null,
+      entries: [],
+      error: null,
+    })
+  })
+
+  it('forwards entries verbatim without per-element validation', () => {
+    const malformed = [{ huh: 1 }, 'string-entry', null]
+    expect(handleFileListing({ entries: malformed })).toEqual({
+      path: null,
+      parentPath: null,
+      entries: malformed,
+      error: null,
+    })
+  })
+
+  it('extracts error string when present', () => {
+    expect(handleFileListing({ error: 'not found' })).toEqual({
+      path: null,
+      parentPath: null,
+      entries: [],
+      error: 'not found',
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleFileContent
+// ---------------------------------------------------------------------------
+describe('handleFileContent', () => {
+  it('extracts all fields from a valid payload', () => {
+    expect(
+      handleFileContent({
+        path: '/repo/src/index.ts',
+        content: 'export {}',
+        language: 'typescript',
+        size: 9,
+        truncated: false,
+        error: null,
+      }),
+    ).toEqual({
+      path: '/repo/src/index.ts',
+      content: 'export {}',
+      language: 'typescript',
+      size: 9,
+      truncated: false,
+      error: null,
+    })
+  })
+
+  it('defaults to nulls and false when fields are missing', () => {
+    expect(handleFileContent({})).toEqual({
+      path: null,
+      content: null,
+      language: null,
+      size: null,
+      truncated: false,
+      error: null,
+    })
+  })
+
+  it('coerces non-string path/content/language/error to null', () => {
+    expect(
+      handleFileContent({
+        path: 1,
+        content: false,
+        language: 0,
+        error: {},
+      }),
+    ).toEqual({
+      path: null,
+      content: null,
+      language: null,
+      size: null,
+      truncated: false,
+      error: null,
+    })
+  })
+
+  it('coerces non-number size to null', () => {
+    expect(handleFileContent({ size: '9001' })).toEqual({
+      path: null,
+      content: null,
+      language: null,
+      size: null,
+      truncated: false,
+      error: null,
+    })
+  })
+
+  it('returns truncated=true only for strict === true', () => {
+    expect(handleFileContent({ truncated: true }).truncated).toBe(true)
+  })
+
+  it('returns truncated=false for truthy non-boolean values', () => {
+    // Behaviour-preserving: matches inline `msg.truncated === true`. Truthy
+    // strings/numbers do NOT count.
+    expect(handleFileContent({ truncated: 'true' }).truncated).toBe(false)
+    expect(handleFileContent({ truncated: 1 }).truncated).toBe(false)
+    expect(handleFileContent({ truncated: {} }).truncated).toBe(false)
+  })
+
+  it('returns truncated=false when missing', () => {
+    expect(handleFileContent({}).truncated).toBe(false)
+  })
+
+  it('extracts error string when present', () => {
+    expect(handleFileContent({ error: 'too big' })).toEqual({
+      path: null,
+      content: null,
+      language: null,
+      size: null,
+      truncated: false,
+      error: 'too big',
+    })
+  })
+
+  it('preserves empty-string content verbatim', () => {
+    // Empty string is still a string and passes through (matches inline guard).
+    expect(handleFileContent({ content: '' }).content).toBe('')
+  })
+
+  it('preserves zero size verbatim', () => {
+    expect(handleFileContent({ size: 0 }).size).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleWriteFileResult
+// ---------------------------------------------------------------------------
+describe('handleWriteFileResult', () => {
+  it('extracts both fields when present', () => {
+    expect(
+      handleWriteFileResult({ path: '/repo/out.txt', error: null }),
+    ).toEqual({ path: '/repo/out.txt', error: null })
+  })
+
+  it('extracts error when set', () => {
+    expect(
+      handleWriteFileResult({ path: '/repo/out.txt', error: 'EACCES' }),
+    ).toEqual({ path: '/repo/out.txt', error: 'EACCES' })
+  })
+
+  it('defaults to nulls when fields are missing', () => {
+    expect(handleWriteFileResult({})).toEqual({ path: null, error: null })
+  })
+
+  it('coerces non-string fields to null', () => {
+    expect(handleWriteFileResult({ path: 1, error: false })).toEqual({
+      path: null,
+      error: null,
+    })
+  })
+
+  it('preserves empty-string path verbatim', () => {
+    expect(handleWriteFileResult({ path: '' })).toEqual({ path: '', error: null })
   })
 })

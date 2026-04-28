@@ -51,6 +51,9 @@ import {
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
   handlePermissionExpired as sharedPermissionExpired,
   handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  handleDirectoryListing as sharedDirectoryListing,
+  handleFileListing as sharedFileListing,
+  handleFileContent as sharedFileContent,
   handleSessionList as sharedSessionList,
   handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
@@ -2067,12 +2070,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'directory_listing': {
       const cb = get()._directoryListingCallback;
       if (cb) {
-        cb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-          entries: Array.isArray(msg.entries) ? msg.entries as DirectoryEntry[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        const payload = sharedDirectoryListing(msg);
+        cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
       }
       break;
     }
@@ -2080,12 +2079,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'file_listing': {
       const fileBrowserCb = get()._fileBrowserCallback;
       if (fileBrowserCb) {
-        fileBrowserCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-          entries: Array.isArray(msg.entries) ? msg.entries as FileEntry[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        const payload = sharedFileListing(msg);
+        fileBrowserCb({ ...payload, entries: payload.entries as FileEntry[] });
       }
       break;
     }
@@ -2093,14 +2088,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'file_content': {
       const fileContentCb = get()._fileContentCallback;
       if (fileContentCb) {
-        fileContentCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          content: typeof msg.content === 'string' ? msg.content : null,
-          language: typeof msg.language === 'string' ? msg.language : null,
-          size: typeof msg.size === 'number' ? msg.size : null,
-          truncated: msg.truncated === true,
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        fileContentCb(sharedFileContent(msg));
       }
       break;
     }
