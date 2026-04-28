@@ -3147,6 +3147,27 @@ describe('handleMcpServers', () => {
       mcpServers: servers,
     })
   })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim, no fallback)', () => {
+    // Matches legacy `(msg.sessionId as string) || activeSessionId` semantics:
+    // a non-empty whitespace-padded string is truthy, so it's used as-is and
+    // we do NOT fall back to activeSessionId. Downstream sessionStates lookup
+    // will miss (correct outcome), rather than silently patching active.
+    const result = handleMcpServers(
+      { sessionId: '  sess-1  ', servers: [] },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    // Empty string is falsy, so the legacy `||` falls back to activeSessionId.
+    const result = handleMcpServers(
+      { sessionId: '', servers: [] },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -3200,5 +3221,27 @@ describe('handleCostUpdate', () => {
 
   it('returns null sessionId when neither is available', () => {
     expect(handleCostUpdate({ sessionCost: 0.5 }, null).sessionId).toBeNull()
+  })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim, no fallback)', () => {
+    // Matches legacy `(msg.sessionId as string) || activeSessionId` semantics:
+    // a non-empty whitespace-padded string is truthy, so it's used as-is and
+    // we do NOT fall back to activeSessionId. Downstream sessionStates lookup
+    // will miss (correct outcome), rather than silently applying the cost
+    // update to the active session.
+    const result = handleCostUpdate(
+      { sessionId: '  sess-1  ', sessionCost: 0.5 },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    // Empty string is falsy, so the legacy `||` falls back to activeSessionId.
+    const result = handleCostUpdate(
+      { sessionId: '', sessionCost: 0.5 },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
   })
 })

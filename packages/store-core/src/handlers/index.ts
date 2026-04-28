@@ -2107,11 +2107,12 @@ export function handleAvailableModels(
  * `mcpServers` list. Defaults to an empty array when the message has no
  * (or non-array) `servers` field.
  *
- * Note on session resolution: matches the prior inline behaviour
- * `(msg.sessionId as string) || activeSessionId` via the shared
- * `resolveSessionId` helper (which trims and falls back). The two diverge only
- * for whitespace-only `sessionId` values, which would harmlessly miss the
- * downstream `sessionStates[id]` lookup either way.
+ * Session resolution matches the prior inline behaviour exactly:
+ * `(msg.sessionId as string) || activeSessionId` (raw string passthrough; no
+ * trim, no whitespace coercion). A whitespace-only `sessionId` is preserved
+ * verbatim so the downstream `sessionStates[id]` lookup misses, rather than
+ * silently falling back to the active session and patching the wrong one.
+ * Mirrors the pattern used by `handleHistoryReplayStart`.
  */
 export function handleMcpServers(
   msg: Record<string, unknown>,
@@ -2120,8 +2121,10 @@ export function handleMcpServers(
   const servers: unknown[] = Array.isArray(msg.servers)
     ? (msg.servers as unknown[])
     : []
+  const rawSessionId =
+    typeof msg.sessionId === 'string' ? msg.sessionId : null
   return {
-    sessionId: resolveSessionId(msg, activeSessionId),
+    sessionId: rawSessionId || activeSessionId,
     patch: { mcpServers: servers },
   }
 }
@@ -2141,6 +2144,13 @@ export function handleMcpServers(
  * Behaviour-preserving: passes a numeric `sessionCost` through verbatim
  * (including `0`); any non-number — missing, null, string, etc. — becomes
  * null. Matches `typeof msg.sessionCost === 'number' ? msg.sessionCost : null`.
+ *
+ * Session resolution matches the prior inline behaviour exactly:
+ * `(msg.sessionId as string) || activeSessionId` (raw string passthrough; no
+ * trim, no whitespace coercion). A whitespace-only `sessionId` is preserved
+ * verbatim so the downstream `sessionStates[id]` lookup misses, rather than
+ * silently falling back to the active session and applying cost updates to
+ * the wrong session. Mirrors the pattern used by `handleHistoryReplayStart`.
  */
 export function handleCostUpdate(
   msg: Record<string, unknown>,
@@ -2148,8 +2158,10 @@ export function handleCostUpdate(
 ): SessionPatch {
   const sessionCost =
     typeof msg.sessionCost === 'number' ? msg.sessionCost : null
+  const rawSessionId =
+    typeof msg.sessionId === 'string' ? msg.sessionId : null
   return {
-    sessionId: resolveSessionId(msg, activeSessionId),
+    sessionId: rawSessionId || activeSessionId,
     patch: { sessionCost },
   }
 }
