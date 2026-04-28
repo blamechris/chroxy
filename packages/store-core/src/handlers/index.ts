@@ -19,6 +19,7 @@ import type {
   ModelInfo,
   ServerError,
   SessionInfo,
+  WebTask,
 } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
 
@@ -2324,4 +2325,160 @@ export function handleServerStatusLegacy(
     timestamp: Date.now(),
   }
   return { chatMessage }
+}
+
+// ---------------------------------------------------------------------------
+// web_task_created / web_task_updated (shared upsert)
+//
+// Both messages carry a single `task` payload that should replace any existing
+// task with the same `taskId`. The handler extracts the validated task; the
+// caller performs the filter-and-append against its own `webTasks` list so
+// the dedup semantics stay identical across consumers.
+// ---------------------------------------------------------------------------
+
+export interface WebTaskUpsertPayload {
+  /** The validated task to upsert, or null when the message is malformed. */
+  task: WebTask | null
+}
+
+/**
+ * Validate and extract the task from a `web_task_created` or `web_task_updated`
+ * message.
+ *
+ * Returns `{ task: null }` when:
+ * - `msg.task` is missing or not a non-null object
+ * - `task.taskId` is missing or not a non-empty string
+ *
+ * Otherwise returns the task as-is. The element type stays downstream — the
+ * runtime check above is only on `taskId`, matching the prior inline behaviour.
+ */
+export function handleWebTaskUpsert(
+  msg: Record<string, unknown>,
+): WebTaskUpsertPayload {
+  const task = msg.task
+  if (!task || typeof task !== 'object') return { task: null }
+  const taskId = (task as { taskId?: unknown }).taskId
+  if (typeof taskId !== 'string' || taskId.length === 0) return { task: null }
+  return { task: task as WebTask }
+}
+
+// ---------------------------------------------------------------------------
+// web_task_error
+//
+// Server-emitted failure for a web task. The shared handler extracts the
+// taskId, the user-visible error text, the optional error code, and the
+// optional bound-session name; it also pre-builds the system ChatMessage.
+// Callers decide the side-effects: the app shows a Disconnect Alert when a
+// SESSION_TOKEN_MISMATCH carries a `boundSessionName` and skips dispatching
+// the chat message; the dashboard always dispatches the chat message.
+// ---------------------------------------------------------------------------
+
+export interface WebTaskErrorPayload {
+  /** Validated taskId for the failed task, or null when missing. */
+  taskId: string | null
+  /**
+   * Failure text to apply to the matching task's `error` field. Defaults to
+   * `'Unknown error'` when the message is missing or non-string.
+   */
+  errorMessage: string
+  /**
+   * Normalized chat content for the optional system ChatMessage. Defaults to
+   * `'Web task error'` when the message is missing or non-string. The caller
+   * builds the ChatMessage (allocating id + timestamp) only when it will
+   * actually dispatch — the app's SESSION_TOKEN_MISMATCH-with-boundSessionName
+   * branch short-circuits to an Alert and never builds the message.
+   */
+  chatMessageContent: string
+  /** Optional error code (e.g. `'SESSION_TOKEN_MISMATCH'`). */
+  code: string | null
+  /** Optional bound session name for the SESSION_TOKEN_MISMATCH branch. */
+  boundSessionName: string | null
+}
+
+/**
+ * Normalize a `web_task_error` message.
+ *
+ * - `taskId`: string pass-through; null when missing, non-string, or empty.
+ * - `errorMessage`: `msg.message` when a non-empty string, else
+ *   `'Unknown error'`. Used by the caller to update the matching task's
+ *   `error` field.
+ * - `chatMessageContent`: `msg.message` when a non-empty string, else
+ *   `'Web task error'`. The caller wraps this in a system-typed ChatMessage
+ *   (allocating id + timestamp) only when it actually dispatches the message
+ *   — the app's SESSION_TOKEN_MISMATCH-with-boundSessionName branch
+ *   short-circuits to an Alert and skips dispatch (and the construction).
+ * - `code`: string pass-through; null when missing or non-string.
+ * - `boundSessionName`: string pass-through; null when missing, non-string,
+ *   or empty.
+ */
+export function handleWebTaskError(
+  msg: Record<string, unknown>,
+): WebTaskErrorPayload {
+  const taskId =
+    typeof msg.taskId === 'string' && (msg.taskId as string).length > 0
+      ? (msg.taskId as string)
+      : null
+  const messageText =
+    typeof msg.message === 'string' && (msg.message as string).length > 0
+      ? (msg.message as string)
+      : null
+  const errorMessage = messageText ?? 'Unknown error'
+  const code = typeof msg.code === 'string' ? (msg.code as string) : null
+  const boundSessionName =
+    typeof msg.boundSessionName === 'string' &&
+    (msg.boundSessionName as string).length > 0
+      ? (msg.boundSessionName as string)
+      : null
+  const chatMessageContent = messageText ?? 'Web task error'
+  return { taskId, errorMessage, chatMessageContent, code, boundSessionName }
+}
+
+// ---------------------------------------------------------------------------
+// web_task_list
+//
+// Server emits the full webTasks list. Caller replaces its `webTasks` state
+// wholesale. Element type stays at the call site (`tasks as WebTask[]`).
+// ---------------------------------------------------------------------------
+
+export interface WebTaskListPayload {
+  tasks: unknown[]
+}
+
+/** Extract the tasks array from a `web_task_list` message; defaults to `[]`. */
+export function handleWebTaskList(
+  msg: Record<string, unknown>,
+): WebTaskListPayload {
+  return { tasks: Array.isArray(msg.tasks) ? (msg.tasks as unknown[]) : [] }
+}
+
+// ---------------------------------------------------------------------------
+// web_feature_status
+//
+// Server reports availability flags for the Claude Code Web feature. All
+// three booleans are coerced via `!!` to preserve the prior inline behaviour
+// (truthy non-booleans become `true`, missing/falsy become `false`).
+// ---------------------------------------------------------------------------
+
+export interface WebFeatureStatusPayload {
+  webFeatures: {
+    available: boolean
+    remote: boolean
+    teleport: boolean
+  }
+}
+
+/**
+ * Coerce the three boolean fields of a `web_feature_status` message into the
+ * `webFeatures` state patch. Missing fields default to `false`.
+ */
+export function handleWebFeatureStatus(
+  msg: Record<string, unknown>,
+): WebFeatureStatusPayload {
+  return {
+    webFeatures: {
+      available: !!msg.available,
+      remote: !!msg.remote,
+      teleport: !!msg.teleport,
+    },
+  }
 }

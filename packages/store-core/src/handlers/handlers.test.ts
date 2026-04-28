@@ -72,7 +72,12 @@ import {
   handleServerError,
   handleServerShutdown,
   handleServerStatusLegacy,
+  handleWebTaskUpsert,
+  handleWebTaskError,
+  handleWebTaskList,
+  handleWebFeatureStatus,
 } from './index'
+import { nextMessageId } from '../utils'
 import type {
   AgentInfo,
   Checkpoint,
@@ -3465,5 +3470,260 @@ describe('handleServerStatusLegacy', () => {
     expect(typeof result.chatMessage.id).toBe('string')
     expect(result.chatMessage.id.length).toBeGreaterThan(0)
     expect(typeof result.chatMessage.timestamp).toBe('number')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleWebTaskUpsert
+// ---------------------------------------------------------------------------
+describe('handleWebTaskUpsert', () => {
+  it('returns null task when msg.task is missing', () => {
+    expect(handleWebTaskUpsert({})).toEqual({ task: null })
+  })
+
+  it('returns null task when msg.task is null', () => {
+    expect(handleWebTaskUpsert({ task: null })).toEqual({ task: null })
+  })
+
+  it('returns null task when msg.task is non-object', () => {
+    expect(handleWebTaskUpsert({ task: 'not-a-task' })).toEqual({ task: null })
+    expect(handleWebTaskUpsert({ task: 42 })).toEqual({ task: null })
+  })
+
+  it('returns null task when task.taskId is missing', () => {
+    const task = {
+      prompt: 'hello',
+      status: 'pending',
+      createdAt: 1,
+      updatedAt: 1,
+      result: null,
+      error: null,
+    }
+    expect(handleWebTaskUpsert({ task })).toEqual({ task: null })
+  })
+
+  it('returns null task when task.taskId is empty string', () => {
+    const task = {
+      taskId: '',
+      prompt: 'hello',
+      status: 'pending',
+      createdAt: 1,
+      updatedAt: 1,
+      result: null,
+      error: null,
+    }
+    expect(handleWebTaskUpsert({ task })).toEqual({ task: null })
+  })
+
+  it('returns null task when task.taskId is non-string', () => {
+    const task = {
+      taskId: 42,
+      prompt: 'hello',
+      status: 'pending',
+      createdAt: 1,
+      updatedAt: 1,
+      result: null,
+      error: null,
+    }
+    expect(handleWebTaskUpsert({ task })).toEqual({ task: null })
+  })
+
+  it('passes a valid task through', () => {
+    const task = {
+      taskId: 'task-1',
+      prompt: 'do the thing',
+      status: 'pending' as const,
+      createdAt: 1000,
+      updatedAt: 1000,
+      result: null,
+      error: null,
+    }
+    expect(handleWebTaskUpsert({ task })).toEqual({ task })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleWebTaskError
+// ---------------------------------------------------------------------------
+describe('handleWebTaskError', () => {
+  it('extracts taskId, message, code, and boundSessionName when present', () => {
+    const result = handleWebTaskError({
+      taskId: 'task-1',
+      message: 'something failed',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionName: 'main',
+    })
+    expect(result.taskId).toBe('task-1')
+    expect(result.errorMessage).toBe('something failed')
+    expect(result.code).toBe('SESSION_TOKEN_MISMATCH')
+    expect(result.boundSessionName).toBe('main')
+  })
+
+  it('returns null taskId when missing', () => {
+    expect(handleWebTaskError({}).taskId).toBeNull()
+  })
+
+  it('returns null taskId when non-string', () => {
+    expect(handleWebTaskError({ taskId: 42 }).taskId).toBeNull()
+  })
+
+  it('returns null taskId when empty string', () => {
+    expect(handleWebTaskError({ taskId: '' }).taskId).toBeNull()
+  })
+
+  it('returns null code when missing', () => {
+    expect(handleWebTaskError({}).code).toBeNull()
+  })
+
+  it('returns null code when non-string', () => {
+    expect(handleWebTaskError({ code: 42 }).code).toBeNull()
+  })
+
+  it('returns null boundSessionName when missing', () => {
+    expect(handleWebTaskError({}).boundSessionName).toBeNull()
+  })
+
+  it('returns null boundSessionName when non-string', () => {
+    expect(handleWebTaskError({ boundSessionName: 42 }).boundSessionName).toBeNull()
+  })
+
+  it('returns null boundSessionName when empty string', () => {
+    expect(handleWebTaskError({ boundSessionName: '' }).boundSessionName).toBeNull()
+  })
+
+  it('defaults errorMessage to "Unknown error" when message missing', () => {
+    expect(handleWebTaskError({}).errorMessage).toBe('Unknown error')
+  })
+
+  it('defaults errorMessage to "Unknown error" when message is non-string', () => {
+    expect(handleWebTaskError({ message: 42 }).errorMessage).toBe('Unknown error')
+  })
+
+  it('defaults errorMessage to "Unknown error" when message is empty string', () => {
+    expect(handleWebTaskError({ message: '' }).errorMessage).toBe('Unknown error')
+  })
+
+  it('returns chatMessageContent set to the message text when present', () => {
+    const result = handleWebTaskError({ message: 'task blew up' })
+    expect(result.chatMessageContent).toBe('task blew up')
+  })
+
+  it('chatMessageContent defaults to "Web task error" when message is missing', () => {
+    const result = handleWebTaskError({})
+    expect(result.chatMessageContent).toBe('Web task error')
+  })
+
+  it('chatMessageContent defaults to "Web task error" when message is non-string', () => {
+    expect(handleWebTaskError({ message: 42 }).chatMessageContent).toBe(
+      'Web task error',
+    )
+  })
+
+  it('chatMessageContent defaults to "Web task error" when message is empty string', () => {
+    expect(handleWebTaskError({ message: '' }).chatMessageContent).toBe(
+      'Web task error',
+    )
+  })
+
+  it('does not allocate a message id (caller builds the ChatMessage)', () => {
+    // Calling the handler 100x must not advance the global nextMessageId
+    // counter. We verify by calling a separate id-allocating handler before
+    // and after, and checking the counter advances by exactly one.
+    const before = nextMessageId('probe')
+    for (let i = 0; i < 100; i++) {
+      handleWebTaskError({ message: 'x', taskId: 't' })
+    }
+    const after = nextMessageId('probe')
+    const beforeNum = parseInt(before.split('-')[1], 10)
+    const afterNum = parseInt(after.split('-')[1], 10)
+    expect(afterNum - beforeNum).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleWebTaskList
+// ---------------------------------------------------------------------------
+describe('handleWebTaskList', () => {
+  it('passes the tasks array through', () => {
+    const tasks = [
+      {
+        taskId: 't1',
+        prompt: 'a',
+        status: 'pending',
+        createdAt: 0,
+        updatedAt: 0,
+        result: null,
+        error: null,
+      },
+    ]
+    expect(handleWebTaskList({ tasks })).toEqual({ tasks })
+  })
+
+  it('defaults to [] when tasks missing', () => {
+    expect(handleWebTaskList({})).toEqual({ tasks: [] })
+  })
+
+  it('defaults to [] when tasks is non-array', () => {
+    expect(handleWebTaskList({ tasks: 'not an array' })).toEqual({ tasks: [] })
+    expect(handleWebTaskList({ tasks: null })).toEqual({ tasks: [] })
+    expect(handleWebTaskList({ tasks: 42 })).toEqual({ tasks: [] })
+    expect(handleWebTaskList({ tasks: {} })).toEqual({ tasks: [] })
+  })
+
+  it('returns an empty array unchanged', () => {
+    expect(handleWebTaskList({ tasks: [] })).toEqual({ tasks: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleWebFeatureStatus
+// ---------------------------------------------------------------------------
+describe('handleWebFeatureStatus', () => {
+  it('coerces truthy values to true', () => {
+    expect(
+      handleWebFeatureStatus({ available: true, remote: true, teleport: true }),
+    ).toEqual({
+      webFeatures: { available: true, remote: true, teleport: true },
+    })
+  })
+
+  it('coerces falsy values to false', () => {
+    expect(
+      handleWebFeatureStatus({
+        available: false,
+        remote: false,
+        teleport: false,
+      }),
+    ).toEqual({
+      webFeatures: { available: false, remote: false, teleport: false },
+    })
+  })
+
+  it('defaults missing fields to false', () => {
+    expect(handleWebFeatureStatus({})).toEqual({
+      webFeatures: { available: false, remote: false, teleport: false },
+    })
+  })
+
+  it('coerces truthy non-boolean values to true', () => {
+    expect(
+      handleWebFeatureStatus({ available: 1, remote: 'yes', teleport: {} }),
+    ).toEqual({
+      webFeatures: { available: true, remote: true, teleport: true },
+    })
+  })
+
+  it('coerces falsy non-boolean values to false', () => {
+    expect(
+      handleWebFeatureStatus({ available: 0, remote: '', teleport: null }),
+    ).toEqual({
+      webFeatures: { available: false, remote: false, teleport: false },
+    })
+  })
+
+  it('handles partial fields', () => {
+    expect(handleWebFeatureStatus({ available: true })).toEqual({
+      webFeatures: { available: true, remote: false, teleport: false },
+    })
   })
 })

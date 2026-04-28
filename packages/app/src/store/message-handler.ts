@@ -92,6 +92,10 @@ import {
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
+  handleWebTaskUpsert as sharedWebTaskUpsert,
+  handleWebTaskError as sharedWebTaskError,
+  handleWebTaskList as sharedWebTaskList,
+  handleWebFeatureStatus as sharedWebFeatureStatus,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -2325,19 +2329,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // -- Web tasks (Claude Code Web) --
 
     case 'web_feature_status': {
-      const wf = {
-        available: !!msg.available,
-        remote: !!msg.remote,
-        teleport: !!msg.teleport,
-      };
-      set({ webFeatures: wf });
+      set(sharedWebFeatureStatus(msg));
       break;
     }
 
     case 'web_task_created':
     case 'web_task_updated': {
-      const task = msg.task as WebTask;
-      if (!task || !task.taskId) break;
+      const { task } = sharedWebTaskUpsert(msg);
+      if (!task) break;
       set((state: ConnectionState) => {
         const existing = state.webTasks.filter((t) => t.taskId !== task.taskId);
         return { webTasks: [...existing, task] };
@@ -2346,36 +2345,41 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'web_task_error': {
-      const errTaskId = msg.taskId as string | null;
+      const {
+        taskId: errTaskId,
+        errorMessage,
+        chatMessageContent,
+        code,
+        boundSessionName,
+      } = sharedWebTaskError(msg);
       if (errTaskId) {
-        const errMessage = (msg.message as string) || 'Unknown error';
         // Update task status to failed
         set((state: ConnectionState) => ({
           webTasks: state.webTasks.map((t) =>
             t.taskId === errTaskId
-              ? { ...t, status: 'failed' as const, error: errMessage, updatedAt: Date.now() }
+              ? { ...t, status: 'failed' as const, error: errorMessage, updatedAt: Date.now() }
               : t,
           ),
         }));
       }
       // For bound-session mismatches, surface the same actionable Alert used
       // by session_error (#2944). When boundSessionName is present the user
-      // needs to know why the action was rejected and how to fix it.
-      if (
-        msg.code === 'SESSION_TOKEN_MISMATCH' &&
-        typeof msg.boundSessionName === 'string' &&
-        msg.boundSessionName.length > 0
-      ) {
+      // needs to know why the action was rejected and how to fix it. We
+      // short-circuit BEFORE building the ChatMessage so no message id /
+      // timestamp is allocated for an event that won't be dispatched.
+      if (code === 'SESSION_TOKEN_MISMATCH' && boundSessionName) {
         showBoundSessionMismatchAlert(
-          `This device is paired to session "${msg.boundSessionName}" and can only perform web tasks in that session. To use other sessions, disconnect and scan a fresh QR code from the desktop.`,
+          `This device is paired to session "${boundSessionName}" and can only perform web tasks in that session. To use other sessions, disconnect and scan a fresh QR code from the desktop.`,
         );
         break;
       }
-      // Otherwise show the error as a system message in chat
+      // Otherwise show the error as a system message in chat. Build the
+      // ChatMessage here so its id + timestamp are allocated after the task
+      // state update above.
       const errorMsg: ChatMessage = {
         id: nextMessageId('web'),
         type: 'system',
-        content: (msg.message as string) || 'Web task error',
+        content: chatMessageContent,
         timestamp: Date.now(),
       };
       const activeSid = get().activeSessionId;
@@ -2390,8 +2394,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'web_task_list': {
-      const tasks = Array.isArray(msg.tasks) ? (msg.tasks as WebTask[]) : [];
-      set({ webTasks: tasks });
+      const { tasks } = sharedWebTaskList(msg);
+      set({ webTasks: tasks as WebTask[] });
       break;
     }
 

@@ -178,6 +178,10 @@ export type {
   ServerErrorPayload,
   ServerShutdownPayload,
   ServerStatusLegacyPayload,
+  WebTaskUpsertPayload,
+  WebTaskErrorPayload,
+  WebTaskListPayload,
+  WebFeatureStatusPayload,
 } from './handlers'
 
 export {
@@ -250,4 +254,8 @@ export {
   handleServerError,
   handleServerShutdown,
   handleServerStatusLegacy,
+  handleWebTaskUpsert,
+  handleWebTaskError,
+  handleWebTaskList,
+  handleWebFeatureStatus,
 } from './handlers'
