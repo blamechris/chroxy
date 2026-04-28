@@ -155,6 +155,10 @@ export type {
   ConversationIdPayload,
   HistoryReplayStartPayload,
   HistoryReplayEndPayload,
+  PermissionRule,
+  PermissionRequestPayload,
+  PermissionResolvedPayload,
+  PermissionRulesUpdatedPayload,
 } from './handlers'
 
 export {
@@ -193,4 +197,9 @@ export {
   handleConversationsList,
   handleHistoryReplayStart,
   handleHistoryReplayEnd,
+  handlePermissionRequest,
+  handlePermissionResolved,
+  handlePermissionExpired,
+  handlePermissionTimeout,
+  handlePermissionRulesUpdated,
 } from './handlers'

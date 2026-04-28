@@ -38,6 +38,11 @@ import {
   handleConversationsList,
   handleHistoryReplayStart,
   handleHistoryReplayEnd,
+  handlePermissionRequest,
+  handlePermissionResolved,
+  handlePermissionExpired,
+  handlePermissionTimeout,
+  handlePermissionRulesUpdated,
 } from './index'
 import type {
   Checkpoint,
@@ -1475,6 +1480,88 @@ describe('handleHistoryReplayStart', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handlePermissionRequest
+// ---------------------------------------------------------------------------
+describe('handlePermissionRequest', () => {
+  it('extracts requestId, tool, description, input, sessionId, remainingMs', () => {
+    const result = handlePermissionRequest({
+      requestId: 'req-1',
+      tool: 'Bash',
+      description: 'rm -rf /',
+      input: { command: 'rm -rf /' },
+      sessionId: 'sess-1',
+      remainingMs: 30000,
+    })
+    expect(result).toEqual({
+      requestId: 'req-1',
+      tool: 'Bash',
+      description: 'rm -rf /',
+      input: { command: 'rm -rf /' },
+      sessionId: 'sess-1',
+      remainingMs: 30000,
+    })
+  })
+
+  it('returns null requestId when missing', () => {
+    const result = handlePermissionRequest({})
+    expect(result.requestId).toBeNull()
+  })
+
+  it('returns null requestId when non-string', () => {
+    const result = handlePermissionRequest({ requestId: 42 })
+    expect(result.requestId).toBeNull()
+  })
+
+  it('returns null tool when missing or non-string', () => {
+    expect(handlePermissionRequest({ requestId: 'r' }).tool).toBeNull()
+    expect(handlePermissionRequest({ requestId: 'r', tool: 42 }).tool).toBeNull()
+  })
+
+  it('returns null description when missing or non-string', () => {
+    expect(handlePermissionRequest({ requestId: 'r' }).description).toBeNull()
+    expect(
+      handlePermissionRequest({ requestId: 'r', description: 42 }).description,
+    ).toBeNull()
+  })
+
+  it('returns null input when missing or not an object', () => {
+    expect(handlePermissionRequest({ requestId: 'r' }).input).toBeNull()
+    expect(
+      handlePermissionRequest({ requestId: 'r', input: 'not an object' }).input,
+    ).toBeNull()
+    expect(handlePermissionRequest({ requestId: 'r', input: null }).input).toBeNull()
+  })
+
+  it('returns null sessionId when missing or non-string', () => {
+    expect(handlePermissionRequest({ requestId: 'r' }).sessionId).toBeNull()
+    expect(
+      handlePermissionRequest({ requestId: 'r', sessionId: 42 }).sessionId,
+    ).toBeNull()
+  })
+
+  it('returns null remainingMs when missing or non-number', () => {
+    expect(handlePermissionRequest({ requestId: 'r' }).remainingMs).toBeNull()
+    expect(
+      handlePermissionRequest({ requestId: 'r', remainingMs: 'soon' }).remainingMs,
+    ).toBeNull()
+  })
+
+  it('preserves remainingMs of 0 (numeric falsy)', () => {
+    expect(
+      handlePermissionRequest({ requestId: 'r', remainingMs: 0 }).remainingMs,
+    ).toBe(0)
+  })
+
+  it('forwards array input verbatim (arrays pass the inline object guard)', () => {
+    // Inline guard: `msg.input && typeof msg.input === 'object'` — arrays pass
+    // this guard. Preserve that behaviour: forward arrays verbatim.
+    const arr = [1, 2, 3]
+    const result = handlePermissionRequest({ requestId: 'r', input: arr })
+    expect(result.input).toBe(arr)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleHistoryReplayEnd
 // ---------------------------------------------------------------------------
 describe('handleHistoryReplayEnd', () => {
@@ -1482,5 +1569,139 @@ describe('handleHistoryReplayEnd', () => {
     expect(handleHistoryReplayEnd()).toEqual({
       receivingHistoryReplay: false,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePermissionResolved
+// ---------------------------------------------------------------------------
+describe('handlePermissionResolved', () => {
+  it('extracts requestId and decision', () => {
+    expect(
+      handlePermissionResolved({ requestId: 'req-1', decision: 'allow' }),
+    ).toEqual({ requestId: 'req-1', decision: 'allow' })
+  })
+
+  it('returns null requestId when missing or non-string', () => {
+    expect(handlePermissionResolved({}).requestId).toBeNull()
+    expect(handlePermissionResolved({ requestId: 42 }).requestId).toBeNull()
+  })
+
+  it('returns null decision when missing or non-string', () => {
+    expect(handlePermissionResolved({ requestId: 'r' }).decision).toBeNull()
+    expect(
+      handlePermissionResolved({ requestId: 'r', decision: 42 }).decision,
+    ).toBeNull()
+  })
+
+  it('forwards decision verbatim — does not validate enum', () => {
+    // Inline impls used `msg.decision as string` with no validation; keep that.
+    const result = handlePermissionResolved({
+      requestId: 'r',
+      decision: 'allowAlways',
+    })
+    expect(result.decision).toBe('allowAlways')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePermissionExpired
+// ---------------------------------------------------------------------------
+describe('handlePermissionExpired', () => {
+  it('extracts requestId and builds a system ChatMessage', () => {
+    const result = handlePermissionExpired({ requestId: 'req-1' })
+    expect(result.requestId).toBe('req-1')
+    expect(result.systemMessage.type).toBe('system')
+    expect(result.systemMessage.id).toMatch(/^system-/)
+    expect(result.systemMessage.timestamp).toBeGreaterThan(0)
+    expect(result.systemMessage.content).toContain('Expired')
+  })
+
+  it('returns null requestId when missing or non-string', () => {
+    expect(handlePermissionExpired({}).requestId).toBeNull()
+    expect(handlePermissionExpired({ requestId: 42 }).requestId).toBeNull()
+  })
+
+  it('still returns a system message when requestId is null', () => {
+    // The handler is purely a parser — call site decides whether to apply
+    // anything based on requestId presence. Mirrors handleBudgetExceeded.
+    const result = handlePermissionExpired({})
+    expect(result.systemMessage).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePermissionTimeout
+// ---------------------------------------------------------------------------
+describe('handlePermissionTimeout', () => {
+  it('extracts requestId, tool, and builds a system ChatMessage', () => {
+    const result = handlePermissionTimeout({
+      requestId: 'req-1',
+      tool: 'Bash',
+    })
+    expect(result.requestId).toBe('req-1')
+    expect(result.tool).toBe('Bash')
+    expect(result.systemMessage.type).toBe('system')
+    expect(result.systemMessage.id).toMatch(/^system-/)
+    expect(result.systemMessage.content).toContain('Bash')
+    expect(result.systemMessage.content).toContain('auto-denied')
+  })
+
+  it('defaults tool to "permission" when missing or non-string', () => {
+    expect(handlePermissionTimeout({ requestId: 'r' }).tool).toBe('permission')
+    expect(
+      handlePermissionTimeout({ requestId: 'r', tool: 42 }).tool,
+    ).toBe('permission')
+  })
+
+  it('returns null requestId when missing or non-string', () => {
+    expect(handlePermissionTimeout({}).requestId).toBeNull()
+    expect(handlePermissionTimeout({ requestId: 42 }).requestId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePermissionRulesUpdated
+// ---------------------------------------------------------------------------
+describe('handlePermissionRulesUpdated', () => {
+  it('extracts the rules array verbatim', () => {
+    const rules = [
+      { tool: 'Bash', decision: 'allow', pattern: 'ls *' },
+      { tool: 'Edit', decision: 'deny' },
+    ]
+    const result = handlePermissionRulesUpdated({
+      sessionId: 'sess-1',
+      rules,
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.rules).toBe(rules)
+  })
+
+  it('returns empty array when rules is missing', () => {
+    expect(handlePermissionRulesUpdated({}).rules).toEqual([])
+  })
+
+  it('returns empty array when rules is not an array', () => {
+    expect(
+      handlePermissionRulesUpdated({ rules: 'not-an-array' }).rules,
+    ).toEqual([])
+  })
+
+  it('returns null sessionId when missing or non-string', () => {
+    expect(handlePermissionRulesUpdated({}).sessionId).toBeNull()
+    expect(
+      handlePermissionRulesUpdated({ sessionId: 42 }).sessionId,
+    ).toBeNull()
+  })
+
+  it('forwards rule elements verbatim — no per-element validation', () => {
+    // Inline impls cast to PermissionRule[] without validating element shape.
+    // Preserve that behaviour: malformed elements pass through unchecked.
+    const rules = [{ junk: 'data' }, null, 42]
+    const result = handlePermissionRulesUpdated({
+      sessionId: 'sess-1',
+      rules,
+    })
+    expect(result.rules).toBe(rules)
   })
 })

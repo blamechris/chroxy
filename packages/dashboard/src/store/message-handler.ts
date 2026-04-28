@@ -49,6 +49,8 @@ import {
   handleConversationId as sharedConversationId,
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
+  handlePermissionExpired as sharedPermissionExpired,
+  handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1837,7 +1839,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'permission_expired': {
-      const expiredRequestId = msg.requestId as string;
+      const { requestId: expiredRequestId, systemMessage: expiredSystemMsg } =
+        sharedPermissionExpired(msg);
       if (expiredRequestId) {
         // If the user already resolved this request (via Allow/Deny/AllowSession),
         // this is the race condition from #2833 — the server expired the prompt
@@ -1863,7 +1866,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(expTargetId, (ss) => ({
             messages: ss.messages.map((m) =>
               m.requestId === expiredRequestId && m.type === 'prompt'
-                ? { ...m, content: `${m.content}\n(Expired — this permission was already handled or timed out)`, options: undefined }
+                ? { ...m, content: `${m.content}\n${expiredSystemMsg.content}`, options: undefined }
                 : m
             ),
           }));
@@ -1882,10 +1885,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Server broadcasts the full rule set for a session after a successful
       // set_permission_rules call. Store it on the session so "Allow for
       // Session" (#2834) can append new rules without clobbering existing ones.
-      const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
-      const rules = Array.isArray(msg.rules)
-        ? (msg.rules as { tool: string; decision: 'allow' | 'deny'; pattern?: string }[])
-        : [];
+      const { sessionId: rulesExplicitSessionId, rules } = sharedPermissionRulesUpdated(msg);
+      const rulesSessionId = rulesExplicitSessionId || get().activeSessionId;
       if (rulesSessionId && get().sessionStates[rulesSessionId]) {
         updateSession(rulesSessionId, () => ({ sessionRules: rules }));
       }
