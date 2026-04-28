@@ -46,6 +46,9 @@ import {
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
   handleClientFocusChanged as sharedClientFocusChanged,
+  handleConversationId as sharedConversationId,
+  handleHistoryReplayStart as sharedHistoryReplayStart,
+  handleHistoryReplayEnd as sharedHistoryReplayEnd,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1516,8 +1519,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'conversation_id': {
-      const convSessionId = msg.sessionId as string;
-      const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
+      // Parser is shared via store-core; the session-existence guard and the
+      // updateSession call stay here. Note: this handler does NOT fall back
+      // to activeSessionId — a missing sessionId skips the patch entirely.
+      const { sessionId: convSessionId, conversationId } = sharedConversationId(msg);
       if (convSessionId && get().sessionStates[convSessionId]) {
         updateSession(convSessionId, () => ({ conversationId }));
       }
@@ -1568,13 +1573,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // --- History replay ---
 
-    case 'history_replay_start':
+    case 'history_replay_start': {
+      // Parser is shared via store-core; flag mutation stays at this call
+      // site (module-level state, not store state).
+      const { fullHistory, sessionId: replayTargetId } = sharedHistoryReplayStart(
+        msg,
+        get().activeSessionId,
+      );
       _receivingHistoryReplay = true;
       // Full history replay (from request_full_history): clear messages before replay
-      if (msg.fullHistory === true) {
-        const targetId = (msg.sessionId as string) || get().activeSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, () => ({ messages: [] }));
+      if (fullHistory) {
+        if (replayTargetId && get().sessionStates[replayTargetId]) {
+          updateSession(replayTargetId, () => ({ messages: [] }));
         }
       }
       // Clear transient state — these events are not replayed from history,
@@ -1589,9 +1599,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         return Object.keys(patch).length > 0 ? patch : {};
       });
       break;
+    }
 
     case 'history_replay_end':
-      _receivingHistoryReplay = false;
+      // Parser is shared via store-core; flag mutation stays here.
+      _receivingHistoryReplay = sharedHistoryReplayEnd().receivingHistoryReplay;
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
       updateActiveSession((ss) => {

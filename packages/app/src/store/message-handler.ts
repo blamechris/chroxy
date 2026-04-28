@@ -57,6 +57,10 @@ import {
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
   handleClientFocusChanged as sharedClientFocusChanged,
+  handleConversationId as sharedConversationId,
+  handleConversationsList as sharedConversationsList,
+  handleHistoryReplayStart as sharedHistoryReplayStart,
+  handleHistoryReplayEnd as sharedHistoryReplayEnd,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -1135,8 +1139,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'conversation_id': {
-      const convSessionId = msg.sessionId as string;
-      const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
+      // Parser is shared via store-core; the session-existence guard and the
+      // updateSession call stay here. Note: this handler does NOT fall back
+      // to activeSessionId — a missing sessionId skips the patch entirely.
+      const { sessionId: convSessionId, conversationId } = sharedConversationId(msg);
       if (convSessionId && get().sessionStates[convSessionId]) {
         updateSession(convSessionId, () => ({ conversationId }));
       }
@@ -1171,14 +1177,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // --- History replay ---
 
-    case 'history_replay_start':
+    case 'history_replay_start': {
+      // Parser is shared via store-core; flag mutation stays at this call
+      // site (module-level _ctx state, not store state).
+      const { fullHistory, sessionId: replayTargetId } = sharedHistoryReplayStart(
+        msg,
+        get().activeSessionId,
+      );
       _ctx.receivingHistoryReplay = true;
       // Full history replay (from request_full_history): clear messages before replay
-      if (msg.fullHistory === true) {
+      if (fullHistory) {
         _ctx.isSessionSwitchReplay = true;
-        const targetId = (msg.sessionId as string) || get().activeSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, () => ({ messages: [] }));
+        if (replayTargetId && get().sessionStates[replayTargetId]) {
+          updateSession(replayTargetId, () => ({ messages: [] }));
         }
       }
       // Clear transient state — these events are not replayed from history,
@@ -1193,9 +1204,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         return Object.keys(patch).length > 0 ? patch : {};
       });
       break;
+    }
 
     case 'history_replay_end':
-      _ctx.receivingHistoryReplay = false;
+      // Parser is shared via store-core; flag mutation stays here.
+      _ctx.receivingHistoryReplay = sharedHistoryReplayEnd().receivingHistoryReplay;
       _ctx.isSessionSwitchReplay = false;
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
@@ -2405,7 +2418,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'conversations_list': {
-      const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
+      // Parser shared via store-core; app-only state mirroring (loading/error
+      // flags + useConversationStore) stays here.
+      const { conversations } = sharedConversationsList(msg);
       set({ conversationHistory: conversations, conversationHistoryLoading: false, conversationHistoryError: null });
       useConversationStore.getState().setConversationHistory(conversations);
       break;
