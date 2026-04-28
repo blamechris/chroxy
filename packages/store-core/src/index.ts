@@ -186,6 +186,8 @@ export type {
   UserQuestionPayload,
   UserInputPayload,
   MessagePayload,
+  ToolStartPayload,
+  ToolResultPayload,
 } from './handlers'
 
 export {
@@ -266,4 +268,6 @@ export {
   handleUserQuestion,
   handleUserInput,
   handleMessage,
+  handleToolStart,
+  handleToolResult,
 } from './handlers'

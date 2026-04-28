@@ -80,6 +80,8 @@ import {
   handleUserQuestion,
   handleUserInput,
   handleMessage,
+  handleToolStart,
+  handleToolResult,
 } from './index'
 import { nextMessageId } from '../utils'
 import type {
@@ -4402,5 +4404,360 @@ describe('handleMessage', () => {
     )
     expect(out.shouldDispatch).toBe(true)
     expect(out.chatMessage!.tool).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleToolStart
+// ---------------------------------------------------------------------------
+describe('handleToolStart', () => {
+  it('uses server messageId as the tool id when present', () => {
+    const out = handleToolStart(
+      {
+        messageId: 'srv-tool-1',
+        sessionId: 'sess-1',
+        tool: 'Bash',
+        toolUseId: 'tu-1',
+        input: { cmd: 'ls' },
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.id).toBe('srv-tool-1')
+  })
+
+  it('generates a tool id when no messageId is provided', () => {
+    const out = handleToolStart(
+      { sessionId: 'sess-1', tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.id).toMatch(/^tool-\d+-\d+$/)
+  })
+
+  it('skips dispatch when replay cache already contains the same id', () => {
+    const cached: ChatMessage[] = [
+      {
+        id: 'srv-tool-1',
+        type: 'tool_use',
+        content: '',
+        timestamp: 1,
+      },
+    ]
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      'sess-active',
+      true,
+      cached,
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('dispatches during replay when cache has no matching id', () => {
+    const cached: ChatMessage[] = [
+      { id: 'other-id', type: 'tool_use', content: '', timestamp: 1 },
+    ]
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      'sess-active',
+      true,
+      cached,
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.id).toBe('srv-tool-1')
+  })
+
+  it('dispatches outside replay regardless of cache content', () => {
+    const cached: ChatMessage[] = [
+      { id: 'srv-tool-1', type: 'tool_use', content: '', timestamp: 1 },
+    ]
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      'sess-active',
+      false,
+      cached,
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.id).toBe('srv-tool-1')
+  })
+
+  it('serialises input as JSON when present', () => {
+    const out = handleToolStart(
+      {
+        messageId: 'srv-tool-1',
+        tool: 'Bash',
+        input: { cmd: 'ls', flag: true },
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.content).toBe(JSON.stringify({ cmd: 'ls', flag: true }))
+  })
+
+  it('falls back to tool name when input is absent', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.content).toBe('Bash')
+  })
+
+  it('falls back to empty string when both input and tool are absent', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.chatMessage!.content).toBe('')
+  })
+
+  it('populates type/tool/toolUseId/serverName/timestamp on the ChatMessage', () => {
+    const before = Date.now()
+    const out = handleToolStart(
+      {
+        messageId: 'srv-tool-1',
+        tool: 'Read',
+        toolUseId: 'tu-99',
+        serverName: 'mcp-server',
+        input: { path: '/x' },
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    const after = Date.now()
+    const cm = out.chatMessage!
+    expect(cm.type).toBe('tool_use')
+    expect(cm.tool).toBe('Read')
+    expect(cm.toolUseId).toBe('tu-99')
+    expect(cm.serverName).toBe('mcp-server')
+    expect(cm.timestamp).toBeGreaterThanOrEqual(before)
+    expect(cm.timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('resolves sessionId from message when present', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', sessionId: 'sess-1', tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.sessionId).toBe('sess-1')
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.sessionId).toBe('sess-active')
+  })
+
+  it('returns null sessionId when neither active nor message provides one', () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      null,
+      false,
+      [],
+    )
+    expect(out.sessionId).toBeNull()
+  })
+
+  it("exposes resolved toolName (msg.tool when present)", () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1', tool: 'Bash' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.toolName).toBe('Bash')
+  })
+
+  it("exposes 'tool' fallback toolName when msg.tool is missing", () => {
+    const out = handleToolStart(
+      { messageId: 'srv-tool-1' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.toolName).toBe('tool')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleToolResult
+// ---------------------------------------------------------------------------
+describe('handleToolResult', () => {
+  it('returns null when toolUseId is missing', () => {
+    const out = handleToolResult({ result: 'ok' }, 'sess-active')
+    expect(out).toBeNull()
+  })
+
+  it('returns null when toolUseId is non-string', () => {
+    const out = handleToolResult({ toolUseId: 42, result: 'ok' }, 'sess-active')
+    expect(out).toBeNull()
+  })
+
+  it('builds patch with toolResult and toolResultTruncated', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 'hello', truncated: true },
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.patch.toolResult).toBe('hello')
+    expect(out!.patch.toolResultTruncated).toBe(true)
+  })
+
+  it('omits toolResultImages when images is missing', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 'ok' },
+      'sess-active',
+    )
+    expect(out!.patch.toolResultImages).toBeUndefined()
+  })
+
+  it('omits toolResultImages when images array is empty', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 'ok', images: [] },
+      'sess-active',
+    )
+    expect(out!.patch.toolResultImages).toBeUndefined()
+  })
+
+  it('includes toolResultImages when images array has entries', () => {
+    const images = [{ mediaType: 'image/png', data: 'base64-data' }]
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 'ok', images },
+      'sess-active',
+    )
+    expect(out!.patch.toolResultImages).toEqual(images)
+  })
+
+  it("defaults resultText to '' when missing", () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1' },
+      'sess-active',
+    )
+    expect(out!.resultText).toBe('')
+    expect(out!.patch.toolResult).toBe('')
+  })
+
+  it('exposes resultText for caller side-effects', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 'visible-text' },
+      'sess-active',
+    )
+    expect(out!.resultText).toBe('visible-text')
+  })
+
+  it('resolves sessionId from message when present', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', sessionId: 'sess-1', result: 'ok' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-1')
+  })
+
+  it('falls back to active sessionId when not on message', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-1', result: 'ok' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  it('exposes toolUseId on the result', () => {
+    const out = handleToolResult(
+      { toolUseId: 'tu-99', result: 'ok' },
+      'sess-active',
+    )
+    expect(out!.toolUseId).toBe('tu-99')
+  })
+
+  describe('applyTo()', () => {
+    const baseMessages: ChatMessage[] = [
+      { id: 'msg-1', type: 'response', content: 'hello', timestamp: 1 },
+      {
+        id: 'msg-2',
+        type: 'tool_use',
+        content: 'Bash',
+        toolUseId: 'tu-1',
+        timestamp: 2,
+      },
+      { id: 'msg-3', type: 'response', content: 'after', timestamp: 3 },
+    ]
+
+    it('finds the matching tool_use message and merges patch', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'output', truncated: false },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated).not.toBe(baseMessages)
+      expect(updated[1]).toMatchObject({
+        id: 'msg-2',
+        type: 'tool_use',
+        toolUseId: 'tu-1',
+        toolResult: 'output',
+        toolResultTruncated: false,
+      })
+    })
+
+    it('returns same array reference when no matching tool_use is found (no-op)', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-missing', result: 'output' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated).toBe(baseMessages)
+    })
+
+    it("does not match a non-tool_use message even if its toolUseId field equals", () => {
+      // Defensive: only tool_use messages are valid match targets.
+      const messages: ChatMessage[] = [
+        // hypothetical: a response message with the same toolUseId on it
+        {
+          id: 'm-1',
+          type: 'response',
+          content: 'x',
+          toolUseId: 'tu-1',
+          timestamp: 1,
+        },
+      ]
+      const out = handleToolResult({ toolUseId: 'tu-1', result: 'out' }, 'sess-active')
+      const updated = out!.applyTo(messages)
+      expect(updated).toBe(messages)
+    })
+
+    it('does not disturb other messages in the array', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'output' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated[0]).toBe(baseMessages[0])
+      expect(updated[2]).toBe(baseMessages[2])
+    })
+
+    it('attaches toolResultImages when present', () => {
+      const images = [{ mediaType: 'image/png', data: 'b64' }]
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'out', images },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated[1]!.toolResultImages).toEqual(images)
+    })
   })
 })
