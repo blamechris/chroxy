@@ -2151,6 +2151,24 @@ describe('handleSlashCommands', () => {
     const cmds = [{ name: '/help' }]
     expect(handleSlashCommands({ commands: cmds }, null)).toEqual({ commands: cmds })
   })
+
+  // Behaviour-preservation tests for the truthiness-based guard.
+  // The original inline guard was `if (msg.sessionId && active && msg.sessionId !== active) skip`,
+  // which treats any truthy value as "set" (not just strings).
+  it('skips when non-string truthy session id mismatches active', () => {
+    // Number sessionId different from active string — original code skipped this.
+    expect(
+      handleSlashCommands({ sessionId: 123, commands: [{ name: '/help' }] }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns commands when falsy session id (empty string) and active is set', () => {
+    // Empty-string sessionId is falsy → guard bypassed in original truthiness check.
+    const cmds = [{ name: '/help' }]
+    expect(handleSlashCommands({ sessionId: '', commands: cmds }, 'active-1')).toEqual({
+      commands: cmds,
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -2263,6 +2281,19 @@ describe('handleAgentList', () => {
   it('returns agents when no active session and no session id on message', () => {
     const agents = [{ name: 'reviewer' }]
     expect(handleAgentList({ agents }, null)).toEqual({ agents })
+  })
+
+  // Behaviour-preservation tests for the truthiness-based guard (mirrors
+  // the original inline `msg.sessionId && active && msg.sessionId !== active`).
+  it('skips when non-string truthy session id mismatches active', () => {
+    expect(
+      handleAgentList({ sessionId: 123, agents: [{ name: 'r' }] }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns agents when falsy session id (empty string) and active is set', () => {
+    const agents = [{ name: 'reviewer' }]
+    expect(handleAgentList({ sessionId: '', agents }, 'active-1')).toEqual({ agents })
   })
 })
 

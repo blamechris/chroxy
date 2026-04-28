@@ -1644,15 +1644,21 @@ export function handleWriteFileResult(
  * Apply the `if (msg.sessionId && active && msg.sessionId !== active) skip`
  * guard used by `slash_commands` and `agent_list`. Returns true when the
  * caller should skip the message.
+ *
+ * Mirrors the prior inline truthiness-based guard exactly: any truthy
+ * `msg.sessionId` (including non-string values like `123`) counts as "set",
+ * any truthy `activeSessionId` counts as "active", and the strict-inequality
+ * comparison is then applied. Non-string `sessionId` values are still
+ * skipped when they don't match an active session — preserving the
+ * dashboard/app behaviour.
  */
 function shouldSkipForSessionMismatch(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): boolean {
   return (
-    typeof msg.sessionId === 'string' &&
-    msg.sessionId.length > 0 &&
-    activeSessionId !== null &&
+    !!msg.sessionId &&
+    !!activeSessionId &&
     msg.sessionId !== activeSessionId
   )
 }
