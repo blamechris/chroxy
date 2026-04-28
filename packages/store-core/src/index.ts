@@ -152,6 +152,9 @@ export type {
   ClientLeftResult,
   PrimaryChanged,
   ClientFocusChanged,
+  ConversationIdPayload,
+  HistoryReplayStartPayload,
+  HistoryReplayEndPayload,
 } from './handlers'
 
 export {
@@ -186,4 +189,8 @@ export {
   handleClientLeft,
   handlePrimaryChanged,
   handleClientFocusChanged,
+  handleConversationId,
+  handleConversationsList,
+  handleHistoryReplayStart,
+  handleHistoryReplayEnd,
 } from './handlers'

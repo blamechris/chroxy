@@ -34,8 +34,18 @@ import {
   handleClientLeft,
   handlePrimaryChanged,
   handleClientFocusChanged,
+  handleConversationId,
+  handleConversationsList,
+  handleHistoryReplayStart,
+  handleHistoryReplayEnd,
 } from './index'
-import type { Checkpoint, ConnectedClient, DevPreview, SessionInfo } from '../types'
+import type {
+  Checkpoint,
+  ConnectedClient,
+  ConversationSummary,
+  DevPreview,
+  SessionInfo,
+} from '../types'
 
 // ---------------------------------------------------------------------------
 // resolveSessionId
@@ -1297,5 +1307,157 @@ describe('handleClientFocusChanged', () => {
 
   it('returns null when both are missing', () => {
     expect(handleClientFocusChanged({})).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleConversationId
+// ---------------------------------------------------------------------------
+describe('handleConversationId', () => {
+  it('extracts sessionId and conversationId verbatim', () => {
+    expect(
+      handleConversationId({ sessionId: 'sess-1', conversationId: 'conv-abc' }),
+    ).toEqual({ sessionId: 'sess-1', conversationId: 'conv-abc' })
+  })
+
+  it('returns null conversationId when missing', () => {
+    expect(handleConversationId({ sessionId: 'sess-1' })).toEqual({
+      sessionId: 'sess-1',
+      conversationId: null,
+    })
+  })
+
+  it('returns null conversationId when non-string', () => {
+    expect(
+      handleConversationId({ sessionId: 'sess-1', conversationId: 42 }),
+    ).toEqual({ sessionId: 'sess-1', conversationId: null })
+  })
+
+  it('returns null sessionId when missing (no active-session fallback)', () => {
+    // Prior inline behaviour: `msg.sessionId as string` without a fallback —
+    // call site gates on truthy sessionId before applying.
+    expect(handleConversationId({ conversationId: 'conv-abc' })).toEqual({
+      sessionId: null,
+      conversationId: 'conv-abc',
+    })
+  })
+
+  it('returns null sessionId when non-string', () => {
+    expect(
+      handleConversationId({ sessionId: 42, conversationId: 'conv-abc' }),
+    ).toEqual({ sessionId: null, conversationId: 'conv-abc' })
+  })
+
+  it('returns both null when message is empty', () => {
+    expect(handleConversationId({})).toEqual({
+      sessionId: null,
+      conversationId: null,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleConversationsList
+// ---------------------------------------------------------------------------
+describe('handleConversationsList', () => {
+  it('extracts conversations array verbatim', () => {
+    const conversations: ConversationSummary[] = [
+      {
+        conversationId: 'conv-1',
+        project: '/repo',
+        projectName: 'repo',
+        modifiedAt: '2026-04-27T00:00:00Z',
+        modifiedAtMs: 1700000000000,
+        sizeBytes: 1024,
+        preview: 'hello',
+        cwd: '/repo',
+      },
+    ]
+    expect(handleConversationsList({ conversations })).toEqual({
+      conversations,
+    })
+  })
+
+  it('returns empty array when conversations is missing', () => {
+    expect(handleConversationsList({})).toEqual({ conversations: [] })
+  })
+
+  it('returns empty array when conversations is non-array', () => {
+    expect(handleConversationsList({ conversations: 'nope' })).toEqual({
+      conversations: [],
+    })
+    expect(handleConversationsList({ conversations: null })).toEqual({
+      conversations: [],
+    })
+  })
+
+  it('forwards array elements verbatim without per-element validation', () => {
+    // Behaviour-preserving: matches the prior inline `as ConversationSummary[]`
+    // cast — the call site trusts whatever the server sent.
+    const malformed = [{ wat: true }] as unknown as ConversationSummary[]
+    expect(handleConversationsList({ conversations: malformed })).toEqual({
+      conversations: malformed,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleHistoryReplayStart
+// ---------------------------------------------------------------------------
+describe('handleHistoryReplayStart', () => {
+  it('returns receivingHistoryReplay=true with fullHistory=false by default', () => {
+    expect(handleHistoryReplayStart({}, null)).toEqual({
+      receivingHistoryReplay: true,
+      fullHistory: false,
+      sessionId: null,
+    })
+  })
+
+  it('preserves fullHistory=true only when strictly === true', () => {
+    expect(
+      handleHistoryReplayStart({ fullHistory: true }, null).fullHistory,
+    ).toBe(true)
+    // Truthy-but-not-true values should NOT trigger the full-history branch
+    // (matches the prior inline `msg.fullHistory === true` strict check).
+    expect(
+      handleHistoryReplayStart({ fullHistory: 1 }, null).fullHistory,
+    ).toBe(false)
+    expect(
+      handleHistoryReplayStart({ fullHistory: 'true' }, null).fullHistory,
+    ).toBe(false)
+  })
+
+  it('uses explicit sessionId from message', () => {
+    const result = handleHistoryReplayStart(
+      { fullHistory: true, sessionId: 'sess-1' },
+      'active-1',
+    )
+    expect(result).toEqual({
+      receivingHistoryReplay: true,
+      fullHistory: true,
+      sessionId: 'sess-1',
+    })
+  })
+
+  it('falls back to activeSessionId when message has no sessionId', () => {
+    const result = handleHistoryReplayStart({ fullHistory: true }, 'active-1')
+    expect(result.sessionId).toBe('active-1')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    expect(
+      handleHistoryReplayStart({ fullHistory: true }, null).sessionId,
+    ).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleHistoryReplayEnd
+// ---------------------------------------------------------------------------
+describe('handleHistoryReplayEnd', () => {
+  it('returns receivingHistoryReplay=false', () => {
+    expect(handleHistoryReplayEnd()).toEqual({
+      receivingHistoryReplay: false,
+    })
   })
 })
