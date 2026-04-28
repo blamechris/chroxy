@@ -14,6 +14,7 @@ import type {
   ChatMessage,
   Checkpoint,
   ConnectedClient,
+  ContextUsage,
   ConversationSummary,
   DevPreview,
   ModelInfo,
@@ -3127,4 +3128,77 @@ export function handleStreamEnd(
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
   return { sessionId, messageId }
+}
+
+// ---------------------------------------------------------------------------
+// result — payload-normalization parts only
+//
+// Streaming-state cleanup (`flushPendingDeltas`, `clearTimeout(deltaFlushTimer)`,
+// `_postPermissionSplits.clear()`, `_deltaIdRemaps.clear()`) and side-effects
+// (Codex/Gemini cost fallback via dashboard's `calculateCost`, app's
+// `hapticSuccess()`, `pushSessionNotification`, force-array-ref) all stay at
+// the call site. This helper extracts only the pure payload normalization:
+// session resolution, `usage` → `ContextUsage`, and `cost`/`duration` type
+// guards.
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleResultUsage}. */
+export interface ResultUsagePayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** Normalized usage counts, or null when the message had no `usage` object. */
+  contextUsage: ContextUsage | null
+  /** Numeric `cost` from the message, or null when missing/non-numeric. */
+  lastResultCost: number | null
+  /** Numeric `duration` from the message, or null when missing/non-numeric. */
+  lastResultDuration: number | null
+}
+
+/**
+ * Normalize the payload-pure parts of a `result` message.
+ *
+ * - `sessionId`: resolved via the legacy `(msg.sessionId as string) || activeSessionId`
+ *   pattern (raw cast — no trim, no whitespace coercion). Mirrors
+ *   `handleMcpServers` / `handleCostUpdate` behaviour exactly so a
+ *   whitespace-only `sessionId` is preserved verbatim and downstream
+ *   `sessionStates[id]` lookups miss rather than silently falling back to the
+ *   active session.
+ * - `contextUsage`: built from `msg.usage` when it's a plain object, with each
+ *   field defaulting to `0` via `|| 0`. Returns `null` when `usage` is missing
+ *   or not a plain object (defensive: rejects strings, numbers, arrays, null).
+ * - `lastResultCost`: `typeof msg.cost === 'number' ? msg.cost : null`. The
+ *   dashboard's Codex/Gemini fallback (`calculateCost(...)`) stays inline at
+ *   the call site and overrides this when the helper returned null but usage
+ *   was present.
+ * - `lastResultDuration`: `typeof msg.duration === 'number' ? msg.duration : null`.
+ */
+export function handleResultUsage(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): ResultUsagePayload {
+  const rawUsage = msg.usage
+  const usage =
+    rawUsage !== null &&
+    typeof rawUsage === 'object' &&
+    !Array.isArray(rawUsage)
+      ? (rawUsage as Record<string, unknown>)
+      : null
+  const contextUsage: ContextUsage | null = usage
+    ? {
+        inputTokens: (usage.input_tokens as number) || 0,
+        outputTokens: (usage.output_tokens as number) || 0,
+        cacheCreation: (usage.cache_creation_input_tokens as number) || 0,
+        cacheRead: (usage.cache_read_input_tokens as number) || 0,
+      }
+    : null
+  const lastResultCost =
+    typeof msg.cost === 'number' ? msg.cost : null
+  const lastResultDuration =
+    typeof msg.duration === 'number' ? msg.duration : null
+  return {
+    sessionId: (msg.sessionId as string) || activeSessionId,
+    contextUsage,
+    lastResultCost,
+    lastResultDuration,
+  }
 }

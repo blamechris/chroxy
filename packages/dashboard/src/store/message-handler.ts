@@ -77,6 +77,7 @@ import {
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
+  handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
@@ -1638,35 +1639,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Clean up permission boundary split tracking
       _postPermissionSplits.clear();
       _deltaIdRemaps.clear();
-      const usage = msg.usage as Record<string, number> | undefined;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      const normalized = sharedResultUsage(msg, get().activeSessionId);
+      const targetId = normalized.sessionId;
       // Resolve cost: server provides it for Claude; compute client-side for
-      // Codex/Gemini sessions that emit cost: null.
-      let resolvedCost: number | null = typeof msg.cost === 'number' ? msg.cost : null;
-      if (resolvedCost === null && usage) {
+      // Codex/Gemini sessions that emit cost: null. The shared helper returns
+      // null when msg.cost is missing/non-numeric — fall back to client-side
+      // pricing only when we have a usage payload to work with.
+      let resolvedCost: number | null = normalized.lastResultCost;
+      if (resolvedCost === null && normalized.contextUsage) {
         const sessionModel = get().sessions.find(
           (s: SessionInfo) => s.sessionId === targetId,
         )?.model ?? null;
         if (sessionModel) {
           resolvedCost = calculateCost(
             sessionModel,
-            usage.input_tokens || 0,
-            usage.output_tokens || 0,
+            normalized.contextUsage.inputTokens,
+            normalized.contextUsage.outputTokens,
           );
         }
       }
       const resultPatch = {
         streamingMessageId: null as string | null,
-        contextUsage: usage
-          ? {
-              inputTokens: usage.input_tokens || 0,
-              outputTokens: usage.output_tokens || 0,
-              cacheCreation: usage.cache_creation_input_tokens || 0,
-              cacheRead: usage.cache_read_input_tokens || 0,
-            }
-          : null,
+        contextUsage: normalized.contextUsage,
         lastResultCost: resolvedCost,
-        lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
+        lastResultDuration: normalized.lastResultDuration,
       };
       // Notify if a background session just finished (was streaming)
       if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
