@@ -173,6 +173,7 @@ export type {
   GitBranchesResultPayload,
   GitStageResultPayload,
   GitCommitResultPayload,
+  AvailableModelsPayload,
 } from './handlers'
 
 export {
@@ -239,4 +240,7 @@ export {
   handleAgentCompleted,
   handleEnvironmentList,
   handleEnvironmentError,
+  handleAvailableModels,
+  handleMcpServers,
+  handleCostUpdate,
 } from './handlers'

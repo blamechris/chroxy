@@ -16,6 +16,7 @@ import type {
   ConnectedClient,
   ConversationSummary,
   DevPreview,
+  ModelInfo,
   SessionInfo,
 } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
@@ -2016,5 +2017,139 @@ export function handleEnvironmentError(
 ): { error: string | null } {
   return {
     error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// available_models
+//
+// Validates and normalizes the `models` array on an `available_models`
+// message. Each entry can be either:
+//
+//  - A `ModelInfo` object with at least `id`, `label`, `fullId` (all non-empty
+//    after trim). `contextWindow` is preserved only when it's a number > 0.
+//  - A bare string (trimmed; non-empty), which gets expanded into
+//    `{id, label: capitalized, fullId}` (label = first char uppercased).
+//
+// Malformed entries are dropped. Also extracts `defaultModelId` from
+// `msg.defaultModel` (string passthrough; non-string → null) — preserving the
+// dashboard's prior inline behaviour, which did NOT trim. The app previously
+// trimmed; that minor behaviour change is intentional per the migration spec.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parsed payload from an `available_models` message: the validated/normalized
+ * model list and the server-default model id.
+ */
+export interface AvailableModelsPayload {
+  /** Cleaned/normalized list of models. Empty when input is missing or non-array. */
+  models: ModelInfo[]
+  /** Default model id from `msg.defaultModel` when string, else null. */
+  defaultModelId: string | null
+}
+
+/**
+ * Parse and normalize an `available_models` message.
+ *
+ * Behaviour-preserving (matches the dashboard's prior inline implementation):
+ * - Object entries require non-empty trimmed `id`, `label`, `fullId`. Fields
+ *   are NOT trimmed in the output (preserves verbatim values).
+ * - `contextWindow` is included only when `typeof === 'number' && > 0`.
+ * - String entries are trimmed; the trimmed value is used as `id` and `fullId`,
+ *   and `label` is the trimmed value with its first character uppercased.
+ * - `defaultModel` is passed through verbatim when it's a string (no trim,
+ *   empty string preserved).
+ */
+export function handleAvailableModels(
+  msg: Record<string, unknown>,
+): AvailableModelsPayload {
+  if (!Array.isArray(msg.models)) {
+    return { models: [], defaultModelId: null }
+  }
+  const cleaned = (msg.models as unknown[])
+    .map((m: unknown): ModelInfo | null => {
+      if (typeof m === 'object' && m !== null) {
+        const { id, label, fullId, contextWindow } = m as ModelInfo
+        if (
+          typeof id === 'string' && id.trim() !== '' &&
+          typeof label === 'string' && label.trim() !== '' &&
+          typeof fullId === 'string' && fullId.trim() !== ''
+        ) {
+          const info: ModelInfo = { id, label, fullId }
+          if (typeof contextWindow === 'number' && contextWindow > 0) {
+            info.contextWindow = contextWindow
+          }
+          return info
+        }
+      }
+      if (typeof m === 'string' && m.trim().length > 0) {
+        const s = m.trim()
+        return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s }
+      }
+      return null
+    })
+    .filter((m: ModelInfo | null): m is ModelInfo => m !== null)
+  const defaultModelId =
+    typeof msg.defaultModel === 'string' ? msg.defaultModel : null
+  return { models: cleaned, defaultModelId }
+}
+
+// ---------------------------------------------------------------------------
+// mcp_servers
+//
+// Session-scoped list-replacement: writes the `mcpServers` array into the
+// target session's state. The element type is left as `unknown[]` here — both
+// callers cast to their own `McpServer[]` type at the call site.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve target session and produce a session patch that replaces the
+ * `mcpServers` list. Defaults to an empty array when the message has no
+ * (or non-array) `servers` field.
+ *
+ * Note on session resolution: matches the prior inline behaviour
+ * `(msg.sessionId as string) || activeSessionId` via the shared
+ * `resolveSessionId` helper (which trims and falls back). The two diverge only
+ * for whitespace-only `sessionId` values, which would harmlessly miss the
+ * downstream `sessionStates[id]` lookup either way.
+ */
+export function handleMcpServers(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  const servers: unknown[] = Array.isArray(msg.servers)
+    ? (msg.servers as unknown[])
+    : []
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: { mcpServers: servers },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// cost_update
+//
+// Session-scoped scalar patch: writes `sessionCost` (number | null) into the
+// target session's state. Both clients also handle `totalCost` and `budget`
+// fields on this message, but those are global — not session-scoped — so they
+// are left to call sites and not part of this shared helper.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve target session and produce a session patch that sets `sessionCost`.
+ *
+ * Behaviour-preserving: passes a numeric `sessionCost` through verbatim
+ * (including `0`); any non-number — missing, null, string, etc. — becomes
+ * null. Matches `typeof msg.sessionCost === 'number' ? msg.sessionCost : null`.
+ */
+export function handleCostUpdate(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  const sessionCost =
+    typeof msg.sessionCost === 'number' ? msg.sessionCost : null
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: { sessionCost },
   }
 }
