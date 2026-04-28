@@ -159,6 +159,10 @@ export type {
   PermissionRequestPayload,
   PermissionResolvedPayload,
   PermissionRulesUpdatedPayload,
+  SessionTimeoutPayload,
+  SessionRestoreFailedPayload,
+  SessionWarningPayload,
+  SessionSwitchedPayload,
 } from './handlers'
 
 export {
@@ -202,4 +206,10 @@ export {
   handlePermissionExpired,
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
+  handleSessionList,
+  handleSessionContext,
+  handleSessionTimeout,
+  handleSessionRestoreFailed,
+  handleSessionWarning,
+  handleSessionSwitched,
 } from './handlers'

@@ -43,6 +43,12 @@ import {
   handlePermissionExpired,
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
+  handleSessionList,
+  handleSessionContext,
+  handleSessionTimeout,
+  handleSessionRestoreFailed,
+  handleSessionWarning,
+  handleSessionSwitched,
 } from './index'
 import type {
   Checkpoint,
@@ -1362,6 +1368,44 @@ describe('handleConversationId', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleSessionList
+// ---------------------------------------------------------------------------
+describe('handleSessionList', () => {
+  const sessions: SessionInfo[] = [
+    {
+      sessionId: 'sess-1',
+      name: 'One',
+      cwd: '/tmp',
+      type: 'cli',
+      hasTerminal: true,
+      model: null,
+      permissionMode: null,
+      isBusy: false,
+      createdAt: 1000,
+      conversationId: null,
+    },
+  ]
+
+  it('returns the parsed sessions array verbatim', () => {
+    expect(handleSessionList({ sessions })).toBe(sessions)
+  })
+
+  it('returns null when sessions is missing', () => {
+    expect(handleSessionList({})).toBeNull()
+  })
+
+  it('returns null when sessions is not an array', () => {
+    expect(handleSessionList({ sessions: 'nope' })).toBeNull()
+    expect(handleSessionList({ sessions: { foo: 'bar' } })).toBeNull()
+  })
+
+  it('returns empty array verbatim (auto-resume gate stays at call site)', () => {
+    const empty: SessionInfo[] = []
+    expect(handleSessionList({ sessions: empty })).toBe(empty)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleConversationsList
 // ---------------------------------------------------------------------------
 describe('handleConversationsList', () => {
@@ -1480,6 +1524,73 @@ describe('handleHistoryReplayStart', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleSessionContext
+// ---------------------------------------------------------------------------
+describe('handleSessionContext', () => {
+  it('extracts all fields when valid', () => {
+    const result = handleSessionContext(
+      {
+        sessionId: 'sess-1',
+        gitBranch: 'main',
+        gitDirty: 3,
+        gitAhead: 1,
+        projectName: 'chroxy',
+      },
+      null,
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: {
+        sessionContext: {
+          gitBranch: 'main',
+          gitDirty: 3,
+          gitAhead: 1,
+          projectName: 'chroxy',
+        },
+      },
+    })
+  })
+
+  it('falls back to active session when sessionId is missing', () => {
+    const result = handleSessionContext(
+      { gitBranch: 'main', gitDirty: 0, gitAhead: 0, projectName: 'p' },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
+  })
+
+  it('uses null/0 fallbacks for missing or non-string/non-number fields', () => {
+    const result = handleSessionContext({ sessionId: 'sess-1' }, null)
+    expect(result.patch).toEqual({
+      sessionContext: {
+        gitBranch: null,
+        gitDirty: 0,
+        gitAhead: 0,
+        projectName: null,
+      },
+    })
+  })
+
+  it('coerces non-string gitBranch/projectName to null', () => {
+    const result = handleSessionContext(
+      { sessionId: 'sess-1', gitBranch: 42, projectName: { x: 1 } },
+      null,
+    )
+    expect((result.patch.sessionContext as { gitBranch: unknown }).gitBranch).toBeNull()
+    expect((result.patch.sessionContext as { projectName: unknown }).projectName).toBeNull()
+  })
+
+  it('coerces non-number gitDirty/gitAhead to 0', () => {
+    const result = handleSessionContext(
+      { sessionId: 'sess-1', gitDirty: 'a', gitAhead: null },
+      null,
+    )
+    expect((result.patch.sessionContext as { gitDirty: number }).gitDirty).toBe(0)
+    expect((result.patch.sessionContext as { gitAhead: number }).gitAhead).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handlePermissionRequest
 // ---------------------------------------------------------------------------
 describe('handlePermissionRequest', () => {
@@ -1558,6 +1669,43 @@ describe('handlePermissionRequest', () => {
     const arr = [1, 2, 3]
     const result = handlePermissionRequest({ requestId: 'r', input: arr })
     expect(result.input).toBe(arr)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionTimeout
+// ---------------------------------------------------------------------------
+describe('handleSessionTimeout', () => {
+  it('extracts sessionId and name when present', () => {
+    const result = handleSessionTimeout({ sessionId: 'sess-1', name: 'Editor' })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.name).toBe('Editor')
+    expect(result.systemMessage.type).toBe('system')
+    expect(result.systemMessage.content).toBe('Session "Editor" was closed due to inactivity.')
+    expect(result.systemMessage.id).toMatch(/^system-/)
+  })
+
+  it('uses "Unknown" name fallback when missing', () => {
+    const result = handleSessionTimeout({ sessionId: 'sess-1' })
+    expect(result.name).toBe('Unknown')
+    expect(result.systemMessage.content).toBe('Session "Unknown" was closed due to inactivity.')
+  })
+
+  it('returns null sessionId when missing or non-string', () => {
+    expect(handleSessionTimeout({}).sessionId).toBeNull()
+    expect(handleSessionTimeout({ sessionId: 42 }).sessionId).toBeNull()
+  })
+
+  it('trims whitespace from sessionId and name', () => {
+    const result = handleSessionTimeout({ sessionId: '  sess-1  ', name: '  Editor  ' })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.name).toBe('Editor')
+  })
+
+  it('returns null sessionId and "Unknown" name when whitespace-only', () => {
+    const result = handleSessionTimeout({ sessionId: '   ', name: '   ' })
+    expect(result.sessionId).toBeNull()
+    expect(result.name).toBe('Unknown')
   })
 })
 
@@ -1703,5 +1851,170 @@ describe('handlePermissionRulesUpdated', () => {
       rules,
     })
     expect(result.rules).toBe(rules)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionRestoreFailed
+// ---------------------------------------------------------------------------
+describe('handleSessionRestoreFailed', () => {
+  it('extracts all fields when present', () => {
+    const result = handleSessionRestoreFailed({
+      sessionId: 'sess-1',
+      name: 'Editor',
+      provider: 'claude',
+      errorCode: 'NO_API_KEY',
+      errorMessage: 'API key missing',
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.name).toBe('Editor')
+    expect(result.provider).toBe('claude')
+    expect(result.errorCode).toBe('NO_API_KEY')
+    expect(result.errorMessage).toBe('API key missing')
+    expect(result.systemMessage.type).toBe('system')
+    expect(result.systemMessage.content).toBe('Failed to restore Editor: API key missing')
+  })
+
+  it('falls back to sessionId when name is missing', () => {
+    const result = handleSessionRestoreFailed({
+      sessionId: 'sess-1',
+      errorMessage: 'boom',
+    })
+    expect(result.systemMessage.content).toBe('Failed to restore sess-1: boom')
+  })
+
+  it('falls back to "session" when name and sessionId are missing', () => {
+    const result = handleSessionRestoreFailed({ errorMessage: 'boom' })
+    expect(result.systemMessage.content).toBe('Failed to restore session: boom')
+  })
+
+  it('falls back to errorCode when errorMessage is missing', () => {
+    const result = handleSessionRestoreFailed({
+      sessionId: 'sess-1',
+      errorCode: 'NO_API_KEY',
+    })
+    expect(result.systemMessage.content).toBe('Failed to restore sess-1: NO_API_KEY')
+  })
+
+  it('falls back to "unknown error" when both error fields are missing', () => {
+    const result = handleSessionRestoreFailed({ sessionId: 'sess-1' })
+    expect(result.systemMessage.content).toBe('Failed to restore sess-1: unknown error')
+  })
+
+  it('coerces non-string fields to null', () => {
+    const result = handleSessionRestoreFailed({
+      sessionId: 42,
+      name: false,
+      provider: { x: 1 },
+      errorCode: null,
+      errorMessage: 99,
+    })
+    expect(result.sessionId).toBeNull()
+    expect(result.name).toBeNull()
+    expect(result.provider).toBeNull()
+    expect(result.errorCode).toBeNull()
+    expect(result.errorMessage).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionWarning
+// ---------------------------------------------------------------------------
+describe('handleSessionWarning', () => {
+  it('extracts all fields when present', () => {
+    const result = handleSessionWarning({
+      sessionId: 'sess-1',
+      name: 'Editor',
+      remainingMs: 60000,
+      message: 'Session ends in 60s',
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.sessionName).toBe('Editor')
+    expect(result.remainingMs).toBe(60000)
+    expect(result.message).toBe('Session ends in 60s')
+    expect(result.systemMessage.content).toBe('Session ends in 60s')
+    expect(result.systemMessage.type).toBe('system')
+    expect(result.systemMessage.id).toMatch(/^warn-/)
+  })
+
+  it('falls back to defaults when fields are missing', () => {
+    const result = handleSessionWarning({})
+    expect(result.sessionId).toBeNull()
+    expect(result.sessionName).toBe('Session')
+    expect(result.remainingMs).toBe(120000)
+    expect(result.message).toBe('Session will timeout soon')
+    expect(result.systemMessage.content).toBe('Session will timeout soon')
+  })
+
+  it('coerces non-string sessionId/name to default fallbacks', () => {
+    const result = handleSessionWarning({ sessionId: 42, name: { x: 1 }, remainingMs: 'a' })
+    expect(result.sessionId).toBeNull()
+    expect(result.sessionName).toBe('Session')
+    expect(result.remainingMs).toBe(120000)
+  })
+
+  it('trims whitespace from sessionId/name/message', () => {
+    const result = handleSessionWarning({
+      sessionId: '  sess-1  ',
+      name: '  Editor  ',
+      message: '  ending soon  ',
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.sessionName).toBe('Editor')
+    expect(result.message).toBe('ending soon')
+  })
+
+  it('falls back to defaults when fields are whitespace-only', () => {
+    const result = handleSessionWarning({ sessionId: '   ', name: '   ', message: '   ' })
+    expect(result.sessionId).toBeNull()
+    expect(result.sessionName).toBe('Session')
+    expect(result.message).toBe('Session will timeout soon')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionSwitched
+// ---------------------------------------------------------------------------
+describe('handleSessionSwitched', () => {
+  it('extracts newSessionId and conversationId when both are present', () => {
+    expect(
+      handleSessionSwitched({ sessionId: 'sess-1', conversationId: 'conv-1' }),
+    ).toEqual({ newSessionId: 'sess-1', conversationId: 'conv-1' })
+  })
+
+  it('returns null conversationId when missing', () => {
+    expect(handleSessionSwitched({ sessionId: 'sess-1' })).toEqual({
+      newSessionId: 'sess-1',
+      conversationId: null,
+    })
+  })
+
+  it('returns null when sessionId is missing', () => {
+    expect(handleSessionSwitched({})).toBeNull()
+  })
+
+  it('returns null when sessionId is non-string', () => {
+    expect(handleSessionSwitched({ sessionId: 42 })).toBeNull()
+  })
+
+  it('returns null when sessionId is empty', () => {
+    expect(handleSessionSwitched({ sessionId: '' })).toBeNull()
+  })
+
+  it('returns null when sessionId is whitespace only', () => {
+    expect(handleSessionSwitched({ sessionId: '   ' })).toBeNull()
+  })
+
+  it('trims whitespace from sessionId and conversationId', () => {
+    expect(
+      handleSessionSwitched({ sessionId: '  sess-1  ', conversationId: '  conv-1  ' }),
+    ).toEqual({ newSessionId: 'sess-1', conversationId: 'conv-1' })
+  })
+
+  it('returns null conversationId when non-string', () => {
+    expect(handleSessionSwitched({ sessionId: 'sess-1', conversationId: 42 })).toEqual({
+      newSessionId: 'sess-1',
+      conversationId: null,
+    })
   })
 })

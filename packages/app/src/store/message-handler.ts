@@ -66,6 +66,12 @@ import {
   handlePermissionExpired as sharedPermissionExpired,
   handlePermissionTimeout as sharedPermissionTimeout,
   handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  handleSessionList as sharedSessionList,
+  handleSessionContext as sharedSessionContext,
+  handleSessionTimeout as sharedSessionTimeout,
+  handleSessionRestoreFailed as sharedSessionRestoreFailed,
+  handleSessionWarning as sharedSessionWarning,
+  handleSessionSwitched as sharedSessionSwitched,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -990,9 +996,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // --- Multi-session messages ---
 
-    case 'session_list':
-      if (Array.isArray(msg.sessions)) {
-        const sessionList = msg.sessions as SessionInfo[];
+    case 'session_list': {
+      const sessionList = sharedSessionList(msg);
+      if (sessionList) {
         // Auto-resume on server restart: if reconnecting and server has no sessions,
         // restore the last active conversation so user doesn't have to navigate History.
         if (sessionList.length === 0 && ctx.isReconnect) {
@@ -1079,6 +1085,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
       break;
+    }
 
     case 'session_updated': {
       const updated = sharedSessionUpdated(msg, get().sessions);
@@ -1098,29 +1105,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'session_context': {
-      const ctxSessionId = (msg.sessionId as string) || get().activeSessionId;
+      const { sessionId: ctxSessionId, patch } = sharedSessionContext(msg, get().activeSessionId);
       if (ctxSessionId && get().sessionStates[ctxSessionId]) {
-        updateSession(ctxSessionId, () => ({
-          sessionContext: {
-            gitBranch: typeof msg.gitBranch === 'string' ? msg.gitBranch : null,
-            gitDirty: typeof msg.gitDirty === 'number' ? msg.gitDirty : 0,
-            gitAhead: typeof msg.gitAhead === 'number' ? msg.gitAhead : 0,
-            projectName: typeof msg.projectName === 'string' ? msg.projectName : null,
-          },
-        }));
+        updateSession(ctxSessionId, () => patch);
       }
       break;
     }
 
     case 'session_switched': {
-      const sessionId = msg.sessionId as string;
+      const switched = sharedSessionSwitched(msg);
+      if (!switched) break;
+      const { newSessionId: sessionId, conversationId: switchConvId } = switched;
       // Only treat as session-switch replay if the user explicitly initiated it
       // (auth-triggered session_switched on reconnect should use reconnect dedup)
       if (_ctx.pendingSwitchSessionId && _ctx.pendingSwitchSessionId === sessionId) {
         _ctx.isSessionSwitchReplay = true;
       }
       _ctx.pendingSwitchSessionId = null;
-      const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
       set((state: ConnectionState) => {
         // Initialize session state if it doesn't exist
         const sessionStates = { ...state.sessionStates };
@@ -2224,13 +2225,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Server couldn't restart a persisted session (e.g. missing API key).
       // History is preserved on disk. Full UI (retry button, needs-attention
       // marker) is a follow-up; for now just surface via console.
+      const restoreFailed = sharedSessionRestoreFailed(msg);
       // eslint-disable-next-line no-console
       console.warn('[session_restore_failed]', {
-        sessionId: msg.sessionId,
-        name: msg.name,
-        provider: msg.provider,
-        errorCode: msg.errorCode,
-        errorMessage: msg.errorMessage,
+        sessionId: restoreFailed.sessionId,
+        name: restoreFailed.name,
+        provider: restoreFailed.provider,
+        errorCode: restoreFailed.errorCode,
+        errorMessage: restoreFailed.errorMessage,
       });
       break;
     }
@@ -2527,9 +2529,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'session_warning': {
-      const warnSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const sessionName = typeof msg.name === 'string' ? msg.name : 'Session';
-      const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : 120000;
+      const { sessionId: warnSessionId, sessionName, remainingMs } = sharedSessionWarning(msg);
 
       // Set timeout warning state for the banner UI
       const warningData = {
@@ -2544,8 +2544,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'session_timeout': {
-      const timeoutSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const name = typeof msg.name === 'string' ? msg.name : 'Unknown';
+      const { sessionId: timeoutSessionId, name } = sharedSessionTimeout(msg);
       Alert.alert('Session Closed', `Session "${name}" was closed due to inactivity.`);
       if (timeoutSessionId) {
         // Clean up sessionStates entry for the destroyed session (#816)
