@@ -4325,4 +4325,82 @@ describe('handleMessage', () => {
     )
     expect(out.sessionId).toBeNull()
   })
+
+  // Runtime validation guards (Copilot review on PR #3148): handleMessage now
+  // rejects malformed payloads up front rather than building an invalid
+  // ChatMessage and letting it crash render paths.
+  it('drops dispatch when messageType / type is missing', () => {
+    const out = handleMessage(
+      { content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('drops dispatch when messageType is non-string', () => {
+    const out = handleMessage(
+      { messageType: 7, content: 'hi', timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+  })
+
+  it('drops dispatch when content is non-string', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 42, timestamp: 1 },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('drops dispatch when timestamp is non-number', () => {
+    const out = handleMessage(
+      { messageType: 'response', content: 'hi', timestamp: 'now' },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.chatMessage).toBeNull()
+  })
+
+  it('uses resolveSessionId — rejects whitespace-only sessionId', () => {
+    const out = handleMessage(
+      {
+        messageType: 'response',
+        sessionId: '   ',
+        content: 'hi',
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    // Whitespace is not a valid sessionId — should fall back to activeSessionId.
+    expect(out.sessionId).toBe('sess-active')
+  })
+
+  it('drops dispatch when tool is non-string (sanitises rather than passing through)', () => {
+    const out = handleMessage(
+      {
+        messageType: 'tool_use',
+        content: 'using bash',
+        tool: 99,
+        timestamp: 1,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.chatMessage!.tool).toBeUndefined()
+  })
 })

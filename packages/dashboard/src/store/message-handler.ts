@@ -1631,7 +1631,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Existing message handlers (now session-aware) ---
 
     case 'message': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Use the shared resolver so trim / empty-string normalization stays
+      // consistent with sharedMessageHandler and the rest of store-core.
+      const targetId = resolveSessionId(msg, get().activeSessionId);
       // Resolve the cache used for replay-dedup (target session if known,
       // else the global message log).
       const targetState = targetId ? get().sessionStates[targetId] : null;

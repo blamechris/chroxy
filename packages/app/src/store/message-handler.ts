@@ -1272,7 +1272,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Existing message handlers (now session-aware) ---
 
     case 'message': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Use the shared resolver so trim / empty-string normalization stays
+      // consistent with sharedMessageHandler and the rest of store-core.
+      const targetId = resolveSessionId(msg, get().activeSessionId);
       const cached = getSessionMessages(targetId);
       const result = sharedMessageHandler(msg, get().activeSessionId, _ctx.receivingHistoryReplay, cached);
       if (!result.shouldDispatch) break;

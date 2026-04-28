@@ -2712,7 +2712,14 @@ const RATE_LIMIT_KEYWORDS = ['rate limit', 'usage limit', 'quota', 'overloaded']
 /**
  * Validate, gate, and normalize a generic forwarded `message` event.
  *
- * - Resolves `msgType = msg.messageType || msg.type`.
+ * - Resolves the target session via `resolveSessionId` (trims, rejects
+ *   empty/whitespace strings — consistent with the other store-core handlers).
+ * - Resolves `msgType = msg.messageType || msg.type` and rejects payloads
+ *   where `msgType` / `content` / `timestamp` fail their runtime type checks
+ *   (`shouldDispatch: false`). The resulting `ChatMessage` declares
+ *   `content: string` and `timestamp: number` as required; rejecting
+ *   structurally invalid messages here keeps malformed WS payloads from
+ *   crashing render paths.
  * - Returns `shouldDispatch: false` when `msgType === 'user_input'` outside
  *   replay (live echoes are handled by `handleUserInput`).
  * - Returns `shouldDispatch: false` during replay when `isReplayDuplicate`
@@ -2723,6 +2730,10 @@ const RATE_LIMIT_KEYWORDS = ['rate limit', 'usage limit', 'quota', 'overloaded']
  * - Detects rate-limit / quota / overloaded errors via case-insensitive
  *   substring match on the error content; returns `isRateLimitError: true`
  *   and `errorContent` so the caller can surface a platform-specific alert.
+ *
+ * The caller still owns the thinking-placeholder filter and the
+ * `addMessage` vs `updateSession` choice — this helper returns the built
+ * ChatMessage rather than driving the dispatch itself.
  */
 export function handleMessage(
   msg: Record<string, unknown>,
@@ -2730,11 +2741,9 @@ export function handleMessage(
   receivingHistoryReplay: boolean,
   cachedMessages: readonly ChatMessage[],
 ): MessagePayload {
-  const msgType = (msg.messageType || msg.type) as string
-  const sessionId =
-    (typeof msg.sessionId === 'string' && msg.sessionId.length > 0
-      ? (msg.sessionId as string)
-      : null) ?? activeSessionId
+  // Resolve canonical session routing via the shared helper so trim /
+  // empty-string normalization stays consistent with the other handlers.
+  const sessionId = resolveSessionId(msg, activeSessionId)
 
   const empty: MessagePayload = {
     shouldDispatch: false,
@@ -2743,6 +2752,17 @@ export function handleMessage(
     isRateLimitError: false,
     errorContent: null,
   }
+
+  // Runtime validation: this function accepts raw WS payloads
+  // (`Record<string, unknown>`) and the resulting `ChatMessage` declares
+  // `content: string` and `timestamp: number` as required. Reject
+  // structurally invalid messages here rather than letting them propagate
+  // and crash render paths.
+  const rawType = msg.messageType ?? msg.type
+  if (typeof rawType !== 'string' || rawType.length === 0) return empty
+  const msgType = rawType
+  if (typeof msg.content !== 'string') return empty
+  if (typeof msg.timestamp !== 'number') return empty
 
   // Live user_input echoes from other clients arrive as top-level
   // `type: 'user_input'` and are handled by `handleUserInput`. Anything that
@@ -2759,8 +2779,8 @@ export function handleMessage(
         messageType: msgType,
         messageId: stableMessageId,
         content: msg.content,
-        timestamp: msg.timestamp as number | undefined,
-        tool: msg.tool as string | undefined,
+        timestamp: msg.timestamp,
+        tool: typeof msg.tool === 'string' ? msg.tool : undefined,
         options: msg.options as ChatMessage['options'],
       })
     ) {
@@ -2772,20 +2792,20 @@ export function handleMessage(
     // Canonical: preserve server-stamped messageId for ALL types (#2902).
     id: stableMessageId || nextMessageId(msgType),
     type: msgType as ChatMessage['type'],
-    content: msg.content as string,
-    tool: msg.tool as string | undefined,
+    content: msg.content,
+    tool: typeof msg.tool === 'string' ? msg.tool : undefined,
     options: msg.options as ChatMessage['options'],
-    timestamp: msg.timestamp as number,
+    timestamp: msg.timestamp,
   }
 
   // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).
   let isRateLimitError = false
   let errorContent: string | null = null
-  if (msgType === 'error' && typeof msg.content === 'string') {
-    const lower = (msg.content as string).toLowerCase()
+  if (msgType === 'error') {
+    const lower = msg.content.toLowerCase()
     if (RATE_LIMIT_KEYWORDS.some((kw) => lower.includes(kw))) {
       isRateLimitError = true
-      errorContent = msg.content as string
+      errorContent = msg.content
     }
   }
 
