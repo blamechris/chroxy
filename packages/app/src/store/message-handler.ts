@@ -66,6 +66,10 @@ import {
   handlePermissionExpired as sharedPermissionExpired,
   handlePermissionTimeout as sharedPermissionTimeout,
   handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  handleDirectoryListing as sharedDirectoryListing,
+  handleFileListing as sharedFileListing,
+  handleFileContent as sharedFileContent,
+  handleWriteFileResult as sharedWriteFileResult,
   handleSessionList as sharedSessionList,
   handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
@@ -2070,12 +2074,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'directory_listing': {
       const cb = getCallback('directoryListing');
       if (cb) {
-        cb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-          entries: Array.isArray(msg.entries) ? msg.entries as DirectoryEntry[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        const payload = sharedDirectoryListing(msg);
+        cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
       }
       break;
     }
@@ -2083,12 +2083,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'file_listing': {
       const fileBrowserCb = getCallback('fileBrowser');
       if (fileBrowserCb) {
-        fileBrowserCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-          entries: Array.isArray(msg.entries) ? msg.entries as FileEntry[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        const payload = sharedFileListing(msg);
+        fileBrowserCb({ ...payload, entries: payload.entries as FileEntry[] });
       }
       break;
     }
@@ -2096,14 +2092,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'file_content': {
       const fileContentCb = getCallback('fileContent');
       if (fileContentCb) {
-        fileContentCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          content: typeof msg.content === 'string' ? msg.content : null,
-          language: typeof msg.language === 'string' ? msg.language : null,
-          size: typeof msg.size === 'number' ? msg.size : null,
-          truncated: msg.truncated === true,
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        fileContentCb(sharedFileContent(msg));
       }
       break;
     }
@@ -2111,10 +2100,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'write_file_result': {
       const fileWriteCb = getCallback('fileWrite');
       if (fileWriteCb) {
-        fileWriteCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
+        fileWriteCb(sharedWriteFileResult(msg));
       }
       break;
     }
