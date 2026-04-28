@@ -62,8 +62,13 @@ import {
   handleGitBranchesResult,
   handleGitStageResult,
   handleGitCommitResult,
+  handleAgentSpawned,
+  handleAgentCompleted,
+  handleEnvironmentList,
+  handleEnvironmentError,
 } from './index'
 import type {
+  AgentInfo,
   Checkpoint,
   ConnectedClient,
   ConversationSummary,
@@ -2680,5 +2685,257 @@ describe('handleGitCommitResult', () => {
 
   it('extracts error when present', () => {
     expect(handleGitCommitResult({ error: 'merge conflict' }).error).toBe('merge conflict')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAgentSpawned
+// ---------------------------------------------------------------------------
+describe('handleAgentSpawned', () => {
+  it('appends a new agent when toolUseId not present in current list', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+    ]
+    const builder = handleAgentSpawned(
+      {
+        sessionId: 'sess-1',
+        toolUseId: 'tu-2',
+        description: 'second',
+        startedAt: 200,
+      },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    expect(builder.applyTo(existing)).toEqual([
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+      { toolUseId: 'tu-2', description: 'second', startedAt: 200 },
+    ])
+  })
+
+  it('returns the same array reference when toolUseId already present (dedup)', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+    ]
+    const builder = handleAgentSpawned(
+      { toolUseId: 'tu-1', description: 'duplicate', startedAt: 999 },
+      'active-1',
+    )
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('returns same array (no-op) when toolUseId is missing', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+    ]
+    const builder = handleAgentSpawned({ description: 'no id' }, 'active-1')
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('returns same array (no-op) when toolUseId is non-string', () => {
+    const existing: AgentInfo[] = []
+    const builder = handleAgentSpawned({ toolUseId: 42 }, 'active-1')
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it("defaults description to 'Background task' when missing", () => {
+    const builder = handleAgentSpawned(
+      { toolUseId: 'tu-1', startedAt: 100 },
+      'active-1',
+    )
+    expect(builder.applyTo([])).toEqual([
+      { toolUseId: 'tu-1', description: 'Background task', startedAt: 100 },
+    ])
+  })
+
+  it("defaults description to 'Background task' when empty string", () => {
+    // Matches prior inline `(msg.description as string) || 'Background task'`.
+    const builder = handleAgentSpawned(
+      { toolUseId: 'tu-1', description: '', startedAt: 100 },
+      'active-1',
+    )
+    expect(builder.applyTo([])[0]?.description).toBe('Background task')
+  })
+
+  it('defaults startedAt to current time when missing', () => {
+    const before = Date.now()
+    const builder = handleAgentSpawned({ toolUseId: 'tu-1' }, 'active-1')
+    const after = Date.now()
+    const out = builder.applyTo([])
+    expect(out).toHaveLength(1)
+    const startedAt = out[0]?.startedAt
+    expect(typeof startedAt).toBe('number')
+    expect(startedAt).toBeGreaterThanOrEqual(before)
+    expect(startedAt).toBeLessThanOrEqual(after)
+  })
+
+  it('defaults startedAt to current time when zero (falsy)', () => {
+    // Matches prior inline `(msg.startedAt as number) || Date.now()`: 0 is falsy.
+    const before = Date.now()
+    const builder = handleAgentSpawned(
+      { toolUseId: 'tu-1', startedAt: 0 },
+      'active-1',
+    )
+    const after = Date.now()
+    const startedAt = builder.applyTo([])[0]?.startedAt as number
+    expect(startedAt).toBeGreaterThanOrEqual(before)
+    expect(startedAt).toBeLessThanOrEqual(after)
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleAgentSpawned({ toolUseId: 'tu-1' }, 'active-1')
+    expect(builder.sessionId).toBe('active-1')
+  })
+
+  it('uses explicit sessionId from message when present', () => {
+    const builder = handleAgentSpawned(
+      { sessionId: 'sess-99', toolUseId: 'tu-1' },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-99')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const builder = handleAgentSpawned({ toolUseId: 'tu-1' }, null)
+    expect(builder.sessionId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAgentCompleted
+// ---------------------------------------------------------------------------
+describe('handleAgentCompleted', () => {
+  it('removes the matching toolUseId from current list', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+      { toolUseId: 'tu-2', description: 'second', startedAt: 200 },
+    ]
+    const builder = handleAgentCompleted(
+      { sessionId: 'sess-1', toolUseId: 'tu-1' },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    expect(builder.applyTo(existing)).toEqual([
+      { toolUseId: 'tu-2', description: 'second', startedAt: 200 },
+    ])
+  })
+
+  it('returns the same array reference when toolUseId not in list', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+    ]
+    const builder = handleAgentCompleted({ toolUseId: 'tu-99' }, 'active-1')
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('returns same array (no-op) when toolUseId is missing', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+    ]
+    const builder = handleAgentCompleted({}, 'active-1')
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('returns same array (no-op) when toolUseId is non-string', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+    ]
+    const builder = handleAgentCompleted({ toolUseId: 42 }, 'active-1')
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleAgentCompleted({ toolUseId: 'tu-1' }, 'active-1')
+    expect(builder.sessionId).toBe('active-1')
+  })
+
+  it('uses explicit sessionId from message when present', () => {
+    const builder = handleAgentCompleted(
+      { sessionId: 'sess-99', toolUseId: 'tu-1' },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-99')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const builder = handleAgentCompleted({ toolUseId: 'tu-1' }, null)
+    expect(builder.sessionId).toBeNull()
+    expect(builder.applyTo([])).toEqual([])
+  })
+
+  it('removes only the matching entry, preserves others', () => {
+    const existing: AgentInfo[] = [
+      { toolUseId: 'tu-1', description: 'first', startedAt: 100 },
+      { toolUseId: 'tu-2', description: 'second', startedAt: 200 },
+      { toolUseId: 'tu-3', description: 'third', startedAt: 300 },
+    ]
+    const builder = handleAgentCompleted({ toolUseId: 'tu-2' }, 'active-1')
+    expect(builder.applyTo(existing).map((a) => a.toolUseId)).toEqual([
+      'tu-1',
+      'tu-3',
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleEnvironmentList
+// ---------------------------------------------------------------------------
+describe('handleEnvironmentList', () => {
+  it('returns environments array when valid', () => {
+    const envs = [{ id: 'env-1', name: 'dev' }, { id: 'env-2', name: 'prod' }]
+    expect(handleEnvironmentList({ environments: envs })).toEqual({ environments: envs })
+  })
+
+  it('returns empty environments array verbatim', () => {
+    expect(handleEnvironmentList({ environments: [] })).toEqual({ environments: [] })
+  })
+
+  it('returns empty array when environments is missing', () => {
+    expect(handleEnvironmentList({})).toEqual({ environments: [] })
+  })
+
+  it('returns empty array when environments is non-array', () => {
+    expect(handleEnvironmentList({ environments: 'oops' })).toEqual({ environments: [] })
+    expect(handleEnvironmentList({ environments: { x: 1 } })).toEqual({ environments: [] })
+    expect(handleEnvironmentList({ environments: null })).toEqual({ environments: [] })
+  })
+
+  it('ignores session id on message (no guard)', () => {
+    const envs = [{ id: 'env-1' }]
+    expect(handleEnvironmentList({ sessionId: 'whatever', environments: envs })).toEqual({
+      environments: envs,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleEnvironmentError
+// ---------------------------------------------------------------------------
+describe('handleEnvironmentError', () => {
+  it('returns error string when present', () => {
+    expect(handleEnvironmentError({ error: 'docker daemon down' })).toEqual({
+      error: 'docker daemon down',
+    })
+  })
+
+  it('preserves empty-string error verbatim', () => {
+    // Matches the prior inline `console.error('[ws] Environment error:', msg.error)` —
+    // the original code passed the value through unconditionally.
+    expect(handleEnvironmentError({ error: '' })).toEqual({ error: '' })
+  })
+
+  it('returns null when error is missing', () => {
+    expect(handleEnvironmentError({})).toEqual({ error: null })
+  })
+
+  it('returns null when error is non-string', () => {
+    expect(handleEnvironmentError({ error: 42 })).toEqual({ error: null })
+    expect(handleEnvironmentError({ error: { msg: 'x' } })).toEqual({ error: null })
+    expect(handleEnvironmentError({ error: null })).toEqual({ error: null })
   })
 })
