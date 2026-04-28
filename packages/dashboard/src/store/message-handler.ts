@@ -76,6 +76,10 @@ import {
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
+  handleWebTaskUpsert as sharedWebTaskUpsert,
+  handleWebTaskError as sharedWebTaskError,
+  handleWebTaskList as sharedWebTaskList,
+  handleWebFeatureStatus as sharedWebFeatureStatus,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -665,18 +669,12 @@ function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set
 }
 
 function handleWebFeatureStatus(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  set({
-    webFeatures: {
-      available: !!msg.available,
-      remote: !!msg.remote,
-      teleport: !!msg.teleport,
-    },
-  });
+  set(sharedWebFeatureStatus(msg));
 }
 
 function handleWebTaskList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const tasks = Array.isArray(msg.tasks) ? (msg.tasks as WebTask[]) : [];
-  set({ webTasks: tasks });
+  const { tasks } = sharedWebTaskList(msg);
+  set({ webTasks: tasks as WebTask[] });
 }
 
 function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
@@ -2158,8 +2156,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'web_task_created':
     case 'web_task_updated': {
-      const task = msg.task as WebTask;
-      if (!task || !task.taskId) break;
+      const { task } = sharedWebTaskUpsert(msg);
+      if (!task) break;
       set((state: ConnectionState) => {
         const existing = state.webTasks.filter((t) => t.taskId !== task.taskId);
         return { webTasks: [...existing, task] };
@@ -2168,24 +2166,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'web_task_error': {
-      const errTaskId = msg.taskId as string | null;
+      const { taskId: errTaskId, errorMessage, chatMessage: errorMsg } = sharedWebTaskError(msg);
       if (errTaskId) {
         // Update task status to failed
         set((state: ConnectionState) => ({
           webTasks: state.webTasks.map((t) =>
             t.taskId === errTaskId
-              ? { ...t, status: 'failed' as const, error: (msg.message as string) || 'Unknown error', updatedAt: Date.now() }
+              ? { ...t, status: 'failed' as const, error: errorMessage, updatedAt: Date.now() }
               : t,
           ),
         }));
       }
       // Show error as system message in chat
-      const errorMsg: ChatMessage = {
-        id: nextMessageId('web'),
-        type: 'system',
-        content: (msg.message as string) || 'Web task error',
-        timestamp: Date.now(),
-      };
       const activeSid = get().activeSessionId;
       if (activeSid && get().sessionStates[activeSid]) {
         updateActiveSession((ss) => ({
