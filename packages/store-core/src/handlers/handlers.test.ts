@@ -4912,6 +4912,33 @@ describe('handleStreamStart', () => {
     expect(out.sessionId).toBeNull()
     expect(out.streamingMessageId).toBe('msg-1')
   })
+
+  it('falls back to nextMessageId when msg.messageId is not a string', () => {
+    // Non-string messageId is a malformed payload (protocol schema requires
+    // string). Helper synthesizes a fresh id rather than producing a
+    // non-string ChatMessage.id that lies about its type.
+    const out = handleStreamStart(
+      { messageId: 42, sessionId: 'sess-1' },
+      'sess-active',
+      [],
+    )
+    expect(out.sessionId).toBe('sess-1')
+    expect(typeof out.streamingMessageId).toBe('string')
+    expect(out.streamingMessageId).not.toBe('42')
+    expect(out.streamingMessageId.length).toBeGreaterThan(0)
+    expect(out.isNewMessage).toBe(true)
+    expect(out.newMessage).not.toBeNull()
+    expect(typeof out.newMessage!.id).toBe('string')
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is not a string', () => {
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 42 },
+      'sess-active',
+      [],
+    )
+    expect(out.sessionId).toBe('sess-active')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -4945,14 +4972,25 @@ describe('handleStreamEnd', () => {
     expect(out.messageId).toBe('msg-1')
   })
 
-  it('passes through messageId verbatim (cast as string for non-string values)', () => {
+  it('returns null messageId when msg.messageId is not a string', () => {
     const out = handleStreamEnd(
       { messageId: 42 },
       'sess-active',
     )
-    // The current call sites use `msg.messageId as string` against the
-    // _deltaIdRemaps Map and _postPermissionSplits Set; preserve that shape
-    // by passing the value through unchanged.
-    expect(out.messageId as unknown).toBe(42)
+    // The protocol schema (ServerStreamEndSchema) guarantees messageId is a
+    // string for well-formed payloads. For malformed payloads, return null
+    // rather than letting non-string values poison the call-site Maps used
+    // for _deltaIdRemaps / _postPermissionSplits cleanup. Map.delete(null)
+    // is a safe no-op.
+    expect(out.messageId).toBeNull()
+  })
+
+  it('returns null messageId when msg.messageId is missing', () => {
+    const out = handleStreamEnd(
+      {},
+      'sess-active',
+    )
+    expect(out.messageId).toBeNull()
+    expect(out.sessionId).toBe('sess-active')
   })
 })

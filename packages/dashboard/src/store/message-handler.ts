@@ -890,9 +890,12 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   // Add newline separator after response ends for Output view readability
   get().appendTerminalData('\r\n');
   const out = sharedStreamEnd(msg, get().activeSessionId);
-  // Clean up permission boundary split tracking
-  _postPermissionSplits.delete(out.messageId);
-  _deltaIdRemaps.delete(out.messageId);
+  // Clean up permission boundary split tracking. messageId is null for
+  // malformed payloads (non-string msg.messageId) — skip cleanup in that case.
+  if (out.messageId !== null) {
+    _postPermissionSplits.delete(out.messageId);
+    _deltaIdRemaps.delete(out.messageId);
+  }
   const targetId = out.sessionId;
   if (targetId && get().sessionStates[targetId]) {
     // Force a new messages array reference so selectors detect the change,

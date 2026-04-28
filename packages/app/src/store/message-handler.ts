@@ -1391,9 +1391,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       flushPendingDeltas();
       {
         const out = sharedStreamEnd(msg, get().activeSessionId);
-        // Clean up permission boundary split tracking
-        _ctx.postPermissionSplits.delete(out.messageId);
-        _ctx.deltaIdRemaps.delete(out.messageId);
+        // Clean up permission boundary split tracking. messageId is null for
+        // malformed payloads (non-string msg.messageId) — skip cleanup then.
+        if (out.messageId !== null) {
+          _ctx.postPermissionSplits.delete(out.messageId);
+          _ctx.deltaIdRemaps.delete(out.messageId);
+        }
         const targetId = out.sessionId;
         if (targetId && get().sessionStates[targetId]) {
           // Force a new messages array reference so selectors detect the change,

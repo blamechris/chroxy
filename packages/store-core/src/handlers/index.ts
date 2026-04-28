@@ -3022,13 +3022,15 @@ export interface StreamStartPayload {
 /**
  * Validate and resolve a `stream_start` message into a session patch.
  *
- * - Resolves `sessionId` from `msg.sessionId` (string-typed) falling back to
- *   `activeSessionId`. Matches the call sites' `(msg.sessionId as string) ||
- *   activeSessionId` pattern.
+ * - Resolves `sessionId` from `msg.sessionId` (validated as `string`), falling
+ *   back to `activeSessionId` when the field is missing or not a string.
  * - Resolves `streamingMessageId` via {@link resolveStreamId} against the
- *   existing session messages. When the stream id collides with an existing
- *   non-response message, returns a suffixed id and a `remap` directive so
- *   the caller can register it in its module-local `_deltaIdRemaps`.
+ *   existing session messages. When `msg.messageId` is missing or not a
+ *   string, falls back to a freshly generated id (`nextMessageId('msg')`) so
+ *   the resolved id is always a real string. When the stream id collides
+ *   with an existing non-response message, returns a suffixed id and a
+ *   `remap` directive so the caller can register it in its module-local
+ *   `_deltaIdRemaps`.
  * - When the existing message is already a `response` (reconnect replay
  *   dedup), returns `isNewMessage: false` and `newMessage: null` so the
  *   caller only updates `streamingMessageId`.
@@ -3039,14 +3041,19 @@ export interface StreamStartPayload {
  * `filterThinking(messages)` array transform that drops the thinking
  * placeholder before appending) stay at the call site — this helper just
  * computes the patch shape.
+ *
+ * Mirrors the `typeof === 'string'` guard pattern used in {@link
+ * handleToolStart} so the returned `ChatMessage.id` and `sessionId` are
+ * always honest strings, matching the protocol schema (`messageId:
+ * z.string()` in `ServerStreamStartSchema`).
  */
 export function handleStreamStart(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
   existingMessages: readonly ChatMessage[],
 ): StreamStartPayload {
-  const streamId = msg.messageId as string
-  const sessionId = (msg.sessionId as string) || activeSessionId
+  const streamId = typeof msg.messageId === 'string' ? msg.messageId : nextMessageId('msg')
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const existing = existingMessages.find((m) => m.id === streamId)
   const { resolvedId, remap } = resolveStreamId(existing, streamId)
 
@@ -3087,13 +3094,17 @@ export interface StreamEndPayload {
   /** Resolved target session, or null when no session context exists. */
   sessionId: string | null
   /**
-   * The messageId from the stream_end message, passed through verbatim. Used
-   * by the caller to clean up `_deltaIdRemaps` and `_postPermissionSplits`
-   * entries. Typed as `string` to match the call sites' existing
-   * `msg.messageId as string` casts; non-string values pass through unchanged
-   * so the caller-side Map/Set delete remains a safe no-op.
+   * The messageId from the stream_end message. Used by the caller to clean
+   * up `_deltaIdRemaps` and `_postPermissionSplits` entries. Returns `null`
+   * when the incoming `msg.messageId` is missing or not a string — the
+   * caller-side `Map.delete(null)` / `Set.delete(null)` is a safe no-op.
+   *
+   * The protocol schema (`ServerStreamEndSchema.messageId: z.string()`)
+   * guarantees this is a string for well-formed payloads; the `null` arm
+   * exists only so malformed payloads cannot poison the call-site Maps with
+   * non-string keys.
    */
-  messageId: string
+  messageId: string | null
 }
 
 /**
@@ -3104,12 +3115,16 @@ export interface StreamEndPayload {
  * `_deltaIdRemaps` / `_postPermissionSplits` entries) all stay at the call
  * site — they touch module-local state and platform-specific store APIs.
  * This helper only resolves the two ids the caller needs.
+ *
+ * Mirrors the `typeof === 'string'` guard pattern used in {@link
+ * handleToolStart} so the returned `messageId` and `sessionId` are honest
+ * strings (or `null`), matching the protocol schema.
  */
 export function handleStreamEnd(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): StreamEndPayload {
-  const sessionId = (msg.sessionId as string) || activeSessionId
-  const messageId = msg.messageId as string
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
+  const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
   return { sessionId, messageId }
 }
