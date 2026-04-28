@@ -1762,7 +1762,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const permMsg: ChatMessage = {
           id: nextMessageId('perm'),
           type: 'prompt',
-          content: permPayload.tool ? `${permPayload.tool}: ${permPayload.description}` : (permPayload.description || 'Permission required'),
+          // Fall back to `undefined` interpolation when description is missing
+          // to match the prior `${msg.tool}: ${msg.description}` cast (avoids a
+          // visible "null" appearing in the prompt content).
+          content: permPayload.tool
+            ? `${permPayload.tool}: ${permPayload.description ?? undefined}`
+            : (permPayload.description || 'Permission required'),
           tool: permPayload.tool ?? undefined,
           requestId: permRequestId,
           toolInput: permPayload.input ?? undefined,
