@@ -14,6 +14,7 @@ import type {
   ChatMessage,
   Checkpoint,
   ConnectedClient,
+  ContextUsage,
   ConversationSummary,
   DevPreview,
   ModelInfo,
@@ -3127,4 +3128,85 @@ export function handleStreamEnd(
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
   return { sessionId, messageId }
+}
+
+// ---------------------------------------------------------------------------
+// result — payload-normalization parts only
+//
+// Streaming-state cleanup (`flushPendingDeltas`, `clearTimeout(deltaFlushTimer)`,
+// `_postPermissionSplits.clear()`, `_deltaIdRemaps.clear()`) and side-effects
+// (Codex/Gemini cost fallback via dashboard's `calculateCost`, app's
+// `hapticSuccess()`, `pushSessionNotification`, force-array-ref) all stay at
+// the call site. This helper extracts only the pure payload normalization:
+// session resolution, `usage` → `ContextUsage`, and `cost`/`duration` type
+// guards.
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleResultUsage}. */
+export interface ResultUsagePayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** Normalized usage counts, or null when the message had no `usage` object. */
+  contextUsage: ContextUsage | null
+  /** Numeric `cost` from the message, or null when missing/non-numeric. */
+  lastResultCost: number | null
+  /** Numeric `duration` from the message, or null when missing/non-numeric. */
+  lastResultDuration: number | null
+}
+
+/**
+ * Normalize the payload-pure parts of a `result` message.
+ *
+ * - `sessionId`: resolved via `typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId`,
+ *   then `|| activeSessionId` to preserve the legacy "empty-string falls back"
+ *   behaviour. Matches the guarded-raw-string pattern used by
+ *   `handleMcpServers` / `handleCostUpdate`: a whitespace-only string is
+ *   preserved verbatim (so downstream `sessionStates[id]` lookups miss rather
+ *   than silently falling back to the active session), but non-string runtime
+ *   values (numbers, booleans, objects) are rejected — keeping the declared
+ *   `string | null` return type honest.
+ * - `contextUsage`: built from `msg.usage` when it's a plain object. Each
+ *   numeric field is coerced via `typeof === 'number' && Number.isFinite(...)`,
+ *   defaulting to `0` for missing, non-number, or `NaN` inputs. Returns `null`
+ *   when `usage` is missing or not a plain object (defensive: rejects strings,
+ *   numbers, arrays, null).
+ * - `lastResultCost`: `typeof msg.cost === 'number' ? msg.cost : null`. The
+ *   dashboard's Codex/Gemini fallback (`calculateCost(...)`) stays inline at
+ *   the call site and overrides this when the helper returned null but usage
+ *   was present.
+ * - `lastResultDuration`: `typeof msg.duration === 'number' ? msg.duration : null`.
+ */
+export function handleResultUsage(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): ResultUsagePayload {
+  const rawUsage = msg.usage
+  const usage =
+    rawUsage !== null &&
+    typeof rawUsage === 'object' &&
+    !Array.isArray(rawUsage)
+      ? (rawUsage as Record<string, unknown>)
+      : null
+  const numField = (v: unknown): number =>
+    typeof v === 'number' && Number.isFinite(v) ? v : 0
+  const contextUsage: ContextUsage | null = usage
+    ? {
+        inputTokens: numField(usage.input_tokens),
+        outputTokens: numField(usage.output_tokens),
+        cacheCreation: numField(usage.cache_creation_input_tokens),
+        cacheRead: numField(usage.cache_read_input_tokens),
+      }
+    : null
+  const lastResultCost =
+    typeof msg.cost === 'number' ? msg.cost : null
+  const lastResultDuration =
+    typeof msg.duration === 'number' ? msg.duration : null
+  const rawSessionId =
+    typeof msg.sessionId === 'string' ? msg.sessionId : null
+  return {
+    sessionId: rawSessionId || activeSessionId,
+    contextUsage,
+    lastResultCost,
+    lastResultDuration,
+  }
 }

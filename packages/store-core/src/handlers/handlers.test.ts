@@ -69,6 +69,7 @@ import {
   handleAvailableModels,
   handleMcpServers,
   handleCostUpdate,
+  handleResultUsage,
   handleServerError,
   handleServerShutdown,
   handleServerStatusLegacy,
@@ -4992,5 +4993,178 @@ describe('handleStreamEnd', () => {
     )
     expect(out.messageId).toBeNull()
     expect(out.sessionId).toBe('sess-active')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleResultUsage
+// ---------------------------------------------------------------------------
+describe('handleResultUsage', () => {
+  it('populates contextUsage from a complete usage object', () => {
+    const out = handleResultUsage(
+      {
+        sessionId: 'sess-1',
+        usage: {
+          input_tokens: 100,
+          output_tokens: 200,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 25,
+        },
+        cost: 0.42,
+        duration: 1234,
+      },
+      'active-1',
+    )
+    expect(out).toEqual({
+      sessionId: 'sess-1',
+      contextUsage: {
+        inputTokens: 100,
+        outputTokens: 200,
+        cacheCreation: 50,
+        cacheRead: 25,
+      },
+      lastResultCost: 0.42,
+      lastResultDuration: 1234,
+    })
+  })
+
+  it('defaults missing usage fields to 0', () => {
+    const out = handleResultUsage(
+      { usage: {} },
+      'active-1',
+    )
+    expect(out.contextUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreation: 0,
+      cacheRead: 0,
+    })
+  })
+
+  it('returns null contextUsage when usage is missing', () => {
+    const out = handleResultUsage({}, 'active-1')
+    expect(out.contextUsage).toBeNull()
+  })
+
+  it('returns null contextUsage when usage is not an object', () => {
+    expect(handleResultUsage({ usage: 'oops' }, 'active-1').contextUsage).toBeNull()
+    expect(handleResultUsage({ usage: 42 }, 'active-1').contextUsage).toBeNull()
+    expect(handleResultUsage({ usage: null }, 'active-1').contextUsage).toBeNull()
+    expect(handleResultUsage({ usage: [] }, 'active-1').contextUsage).toBeNull()
+    expect(
+      handleResultUsage({ usage: [1, 2, 3] }, 'active-1').contextUsage,
+    ).toBeNull()
+  })
+
+  it('coerces non-numeric usage fields to 0 (typeof guard rejects strings/objects/NaN)', () => {
+    // Each field uses `typeof === 'number' && Number.isFinite(...)` so that a
+    // malformed payload like `input_tokens: '100'` does not flow a string into
+    // ContextUsage's numeric contract (would later poison `calculateCost`
+    // arithmetic on the dashboard).
+    const out = handleResultUsage(
+      {
+        usage: {
+          input_tokens: '100',
+          output_tokens: { x: 1 },
+          cache_creation_input_tokens: NaN,
+          cache_read_input_tokens: null,
+        },
+      },
+      'active-1',
+    )
+    expect(out.contextUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreation: 0,
+      cacheRead: 0,
+    })
+  })
+
+  it('passes a numeric cost through', () => {
+    expect(handleResultUsage({ cost: 0.5 }, 'active-1').lastResultCost).toBe(0.5)
+  })
+
+  it('passes zero cost through', () => {
+    expect(handleResultUsage({ cost: 0 }, 'active-1').lastResultCost).toBe(0)
+  })
+
+  it('returns null cost when missing', () => {
+    expect(handleResultUsage({}, 'active-1').lastResultCost).toBeNull()
+  })
+
+  it('returns null cost when non-number', () => {
+    expect(handleResultUsage({ cost: '0.5' }, 'active-1').lastResultCost).toBeNull()
+    expect(handleResultUsage({ cost: null }, 'active-1').lastResultCost).toBeNull()
+    expect(handleResultUsage({ cost: { x: 1 } }, 'active-1').lastResultCost).toBeNull()
+  })
+
+  it('passes a numeric duration through', () => {
+    expect(handleResultUsage({ duration: 1234 }, 'active-1').lastResultDuration).toBe(1234)
+  })
+
+  it('passes zero duration through', () => {
+    expect(handleResultUsage({ duration: 0 }, 'active-1').lastResultDuration).toBe(0)
+  })
+
+  it('returns null duration when missing', () => {
+    expect(handleResultUsage({}, 'active-1').lastResultDuration).toBeNull()
+  })
+
+  it('returns null duration when non-number', () => {
+    expect(handleResultUsage({ duration: '1234' }, 'active-1').lastResultDuration).toBeNull()
+    expect(handleResultUsage({ duration: null }, 'active-1').lastResultDuration).toBeNull()
+    expect(handleResultUsage({ duration: { x: 1 } }, 'active-1').lastResultDuration).toBeNull()
+  })
+
+  it('uses sessionId from message when present', () => {
+    expect(
+      handleResultUsage({ sessionId: 'sess-9' }, 'active-1').sessionId,
+    ).toBe('sess-9')
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    expect(handleResultUsage({}, 'active-1').sessionId).toBe('active-1')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    expect(handleResultUsage({}, null).sessionId).toBeNull()
+  })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim)', () => {
+    // A non-empty whitespace-padded string is truthy, so it's used as-is and
+    // we do NOT fall back to activeSessionId. Matches `handleMcpServers` /
+    // `handleCostUpdate` behaviour exactly.
+    const out = handleResultUsage(
+      { sessionId: '  sess-1  ' },
+      'active-1',
+    )
+    expect(out.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    // Empty string is falsy, so `|| activeSessionId` kicks in.
+    const out = handleResultUsage(
+      { sessionId: '' },
+      'active-1',
+    )
+    expect(out.sessionId).toBe('active-1')
+  })
+
+  it('falls back to activeSessionId when sessionId is non-string runtime value', () => {
+    // The `typeof === 'string'` guard rejects numbers/booleans/objects so
+    // the declared `string | null` return type stays honest at runtime, even
+    // for protocol-violating payloads.
+    expect(
+      handleResultUsage({ sessionId: 42 }, 'active-1').sessionId,
+    ).toBe('active-1')
+    expect(
+      handleResultUsage({ sessionId: true }, 'active-1').sessionId,
+    ).toBe('active-1')
+    expect(
+      handleResultUsage({ sessionId: { id: 'x' } }, 'active-1').sessionId,
+    ).toBe('active-1')
+    expect(
+      handleResultUsage({ sessionId: null }, 'active-1').sessionId,
+    ).toBe('active-1')
   })
 })

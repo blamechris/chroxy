@@ -92,6 +92,7 @@ import {
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
+  handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
@@ -1459,21 +1460,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Clean up permission boundary split tracking
       _ctx.postPermissionSplits.clear();
       _ctx.deltaIdRemaps.clear();
-      const usage = msg.usage as Record<string, number> | undefined;
+      const normalized = sharedResultUsage(msg, get().activeSessionId);
       const resultPatch = {
         streamingMessageId: null as string | null,
-        contextUsage: usage
-          ? {
-              inputTokens: usage.input_tokens || 0,
-              outputTokens: usage.output_tokens || 0,
-              cacheCreation: usage.cache_creation_input_tokens || 0,
-              cacheRead: usage.cache_read_input_tokens || 0,
-            }
-          : null,
-        lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
-        lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
+        contextUsage: normalized.contextUsage,
+        lastResultCost: normalized.lastResultCost,
+        lastResultDuration: normalized.lastResultDuration,
       };
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      const targetId = normalized.sessionId;
       // Notify if a background session just finished (was streaming)
       if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
         pushSessionNotification(targetId, 'completed', 'Task completed');
