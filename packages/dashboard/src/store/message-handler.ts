@@ -70,6 +70,9 @@ import {
   handleAgentCompleted as sharedAgentCompleted,
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
+  handleAvailableModels as sharedAvailableModels,
+  handleMcpServers as sharedMcpServers,
+  handleCostUpdate as sharedCostUpdate,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -96,7 +99,6 @@ import type {
   FileEntry,
   GitStatusEntry,
   McpServer,
-  ModelInfo,
   QueuedMessage,
   ServerError,
   SessionInfo,
@@ -1770,33 +1772,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'available_models':
+    case 'available_models': {
       if (Array.isArray(msg.models)) {
-        const cleaned = (msg.models as unknown[])
-          .map((m: unknown): ModelInfo | null => {
-            if (typeof m === 'object' && m !== null) {
-              const { id, label, fullId, contextWindow } = m as ModelInfo;
-              if (
-                typeof id === 'string' && id.trim() !== '' &&
-                typeof label === 'string' && label.trim() !== '' &&
-                typeof fullId === 'string' && fullId.trim() !== ''
-              ) {
-                const info: ModelInfo = { id, label, fullId };
-                if (typeof contextWindow === 'number' && contextWindow > 0) info.contextWindow = contextWindow;
-                return info;
-              }
-            }
-            if (typeof m === 'string' && m.trim().length > 0) {
-              const s = m.trim();
-              return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s };
-            }
-            return null;
-          })
-          .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
-        const defaultModelId = typeof msg.defaultModel === 'string' ? msg.defaultModel : null;
-        set({ availableModels: cleaned, defaultModelId });
+        const { models, defaultModelId } = sharedAvailableModels(msg);
+        set({ availableModels: models, defaultModelId });
       }
       break;
+    }
 
     case 'confirm_permission_mode': {
       const pending = sharedConfirmPermissionMode(msg);
@@ -2177,19 +2159,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'mcp_servers': {
-      const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
-      const servers = (msg.servers as McpServer[]) || [];
-      if (mcpTargetId && get().sessionStates[mcpTargetId]) {
-        updateSession(mcpTargetId, () => ({ mcpServers: servers }));
+      const result = sharedMcpServers(msg, get().activeSessionId);
+      if (result.sessionId && get().sessionStates[result.sessionId]) {
+        updateSession(result.sessionId, () => ({
+          mcpServers: result.patch.mcpServers as McpServer[],
+        }));
       }
       break;
     }
 
     case 'cost_update': {
-      const sessionCost = typeof msg.sessionCost === 'number' ? msg.sessionCost : null;
-      const costTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (costTargetId && get().sessionStates[costTargetId]) {
-        updateSession(costTargetId, () => ({ sessionCost }));
+      const result = sharedCostUpdate(msg, get().activeSessionId);
+      if (result.sessionId && get().sessionStates[result.sessionId]) {
+        updateSession(result.sessionId, () => result.patch);
       }
       break;
     }

@@ -66,6 +66,9 @@ import {
   handleAgentCompleted,
   handleEnvironmentList,
   handleEnvironmentError,
+  handleAvailableModels,
+  handleMcpServers,
+  handleCostUpdate,
 } from './index'
 import type {
   AgentInfo,
@@ -73,6 +76,7 @@ import type {
   ConnectedClient,
   ConversationSummary,
   DevPreview,
+  ModelInfo,
   SessionInfo,
 } from '../types'
 
@@ -2937,5 +2941,307 @@ describe('handleEnvironmentError', () => {
     expect(handleEnvironmentError({ error: 42 })).toEqual({ error: null })
     expect(handleEnvironmentError({ error: { msg: 'x' } })).toEqual({ error: null })
     expect(handleEnvironmentError({ error: null })).toEqual({ error: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAvailableModels
+// ---------------------------------------------------------------------------
+describe('handleAvailableModels', () => {
+  it('passes through valid object entries verbatim', () => {
+    const models: ModelInfo[] = [
+      { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4' },
+      { id: 'opus', label: 'Opus', fullId: 'claude-opus-4', contextWindow: 200000 },
+    ]
+    expect(handleAvailableModels({ models })).toEqual({
+      models,
+      defaultModelId: null,
+    })
+  })
+
+  it('expands string entries into capitalized objects', () => {
+    expect(handleAvailableModels({ models: ['sonnet'] })).toEqual({
+      models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'sonnet' }],
+      defaultModelId: null,
+    })
+  })
+
+  it('trims whitespace on string entries', () => {
+    expect(handleAvailableModels({ models: ['  haiku  '] })).toEqual({
+      models: [{ id: 'haiku', label: 'Haiku', fullId: 'haiku' }],
+      defaultModelId: null,
+    })
+  })
+
+  it('handles a mixed array of strings and objects', () => {
+    const result = handleAvailableModels({
+      models: [
+        'sonnet',
+        { id: 'opus', label: 'Opus', fullId: 'claude-opus-4' },
+      ],
+    })
+    expect(result.models).toEqual([
+      { id: 'sonnet', label: 'Sonnet', fullId: 'sonnet' },
+      { id: 'opus', label: 'Opus', fullId: 'claude-opus-4' },
+    ])
+  })
+
+  it('filters malformed object entries (missing fields)', () => {
+    const result = handleAvailableModels({
+      models: [
+        { id: 'opus', label: 'Opus', fullId: 'claude-opus-4' },
+        { id: '', label: 'X', fullId: 'y' }, // empty id
+        { id: 'a', label: '   ', fullId: 'a' }, // whitespace label
+        { id: 'b', label: 'B' }, // missing fullId
+        { label: 'No id', fullId: 'x' }, // missing id
+      ],
+    })
+    expect(result.models).toEqual([
+      { id: 'opus', label: 'Opus', fullId: 'claude-opus-4' },
+    ])
+  })
+
+  it('filters non-string non-object entries (numbers, null, etc.)', () => {
+    const result = handleAvailableModels({
+      models: [42, null, undefined, true, ''],
+    })
+    expect(result.models).toEqual([])
+  })
+
+  it('keeps contextWindow only when number > 0', () => {
+    const result = handleAvailableModels({
+      models: [
+        { id: 'a', label: 'A', fullId: 'a', contextWindow: 100000 },
+        { id: 'b', label: 'B', fullId: 'b', contextWindow: 0 },
+        { id: 'c', label: 'C', fullId: 'c', contextWindow: -1 },
+        { id: 'd', label: 'D', fullId: 'd', contextWindow: '200000' },
+        { id: 'e', label: 'E', fullId: 'e' },
+      ],
+    })
+    expect(result.models).toEqual([
+      { id: 'a', label: 'A', fullId: 'a', contextWindow: 100000 },
+      { id: 'b', label: 'B', fullId: 'b' },
+      { id: 'c', label: 'C', fullId: 'c' },
+      { id: 'd', label: 'D', fullId: 'd' },
+      { id: 'e', label: 'E', fullId: 'e' },
+    ])
+  })
+
+  it('extracts defaultModelId when string', () => {
+    const result = handleAvailableModels({
+      models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4' }],
+      defaultModel: 'claude-sonnet-4',
+    })
+    expect(result.defaultModelId).toBe('claude-sonnet-4')
+  })
+
+  it('returns null defaultModelId when missing', () => {
+    expect(
+      handleAvailableModels({
+        models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'sonnet' }],
+      }).defaultModelId,
+    ).toBeNull()
+  })
+
+  it('returns null defaultModelId when non-string', () => {
+    const result = handleAvailableModels({
+      models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'sonnet' }],
+      defaultModel: 42,
+    })
+    expect(result.defaultModelId).toBeNull()
+  })
+
+  it('returns empty models array when models is missing', () => {
+    expect(handleAvailableModels({})).toEqual({
+      models: [],
+      defaultModelId: null,
+    })
+  })
+
+  it('returns empty models array when models is non-array', () => {
+    expect(handleAvailableModels({ models: 'oops' })).toEqual({
+      models: [],
+      defaultModelId: null,
+    })
+    expect(handleAvailableModels({ models: { x: 1 } })).toEqual({
+      models: [],
+      defaultModelId: null,
+    })
+    expect(handleAvailableModels({ models: null })).toEqual({
+      models: [],
+      defaultModelId: null,
+    })
+  })
+
+  it('preserves empty-string entries as filtered (no expansion)', () => {
+    // String must be non-empty after trim to expand.
+    expect(handleAvailableModels({ models: ['', '  '] })).toEqual({
+      models: [],
+      defaultModelId: null,
+    })
+  })
+
+  it('capitalizes only the first character of string entries', () => {
+    expect(handleAvailableModels({ models: ['claude-sonnet-4'] })).toEqual({
+      models: [
+        { id: 'claude-sonnet-4', label: 'Claude-sonnet-4', fullId: 'claude-sonnet-4' },
+      ],
+      defaultModelId: null,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleMcpServers
+// ---------------------------------------------------------------------------
+describe('handleMcpServers', () => {
+  it('uses sessionId from message when present', () => {
+    const servers = [{ name: 'srv-1', status: 'running' }]
+    const result = handleMcpServers(
+      { sessionId: 'sess-9', servers },
+      'active-1',
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-9',
+      patch: { mcpServers: servers },
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const servers = [{ name: 'srv-1', status: 'running' }]
+    const result = handleMcpServers({ servers }, 'active-1')
+    expect(result.sessionId).toBe('active-1')
+    expect(result.patch).toEqual({ mcpServers: servers })
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const result = handleMcpServers({ servers: [] }, null)
+    expect(result.sessionId).toBeNull()
+  })
+
+  it('returns empty array when servers is missing', () => {
+    const result = handleMcpServers({}, 'active-1')
+    expect(result.patch).toEqual({ mcpServers: [] })
+  })
+
+  it('returns empty array when servers is non-array', () => {
+    expect(handleMcpServers({ servers: 'oops' }, 'active-1').patch).toEqual({
+      mcpServers: [],
+    })
+    expect(handleMcpServers({ servers: { x: 1 } }, 'active-1').patch).toEqual({
+      mcpServers: [],
+    })
+    expect(handleMcpServers({ servers: null }, 'active-1').patch).toEqual({
+      mcpServers: [],
+    })
+  })
+
+  it('passes element shape through verbatim (no per-element validation)', () => {
+    // Elements aren't validated at the shared layer — caller casts to McpServer[].
+    const servers = [
+      { name: 'srv-1', status: 'running' },
+      { totally: 'malformed' },
+      'string-entry',
+    ]
+    expect(handleMcpServers({ servers }, 'active-1').patch).toEqual({
+      mcpServers: servers,
+    })
+  })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim, no fallback)', () => {
+    // Matches legacy `(msg.sessionId as string) || activeSessionId` semantics:
+    // a non-empty whitespace-padded string is truthy, so it's used as-is and
+    // we do NOT fall back to activeSessionId. Downstream sessionStates lookup
+    // will miss (correct outcome), rather than silently patching active.
+    const result = handleMcpServers(
+      { sessionId: '  sess-1  ', servers: [] },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    // Empty string is falsy, so the legacy `||` falls back to activeSessionId.
+    const result = handleMcpServers(
+      { sessionId: '', servers: [] },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleCostUpdate
+// ---------------------------------------------------------------------------
+describe('handleCostUpdate', () => {
+  it('passes a numeric sessionCost through', () => {
+    const result = handleCostUpdate(
+      { sessionId: 'sess-1', sessionCost: 1.23 },
+      'active-1',
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { sessionCost: 1.23 },
+    })
+  })
+
+  it('passes zero through (number > 0 not required)', () => {
+    const result = handleCostUpdate({ sessionCost: 0 }, 'active-1')
+    expect(result.patch).toEqual({ sessionCost: 0 })
+  })
+
+  it('returns null sessionCost when missing', () => {
+    expect(handleCostUpdate({}, 'active-1').patch).toEqual({ sessionCost: null })
+  })
+
+  it('returns null sessionCost when non-number', () => {
+    expect(handleCostUpdate({ sessionCost: '1.23' }, 'active-1').patch).toEqual({
+      sessionCost: null,
+    })
+    expect(handleCostUpdate({ sessionCost: null }, 'active-1').patch).toEqual({
+      sessionCost: null,
+    })
+    expect(handleCostUpdate({ sessionCost: { x: 1 } }, 'active-1').patch).toEqual({
+      sessionCost: null,
+    })
+  })
+
+  it('uses sessionId from message when present', () => {
+    expect(
+      handleCostUpdate({ sessionId: 'sess-9', sessionCost: 0.5 }, 'active-1')
+        .sessionId,
+    ).toBe('sess-9')
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    expect(handleCostUpdate({ sessionCost: 0.5 }, 'active-1').sessionId).toBe(
+      'active-1',
+    )
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    expect(handleCostUpdate({ sessionCost: 0.5 }, null).sessionId).toBeNull()
+  })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim, no fallback)', () => {
+    // Matches legacy `(msg.sessionId as string) || activeSessionId` semantics:
+    // a non-empty whitespace-padded string is truthy, so it's used as-is and
+    // we do NOT fall back to activeSessionId. Downstream sessionStates lookup
+    // will miss (correct outcome), rather than silently applying the cost
+    // update to the active session.
+    const result = handleCostUpdate(
+      { sessionId: '  sess-1  ', sessionCost: 0.5 },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    // Empty string is falsy, so the legacy `||` falls back to activeSessionId.
+    const result = handleCostUpdate(
+      { sessionId: '', sessionCost: 0.5 },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
   })
 })
