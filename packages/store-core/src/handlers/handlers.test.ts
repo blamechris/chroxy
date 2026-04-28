@@ -77,6 +77,7 @@ import {
   handleWebTaskList,
   handleWebFeatureStatus,
 } from './index'
+import { nextMessageId } from '../utils'
 import type {
   AgentInfo,
   Checkpoint,
@@ -3602,31 +3603,40 @@ describe('handleWebTaskError', () => {
     expect(handleWebTaskError({ message: '' }).errorMessage).toBe('Unknown error')
   })
 
-  it('always builds a system chatMessage with the message text when present', () => {
+  it('returns chatMessageContent set to the message text when present', () => {
     const result = handleWebTaskError({ message: 'task blew up' })
-    expect(result.chatMessage.type).toBe('system')
-    expect(result.chatMessage.content).toBe('task blew up')
-    expect(typeof result.chatMessage.id).toBe('string')
-    expect(result.chatMessage.id.length).toBeGreaterThan(0)
-    expect(typeof result.chatMessage.timestamp).toBe('number')
+    expect(result.chatMessageContent).toBe('task blew up')
   })
 
-  it('chatMessage defaults to "Web task error" when message is missing', () => {
+  it('chatMessageContent defaults to "Web task error" when message is missing', () => {
     const result = handleWebTaskError({})
-    expect(result.chatMessage.type).toBe('system')
-    expect(result.chatMessage.content).toBe('Web task error')
+    expect(result.chatMessageContent).toBe('Web task error')
   })
 
-  it('chatMessage defaults to "Web task error" when message is non-string', () => {
-    expect(handleWebTaskError({ message: 42 }).chatMessage.content).toBe(
+  it('chatMessageContent defaults to "Web task error" when message is non-string', () => {
+    expect(handleWebTaskError({ message: 42 }).chatMessageContent).toBe(
       'Web task error',
     )
   })
 
-  it('chatMessage defaults to "Web task error" when message is empty string', () => {
-    expect(handleWebTaskError({ message: '' }).chatMessage.content).toBe(
+  it('chatMessageContent defaults to "Web task error" when message is empty string', () => {
+    expect(handleWebTaskError({ message: '' }).chatMessageContent).toBe(
       'Web task error',
     )
+  })
+
+  it('does not allocate a message id (caller builds the ChatMessage)', () => {
+    // Calling the handler 100x must not advance the global nextMessageId
+    // counter. We verify by calling a separate id-allocating handler before
+    // and after, and checking the counter advances by exactly one.
+    const before = nextMessageId('probe')
+    for (let i = 0; i < 100; i++) {
+      handleWebTaskError({ message: 'x', taskId: 't' })
+    }
+    const after = nextMessageId('probe')
+    const beforeNum = parseInt(before.split('-')[1], 10)
+    const afterNum = parseInt(after.split('-')[1], 10)
+    expect(afterNum - beforeNum).toBe(1)
   })
 })
 

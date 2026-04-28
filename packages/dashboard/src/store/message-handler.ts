@@ -2166,7 +2166,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'web_task_error': {
-      const { taskId: errTaskId, errorMessage, chatMessage: errorMsg } = sharedWebTaskError(msg);
+      const { taskId: errTaskId, errorMessage, chatMessageContent } = sharedWebTaskError(msg);
       if (errTaskId) {
         // Update task status to failed
         set((state: ConnectionState) => ({
@@ -2177,7 +2177,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           ),
         }));
       }
-      // Show error as system message in chat
+      // Show error as system message in chat. Build the ChatMessage here so
+      // its id + timestamp are allocated after the task state update above.
+      const errorMsg: ChatMessage = {
+        id: nextMessageId('web'),
+        type: 'system',
+        content: chatMessageContent,
+        timestamp: Date.now(),
+      };
       const activeSid = get().activeSessionId;
       if (activeSid && get().sessionStates[activeSid]) {
         updateActiveSession((ss) => ({

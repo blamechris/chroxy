@@ -2348,7 +2348,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const {
         taskId: errTaskId,
         errorMessage,
-        chatMessage: errorMsg,
+        chatMessageContent,
         code,
         boundSessionName,
       } = sharedWebTaskError(msg);
@@ -2364,14 +2364,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       // For bound-session mismatches, surface the same actionable Alert used
       // by session_error (#2944). When boundSessionName is present the user
-      // needs to know why the action was rejected and how to fix it.
+      // needs to know why the action was rejected and how to fix it. We
+      // short-circuit BEFORE building the ChatMessage so no message id /
+      // timestamp is allocated for an event that won't be dispatched.
       if (code === 'SESSION_TOKEN_MISMATCH' && boundSessionName) {
         showBoundSessionMismatchAlert(
           `This device is paired to session "${boundSessionName}" and can only perform web tasks in that session. To use other sessions, disconnect and scan a fresh QR code from the desktop.`,
         );
         break;
       }
-      // Otherwise show the error as a system message in chat
+      // Otherwise show the error as a system message in chat. Build the
+      // ChatMessage here so its id + timestamp are allocated after the task
+      // state update above.
+      const errorMsg: ChatMessage = {
+        id: nextMessageId('web'),
+        type: 'system',
+        content: chatMessageContent,
+        timestamp: Date.now(),
+      };
       const activeSid = get().activeSessionId;
       if (activeSid && get().sessionStates[activeSid]) {
         updateActiveSession((ss) => ({

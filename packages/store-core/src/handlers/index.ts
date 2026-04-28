@@ -2382,11 +2382,13 @@ export interface WebTaskErrorPayload {
    */
   errorMessage: string
   /**
-   * System-typed ChatMessage describing the failure. Content defaults to
-   * `'Web task error'` when the message is missing or non-string. The handler
-   * always builds this — the caller decides whether to dispatch it.
+   * Normalized chat content for the optional system ChatMessage. Defaults to
+   * `'Web task error'` when the message is missing or non-string. The caller
+   * builds the ChatMessage (allocating id + timestamp) only when it will
+   * actually dispatch — the app's SESSION_TOKEN_MISMATCH-with-boundSessionName
+   * branch short-circuits to an Alert and never builds the message.
    */
-  chatMessage: ChatMessage
+  chatMessageContent: string
   /** Optional error code (e.g. `'SESSION_TOKEN_MISMATCH'`). */
   code: string | null
   /** Optional bound session name for the SESSION_TOKEN_MISMATCH branch. */
@@ -2400,11 +2402,11 @@ export interface WebTaskErrorPayload {
  * - `errorMessage`: `msg.message` when a non-empty string, else
  *   `'Unknown error'`. Used by the caller to update the matching task's
  *   `error` field.
- * - `chatMessage`: system-typed ChatMessage with content set to `msg.message`
- *   when a non-empty string, else `'Web task error'`. Caller dispatches this
- *   onto the active session (or the global log) — except in the app's
- *   SESSION_TOKEN_MISMATCH-with-boundSessionName branch which short-circuits
- *   to an Alert and skips dispatch.
+ * - `chatMessageContent`: `msg.message` when a non-empty string, else
+ *   `'Web task error'`. The caller wraps this in a system-typed ChatMessage
+ *   (allocating id + timestamp) only when it actually dispatches the message
+ *   — the app's SESSION_TOKEN_MISMATCH-with-boundSessionName branch
+ *   short-circuits to an Alert and skips dispatch (and the construction).
  * - `code`: string pass-through; null when missing or non-string.
  * - `boundSessionName`: string pass-through; null when missing, non-string,
  *   or empty.
@@ -2427,13 +2429,8 @@ export function handleWebTaskError(
     (msg.boundSessionName as string).length > 0
       ? (msg.boundSessionName as string)
       : null
-  const chatMessage: ChatMessage = {
-    id: nextMessageId('web'),
-    type: 'system',
-    content: messageText ?? 'Web task error',
-    timestamp: Date.now(),
-  }
-  return { taskId, errorMessage, chatMessage, code, boundSessionName }
+  const chatMessageContent = messageText ?? 'Web task error'
+  return { taskId, errorMessage, chatMessageContent, code, boundSessionName }
 }
 
 // ---------------------------------------------------------------------------
