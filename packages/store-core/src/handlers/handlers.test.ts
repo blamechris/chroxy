@@ -3952,4 +3952,40 @@ describe('handleUserQuestion', () => {
     )
     expect(out!.chatMessage.toolUseId).toBe('tu-42')
   })
+
+  it('omits toolUseId when msg.toolUseId is non-string', () => {
+    const out1 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], toolUseId: 42 },
+      null,
+    )
+    expect(out1!.chatMessage.toolUseId).toBeUndefined()
+    const out2 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], toolUseId: null },
+      null,
+    )
+    expect(out2!.chatMessage.toolUseId).toBeUndefined()
+    const out3 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }] },
+      null,
+    )
+    expect(out3!.chatMessage.toolUseId).toBeUndefined()
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is non-string', () => {
+    const out1 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: 42 },
+      'sess-active',
+    )
+    expect(out1!.sessionId).toBe('sess-active')
+    const out2 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: { id: 'x' } },
+      'sess-active',
+    )
+    expect(out2!.sessionId).toBe('sess-active')
+    const out3 = handleUserQuestion(
+      { questions: [{ question: 'Q?' }], sessionId: null },
+      'sess-active',
+    )
+    expect(out3!.sessionId).toBe('sess-active')
+  })
 })

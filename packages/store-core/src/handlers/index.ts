@@ -2577,17 +2577,17 @@ export interface UserQuestionPayload {
  * - `q.question` not a string
  *
  * Otherwise returns:
- * - `sessionId`: `msg.sessionId` (when a non-empty string) or `activeSessionId`.
+ * - `sessionId`: `msg.sessionId` when a non-empty string, else `activeSessionId`.
+ *   Non-string `msg.sessionId` falls through to `activeSessionId`.
  * - `chatMessage`: `prompt`-typed with a fresh `nextMessageId('question')`,
- *   `content` = `q.question`, `toolUseId` = `msg.toolUseId`, and `options`
- *   filtered to objects with a string `label` (mapped to `{label, value}`
- *   where `value === label`). Missing/non-array `q.options` yields `[]`.
+ *   `content` = `q.question`, `toolUseId` populated only when `msg.toolUseId`
+ *   is a string (otherwise omitted), and `options` filtered to objects with
+ *   a string `label` (mapped to `{label, value}` where `value === label`).
+ *   Missing/non-array `q.options` yields `[]`.
  * - `questionText`: `q.question.slice(0, 60)`.
  *
- * Note: the handler matches the prior inline behaviour exactly. In particular
- * it returns `msg.sessionId` even when it is non-string (cast); the caller's
- * subsequent truthy/`sessionStates` check filters those bad inputs out before
- * dispatch, identical to the prior code paths.
+ * Each non-`questions` field is validated at runtime so the returned payload
+ * matches its declared TypeScript types regardless of what the server sends.
  */
 export function handleUserQuestion(
   msg: Record<string, unknown>,
@@ -2612,11 +2612,17 @@ export function handleUserQuestion(
     id: nextMessageId('question'),
     type: 'prompt',
     content: questionContent,
-    toolUseId: msg.toolUseId as string,
     options,
     timestamp: Date.now(),
   }
-  const sessionId = (msg.sessionId as string) || activeSessionId
+  if (typeof msg.toolUseId === 'string') {
+    chatMessage.toolUseId = msg.toolUseId
+  }
+  const msgSessionId =
+    typeof msg.sessionId === 'string' && msg.sessionId.length > 0
+      ? msg.sessionId
+      : null
+  const sessionId = msgSessionId ?? activeSessionId
   const questionText = questionContent.slice(0, 60)
   return { sessionId, chatMessage, questionText }
 }
