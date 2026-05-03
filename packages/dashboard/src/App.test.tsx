@@ -507,14 +507,20 @@ describe('App', () => {
       // The CSS rule that prevents the asymmetric strip must exist. jsdom
       // doesn't compute grid layout, so verify the rule is present in the
       // theme stylesheet (load directly from disk to avoid relying on jsdom's
-      // CSS-loading behaviour).
+      // CSS-loading behaviour). Both grid-row and grid-column matter — without
+      // grid-row: 2 the banner could pass the column assertion but still land
+      // in the wrong row. Extract the rule body and assert both properties.
       const fs = await import('node:fs')
       const path = await import('node:path')
       const cssPath = path.resolve(__dirname, 'theme/components.css')
       const css = fs.readFileSync(cssPath, 'utf8')
-      expect(css).toMatch(
-        /#app\.with-sidebar\s*>\s*\.tunnel-warming-banner\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*\}/,
+      const ruleMatch = css.match(
+        /#app\.with-sidebar\s*>\s*\.tunnel-warming-banner\s*\{([^}]+)\}/,
       )
+      expect(ruleMatch).not.toBeNull()
+      const ruleBody = ruleMatch![1]
+      expect(ruleBody).toMatch(/grid-row:\s*2\b/)
+      expect(ruleBody).toMatch(/grid-column:\s*1\s*\/\s*-1/)
     })
 
     it('preserves identical banner slot geometry across warming ↔ connected transitions (#2915)', () => {

@@ -28,7 +28,7 @@
 #app.with-sidebar {
   display: grid;
   grid-template-columns: auto 1fr;
-  /* Rows: reconnect-banner, tunnel-warming-banner, header, content (sidebar+main). */
+  /* Rows: reconnect-banner, tunnel-warming-banner, header, content (sidebar+main), footer-bar. */
   grid-template-rows: auto auto auto 1fr auto;
 }
 
@@ -63,6 +63,13 @@
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+}
+
+/* Explicit row 5 placement so future in-flow children don't accidentally
+   shift the footer's auto-placement target (Copilot review #3177). */
+#app.with-sidebar > .footer-bar {
+  grid-row: 5;
+  grid-column: 1 / -1;
 }
 
 /* ---- Header ---- */
