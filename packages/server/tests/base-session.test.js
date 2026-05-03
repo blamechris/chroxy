@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { BaseSession } from '../src/base-session.js'
@@ -173,6 +173,146 @@ describe('BaseSession', () => {
       const out = session._getSkills()
       assert.equal(out.length, 1)
       assert.equal(out[0].name, 'a')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Skills v2 frontmatter consumers (#3198, #3199, #3200) — wiring through
+  // BaseSession's constructor into the loader.
+  // -------------------------------------------------------------------------
+
+  describe('provider gating (#3198)', () => {
+    let skillsDir
+    beforeEach(() => { skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bs-prov-')) })
+    afterEach(() => { rmSync(skillsDir, { recursive: true, force: true }) })
+
+    it('provider id flows from constructor into the skills loader filter', () => {
+      writeFileSync(join(skillsDir, 'codex-only.md'), '---\nname: codex-only\nproviders: [codex]\n---\nbody\n')
+      writeFileSync(join(skillsDir, 'shared.md'), '# shared\n\nbody\n')
+
+      const sdkSession = new BaseSession({
+        cwd: '/tmp',
+        provider: 'claude-sdk',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+      assert.deepEqual(sdkSession._getSkills().map((s) => s.name), ['shared'])
+
+      const codexSession = new BaseSession({
+        cwd: '/tmp',
+        provider: 'codex',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+      assert.deepEqual(codexSession._getSkills().map((s) => s.name).sort(), ['codex-only', 'shared'])
+    })
+  })
+
+  describe('manual activation (#3199)', () => {
+    let skillsDir
+    beforeEach(() => { skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bs-act-')) })
+    afterEach(() => { rmSync(skillsDir, { recursive: true, force: true }) })
+
+    it('manual skills are off by default', () => {
+      writeFileSync(join(skillsDir, 'manual.md'), '---\nname: manual\nactivation: manual\n---\nbody\n')
+      writeFileSync(join(skillsDir, 'auto.md'), '# auto\n\nbody\n')
+
+      const s = new BaseSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+      assert.deepEqual(s._getSkills().map((sk) => sk.name), ['auto'])
+    })
+
+    it('activeManualSkills set in the constructor activates manual skills', () => {
+      writeFileSync(join(skillsDir, 'manual.md'), '---\nname: manual\nactivation: manual\n---\nbody\n')
+
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir,
+        repoSkillsDir: null,
+        activeManualSkills: new Set(['manual']),
+      })
+      assert.deepEqual(s._getSkills().map((sk) => sk.name), ['manual'])
+    })
+
+    it('activeManualSkills as an array is also accepted', () => {
+      writeFileSync(join(skillsDir, 'manual.md'), '---\nname: manual\nactivation: manual\n---\nbody\n')
+
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir,
+        repoSkillsDir: null,
+        activeManualSkills: ['manual'],
+      })
+      assert.deepEqual(s._getSkills().map((sk) => sk.name), ['manual'])
+    })
+
+    it('exposes an _activeManualSkills Set for the future toggle handler (#3209)', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir,
+        repoSkillsDir: null,
+        activeManualSkills: ['x', 'y'],
+      })
+      assert.ok(s._activeManualSkills instanceof Set)
+      assert.ok(s._activeManualSkills.has('x'))
+      assert.ok(s._activeManualSkills.has('y'))
+    })
+  })
+
+  describe('per-skill injection (#3200)', () => {
+    let skillsDir
+    beforeEach(() => { skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bs-inj-')) })
+    afterEach(() => { rmSync(skillsDir, { recursive: true, force: true }) })
+
+    it('claude-sdk session: append-mode skill goes to system prompt, prepend-mode skill goes to first user message', () => {
+      writeFileSync(join(skillsDir, 'sys.md'), '---\nname: sys\ninjection: append\n---\nappend body\n')
+      writeFileSync(join(skillsDir, 'pre.md'), '---\nname: pre\ninjection: prepend\n---\nprepend body\n')
+
+      const s = new BaseSession({
+        cwd: '/tmp',
+        provider: 'claude-sdk',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+
+      const sys = s._buildSystemPrompt()
+      const pre = s._buildPrependPrompt()
+
+      assert.ok(sys.includes('append body'), 'append skill should be in the system prompt')
+      assert.ok(!sys.includes('prepend body'), 'prepend skill should NOT be in the system prompt')
+      assert.ok(pre.includes('prepend body'), 'prepend skill should be in the prepend bucket')
+      assert.ok(!pre.includes('append body'), 'append skill should NOT be in the prepend bucket')
+    })
+
+    it('codex session: bare skills default to prepend (provider default)', () => {
+      writeFileSync(join(skillsDir, 'a.md'), '# a\n\nbody\n')
+
+      const s = new BaseSession({
+        cwd: '/tmp',
+        provider: 'codex',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+
+      assert.equal(s._buildSystemPrompt(), '', 'no skills in system bucket on codex by default')
+      const pre = s._buildPrependPrompt()
+      assert.ok(pre.length > 0)
+      assert.ok(pre.includes('body'))
+    })
+
+    it('claude-sdk session: bare skills default to append (provider default)', () => {
+      writeFileSync(join(skillsDir, 'a.md'), '# a\n\nbody\n')
+
+      const s = new BaseSession({
+        cwd: '/tmp',
+        provider: 'claude-sdk',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+
+      assert.equal(s._buildPrependPrompt(), '', 'no skills in prepend bucket on claude-sdk by default')
+      const sys = s._buildSystemPrompt()
+      assert.ok(sys.length > 0)
+      assert.ok(sys.includes('body'))
     })
   })
 })

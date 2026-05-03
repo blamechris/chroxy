@@ -382,6 +382,11 @@ export class SessionManager extends EventEmitter {
       apiToken: this._apiToken,
       resumeSessionId: resumeSessionId || null,
       transforms: this._transforms,
+      // Provider id flows into BaseSession so the skills loader can apply
+      // the `providers:` filter (#3198) and pick a per-provider injection
+      // default (#3200). Same string SessionManager uses to pick the
+      // ProviderClass via getProvider() — the registry key.
+      provider: resolvedProvider,
     }
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     // Skills size budgets — pass through if configured. BaseSession forwards

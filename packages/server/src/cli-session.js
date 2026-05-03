@@ -153,8 +153,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -407,6 +407,21 @@ export class CliSession extends BaseSession {
         isVoiceInput: !!options.isVoice,
         platform: process.platform,
       })
+    }
+
+    // Per-skill injection mode (#3200): skills with `injection: prepend`
+    // need to ride on the first user message. The append/system bucket is
+    // already wired through `--append-system-prompt` at process start
+    // (see _buildArgs); only the prepend bucket is handled here, once
+    // per session.
+    if (!this._skillsPrepended && typeof transformedPrompt === 'string') {
+      const prependText = typeof this._buildPrependPrompt === 'function'
+        ? this._buildPrependPrompt()
+        : ''
+      if (prependText) {
+        transformedPrompt = `${prependText}\n\n---\n\n${transformedPrompt}`
+      }
+      this._skillsPrepended = true
     }
 
     this._isBusy = true

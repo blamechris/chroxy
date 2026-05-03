@@ -198,11 +198,24 @@ export class JsonlSubprocessSession extends BaseSession {
     // Skills MVP (#2957) — prepend skills text to the first user message when
     // the provider has no system-prompt flag (Codex, Gemini). Only done once
     // per session; subsequent messages flow through unmodified.
+    //
+    // Per-skill injection mode (#3200): subprocess providers have only one
+    // injection channel — the user message. Skills that asked for
+    // `injection: append` / `system` (the system-prompt channel) have
+    // nowhere else to land here, so we concatenate both buckets. The
+    // provider-default mode for Codex / Gemini is `prepend`, so in
+    // practice every loaded skill ends up in the prepend bucket and the
+    // system-prompt bucket is empty; the concat is defensive against
+    // user-authored frontmatter that pins `injection: append` explicitly.
     let effectiveText = text
     if (!this._skillsPrepended) {
-      const skillsText = this._buildSystemPrompt()
-      if (skillsText) {
-        effectiveText = `${skillsText}\n\n---\n\n${text}`
+      const prependText = typeof this._buildPrependPrompt === 'function'
+        ? this._buildPrependPrompt()
+        : ''
+      const appendText = this._buildSystemPrompt()
+      const combined = [prependText, appendText].filter((s) => typeof s === 'string' && s.length > 0).join('\n\n---\n\n')
+      if (combined) {
+        effectiveText = `${combined}\n\n---\n\n${text}`
       }
       this._skillsPrepended = true
     }

@@ -32,10 +32,27 @@
  *     total budget is exceeded; absent priority info, alphabetical order
  *     is the tiebreaker.
  *
- * v2 (frontmatter parser, full trust model, UI toggle) is tracked in
- * #2958 / #2959. This file ships #3197 (parseFrontmatter helper +
- * `metadata` field on each Skill); consumers gating on metadata land in
- * #3198 / #3199 / #3200.
+ * v2 frontmatter consumers (#2958 / #2959):
+ *   - parseFrontmatter helper + `metadata` field on each Skill — #3197.
+ *   - `providers:` filter (#3198): a skill whose frontmatter declares
+ *     `providers: [claude-sdk, codex]` is included only for sessions whose
+ *     provider matches one of the listed values. Missing `providers:`
+ *     means apply-to-all (back-compat with v1). Matching is case-insensitive
+ *     exact-match against the session's provider id (the registry key from
+ *     providers.js, e.g. `claude-sdk`); the alias `claude` is treated as a
+ *     family match for any `claude-*` provider so users don't have to know
+ *     the exact registry key.
+ *   - `activation: manual` (#3199): skills with `metadata.activation ===
+ *     'manual'` are filtered out of the default-active set. They reappear
+ *     only when their name is in the `activeManualSkills` Set passed to
+ *     the loader. Default activation is `auto` (i.e., always active when
+ *     the other gates pass). The runtime toggle WS API is #3209.
+ *   - `injection:` mode (#3200): each loaded Skill carries an
+ *     `injectionMode` of 'prepend' | 'append' | 'system', derived from
+ *     `metadata.injection` (default = the provider's default mode passed
+ *     via `defaultInjectionMode`). Callers that want to split skills by
+ *     injection point use `groupSkillsByInjectionMode()` and feed each
+ *     group through `formatSkillsForPrompt()` separately.
  */
 import { readdirSync, readFileSync, statSync, realpathSync } from 'fs'
 import { basename, dirname, join, resolve, sep } from 'path'
@@ -76,8 +93,9 @@ const DEFAULT_MAX_SKILL_BYTES = 32 * 1024
 const DEFAULT_MAX_TOTAL_SKILL_BYTES = 256 * 1024
 
 // Recognized YAML frontmatter keys (#3197). The parser only accepts these —
-// anything else is dropped to keep the surface area tight while we wire up
-// providers / activation / injection in follow-up issues (#3198–#3200).
+// anything else is dropped to keep the surface area tight. Consumers of the
+// metadata fields land in #3198 (providers), #3199 (activation), #3200
+// (injection); priority is consumed by the size-budget pruner (#3202).
 const FRONTMATTER_KEYS = new Set([
   'name',
   'description',
@@ -88,6 +106,20 @@ const FRONTMATTER_KEYS = new Set([
   'priority',
   'version',
 ])
+
+// Valid `activation:` values (#3199). Any other string falls through to the
+// default ('auto') so a typo doesn't silently mute a skill. Manual activation
+// requires the skill name to be present in the loader's `activeManualSkills`
+// Set; absent the Set, manual skills are skipped entirely.
+const VALID_ACTIVATION_MODES = new Set(['auto', 'manual'])
+
+// Valid `injection:` values (#3200). 'prepend' inserts skills before the
+// first user message (Codex / Gemini default), 'append' adds them to the
+// system prompt (Claude SDK default), 'system' is a synonym for 'append'
+// kept for clarity in user-authored frontmatter — both routes do the same
+// thing on Claude SDK; on subprocess providers without a system-prompt
+// flag, 'system' falls back to 'prepend'.
+const VALID_INJECTION_MODES = new Set(['prepend', 'append', 'system'])
 
 /**
  * Return true if `s` is a string of `[a-z0-9]+` (i.e., a clean extension
@@ -404,11 +436,27 @@ function _stripUnquotedTrailingComment(s) {
  *   allowedRoots?: string[],
  *   allowedExtensions?: string[],
  *   maxSkillBytes?: number,
+ *   provider?: string|null,
+ *   activeManualSkills?: Set<string>|string[]|null,
+ *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
  * }} [opts]
- * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null }>}
+ *   - `provider`: the session's provider id (e.g. `claude-sdk`, `codex`).
+ *     When set, skills whose frontmatter declares a `providers:` list are
+ *     filtered to that subset (#3198).
+ *   - `activeManualSkills`: names of skills the user has explicitly
+ *     activated. Skills with `metadata.activation === 'manual'` only load
+ *     when their name is in this set (#3199). Default = none.
+ *   - `defaultInjectionMode`: provider-default injection mode applied when
+ *     a skill doesn't pin a `metadata.injection` value (#3200). Defaults
+ *     to `'append'` to match the Claude SDK's existing systemPrompt.append
+ *     channel; subprocess providers should pass `'prepend'`.
+ * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
   const { source } = opts
+  const provider = _normalizeProviderName(opts.provider)
+  const activeManualSkills = _coerceManualSet(opts.activeManualSkills)
+  const defaultInjectionMode = _normalizeInjectionMode(opts.defaultInjectionMode) || 'append'
   let entries
   try {
     entries = readdirSync(dir)
@@ -548,7 +596,22 @@ export function loadActiveSkills(dir, opts = {}) {
     const finalBody = frontmatter !== null ? bodyAfterFrontmatter : body
     const description = _firstNonEmptyLine(finalBody) || name
 
-    const skill = { name, body: finalBody, description, metadata: frontmatter }
+    // Provider gating (#3198): if frontmatter declares a `providers:` list,
+    // include the skill only when the session's provider is in it. Missing
+    // / empty list means apply-to-all, preserving v1 back-compat.
+    if (!_skillMatchesProvider(frontmatter, provider)) continue
+
+    // Manual activation (#3199): skills with `activation: manual` are off
+    // by default and require explicit opt-in via `activeManualSkills`.
+    if (!_skillIsActive(frontmatter, name, activeManualSkills)) continue
+
+    // Resolve the per-skill injection mode (#3200). Fall through to the
+    // caller-supplied default (typically the provider's preferred channel)
+    // when the skill doesn't pin a mode itself or pins something we don't
+    // recognise — typo tolerance.
+    const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
+
+    const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
     if (source) skill.source = source
     skills.push(skill)
   }
@@ -695,8 +758,14 @@ export function findRepoSkillsDir(cwd) {
  *   allowedExtensions?: string[],
  *   maxSkillBytes?: number,
  *   maxTotalSkillBytes?: number,
+ *   provider?: string|null,
+ *   activeManualSkills?: Set<string>|string[]|null,
+ *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
  * }} [opts]
- * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo', metadata: object|null }>}
+ *   - `provider`, `activeManualSkills`, `defaultInjectionMode`: forwarded
+ *     to `loadActiveSkills` for #3198 (provider gating), #3199 (manual
+ *     activation), and #3200 (per-skill injection mode).
+ * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo', metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkillsLayered({
   globalDir,
@@ -705,6 +774,9 @@ export function loadActiveSkillsLayered({
   allowedExtensions,
   maxSkillBytes,
   maxTotalSkillBytes,
+  provider,
+  activeManualSkills,
+  defaultInjectionMode,
 } = {}) {
   const sameDir = globalDir && repoDir && _sameAbsolutePath(globalDir, repoDir)
 
@@ -712,6 +784,9 @@ export function loadActiveSkillsLayered({
   if (Array.isArray(allowedRoots)) loaderOpts.allowedRoots = allowedRoots
   if (Array.isArray(allowedExtensions)) loaderOpts.allowedExtensions = allowedExtensions
   if (Number.isFinite(maxSkillBytes) && maxSkillBytes > 0) loaderOpts.maxSkillBytes = maxSkillBytes
+  if (provider != null) loaderOpts.provider = provider
+  if (activeManualSkills != null) loaderOpts.activeManualSkills = activeManualSkills
+  if (defaultInjectionMode != null) loaderOpts.defaultInjectionMode = defaultInjectionMode
 
   const globals = (globalDir && !sameDir)
     ? loadActiveSkills(globalDir, { ...loaderOpts, source: 'global' })
@@ -793,4 +868,139 @@ function _firstNonEmptyLine(s) {
     if (trimmed) return trimmed
   }
   return ''
+}
+
+/**
+ * Group a skill list by injection mode (#3200). Returns an object with one
+ * array per mode — callers feed each non-empty array through
+ * `formatSkillsForPrompt()` separately and route the resulting text to the
+ * matching channel (system prompt vs first user message).
+ *
+ * The 'system' mode is folded into 'append' — both end up on the same
+ * channel for Claude SDK (`systemPrompt.append`); on subprocess providers,
+ * callers can decide to treat 'system' as a synonym for 'append' (no-op
+ * since neither is supported there) or fall back to 'prepend'. Using two
+ * distinct buckets here would force every caller to merge them anyway.
+ *
+ * @param {Array<{injectionMode?: string}>|null|undefined} skills
+ * @returns {{ prepend: Array<object>, append: Array<object> }}
+ */
+export function groupSkillsByInjectionMode(skills) {
+  const out = { prepend: [], append: [] }
+  if (!Array.isArray(skills) || skills.length === 0) return out
+  for (const s of skills) {
+    const mode = _normalizeInjectionMode(s && s.injectionMode) || 'append'
+    if (mode === 'prepend') out.prepend.push(s)
+    else out.append.push(s) // 'append' and 'system' both land here
+  }
+  return out
+}
+
+/**
+ * Normalise an injection-mode string. Returns one of the canonical values
+ * ('prepend' | 'append' | 'system') for recognised input, or null for
+ * unrecognised / non-string input.
+ */
+function _normalizeInjectionMode(s) {
+  if (typeof s !== 'string') return null
+  const v = s.trim().toLowerCase()
+  if (!v) return null
+  return VALID_INJECTION_MODES.has(v) ? v : null
+}
+
+/**
+ * Resolve the injection mode for a skill given its frontmatter and the
+ * provider-supplied default. Falls back to the default for malformed /
+ * unknown values rather than dropping the skill (#3200).
+ */
+function _resolveInjectionMode(frontmatter, defaultMode) {
+  if (frontmatter && typeof frontmatter.injection === 'string') {
+    const norm = _normalizeInjectionMode(frontmatter.injection)
+    if (norm) return norm
+  }
+  return defaultMode
+}
+
+/**
+ * Normalise a provider name for case-insensitive comparison. Returns the
+ * lowercased trimmed string, or null for empty / non-string input.
+ */
+function _normalizeProviderName(p) {
+  if (typeof p !== 'string') return null
+  const v = p.trim().toLowerCase()
+  return v.length === 0 ? null : v
+}
+
+/**
+ * Coerce caller-supplied `activeManualSkills` (Set | array | null) into a
+ * Set of strings. Anything else returns an empty Set so the lookup is
+ * consistent regardless of input shape.
+ */
+function _coerceManualSet(input) {
+  if (input instanceof Set) {
+    const out = new Set()
+    for (const v of input) {
+      if (typeof v === 'string' && v) out.add(v)
+    }
+    return out
+  }
+  if (Array.isArray(input)) {
+    const out = new Set()
+    for (const v of input) {
+      if (typeof v === 'string' && v) out.add(v)
+    }
+    return out
+  }
+  return new Set()
+}
+
+/**
+ * Decide whether a skill matches the session's provider (#3198). Returns
+ * true when:
+ *   - frontmatter is null / missing, OR
+ *   - frontmatter has no `providers` field, OR
+ *   - `providers` is an empty list, OR
+ *   - the session's provider is in the list (case-insensitive exact match).
+ *
+ * The bare alias `claude` is also accepted as a family match for any
+ * `claude-*` provider key — users who write `providers: [claude]` should
+ * not have to know whether the session backend is `claude-sdk` or
+ * `claude-cli`. The reverse is also true: a session running `claude-sdk`
+ * with `providers: [claude]` matches.
+ */
+function _skillMatchesProvider(frontmatter, provider) {
+  if (!frontmatter || !Array.isArray(frontmatter.providers)) return true
+  const list = frontmatter.providers
+  if (list.length === 0) return true
+  if (!provider) return false // skill scoped, but we don't know the provider
+  const target = provider // already lowercased
+  for (const raw of list) {
+    if (typeof raw !== 'string') continue
+    const v = raw.trim().toLowerCase()
+    if (!v) continue
+    if (v === target) return true
+    // Family alias: `claude` matches any claude-* provider, and a
+    // skill scoped to `claude-sdk` matches a session whose provider was
+    // declared as the bare `claude` alias.
+    if (v === 'claude' && target.startsWith('claude')) return true
+    if (target === 'claude' && v.startsWith('claude')) return true
+  }
+  return false
+}
+
+/**
+ * Decide whether a skill is in the default-active set (#3199). Skills
+ * with `metadata.activation === 'manual'` are filtered out unless their
+ * name is in `activeManualSkills`. Anything else (including missing /
+ * unrecognised activation values) defaults to `auto` = active.
+ */
+function _skillIsActive(frontmatter, name, activeManualSkills) {
+  if (!frontmatter) return true
+  const raw = frontmatter.activation
+  if (typeof raw !== 'string') return true
+  const v = raw.trim().toLowerCase()
+  if (!VALID_ACTIVATION_MODES.has(v)) return true // unknown → behave as auto
+  if (v === 'auto') return true
+  // v === 'manual' — require explicit opt-in.
+  return activeManualSkills.has(name)
 }

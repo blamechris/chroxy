@@ -154,6 +154,34 @@ describe('skills integration — true end-to-end', () => {
         rmSync(empty, { recursive: true, force: true })
       }
     })
+
+    it('omits --append-system-prompt when only `injection: prepend` skills are present (#3200)', () => {
+      // Skill with explicit `injection: prepend` — even on claude-cli, this
+      // skill must NOT flow through --append-system-prompt; it rides on the
+      // first user message instead.
+      const onlyPrepend = mkdtempSync(join(tmpdir(), 'chroxy-skills-prep-'))
+      try {
+        writeFileSync(
+          join(onlyPrepend, 'pre.md'),
+          '---\nname: pre\ninjection: prepend\n---\nprepend body PREPEND_MARKER\n',
+        )
+
+        const session = new CliSession({ cwd: '/tmp', skillsDir: onlyPrepend })
+        let capturedArgs = null
+        session._spawnPersistentProcess = (args) => { capturedArgs = args }
+        session._hookManager = null
+
+        session.start()
+
+        assert.ok(!capturedArgs.includes('--append-system-prompt'),
+          '--append-system-prompt must NOT be present when only prepend skills exist')
+        // The prepend bucket is non-empty though — it would be injected on
+        // the first sendMessage(). Sanity check.
+        assert.ok(session._buildPrependPrompt().includes('PREPEND_MARKER'))
+      } finally {
+        rmSync(onlyPrepend, { recursive: true, force: true })
+      }
+    })
   })
 
   // -----------------------------------------------------------------------

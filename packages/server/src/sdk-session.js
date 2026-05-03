@@ -164,8 +164,8 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes })
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -268,10 +268,23 @@ export class SdkSession extends BaseSession {
 
     const sdkPermMode = this._sdkPermissionMode()
     // Skills MVP (#2957) — append shared skills via SDK systemPrompt.append.
+    // Per-skill injection mode (#3200): the append bucket flows through
+    // systemPrompt.append; the prepend bucket is concatenated onto the
+    // first user message, once per session.
     const skillsText = this._buildSystemPrompt()
     const systemPrompt = { type: 'preset', preset: 'claude_code' }
     if (skillsText) {
       systemPrompt.append = skillsText
+    }
+    let firstMessagePrefix = ''
+    if (!this._skillsPrepended) {
+      const prependText = typeof this._buildPrependPrompt === 'function'
+        ? this._buildPrependPrompt()
+        : ''
+      if (prependText) {
+        firstMessagePrefix = `${prependText}\n\n---\n\n`
+      }
+      this._skillsPrepended = true
     }
     const options = {
       cwd: this.cwd,
@@ -345,9 +358,12 @@ export class SdkSession extends BaseSession {
       this._augmentQueryOptions(options)
 
       // If attachments present, build multimodal content blocks
-      const queryArgs = { prompt: transformedPrompt, options }
+      const promptWithSkills = firstMessagePrefix
+        ? `${firstMessagePrefix}${transformedPrompt}`
+        : transformedPrompt
+      const queryArgs = { prompt: promptWithSkills, options }
       if (attachments?.length) {
-        queryArgs.prompt = buildContentBlocks(transformedPrompt, attachments)
+        queryArgs.prompt = buildContentBlocks(promptWithSkills, attachments)
       }
       this._query = this._callQuery(queryArgs)
 

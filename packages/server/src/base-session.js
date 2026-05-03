@@ -11,11 +11,29 @@ import { resolveModelId } from './models.js'
 import {
   loadActiveSkillsLayered,
   formatSkillsForPrompt,
+  groupSkillsByInjectionMode,
   findRepoSkillsDir,
   DEFAULT_SKILLS_DIR,
 } from './skills-loader.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
+
+// Default per-provider injection mode (#3200). Subprocess providers without
+// a system-prompt flag (Codex, Gemini) prepend skills to the first user
+// message; Claude (SDK or CLI) appends to the system prompt. Maps the
+// session's provider id to the channel that the existing skills text
+// pipeline already uses, so a skill without `injection:` keeps its
+// behaviour from v1.
+const DEFAULT_INJECTION_BY_PROVIDER = {
+  'claude-sdk': 'append',
+  'claude-cli': 'append',
+  'docker-sdk': 'append',
+  'docker-cli': 'append',
+  'docker': 'append',
+  'codex': 'prepend',
+  'gemini': 'prepend',
+}
+const FALLBACK_INJECTION_MODE = 'append'
 
 export class BaseSession extends EventEmitter {
   /**
@@ -40,6 +58,8 @@ export class BaseSession extends EventEmitter {
     repoSkillsDir,
     maxSkillBytes,
     maxTotalSkillBytes,
+    provider,
+    activeManualSkills,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -53,6 +73,25 @@ export class BaseSession extends EventEmitter {
     this._destroying = false
     this._activeAgents = new Map()
     this._resultTimeout = null
+
+    // Provider id (registry key from providers.js — `claude-sdk`, `codex`,
+    // etc.). Stored so frontmatter `providers:` filtering (#3198) and
+    // injection-mode defaulting (#3200) can run at construction. Optional
+    // — tests and ad-hoc instantiations may omit it; the loader treats
+    // null provider as "no provider scoping" (skills with a `providers:`
+    // list are filtered OUT, skills without one still apply).
+    this._provider = provider || null
+
+    // Per-session manually-activated skill names (#3199). Skills declared
+    // `activation: manual` are off by default and only load when their
+    // name is in this Set. The runtime toggle WS API that mutates this
+    // Set is tracked in #3209; for now the Set is populated from
+    // constructor input and never changes. Stored for forward
+    // compatibility so a future toggle handler can mutate + re-load
+    // without changing the BaseSession shape.
+    this._activeManualSkills = activeManualSkills instanceof Set
+      ? new Set(activeManualSkills)
+      : (Array.isArray(activeManualSkills) ? new Set(activeManualSkills) : new Set())
 
     // Skills are scanned once at construction.
     // - skillsDir overrides the global directory (#2957) — primarily for tests.
@@ -68,11 +107,23 @@ export class BaseSession extends EventEmitter {
     const layerOpts = {
       globalDir: this._skillsDir,
       repoDir: this._repoSkillsDir,
+      provider: this._provider,
+      activeManualSkills: this._activeManualSkills,
+      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
     }
     if (Number.isFinite(maxSkillBytes)) layerOpts.maxSkillBytes = maxSkillBytes
     if (Number.isFinite(maxTotalSkillBytes)) layerOpts.maxTotalSkillBytes = maxTotalSkillBytes
     this._skills = loadActiveSkillsLayered(layerOpts)
-    this._skillsText = formatSkillsForPrompt(this._skills)
+    // Split skills by injection mode (#3200). Each provider implementation
+    // calls _buildSystemPrompt() (back-compat alias for the append/system
+    // bucket) and _buildPrependPrompt() (the prepend bucket); subprocess
+    // providers that have no system-prompt channel concatenate both in
+    // their first-message prepend path so a skill that asks for `system`
+    // injection still ends up in front of the user message.
+    const grouped = groupSkillsByInjectionMode(this._skills)
+    this._skillsByMode = grouped
+    this._skillsText = formatSkillsForPrompt(grouped.append)
+    this._prependSkillsText = formatSkillsForPrompt(grouped.prepend)
   }
 
   get isRunning() {
@@ -157,13 +208,40 @@ export class BaseSession extends EventEmitter {
   /**
    * Return the formatted skills text for injection into the provider's
    * system prompt (Claude SDK `systemPrompt.append`, CLI
-   * `--append-system-prompt`) or prefixed to the first user message
-   * (Codex, Gemini). Returns an empty string when no skills are active.
+   * `--append-system-prompt`). Returns an empty string when no skills are
+   * active.
+   *
+   * Per-skill injection mode (#3200): this returns ONLY skills whose
+   * resolved `injectionMode` is `append` / `system`. Skills that asked
+   * for `prepend` are returned by `_buildPrependPrompt()` instead. On
+   * Claude (which has both channels available), the system-prompt path
+   * is the existing v1 default; on Codex / Gemini there is no system
+   * prompt so this returns '' for any skill that explicitly asked for
+   * `injection: append` — those callers should fall back through
+   * `_buildPrependPrompt()`.
    *
    * @returns {string}
    */
   _buildSystemPrompt() {
     return typeof this._skillsText === 'string' ? this._skillsText : ''
+  }
+
+  /**
+   * Return the formatted skills text for prepending to the first user
+   * message (Codex, Gemini default; any provider when a skill declares
+   * `injection: prepend`). Returns an empty string when no skills are
+   * active for this channel.
+   *
+   * Subprocess providers that have no system-prompt channel should
+   * concatenate `_buildSystemPrompt()` + `_buildPrependPrompt()` so a
+   * Claude-targeted skill that nonetheless ended up loaded for a Codex
+   * session still injects (rare — `providers:` filtering normally
+   * prevents this — but defensive against typos in frontmatter).
+   *
+   * @returns {string}
+   */
+  _buildPrependPrompt() {
+    return typeof this._prependSkillsText === 'string' ? this._prependSkillsText : ''
   }
 
   _clearMessageState() {
