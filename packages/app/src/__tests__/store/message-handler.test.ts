@@ -1872,7 +1872,7 @@ describe('tool_start handler', () => {
     expect(ss.streamingMessageId).toBe('msg-real');
   });
 
-  it('falls back to "tool-active" sentinel when tool_start has no messageId', () => {
+  it('bumps off "pending" with a fallback when tool_start has no messageId', () => {
     const store = createMockStore({
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
@@ -1894,7 +1894,11 @@ describe('tool_start handler', () => {
     });
 
     const ss = store.getState().sessionStates.s1;
-    expect(ss.streamingMessageId).toBe('tool-active');
+    // Assert the contract (truthy, non-'pending') rather than the literal
+    // sentinel, so a future rename of 'tool-active' doesn't require lockstep
+    // test updates. The safety timer in sendInput only cares about !== 'pending'.
+    expect(ss.streamingMessageId).toBeTruthy();
+    expect(ss.streamingMessageId).not.toBe('pending');
   });
 });
 
