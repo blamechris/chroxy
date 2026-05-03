@@ -1749,13 +1749,41 @@ describe('stream_delta handler', () => {
     const toolUse = ss.messages.find((m) => m.id === 'msg-race' && m.type === 'tool_use');
     // tool_use bubble must remain pristine — no delta concatenation
     expect(toolUse?.content).toBe('ls');
-    // App's flushPendingDeltas has no orphan-create safety net (the dashboard's
-    // #2611 fix is dashboard-only), so the colliding delta is silently dropped.
-    // No response message is created at the colliding id. This is more
-    // aggressive data loss than the dashboard but still strictly better than
-    // corrupting the tool_use bubble.
-    const responseAtSameId = ss.messages.find((m) => m.id === 'msg-race' && m.type === 'response');
-    expect(responseAtSameId).toBeUndefined();
+    // Orphan-create (#2611, ported in #3168) suffixes the response id when
+    // there's a non-response collision, so the messages array does not contain
+    // duplicate ids. Matches dashboard behaviour.
+    const orphan = ss.messages.find((m) => m.id === 'msg-race-response');
+    expect(orphan?.type).toBe('response');
+    expect(orphan?.content).toBe('must not leak');
+    // No two messages share an id.
+    const ids = ss.messages.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  // #3168: port of dashboard's #2611 orphan-create safety net. When a
+  // stream_start frame is dropped (e.g. session not yet in store at the time
+  // it arrived), the subsequent stream_delta has no message to attach to.
+  // Pre-#3168 the app silently dropped these orphan deltas; now it lazy-creates
+  // a response message at the wire id so data is preserved.
+  it('lazy-creates orphan response when stream_delta arrives with no matching message (#3168)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Skip stream_start — simulate the dropped/raced case
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-orphan', sessionId: 's1', delta: 'After tool ' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-orphan', sessionId: 's1', delta: 'response' });
+
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const orphan = ss.messages.find((m) => m.id === 'msg-orphan');
+    expect(orphan?.type).toBe('response');
+    expect(orphan?.content).toBe('After tool response');
   });
 });
 

@@ -548,16 +548,42 @@ function flushPendingDeltas(): void {
   for (const [sessionId, deltas] of bySession) {
     if (sessionId && newSessionStates[sessionId]) {
       const sessionState = newSessionStates[sessionId];
+      const matched = new Set<string>();
       // Type guard: never apply deltas to non-response messages, even if id
       // matches. Defense against future server regressions that reintroduce
       // id collisions across tool_start and stream_start.
       const updatedMessages = sessionState.messages.map((m) => {
         const d = deltas.get(m.id);
-        return d && m.type === 'response' ? { ...m, content: m.content + d } : m;
+        if (d && m.type === 'response') {
+          matched.add(m.id);
+          return { ...m, content: m.content + d };
+        }
+        return m;
       });
+      // Safety net: create response messages for orphaned deltas (#2611,
+      // ported to app in #3168). If a non-response message already occupies
+      // the colliding id, use a suffixed response id and register a remap so
+      // we don't introduce duplicate ids in the messages array. Mirrors the
+      // defensive remap in handleStreamDelta, applied here as a final guard
+      // for collisions that slipped past it (e.g. tool_use was added after
+      // the delta was queued).
+      const finalMessages = updatedMessages;
+      for (const [msgId, delta] of deltas) {
+        if (matched.has(msgId)) continue;
+        const colliding = finalMessages.some((m) => m.id === msgId && m.type !== 'response');
+        const targetId = colliding ? `${msgId}-response` : msgId;
+        const existing = finalMessages.find((m) => m.id === targetId);
+        if (existing) {
+          const idx = finalMessages.indexOf(existing);
+          finalMessages[idx] = { ...existing, content: existing.content + delta };
+        } else {
+          finalMessages.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
+        }
+        if (colliding) _ctx.deltaIdRemaps.set(msgId, targetId);
+      }
       newSessionStates = {
         ...newSessionStates,
-        [sessionId]: { ...sessionState, messages: updatedMessages },
+        [sessionId]: { ...sessionState, messages: finalMessages },
       };
       if (sessionId === state.activeSessionId) {
         getStore().setState({ sessionStates: newSessionStates });
@@ -568,13 +594,33 @@ function flushPendingDeltas(): void {
       const activeId = state.activeSessionId;
       if (activeId && newSessionStates[activeId]) {
         const ss = newSessionStates[activeId];
+        const matched = new Set<string>();
         const updatedMessages = ss.messages.map((m) => {
           const d = deltas.get(m.id);
-          return d && m.type === 'response' ? { ...m, content: m.content + d } : m;
+          if (d && m.type === 'response') {
+            matched.add(m.id);
+            return { ...m, content: m.content + d };
+          }
+          return m;
         });
+        // Same orphan-create safety net as the sessionStates branch above.
+        const finalMessages = updatedMessages;
+        for (const [msgId, delta] of deltas) {
+          if (matched.has(msgId)) continue;
+          const colliding = finalMessages.some((m) => m.id === msgId && m.type !== 'response');
+          const targetId = colliding ? `${msgId}-response` : msgId;
+          const existing = finalMessages.find((m) => m.id === targetId);
+          if (existing) {
+            const idx = finalMessages.indexOf(existing);
+            finalMessages[idx] = { ...existing, content: existing.content + delta };
+          } else {
+            finalMessages.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
+          }
+          if (colliding) _ctx.deltaIdRemaps.set(msgId, targetId);
+        }
         newSessionStates = {
           ...newSessionStates,
-          [activeId]: { ...ss, messages: updatedMessages },
+          [activeId]: { ...ss, messages: finalMessages },
         };
         getStore().setState({ sessionStates: newSessionStates });
         flatUpdated = true;
