@@ -288,7 +288,7 @@ describe('BaseSession', () => {
       const trustDir = mkdtempSync(join(tmpdir(), 'chroxy-3252-trust-'))
       try {
         const trustStore = new SkillsTrustStore({
-          path: join(trustDir, 'trust.json'),
+          filePath: join(trustDir, 'trust.json'),
           mode: 'warn',
         })
         const s = new BaseSession({
