@@ -147,9 +147,13 @@ export function SkillsPanel({
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
                 <div className="skill-row">
                   <span className="skill-name">{s.name}</span>
-                  <MismatchFlag name={s.name} />
                   {s.description && <span className="skill-desc">{s.description}</span>}
                 </div>
+                {/* #3251: render the flag as a sibling so its tooltip
+                    is hoverable without intercepting any future click
+                    handler on the row container. Mirrors the manual
+                    section layout for visual consistency. */}
+                <MismatchFlag name={s.name} />
                 <SkillMeta skill={s} />
               </li>
             ))}
@@ -182,9 +186,15 @@ export function SkillsPanel({
                     data-testid={`skill-toggle-${s.name}`}
                   />
                   <span className="skill-name">{s.name}</span>
-                  <MismatchFlag name={s.name} />
                   {s.description && <span className="skill-desc">{s.description}</span>}
                 </label>
+                {/* #3251: render the mismatch flag as a sibling of the
+                    <label>, not a child. Browser label-association
+                    means clicking anything inside the label toggles
+                    the checkbox; the operator hovers the warning to
+                    read the tooltip and accidentally activates a
+                    skill they were about to inspect more carefully. */}
+                <MismatchFlag name={s.name} />
                 <SkillMeta skill={s} />
               </li>
             ))}
