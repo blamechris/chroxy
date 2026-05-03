@@ -113,8 +113,17 @@ describe('ChatSettingsDropdown', () => {
       expect(screen.queryByTestId('prompt-evaluator-toggle')).toBeNull()
     })
 
-    it('renders the toggle when onPromptEvaluatorChange is provided', () => {
-      renderDropdown({ onPromptEvaluatorChange: vi.fn() })
+    // Capability gate: even with the change handler wired, the toggle
+    // stays hidden until the active session reports a boolean
+    // `promptEvaluator` field. Older servers (pre-#3185) omit the field
+    // entirely — surfacing a non-functional control would be misleading.
+    it('does not render when promptEvaluator is undefined (older server)', () => {
+      renderDropdown({ promptEvaluator: undefined, onPromptEvaluatorChange: vi.fn() })
+      expect(screen.queryByTestId('prompt-evaluator-toggle')).toBeNull()
+    })
+
+    it('renders the toggle when handler + boolean value are both present', () => {
+      renderDropdown({ promptEvaluator: false, onPromptEvaluatorChange: vi.fn() })
       expect(screen.getByTestId('prompt-evaluator-toggle')).toBeInTheDocument()
     })
 
@@ -126,14 +135,6 @@ describe('ChatSettingsDropdown', () => {
 
     it('reflects promptEvaluator=false as an unchecked checkbox', () => {
       renderDropdown({ promptEvaluator: false, onPromptEvaluatorChange: vi.fn() })
-      const cb = screen.getByTestId('prompt-evaluator-checkbox') as HTMLInputElement
-      expect(cb.checked).toBe(false)
-    })
-
-    it('treats undefined promptEvaluator as off (the default)', () => {
-      // Older servers / first-render without session_list emit undefined;
-      // the UI must not flash a "checked" state.
-      renderDropdown({ promptEvaluator: undefined, onPromptEvaluatorChange: vi.fn() })
       const cb = screen.getByTestId('prompt-evaluator-checkbox') as HTMLInputElement
       expect(cb.checked).toBe(false)
     })

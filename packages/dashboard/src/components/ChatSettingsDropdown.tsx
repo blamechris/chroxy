@@ -98,15 +98,17 @@ export function ChatSettingsDropdown({
       )}
 
       {/* #3185: per-session promptEvaluator toggle. Renders only when the
-          parent wires the change handler — feature-gates the UI without
-          requiring a separate capability flag. Native checkbox keeps
-          accessibility (label association, keyboard) without an extra
-          dependency. */}
-      {onPromptEvaluatorChange && (
+          parent wires the change handler AND the active session info
+          actually carries a boolean `promptEvaluator` field — older
+          servers without #3185 omit the field, in which case showing
+          a "functional" toggle that can't actually flip server-side
+          state would be misleading. Native checkbox keeps accessibility
+          (label association, keyboard) without an extra dependency. */}
+      {onPromptEvaluatorChange && typeof promptEvaluator === 'boolean' && (
         <label className="prompt-evaluator-toggle" data-testid="prompt-evaluator-toggle" title="Auto-evaluate prompts before send">
           <input
             type="checkbox"
-            checked={!!promptEvaluator}
+            checked={promptEvaluator}
             onChange={e => onPromptEvaluatorChange(e.target.checked)}
             data-testid="prompt-evaluator-checkbox"
           />

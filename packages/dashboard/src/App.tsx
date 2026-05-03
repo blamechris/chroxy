@@ -1067,7 +1067,7 @@ export function App() {
             })()}
             thinkingLevel={thinkingLevel}
             onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
-            promptEvaluator={!!sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator}
+            promptEvaluator={sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator}
             onPromptEvaluatorChange={setPromptEvaluator}
           />
         </div>

@@ -448,8 +448,12 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
  * payload validation, idempotent (no-op when value unchanged so the
  * dashboard can re-send the current value without churning state-file
  * writes), and broadcast on actual change so multi-client UIs stay in
- * sync. Persistence is delegated to SessionManager's debounced flush
- * (the field is already part of `serializeState`'s output).
+ * sync.
+ *
+ * Persistence is an immediate `serializeState()` flush rather than the
+ * debounced `schedulePersist` other handlers use. Toggles are operator
+ * actions — rare enough that the synchronous write is free, and a crash
+ * within the debounce window would otherwise silently lose the change.
  */
 function handleSetPromptEvaluator(ws, client, msg, ctx) {
   if (typeof msg.value !== 'boolean') {
