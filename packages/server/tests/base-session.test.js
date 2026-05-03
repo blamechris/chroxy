@@ -337,7 +337,7 @@ describe('BaseSession', () => {
           `expected at least 3 cached skills (auto, manual-a, manual-b) — got ${s._skillsParseCache.size}`)
         // Each cache entry should carry mtime + parsed body fields.
         for (const [path, entry] of s._skillsParseCache) {
-          assert.equal(typeof entry.mtime, 'number', `entry for ${path} missing mtime`)
+          assert.equal(typeof entry.mtimeMs, 'number', `entry for ${path} missing mtimeMs`)
           assert.equal(typeof entry.body, 'string', `entry for ${path} missing body`)
           assert.ok('frontmatter' in entry, `entry for ${path} missing frontmatter`)
         }
@@ -401,7 +401,7 @@ describe('BaseSession', () => {
         const trustDir = mkdtempSync(join(tmpdir(), 'chroxy-3248-trust-'))
         try {
           const trustStore = new SkillsTrustStore({
-            path: join(trustDir, 'trust.json'),
+            filePath: join(trustDir, 'trust.json'),
             mode: 'warn',
           })
           const s = new BaseSession({

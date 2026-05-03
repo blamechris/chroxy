@@ -602,7 +602,7 @@ export function loadActiveSkills(dir, opts = {}) {
     const name = entry.slice(0, -(ext.length + 1))
 
     // #3248: parse-cache fast path. statSync's mtimeMs already gave
-    // us the file's mtime above; if the cache entry's mtime+size
+    // us the file's mtime above; if the cache entry's mtimeMs+size
     // match, skip readFileSync / text-validation / parseFrontmatter
     // and reuse the cached parse. Mismatch (or no entry) falls
     // through to the full read+parse path below.
@@ -613,7 +613,7 @@ export function loadActiveSkills(dir, opts = {}) {
     const cached = parseCache?.get(realPath)
     const cacheHit = cached
       && typeof st.mtimeMs === 'number'
-      && cached.mtime === st.mtimeMs
+      && cached.mtimeMs === st.mtimeMs
       && cached.size === st.size
 
     if (cacheHit) {
@@ -654,11 +654,11 @@ export function loadActiveSkills(dir, opts = {}) {
       finalBody = parsed.frontmatter !== null ? parsed.body : body
       description = _firstNonEmptyLine(finalBody) || name
 
-      // Populate the cache for next time. Stamp mtime+size from the
+      // Populate the cache for next time. Stamp mtimeMs+size from the
       // statSync above (already paid the syscall cost).
       if (parseCache && typeof st.mtimeMs === 'number') {
         parseCache.set(realPath, {
-          mtime: st.mtimeMs,
+          mtimeMs: st.mtimeMs,
           size: st.size,
           body,
           frontmatter,

@@ -135,11 +135,11 @@ export class BaseSession extends EventEmitter {
     this._trustStore = resolvedTrustStore
 
     // #3248: per-session parse cache. Map keyed by realpath; values
-    // hold mtime+size+parsed body so subsequent _loadSkills() calls
-    // (every activate/deactivate toggle) skip readFileSync /
-    // parseFrontmatter for files whose mtime is unchanged. The
-    // loader writes through to this Map — invalidation is automatic
-    // when the on-disk mtime moves.
+    // hold `{ mtimeMs, size, body, frontmatter, finalBody, description }`
+    // so subsequent _loadSkills() calls (every activate/deactivate
+    // toggle) skip readFileSync / parseFrontmatter for files whose
+    // mtimeMs is unchanged. The loader writes through to this Map —
+    // invalidation is automatic when the on-disk mtimeMs moves.
     this._skillsParseCache = new Map()
 
     // Skills are scanned at construction. #3209 adds a runtime reload
