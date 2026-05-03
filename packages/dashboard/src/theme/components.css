@@ -28,7 +28,8 @@
 #app.with-sidebar {
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto 1fr auto;
+  /* Rows: reconnect-banner, tunnel-warming-banner, header, content (sidebar+main). */
+  grid-template-rows: auto auto auto 1fr auto;
 }
 
 #app.with-sidebar > .reconnect-banner {
@@ -36,18 +37,27 @@
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > header {
+/* Tunnel-warming banner must span full width above the header. Without explicit
+   grid placement it auto-places into row 4 col 1 (under the sidebar only),
+   producing an asymmetric strip that pushes the sidebar/chat columns out of
+   alignment when the banner expands from max-height: 0 to 2rem. */
+#app.with-sidebar > .tunnel-warming-banner {
   grid-row: 2;
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > .sidebar {
+#app.with-sidebar > header {
   grid-row: 3;
+  grid-column: 1 / -1;
+}
+
+#app.with-sidebar > .sidebar {
+  grid-row: 4;
   grid-column: 1;
 }
 
 #app.with-sidebar > .main-wrapper {
-  grid-row: 3;
+  grid-row: 4;
   grid-column: 2;
   display: flex;
   flex-direction: column;

@@ -482,6 +482,41 @@ describe('App', () => {
       expect(banner.textContent).toBe('')
     })
 
+    // Regression: when with-sidebar grid layout is active, the banner had
+    // no explicit grid placement and was auto-placed into row 4 col 1 (under
+    // the sidebar only), creating an asymmetric strip. The fix adds explicit
+    // grid-row/grid-column rules so the banner spans full width above the
+    // header in both flex (no sidebar) and grid (with sidebar) modes.
+    it('keeps #app.with-sidebar > .tunnel-warming-banner full-width above the header (no asymmetric strip)', async () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'tunnel_warming',
+        tunnelProgress: { attempt: 1, maxAttempts: 20 },
+        // Populate sessions with cwd so sidebarRepos > 0 → with-sidebar class
+        sessions: [{ sessionId: 's1', name: 'S1', cwd: '/tmp/repo', isBusy: false, provider: 'claude-sdk' }],
+      }
+      const { container } = render(<App />)
+      const app = container.querySelector('#app')
+      expect(app).not.toBeNull()
+      expect(app).toHaveClass('with-sidebar')
+
+      // Banner must be a direct child of #app (so the > selector matches).
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner.parentElement).toBe(app)
+
+      // The CSS rule that prevents the asymmetric strip must exist. jsdom
+      // doesn't compute grid layout, so verify the rule is present in the
+      // theme stylesheet (load directly from disk to avoid relying on jsdom's
+      // CSS-loading behaviour).
+      const fs = await import('node:fs')
+      const path = await import('node:path')
+      const cssPath = path.resolve(__dirname, 'theme/components.css')
+      const css = fs.readFileSync(cssPath, 'utf8')
+      expect(css).toMatch(
+        /#app\.with-sidebar\s*>\s*\.tunnel-warming-banner\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*\}/,
+      )
+    })
+
     it('preserves identical banner slot geometry across warming ↔ connected transitions (#2915)', () => {
       // Warming state
       stateOverrides = {
