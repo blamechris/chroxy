@@ -148,12 +148,13 @@ export function SkillsPanel({
                 <div className="skill-row">
                   <span className="skill-name">{s.name}</span>
                   {s.description && <span className="skill-desc">{s.description}</span>}
+                  {/* #3251: auto skills have no <label>, so label-
+                      association doesn't apply here — keep the flag
+                      inside the existing flex row so it renders
+                      inline next to the skill name (matches v1
+                      visual layout). */}
+                  <MismatchFlag name={s.name} />
                 </div>
-                {/* #3251: render the flag as a sibling so its tooltip
-                    is hoverable without intercepting any future click
-                    handler on the row container. Mirrors the manual
-                    section layout for visual consistency. */}
-                <MismatchFlag name={s.name} />
                 <SkillMeta skill={s} />
               </li>
             ))}
@@ -174,27 +175,29 @@ export function SkillsPanel({
           <ul className="skills-panel-list">
             {manualSkills.map(s => (
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={!!s.active}
-                    disabled={!canToggle}
-                    onChange={e => {
-                      if (e.target.checked) onActivate(s.name)
-                      else onDeactivate(s.name)
-                    }}
-                    data-testid={`skill-toggle-${s.name}`}
-                  />
-                  <span className="skill-name">{s.name}</span>
-                  {s.description && <span className="skill-desc">{s.description}</span>}
-                </label>
-                {/* #3251: render the mismatch flag as a sibling of the
-                    <label>, not a child. Browser label-association
-                    means clicking anything inside the label toggles
-                    the checkbox; the operator hovers the warning to
-                    read the tooltip and accidentally activates a
-                    skill they were about to inspect more carefully. */}
-                <MismatchFlag name={s.name} />
+                {/* #3251: wrap <label> + <MismatchFlag /> in a flex
+                    row so they render inline. The flag sits OUTSIDE
+                    the <label>, so clicking it does not trigger
+                    label-association and toggle the checkbox — but
+                    the visual placement (inline, after the name)
+                    matches the auto-skills section. */}
+                <div className="skill-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={!!s.active}
+                      disabled={!canToggle}
+                      onChange={e => {
+                        if (e.target.checked) onActivate(s.name)
+                        else onDeactivate(s.name)
+                      }}
+                      data-testid={`skill-toggle-${s.name}`}
+                    />
+                    <span className="skill-name">{s.name}</span>
+                    {s.description && <span className="skill-desc">{s.description}</span>}
+                  </label>
+                  <MismatchFlag name={s.name} />
+                </div>
                 <SkillMeta skill={s} />
               </li>
             ))}
