@@ -259,6 +259,9 @@ export async function startCliServer(config) {
     sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
+    // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
+    maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
+    maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
   })
 
   // 2. Try restoring session state from a previous instance

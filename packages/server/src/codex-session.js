@@ -219,11 +219,11 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir })
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes })
   }
 
   // ------------------------------------------------------------------

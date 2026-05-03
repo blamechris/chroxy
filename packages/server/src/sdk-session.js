@@ -164,8 +164,8 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir })
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null

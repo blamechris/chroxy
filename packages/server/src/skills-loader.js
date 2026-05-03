@@ -282,11 +282,13 @@ function _parseFrontmatterBody(yaml) {
     const key = m[1]
     let valueText = m[2]
 
-    // Strip inline trailing comment (e.g., `key: foo  # note`). Be
-    // conservative — only when the `#` is preceded by whitespace, so a `#`
-    // inside a quoted string survives.
-    const commentIdx = valueText.search(/\s#/)
-    if (commentIdx >= 0) valueText = valueText.slice(0, commentIdx)
+    // Strip inline trailing comment (e.g., `key: foo  # note`) — quote-aware
+    // so a `#` inside a quoted string is preserved. Examples that must NOT
+    // truncate: `description: "Fix issue #123"`, `name: 'C# tips'`,
+    // `summary: "foo # bar"`. Walk char-by-char tracking quote state and
+    // only treat ` #` (whitespace then hash) as a comment opener when
+    // outside any quote.
+    valueText = _stripUnquotedTrailingComment(valueText)
     valueText = valueText.trim()
 
     if (!FRONTMATTER_KEYS.has(key)) continue // silently drop unknown keys
@@ -338,6 +340,39 @@ function _unquote(s) {
     return t.slice(1, -1)
   }
   return t
+}
+
+/**
+ * Strip a trailing `# comment` from a YAML scalar value, but only when the
+ * `#` is OUTSIDE any quoted string. Without quote awareness, a value like
+ * `"Fix issue #123"` would truncate to `"Fix issue` — corrupting metadata
+ * and turning valid frontmatter into garbage.
+ *
+ * Walks char-by-char tracking single/double-quote state. Only the FIRST
+ * unquoted ` #` (whitespace+hash) is treated as a comment opener; everything
+ * before it is returned verbatim.
+ */
+function _stripUnquotedTrailingComment(s) {
+  if (typeof s !== 'string' || s.length === 0) return s
+  let inSingle = false
+  let inDouble = false
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (!inSingle && ch === '"') {
+      inDouble = !inDouble
+      continue
+    }
+    if (!inDouble && ch === "'") {
+      inSingle = !inSingle
+      continue
+    }
+    if (inSingle || inDouble) continue
+    // Outside any quote — does this position open a trailing comment?
+    if (ch === '#' && i > 0 && /\s/.test(s[i - 1])) {
+      return s.slice(0, i - 1)
+    }
+  }
+  return s
 }
 
 /**
@@ -459,7 +494,13 @@ export function loadActiveSkills(dir, opts = {}) {
     try {
       realPath = realpathSync(fullPath)
     } catch (err) {
-      log.warn(`Skipping skill ${label}: realpath failed (${err.message})`)
+      // Node's realpathSync errors interpolate the offending path into
+      // `err.message` (e.g. ENOENT 'no such file or directory, lstat ...').
+      // log.warn fans out via log_entry to paired WS clients — same leak
+      // channel addressed by #3215. Strip to the error code only; full
+      // path is logged separately at debug.
+      const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+      log.warn(`Skipping skill ${label}: realpath failed (${code})`)
       log.debug(`skill ${label} full path: ${fullPath}`)
       continue
     }
@@ -557,11 +598,19 @@ function _enforceTotalBudget(skills, maxTotalBytes) {
   return kept
 }
 
+// Default priority for skills without an explicit `priority:` in frontmatter
+// (and for v1 skills that have no frontmatter at all). Per the #2958 schema,
+// the documented default is 100. Returning 0 here (the previous behaviour)
+// would push v1 / no-priority skills to the BOTTOM of the budget-prune order,
+// so any new v2 skill with even `priority: 1` would outrank them — wrong for
+// mixed v1/v2 sets.
+const DEFAULT_SKILL_PRIORITY = 100
+
 function _priorityOf(skill) {
   if (skill && skill.metadata && Number.isFinite(skill.metadata.priority)) {
     return skill.metadata.priority
   }
-  return 0
+  return DEFAULT_SKILL_PRIORITY
 }
 
 /**

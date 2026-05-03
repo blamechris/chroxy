@@ -32,7 +32,15 @@ export class BaseSession extends EventEmitter {
     return []
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir } = {}) {
+  constructor({
+    cwd,
+    model,
+    permissionMode,
+    skillsDir,
+    repoSkillsDir,
+    maxSkillBytes,
+    maxTotalSkillBytes,
+  } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
@@ -51,14 +59,19 @@ export class BaseSession extends EventEmitter {
     // - repoSkillsDir overrides the per-repo directory walk-up (#3067) so tests
     //   can pin both layers without touching the real filesystem; if omitted,
     //   walk up from this.cwd looking for the nearest .chroxy/skills/.
+    // - maxSkillBytes / maxTotalSkillBytes override the loader's 32KB / 256KB
+    //   defaults (#3202); plumbed from server config via SessionManager.
     this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
     this._repoSkillsDir = repoSkillsDir !== undefined
       ? repoSkillsDir
       : findRepoSkillsDir(this.cwd)
-    this._skills = loadActiveSkillsLayered({
+    const layerOpts = {
       globalDir: this._skillsDir,
       repoDir: this._repoSkillsDir,
-    })
+    }
+    if (Number.isFinite(maxSkillBytes)) layerOpts.maxSkillBytes = maxSkillBytes
+    if (Number.isFinite(maxTotalSkillBytes)) layerOpts.maxTotalSkillBytes = maxTotalSkillBytes
+    this._skills = loadActiveSkillsLayered(layerOpts)
     this._skillsText = formatSkillsForPrompt(this._skills)
   }
 

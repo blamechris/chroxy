@@ -634,6 +634,14 @@ describe('skills-loader', () => {
       assert.ok(joined.includes('oversized.md#'), `expected sanitized label, got:\n${joined}`)
       assert.ok(!joined.includes(dir), `warn output must NOT include absolute path, got:\n${joined}`)
     })
+
+    // Note: the realpath-fail warn path (`Skipping skill X: realpath failed
+    // (CODE)`) was hardened in this round to surface only the error code,
+    // not the embedded path that Node interpolates into `err.message`. The
+    // path is hard to exercise deterministically — statSync usually fails
+    // first on dangling/circular symlinks and short-circuits via the silent
+    // continue. The fix is straightforward (`err.message` → `err.code`)
+    // and verified by inspection in the diff.
   })
 
   // -----------------------------------------------------------------------
@@ -810,6 +818,28 @@ describe('skills-loader', () => {
       const out = parseFrontmatter(text)
       assert.deepEqual(out.frontmatter, { name: 'just-a-name' })
       assert.equal(out.body, 'body\n')
+    })
+
+    // Regression for the Copilot review on PR #3220: the inline-comment
+    // stripper was not quote-aware. A value like `description: "Fix issue
+    // #123"` contains a ` #` sequence INSIDE the quoted string, so the old
+    // stripper truncated to `"Fix issue` and returned malformed metadata.
+    it('preserves "#" inside double-quoted values (no false-positive comment strip)', () => {
+      const text = '---\nname: x\ndescription: "Fix issue #123 in repo"\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'x', description: 'Fix issue #123 in repo' })
+    })
+
+    it('preserves "#" inside single-quoted values', () => {
+      const text = "---\nname: 'C# tips'\ndescription: 'short'\n---\nbody\n"
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'C# tips', description: 'short' })
+    })
+
+    it('strips an actual trailing comment after whitespace + # outside quotes', () => {
+      const text = '---\nname: foo  # this is a comment\ndescription: bar\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'foo', description: 'bar' })
     })
   })
 
