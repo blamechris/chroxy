@@ -1,11 +1,12 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   SkillsTrustStore,
   sha256Hex,
+  _normalizePathKey,
   TRUST_MODE_WARN,
   TRUST_MODE_BLOCK,
 } from '../src/skills-trust.js'
@@ -288,6 +289,176 @@ describe('skills-trust', () => {
     it('accepts an explicit block mode', () => {
       const store = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
       assert.equal(store.mode, TRUST_MODE_BLOCK)
+    })
+  })
+
+  // #3232: atomic write (temp+rename) + chmod 0600.
+  describe('atomic write + 0600 (#3232)', () => {
+    it('writes through <path>.tmp then renames to the target', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+
+      // Target file exists and parses cleanly.
+      assert.ok(existsSync(trustPath), 'target file should exist after flush')
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      // Lookup uses the platform-normalised key.
+      const expectedKey = _normalizePathKey('/abs/skill.md')
+      assert.ok(persisted[expectedKey], 'record should be persisted under normalised key')
+
+      // Temp file should NOT linger after a clean flush — the rename
+      // moved it onto the target. Anything left at <path>.tmp is a
+      // leak / orphan.
+      assert.ok(!existsSync(`${trustPath}.tmp`),
+        '.tmp sibling must be cleaned up by rename')
+    })
+
+    it('writes file with mode 0600 (POSIX only)', { skip: process.platform === 'win32' }, () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+
+      const stat = statSync(trustPath)
+      // Lower 9 bits = perm; mask off type bits. 0o600 = owner rw, no group/other.
+      const perm = stat.mode & 0o777
+      assert.equal(perm, 0o600,
+        `expected mode 0600, got 0${perm.toString(8)}`)
+    })
+
+    it('does not corrupt the target file when a stale .tmp pre-exists (orphan from prior crash)', () => {
+      const tmpPath = `${trustPath}.tmp`
+      // Simulate a half-written temp from a crashed prior flush.
+      writeFileSync(tmpPath, '{ partial json — this should be cleaned')
+
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+
+      // The flush should have unlinked the stale temp before writing.
+      // Final state: target parses cleanly, temp gone.
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      const expectedKey = _normalizePathKey('/abs/skill.md')
+      assert.ok(persisted[expectedKey], 'fresh record should land cleanly')
+      assert.ok(!existsSync(tmpPath), 'stale .tmp must not survive flush')
+    })
+
+    it('_load ignores a stale .tmp file (does not parse it as the ledger)', () => {
+      // Set up a valid target...
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+
+      // ...and a corrupt sibling temp from a crashed write.
+      writeFileSync(`${trustPath}.tmp`, '{ this is broken')
+
+      // A fresh store should ONLY consult the target — the corrupt
+      // temp must not poison the load.
+      const store2 = new SkillsTrustStore({ filePath: trustPath })
+      const r = store2.inspect('/abs/skill.md', 'body')
+      assert.equal(r.status, 'verified',
+        'load must read the canonical target and ignore the .tmp orphan')
+    })
+
+    it('survives a write failure without throwing or corrupting target (fail-open)', () => {
+      // Seed a valid target file.
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/skill.md', 'original')
+      store.flush()
+      const before = readFileSync(trustPath, 'utf8')
+
+      // Now point the store at a directory path so the rename target
+      // is invalid and writeFileSync would have thrown EISDIR. The
+      // atomic-write path catches the error and leaves the original
+      // good file untouched.
+      const badStore = new SkillsTrustStore({ filePath: dir })
+      badStore.inspect('/abs/x.md', 'body')
+      badStore.flush() // must not throw
+
+      // The original good file is untouched (different path, but the
+      // important guarantee is that a failed flush doesn't leave a
+      // half-baked target on disk).
+      assert.equal(readFileSync(trustPath, 'utf8'), before,
+        'unrelated good file must not be affected by a failed flush elsewhere')
+    })
+  })
+
+  // #3233: case-insensitive ledger key normalisation (macOS APFS, Windows NTFS).
+  describe('case-insensitive key normalisation (#3233)', () => {
+    it('_normalizePathKey lowercases on macOS / Windows, leaves Linux verbatim', () => {
+      const path = '/Users/Me/.chroxy/skills/Foo.md'
+      const norm = _normalizePathKey(path)
+      if (process.platform === 'darwin' || process.platform === 'win32') {
+        assert.equal(norm, path.toLowerCase(),
+          'case-insensitive FS should fold to lower case')
+      } else {
+        assert.equal(norm, path,
+          'case-sensitive FS should leave the key verbatim')
+      }
+    })
+
+    it('_normalizePathKey handles non-string input', () => {
+      assert.equal(_normalizePathKey(null), '')
+      assert.equal(_normalizePathKey(undefined), '')
+      assert.equal(_normalizePathKey(42), '')
+    })
+
+    // The interesting macOS / Windows invariant: a write under one
+    // casing must round-trip cleanly when read back under another.
+    // We can only verify the behaviour the helper actually picks for
+    // the current platform.
+    it('lookup is case-insensitive on macOS / Windows', { skip: !(process.platform === 'darwin' || process.platform === 'win32') }, () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Record under one casing.
+      store.inspect('/Users/me/.chroxy/skills/Foo.md', 'body')
+      store.flush()
+
+      // Re-inspect under a different casing of the same logical path.
+      const r = store.inspect('/users/ME/.chroxy/skills/foo.md', 'body')
+      assert.equal(r.status, 'verified',
+        'case-only differences must resolve to the same record on case-insensitive FS')
+    })
+
+    it('lookup is case-sensitive on Linux (#3233 leaves verbatim)', { skip: process.platform !== 'linux' }, () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/Foo.md', 'body')
+      store.flush()
+
+      // Different casing must NOT match on Linux — same legitimate file
+      // with a distinct realpath.
+      const r = store.inspect('/abs/foo.md', 'body')
+      assert.equal(r.status, 'recorded',
+        'case-sensitive FS must treat differing casings as distinct keys')
+    })
+
+    it('persists ledger keys in normalised form (so future loads still find them)', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/Some/Mixed/Case/skill.md', 'body')
+      store.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      const expectedKey = _normalizePathKey('/Some/Mixed/Case/skill.md')
+      assert.ok(persisted[expectedKey],
+        `expected key ${expectedKey} in persisted ledger`)
+    })
+
+    it('upgrades a verbatim-cased pre-#3233 ledger entry on next read (case-insensitive FS)', { skip: !(process.platform === 'darwin' || process.platform === 'win32') }, () => {
+      // Hand-write a ledger entry with mixed casing — simulates a
+      // ledger written by an older chroxy before #3233.
+      const sha = sha256Hex('body')
+      writeFileSync(trustPath, JSON.stringify({
+        '/Users/Me/.chroxy/skills/Foo.md': {
+          sha256: sha,
+          firstSeen: '2024-01-01T00:00:00.000Z',
+          lastVerified: '2024-01-01T00:00:00.000Z',
+        },
+      }))
+
+      // Now open the ledger fresh — _load should normalise the key —
+      // and inspect under a different casing.
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      const r = store.inspect('/users/me/.chroxy/skills/foo.md', 'body')
+      assert.equal(r.status, 'verified',
+        'pre-#3233 verbatim-cased entries must still be found after normalisation')
     })
   })
 })

@@ -124,6 +124,31 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #3234: skill content-hash mismatch detected by SkillsTrustStore. Only the
+  // 8-char hash prefixes go on the wire — the full SHA never leaves the
+  // server, matching the sanitised log format from #3215. `mode` is the
+  // active trust mode at the time of detection ('warn' or 'block') so a
+  // dashboard can render distinct UX (warn = banner, block = the skill is
+  // already filtered out so a stronger prompt is appropriate). The event
+  // is transient — not replayed on reconnect, since the loader re-checks
+  // hashes every time it scans skills.
+  skill_changed: (data, ctx) => {
+    const oldHash = typeof data?.oldHash === 'string' ? data.oldHash : ''
+    const newHash = typeof data?.newHash === 'string' ? data.newHash : ''
+    return {
+      messages: [{
+        msg: {
+          type: 'skill_changed',
+          skillName: data?.name || '',
+          sessionId: ctx.sessionId || null,
+          oldHashPrefix: oldHash.slice(0, 8),
+          newHashPrefix: newHash.slice(0, 8),
+          mode: data?.blocked ? 'block' : 'warn',
+        },
+      }],
+    }
+  },
+
   plan_started: () => ({
     messages: [{ msg: { type: 'plan_started' } }],
   }),
