@@ -260,7 +260,16 @@ export function App() {
     isPlanPending,
     thinkingLevel,
     skills: activeSkills,
+    mismatchedSkillNames: activeMismatched,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
+
+  // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
+  // keyed by the array reference so the Set only re-derives when the
+  // store actually mutated the list (skill_changed event fired).
+  const mismatchedSet = useMemo(
+    () => new Set(activeMismatched || []),
+    [activeMismatched],
+  )
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
@@ -1410,11 +1419,12 @@ export function App() {
         }
       />
 
-      {/* #3209: SkillsPanel — popover for manual-skill toggles */}
+      {/* #3209: SkillsPanel — popover for manual-skill toggles + #3205 metadata */}
       {skillsPanelOpen && (
         <SkillsPanel
           skills={activeSkills}
           canToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
+          mismatchedSkillNames={mismatchedSet}
           onActivate={activateSkill}
           onDeactivate={deactivateSkill}
           onClose={() => setSkillsPanelOpen(false)}

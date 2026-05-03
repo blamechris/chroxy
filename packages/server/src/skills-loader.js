@@ -643,7 +643,7 @@ export function loadActiveSkills(dir, opts = {}) {
       // dashboard only needs name + description + metadata to render
       // the toggle, and shipping the body to the WS client when the
       // skill is inactive wastes bandwidth.
-      const inactive = { name, description, metadata: frontmatter, active: false }
+      const inactive = { name, description, metadata: frontmatter, active: false, path: realPath }
       if (source) inactive.source = source
       skills.push(inactive)
       continue
@@ -710,6 +710,12 @@ export function loadActiveSkills(dir, opts = {}) {
     // toggle state. `auto` skills are always active; `manual` ones
     // reflect the live `activeManualSkills` membership at load time.
     skill.active = isActive
+    // #3205: realpath is needed by `list_skills` to look up the
+    // trust-store record (recorded hash + lastVerified) without
+    // re-reading the file. Stripped before the WS payload — the
+    // absolute filesystem path never crosses the wire (operator-
+    // facing log lines use basename via `_pathLabel`).
+    skill.path = realPath
     skills.push(skill)
   }
 

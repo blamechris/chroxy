@@ -396,6 +396,12 @@ function handleListSkills(ws, client, msg, ctx) {
   const cwd = entry?.session?.cwd || null
   const repoDir = cwd ? findRepoSkillsDir(cwd) : null
   const provider = entry?.provider || null
+  // #3205: trust store powers the hash + last-activated metadata in
+  // the response. When the session has no trust store wired (operator
+  // didn't opt into 'warn' / 'block' modes), those fields are simply
+  // omitted — the dashboard renders the panel without those columns
+  // rather than showing fake data.
+  const trustStore = entry?.session?._trustStore || null
 
   const skills = loadActiveSkillsLayered({
     globalDir: DEFAULT_SKILLS_DIR,
@@ -410,7 +416,8 @@ function handleListSkills(ws, client, msg, ctx) {
       ? s.metadata.activation.trim().toLowerCase()
       : null
     const activation = rawActivation === 'manual' ? 'manual' : 'auto'
-    return {
+
+    const out = {
       name: s.name,
       description: s.description,
       source: s.source || 'global',
@@ -420,6 +427,28 @@ function handleListSkills(ws, client, msg, ctx) {
       // already set from the activeManualSkills membership.
       active: activation === 'auto' ? true : !!s.active,
     }
+
+    // #3205: optional metadata fields — `version` from the YAML
+    // frontmatter, `hashPrefix` + `lastVerified` from the trust store.
+    // All optional so older clients keep parsing this response, and a
+    // trust-disabled session still gets a useful panel (just without
+    // the audit columns).
+    const version = typeof s.metadata?.version === 'string' ? s.metadata.version.trim() : null
+    if (version) out.version = version
+
+    if (trustStore && typeof trustStore.getRecord === 'function' && typeof s.path === 'string') {
+      const record = trustStore.getRecord(s.path)
+      if (record) {
+        // 8-char hash prefix matches the sanitised log + skill_changed
+        // wire format from #3215 / #3234. The full SHA never leaves
+        // the server.
+        out.hashPrefix = record.sha256.slice(0, 8)
+        if (typeof record.lastVerified === 'string') out.lastVerified = record.lastVerified
+        if (typeof record.firstSeen === 'string') out.firstSeen = record.firstSeen
+      }
+    }
+
+    return out
   })
 
   ctx.send(ws, { type: 'skills_list', skills })

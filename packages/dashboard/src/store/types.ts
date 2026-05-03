@@ -232,12 +232,25 @@ export interface ServerEntry {
 // #3209: per-session skill metadata. Loaded via list_skills, mutated
 // in-place by skill_activated / skill_deactivated broadcasts. The
 // dashboard uses this to render manual-skill toggles.
+//
+// #3205: extended with audit metadata (`version` from frontmatter,
+// `hashPrefix` + `firstSeen` + `lastVerified` from the trust store).
+// All optional so the SkillsPanel can render even when the active
+// session has no trust store wired or the skill predates these fields.
 export interface SessionSkillInfo {
   name: string;
   description?: string;
   source?: 'global' | 'repo';
   activation?: 'auto' | 'manual';
   active?: boolean;
+  version?: string;
+  // 8-char prefix of the SHA-256 — matches the on-wire format from
+  // `skill_changed` so a mismatch indicator can compare prefixes
+  // without the full SHA leaving the server.
+  hashPrefix?: string;
+  // ISO-8601 timestamps from the SkillsTrustStore.
+  firstSeen?: string;
+  lastVerified?: string;
 }
 
 export interface SessionState extends BaseSessionState {
@@ -255,6 +268,15 @@ export interface SessionState extends BaseSessionState {
   // skill_deactivated broadcasts. Optional — undefined until the
   // first list_skills is requested.
   skills?: SessionSkillInfo[];
+  // #3205: skill names whose hash mismatched the trust store's
+  // recorded value during this session (delivered via the
+  // `skill_changed` WS event). The dashboard renders a red-flag
+  // indicator next to mismatched skills in the SkillsPanel so the
+  // operator can audit before activating. Resets on session
+  // destruction; not persisted across reconnects (the next
+  // skills load re-checks hashes, so the loader will re-emit any
+  // mismatches that still apply).
+  mismatchedSkillNames?: string[];
 }
 
 export interface ConnectionState {

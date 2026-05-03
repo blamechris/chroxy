@@ -218,6 +218,10 @@ export declare const ServerSkillsListSchema: z.ZodObject<{
             manual: "manual";
         }>>;
         active: z.ZodOptional<z.ZodBoolean>;
+        version: z.ZodOptional<z.ZodString>;
+        hashPrefix: z.ZodOptional<z.ZodString>;
+        firstSeen: z.ZodOptional<z.ZodString>;
+        lastVerified: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 /**

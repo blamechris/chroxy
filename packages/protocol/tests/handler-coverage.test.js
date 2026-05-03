@@ -47,7 +47,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   // 'skills_list' removed — dashboard now handles it (#3209)
-  'skill_changed',      // #3234: protocol schema added; client UI (dashboard prompt) tracked in #3205
+  // 'skill_changed' removed — dashboard now handles it (#3205)
 ])
 
 // ---------------------------------------------------------------------------
@@ -76,6 +76,7 @@ const PLATFORM_SPECIFIC = {
   'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
   'prompt_evaluator_changed': 'dashboard', // per-session promptEvaluator toggle (#3185) is dashboard-only — same epic as evaluate_draft_result, mobile app exposure tracked in #3068
   'skills_list': 'dashboard',       // skills list response (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
+  'skill_changed': 'dashboard',     // skill content-hash mismatch event (#3234/#3205) is dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_activated': 'dashboard',   // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
   'skill_deactivated': 'dashboard', // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
 }

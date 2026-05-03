@@ -178,6 +178,28 @@ export class SkillsTrustStore {
   }
 
   /**
+   * #3205: read-only accessor for the dashboard's skills metadata UI.
+   * Returns a clone of the recorded entry (sha256 + firstSeen +
+   * lastVerified) so the caller can derive `hashPrefix` and
+   * `lastActivated` without mutating ledger state. Returns `null`
+   * when no record exists for the given path (first-time skill, or
+   * trust never enabled for this session).
+   *
+   * @param {string} absPath
+   * @returns {{ sha256: string, firstSeen: string, lastVerified: string } | null}
+   */
+  getRecord(absPath) {
+    const key = _normalizePathKey(absPath)
+    const existing = this._records[key]
+    if (!existing) return null
+    return {
+      sha256: existing.sha256,
+      firstSeen: existing.firstSeen,
+      lastVerified: existing.lastVerified,
+    }
+  }
+
+  /**
    * Read + JSON-parse the trust file. Returns an empty object on any
    * failure (missing file, malformed JSON, non-object root, etc.) so a
    * corrupted record can never block the loader.

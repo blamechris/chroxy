@@ -151,4 +151,93 @@ describe('SkillsPanel (#3209)', () => {
       expect(cb.disabled).toBe(true)
     })
   })
+
+  // #3205: skills metadata UI. Each skill row carries optional
+  // `version`, `hashPrefix`, `firstSeen`, `lastVerified`, plus a
+  // mismatch flag rendered when the skill name appears in
+  // `mismatchedSkillNames`. All fields degrade gracefully on absence.
+  describe('skills metadata (#3205)', () => {
+    it('renders source, version, hash, and last-verified when present', () => {
+      renderPanel({
+        skills: [{
+          name: 'auditable',
+          activation: 'auto',
+          active: true,
+          source: 'global',
+          version: '1.2.3',
+          hashPrefix: 'abcdef01',
+          // Use a stable timestamp far enough in the past to render
+          // as a date (deterministic across CI timezones).
+          lastVerified: '2025-01-15T12:00:00.000Z',
+        }],
+      })
+      expect(screen.getByTestId('skill-meta-source-auditable')).toHaveTextContent(/source.*global/i)
+      expect(screen.getByTestId('skill-meta-version-auditable')).toHaveTextContent(/version.*1\.2\.3/i)
+      expect(screen.getByTestId('skill-meta-hash-auditable')).toHaveTextContent(/hash.*abcdef01/i)
+      expect(screen.getByTestId('skill-meta-last-verified-auditable')).toBeInTheDocument()
+    })
+
+    it('omits metadata fields entirely when none are present (older server)', () => {
+      renderPanel({
+        skills: [{ name: 'minimal', activation: 'auto', active: true }],
+      })
+      expect(screen.queryByTestId('skill-meta-source-minimal')).toBeNull()
+      expect(screen.queryByTestId('skill-meta-version-minimal')).toBeNull()
+      expect(screen.queryByTestId('skill-meta-hash-minimal')).toBeNull()
+      expect(screen.queryByTestId('skill-meta-last-verified-minimal')).toBeNull()
+    })
+
+    it('renders only the fields that have values (version present, hash absent)', () => {
+      renderPanel({
+        skills: [{ name: 'partial', activation: 'auto', active: true, version: '0.1.0' }],
+      })
+      expect(screen.getByTestId('skill-meta-version-partial')).toHaveTextContent(/0\.1\.0/)
+      expect(screen.queryByTestId('skill-meta-hash-partial')).toBeNull()
+    })
+
+    it('renders mismatch flag when skill name is in mismatchedSkillNames', () => {
+      renderPanel({
+        skills: [{ name: 'changed', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['changed']),
+      })
+      expect(screen.getByTestId('skill-mismatch-changed')).toBeInTheDocument()
+    })
+
+    it('does not render mismatch flag when skill is not in the mismatch set', () => {
+      renderPanel({
+        skills: [{ name: 'clean', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['other-skill']),
+      })
+      expect(screen.queryByTestId('skill-mismatch-clean')).toBeNull()
+    })
+
+    it('does not render mismatch flag when mismatchedSkillNames is omitted', () => {
+      renderPanel({
+        skills: [{ name: 'noflag', activation: 'auto', active: true }],
+      })
+      expect(screen.queryByTestId('skill-mismatch-noflag')).toBeNull()
+    })
+
+    it('renders mismatch flag for manual skills too', () => {
+      renderPanel({
+        skills: [{ name: 'manual-changed', activation: 'manual', active: false }],
+        mismatchedSkillNames: new Set(['manual-changed']),
+      })
+      expect(screen.getByTestId('skill-mismatch-manual-changed')).toBeInTheDocument()
+    })
+
+    it('handles malformed timestamps without crashing (returns raw string)', () => {
+      // Defensive — if a future server emits a non-ISO timestamp,
+      // the component must still render rather than throwing.
+      renderPanel({
+        skills: [{
+          name: 'bad-time',
+          activation: 'auto',
+          active: true,
+          lastVerified: 'not-a-real-timestamp',
+        }],
+      })
+      expect(screen.getByTestId('skill-meta-last-verified-bad-time')).toBeInTheDocument()
+    })
+  })
 })

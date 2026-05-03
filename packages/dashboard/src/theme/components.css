@@ -218,6 +218,38 @@
   color: var(--text-secondary);
   margin-left: 4px;
 }
+/* #3205: per-skill metadata row (source / version / last-activated /
+   hash). Renders directly under the skill name. Smaller font, muted
+   colour, monospace for the hash so it visually reads as audit data. */
+.skill-meta {
+  display: block;
+  margin-left: 22px; /* align under skill name (after the checkbox) */
+  margin-top: 2px;
+  font-size: var(--text-xs, 11px);
+  color: var(--text-secondary);
+}
+.skill-meta-label {
+  font-weight: 500;
+}
+.skill-meta-value {
+  font-family: var(--font-mono, monospace);
+}
+.skill-meta-sep {
+  margin: 0 4px;
+  opacity: 0.6;
+}
+/* #3205: red-flag indicator when the trust store reported a hash
+   mismatch for this skill during this session. Renders inline next
+   to the skill name. */
+.skill-mismatch-flag {
+  margin-left: 6px;
+  cursor: help;
+}
+.skill-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
 
 
 .header-right {

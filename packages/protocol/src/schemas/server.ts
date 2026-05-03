@@ -248,6 +248,18 @@ export const ServerSkillsListSchema = z.object({
     // the dashboard treats absence as `auto`/`active=true`.
     activation: z.enum(['auto', 'manual']).optional(),
     active: z.boolean().optional(),
+    // #3205: skills metadata UI fields. All optional — `version` is
+    // emitted only when the skill's frontmatter declared one;
+    // `hashPrefix`, `firstSeen`, `lastVerified` come from the
+    // SkillsTrustStore and are present only when trust is enabled
+    // (`trustMismatchMode` set to 'warn' / 'block' on the session)
+    // and the skill has been seen at least once. Pre-#3205 servers
+    // omit them entirely; the dashboard renders the panel without
+    // those columns rather than showing fake data.
+    version: z.string().optional(),
+    hashPrefix: z.string().length(8).regex(/^[0-9a-f]{8}$/).optional(),
+    firstSeen: z.string().optional(),
+    lastVerified: z.string().optional(),
   })),
 })
 
