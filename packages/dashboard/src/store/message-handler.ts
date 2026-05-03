@@ -743,9 +743,34 @@ function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSe
       source: source as 'global' | 'repo' | undefined,
       activation: activation as 'auto' | 'manual' | undefined,
       active: typeof s.active === 'boolean' ? s.active : undefined,
+      // #3205: optional audit metadata. The handler stays defensive
+      // about types (older servers won't send these; future ones
+      // might add fields the dashboard hasn't typed yet).
+      version: typeof s.version === 'string' ? s.version : undefined,
+      hashPrefix: typeof s.hashPrefix === 'string' ? s.hashPrefix : undefined,
+      firstSeen: typeof s.firstSeen === 'string' ? s.firstSeen : undefined,
+      lastVerified: typeof s.lastVerified === 'string' ? s.lastVerified : undefined,
     };
   }).filter(s => s.name);
   updateSession(targetId, () => ({ skills }));
+}
+
+// #3205: skill content-hash mismatch event. The trust store detected
+// that a skill's body changed since the recorded hash. Track the
+// mismatched skill name on the affected session so the SkillsPanel
+// can render a red-flag indicator. The wire payload also carries
+// `oldHashPrefix` / `newHashPrefix` / `mode`, but the panel just
+// needs the name list for the indicator UI.
+function handleSkillChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
+  if (!skillName) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => {
+    const prev = Array.isArray(state.mismatchedSkillNames) ? state.mismatchedSkillNames : [];
+    if (prev.includes(skillName)) return {};
+    return { mismatchedSkillNames: [...prev, skillName] };
+  });
 }
 
 // #3209: runtime manual-skill toggle broadcasts. Update the cached
@@ -1337,6 +1362,7 @@ const HANDLERS: Record<string, Handler> = {
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
   skills_list: handleSkillsList,
+  skill_changed: handleSkillChanged,
   skill_activated: handleSkillActivated,
   skill_deactivated: handleSkillDeactivated,
   permission_mode_changed: handlePermissionModeChanged,

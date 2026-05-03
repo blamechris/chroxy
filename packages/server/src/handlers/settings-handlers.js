@@ -393,13 +393,30 @@ function handleListSkills(ws, client, msg, ctx) {
   const activeSet = entry?.session?._activeManualSkills instanceof Set
     ? entry.session._activeManualSkills
     : new Set()
-  const cwd = entry?.session?.cwd || null
-  const repoDir = cwd ? findRepoSkillsDir(cwd) : null
+  // #3205: prefer the session's resolved skill dirs when available so
+  // the response matches what the session is actually injecting. This
+  // matters when the session was constructed with `skillsDir` /
+  // `repoSkillsDir` overrides (tests pin temp dirs; future wiring may
+  // override per-session). Fall back to the defaults / cwd-walk only
+  // when the session doesn't expose these — typically because no
+  // session is bound (the no-session path scans the global tier).
+  const sessionSkillsDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+  const sessionRepoDir = entry?.session
+    ? (entry.session._repoSkillsDir !== undefined
+      ? entry.session._repoSkillsDir
+      : (entry.session.cwd ? findRepoSkillsDir(entry.session.cwd) : null))
+    : null
   const provider = entry?.provider || null
+  // #3205: trust store powers the hash + last-activated metadata in
+  // the response. When the session has no trust store wired (operator
+  // didn't opt into 'warn' / 'block' modes), those fields are simply
+  // omitted — the dashboard renders the panel without those columns
+  // rather than showing fake data.
+  const trustStore = entry?.session?._trustStore || null
 
   const skills = loadActiveSkillsLayered({
-    globalDir: DEFAULT_SKILLS_DIR,
-    repoDir,
+    globalDir: sessionSkillsDir,
+    repoDir: sessionRepoDir,
     provider,
     activeManualSkills: activeSet,
     includeInactive: true,
@@ -410,7 +427,8 @@ function handleListSkills(ws, client, msg, ctx) {
       ? s.metadata.activation.trim().toLowerCase()
       : null
     const activation = rawActivation === 'manual' ? 'manual' : 'auto'
-    return {
+
+    const out = {
       name: s.name,
       description: s.description,
       source: s.source || 'global',
@@ -420,6 +438,28 @@ function handleListSkills(ws, client, msg, ctx) {
       // already set from the activeManualSkills membership.
       active: activation === 'auto' ? true : !!s.active,
     }
+
+    // #3205: optional metadata fields — `version` from the YAML
+    // frontmatter, `hashPrefix` + `lastVerified` from the trust store.
+    // All optional so older clients keep parsing this response, and a
+    // trust-disabled session still gets a useful panel (just without
+    // the audit columns).
+    const version = typeof s.metadata?.version === 'string' ? s.metadata.version.trim() : null
+    if (version) out.version = version
+
+    if (trustStore && typeof trustStore.getRecord === 'function' && typeof s.path === 'string') {
+      const record = trustStore.getRecord(s.path)
+      if (record) {
+        // 8-char hash prefix matches the sanitised log + skill_changed
+        // wire format from #3215 / #3234. The full SHA never leaves
+        // the server.
+        out.hashPrefix = record.sha256.slice(0, 8)
+        if (typeof record.lastVerified === 'string') out.lastVerified = record.lastVerified
+        if (typeof record.firstSeen === 'string') out.firstSeen = record.firstSeen
+      }
+    }
+
+    return out
   })
 
   ctx.send(ws, { type: 'skills_list', skills })
@@ -491,7 +531,7 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
     return
   }
   if (typeof entry.session.deactivateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill toggling' })
     return
   }
   // #3246: same capability gate as activate — subprocess providers

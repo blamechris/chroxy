@@ -91,6 +91,49 @@ describe('skills-trust', () => {
     })
   })
 
+  // #3205: getRecord is the read-only accessor used by the
+  // dashboard's skills metadata UI. Returns the recorded entry
+  // without mutating the ledger; returns null when no record exists.
+  describe('getRecord (#3205)', () => {
+    it('returns null for a path the trust store has never seen', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store.getRecord('/never-seen.md'), null)
+    })
+
+    it('returns the recorded sha256 + firstSeen + lastVerified on hit', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/known.md', 'hello')
+      const rec = store.getRecord('/abs/known.md')
+      assert.ok(rec, 'expected a record')
+      assert.equal(typeof rec.sha256, 'string')
+      assert.equal(rec.sha256.length, 64)
+      assert.equal(typeof rec.firstSeen, 'string')
+      assert.equal(typeof rec.lastVerified, 'string')
+    })
+
+    it('does not mutate ledger state (read-only accessor)', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/known.md', 'hello')
+      store.flush()
+      // After the flush the store is clean — getRecord must NOT
+      // mark it dirty (otherwise the next destroy would re-flush
+      // unnecessarily and the test "amortise writes" intent breaks).
+      assert.equal(store._dirty, false)
+      store.getRecord('/abs/known.md')
+      assert.equal(store._dirty, false, 'getRecord must be a pure read')
+    })
+
+    it('returns clones — caller mutation does not poison the ledger', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/known.md', 'hello')
+      const rec = store.getRecord('/abs/known.md')
+      rec.sha256 = 'tampered'
+      const fresh = store.getRecord('/abs/known.md')
+      assert.notEqual(fresh.sha256, 'tampered',
+        'getRecord must return a defensive copy so callers can\'t mutate the in-memory ledger')
+    })
+  })
+
   describe('inspect — verified', () => {
     it('returns status `verified` when content matches the recorded hash', () => {
       const store = new SkillsTrustStore({ filePath: trustPath })

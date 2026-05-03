@@ -1,11 +1,16 @@
 /**
- * SkillsPanel — manual-skill toggles for the active session (#3209).
+ * SkillsPanel — skills metadata + manual-skill toggles for the active session.
  *
  * Renders a popover-style list of all skills the active session has
  * loaded (auto + manual). Auto skills are shown read-only; manual
  * skills get a checkbox toggle that fires `skill_activate` /
  * `skill_deactivate` WS messages. The server broadcasts back so all
  * clients on the same session stay in sync.
+ *
+ * #3209: runtime activation toggles.
+ * #3205: skills metadata (source, version, last-activated, hash) +
+ * red-flag indicator on hash mismatch so operators can audit before
+ * activating community-shared skills.
  *
  * Compact native checkboxes — no extra deps. Accessibility comes from
  * the label association.
@@ -21,14 +26,70 @@ export interface SkillsPanelProps {
   // unknown / older servers — operators see the skill list but the
   // checkboxes are disabled with an explanatory note.
   canToggle?: boolean
+  // #3205: skill names whose hash mismatched the trust store's
+  // recorded value during this session (delivered via
+  // `skill_changed` events). The panel renders a red flag next to
+  // each entry so the operator can audit before activating.
+  mismatchedSkillNames?: Set<string>
   onActivate: (skillName: string) => void
   onDeactivate: (skillName: string) => void
   onClose: () => void
 }
 
+// #3205: format an ISO-8601 timestamp as a compact relative-or-date
+// label. Same-day shows the time; earlier dates show the localised
+// date. Defensive: returns the raw string when parsing fails so a
+// non-ISO timestamp doesn't break rendering.
+function formatTimestamp(iso: string | undefined): string {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return iso
+  const d = new Date(t)
+  const now = new Date()
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate()
+  if (sameDay) return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+// #3205: render the per-skill metadata row (source / version /
+// last-activated / hash). Each field is conditional — older servers
+// or trust-disabled sessions omit the relevant fields and the row
+// just shrinks. Mismatch indicator (red flag) is rendered on the
+// `name` line above by the caller.
+function SkillMeta({ skill }: { skill: SessionSkillInfo }) {
+  const fields: Array<{ label: string; value: string; testid: string }> = []
+  if (skill.source) {
+    fields.push({ label: 'source', value: skill.source, testid: `skill-meta-source-${skill.name}` })
+  }
+  if (skill.version) {
+    fields.push({ label: 'version', value: skill.version, testid: `skill-meta-version-${skill.name}` })
+  }
+  if (skill.lastVerified) {
+    fields.push({ label: 'last seen', value: formatTimestamp(skill.lastVerified), testid: `skill-meta-last-verified-${skill.name}` })
+  }
+  if (skill.hashPrefix) {
+    fields.push({ label: 'hash', value: skill.hashPrefix, testid: `skill-meta-hash-${skill.name}` })
+  }
+  if (fields.length === 0) return null
+  return (
+    <span className="skill-meta">
+      {fields.map((f, i) => (
+        <span key={f.label} className="skill-meta-field" data-testid={f.testid}>
+          {i > 0 && <span className="skill-meta-sep" aria-hidden> · </span>}
+          <span className="skill-meta-label">{f.label}:</span>{' '}
+          <span className="skill-meta-value">{f.value}</span>
+        </span>
+      ))}
+    </span>
+  )
+}
+
 export function SkillsPanel({
   skills,
   canToggle = false,
+  mismatchedSkillNames,
   onActivate,
   onDeactivate,
   onClose,
@@ -37,6 +98,27 @@ export function SkillsPanel({
   // hierarchy: "always-on" first, "operator-controlled" below).
   const autoSkills = (skills || []).filter(s => s.activation !== 'manual')
   const manualSkills = (skills || []).filter(s => s.activation === 'manual')
+
+  // Stable empty Set so call sites without mismatch tracking don't
+  // need to construct one — and the .has() check below stays cheap.
+  const mismatched = mismatchedSkillNames || new Set<string>()
+
+  // #3205: red-flag indicator. Renders inline next to the skill name
+  // when the hash mismatched the trust-store record during this
+  // session. Plain emoji — accessible (warning emoji is read by
+  // screen readers as "warning"), no extra deps.
+  function MismatchFlag({ name }: { name: string }) {
+    if (!mismatched.has(name)) return null
+    return (
+      <span
+        className="skill-mismatch-flag"
+        data-testid={`skill-mismatch-${name}`}
+        title="Skill content changed since last verified — review before activating"
+        role="img"
+        aria-label="Hash mismatch: skill content changed since last verified"
+      >⚠️</span>
+    )
+  }
 
   return (
     <div className="skills-panel" data-testid="skills-panel" role="dialog" aria-label="Skills">
@@ -63,8 +145,12 @@ export function SkillsPanel({
           <ul className="skills-panel-list">
             {autoSkills.map(s => (
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
-                <span className="skill-name">{s.name}</span>
-                {s.description && <span className="skill-desc">{s.description}</span>}
+                <div className="skill-row">
+                  <span className="skill-name">{s.name}</span>
+                  <MismatchFlag name={s.name} />
+                  {s.description && <span className="skill-desc">{s.description}</span>}
+                </div>
+                <SkillMeta skill={s} />
               </li>
             ))}
           </ul>
@@ -96,8 +182,10 @@ export function SkillsPanel({
                     data-testid={`skill-toggle-${s.name}`}
                   />
                   <span className="skill-name">{s.name}</span>
+                  <MismatchFlag name={s.name} />
                   {s.description && <span className="skill-desc">{s.description}</span>}
                 </label>
+                <SkillMeta skill={s} />
               </li>
             ))}
           </ul>

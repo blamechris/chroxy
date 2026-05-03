@@ -181,11 +181,13 @@ export class BaseSession extends EventEmitter {
       if (collectTrustEvents) {
         layerOpts.onTrustMismatch = (info) => { pendingTrustEvents.push(info) }
       }
-      // On runtime reload (collectTrustEvents=false), still pass a
-      // callback so the loader records new hashes — but drop the events
-      // (no `skill_changed` emit). Reload is a user-initiated toggle,
-      // not a content scan; the trust file stays consistent without
-      // double-firing the mismatch UX.
+      // Hash recording happens via `trustStore.inspect()` inside the
+      // loader regardless of whether `onTrustMismatch` is wired — the
+      // callback is just the mismatch-event delivery channel. On
+      // runtime reload (collectTrustEvents=false) we deliberately
+      // omit the callback so a user-initiated toggle does NOT
+      // re-emit `skill_changed` events that already fired at session
+      // construction.
     }
 
     this._skills = loadActiveSkillsLayered(layerOpts)
