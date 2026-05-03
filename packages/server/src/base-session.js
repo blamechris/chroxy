@@ -172,9 +172,9 @@ export class BaseSession extends EventEmitter {
       defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
       // #3253: include inactive manual skills in the unified scan so
       // `activateSkill` can validate names against `_manualSkillNames`
-      // without paying for a second `_listManualSkillNames()` scan.
-      // The active subset is partitioned out below before populating
-      // the prompt-context caches — inactive entries never reach the
+      // without paying for a second validation-only scan. The active
+      // subset is partitioned out below before populating the
+      // prompt-context caches — inactive entries never reach the
       // model. Cost: a few metadata-only entries; bodies are not
       // loaded for inactive manual skills (skills-loader.js:646).
       includeInactive: true,
@@ -272,11 +272,10 @@ export class BaseSession extends EventEmitter {
     // #3253: speculatively add and reload — the unified `_loadSkills`
     // scan populates both the prompt-context caches AND the
     // `_manualSkillNames` validation set, so we can reuse one scan
-    // for validation + reload rather than calling
-    // `_listManualSkillNames` (a separate full scan) first. On the
-    // rare failure path (typo / auto-skill name) we run a rollback
-    // scan to restore the active set; the common success path stays
-    // at one layered scan.
+    // for validation + reload rather than running a separate
+    // validation-only scan first. On the rare failure path (typo /
+    // auto-skill name) we run a rollback scan to restore the active
+    // set; the common success path stays at one layered scan.
     this._activeManualSkills.add(skillName)
     this._loadSkills()
     if (!this._manualSkillNames.has(skillName)) {
