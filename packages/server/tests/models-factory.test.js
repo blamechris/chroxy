@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createModelsRegistry, canonicalStringify } from '../src/models.js'
@@ -271,6 +271,136 @@ describe('disk cache (loadCache / saveCache)', () => {
     r.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
     assert.equal(r.saveCache(nested), true)
     assert.ok(existsSync(nested))
+  })
+
+  // #3162: cached entries whose family/version stem isn't in FALLBACK_MODELS
+  // must be dropped on load, otherwise retired model ids surface in the
+  // picker and selecting them fails the API call. Affects CLI-only users
+  // most because the SDK's supportedModels() never refreshes the cache.
+  it('loadCache drops stale entries whose stem is not in FALLBACK_MODELS', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 }, // retired
+        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+        { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
+      ],
+      defaultModelId: 'sonnet-4-6',
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+    const loaded = r.getModels().map(m => m.fullId)
+    assert.ok(!loaded.includes('claude-opus-4-6'), `retired claude-opus-4-6 should be dropped, got ${loaded.join(',')}`)
+    assert.ok(loaded.includes('claude-opus-4-7'), 'current claude-opus-4-7 should be kept')
+    assert.ok(loaded.includes('claude-sonnet-4-6'), 'current claude-sonnet-4-6 should be kept')
+    // FALLBACK_MODELS includes haiku-4-5 — it should be merged in even though
+    // the cache didn't have it, so the picker always has the canonical aliases.
+    assert.ok(loaded.includes('claude-haiku-4-5'), 'fallback claude-haiku-4-5 should be merged in')
+    assert.equal(r.getDefaultModelId(), 'sonnet-4-6')
+  })
+
+  it('loadCache returns false when every cached entry is stale (no stem match)', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
+        { id: 'sonnet-3-5', fullId: 'claude-sonnet-3-5-20240620', label: 'Sonnet 3.5', contextWindow: 200_000 },
+      ],
+    }))
+    const r = createModelsRegistry()
+    const before = r.getModels()
+    assert.equal(r.loadCache(cachePath), false, 'all-stale cache should be treated as missing')
+    // Registry state untouched — still at FALLBACK_MODELS
+    assert.deepEqual(r.getModels(), before)
+  })
+
+  it('loadCache keeps dated and [1m] variants whose stem matches a FALLBACK family', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-7-20251201', fullId: 'claude-opus-4-7-20251201', label: 'Opus 4.7 (2025-12-01)', contextWindow: 1_000_000 },
+        { id: 'opus-4-7[1m]', fullId: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)', contextWindow: 1_000_000 },
+      ],
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+    const loaded = r.getModels().map(m => m.fullId)
+    assert.ok(loaded.includes('claude-opus-4-7-20251201'), 'dated variant of current opus-4-7 should be kept')
+    assert.ok(loaded.includes('claude-opus-4-7[1m]'), '[1m] variant of current opus-4-7 should be kept')
+  })
+
+  it('loadCache discards a defaultModelId that points to a stale entry', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
+        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+      ],
+      defaultModelId: 'opus-4-6',
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+    assert.equal(r.getDefaultModelId(), null, 'stale default should be discarded')
+  })
+
+  // SDK-reported ids commonly use the `claude-{family}-{major}-{date}` shape
+  // (e.g. `claude-sonnet-4-20250514`). The API still accepts these even though
+  // they don't carry an explicit minor, so they must pass the cache filter as
+  // long as the {family}-{major} portion is in FALLBACK_MODELS.
+  it('loadCache keeps SDK-reported dated ids when their family-major matches a fallback', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'sonnet-4-20250514', fullId: 'claude-sonnet-4-20250514', label: 'Sonnet 4 (2025-05-14)', contextWindow: 200_000 },
+        { id: 'opus-4-20250514', fullId: 'claude-opus-4-20250514', label: 'Opus 4 (2025-05-14)', contextWindow: 1_000_000 },
+        { id: 'sonnet-3-20240620', fullId: 'claude-sonnet-3-20240620', label: 'Sonnet 3', contextWindow: 200_000 }, // family retired
+      ],
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+    const loaded = r.getModels().map(m => m.fullId)
+    assert.ok(loaded.includes('claude-sonnet-4-20250514'), 'dated sonnet-4 should be kept (family in FALLBACK)')
+    assert.ok(loaded.includes('claude-opus-4-20250514'), 'dated opus-4 should be kept (family in FALLBACK)')
+    assert.ok(!loaded.includes('claude-sonnet-3-20240620'), 'dated sonnet-3 should be dropped (sonnet-3 family retired)')
+  })
+
+  // After pruning, loadCache should write the cleaned list back to disk so
+  // subsequent startups don't re-filter the same stale entries. Otherwise
+  // CLI-only users (no updateModels() refresh path) keep paying the filter
+  // cost forever and the disk file never heals.
+  it('loadCache persists the cleaned list to disk when stale entries are pruned', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
+        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+      ],
+    }))
+    const beforeMtime = statSync(cachePath).mtimeMs
+
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+
+    // The on-disk file should now have been rewritten without the retired entry.
+    const afterRaw = JSON.parse(readFileSync(cachePath, 'utf-8'))
+    const afterIds = afterRaw.models.map(m => m.fullId)
+    assert.ok(!afterIds.includes('claude-opus-4-6'), 'disk file should no longer contain claude-opus-4-6')
+    assert.ok(afterIds.includes('claude-opus-4-7'), 'disk file should still contain claude-opus-4-7')
+    assert.ok(statSync(cachePath).mtimeMs >= beforeMtime, 'disk file should have been touched')
+  })
+
+  // No-op load (nothing pruned, nothing changed) should NOT touch the disk.
+  // Otherwise every server startup would needlessly rewrite the cache file.
+  it('loadCache does not rewrite the disk file when no entries are pruned', async () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+        { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
+        { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5', contextWindow: 200_000 },
+      ],
+    }))
+    const beforeMtime = statSync(cachePath).mtimeMs
+    // Tiny pause so a same-millisecond rewrite would be detectable.
+    await new Promise(resolve => setTimeout(resolve, 5))
+
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+
+    assert.equal(statSync(cachePath).mtimeMs, beforeMtime, 'disk file should not be rewritten on clean load')
   })
 
   it('saveCache swallows write errors (returns false) on read-only parent', () => {
