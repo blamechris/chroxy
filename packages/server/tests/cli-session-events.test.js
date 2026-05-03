@@ -218,7 +218,7 @@ describe('CliSession stream-event handling', () => {
   })
 
   describe('tool_start emission', () => {
-    it('emits tool_start on content_block_start for tool_use', () => {
+    it('emits tool_start on content_block_start for tool_use with the tool id as messageId', () => {
       const session = createSession()
       const events = []
       session.on('tool_start', (data) => events.push(data))
@@ -227,7 +227,49 @@ describe('CliSession stream-event handling', () => {
 
       assert.equal(events.length, 1)
       assert.equal(events[0].tool, 'Bash')
-      assert.equal(events[0].messageId, 'msg-1')
+      // messageId is the tool's content_block.id, not the turn-level _currentMessageId.
+      // Each tool in a multi-tool turn must have a distinct id; sharing the turn-level
+      // id collides with the post-tool stream_start and corrupts client message state
+      // (ChatView dedup drops bubbles, flushPendingDeltas leaks deltas into tool_use).
+      assert.equal(events[0].messageId, 'toolu_1')
+      assert.equal(events[0].toolUseId, 'toolu_1')
+    })
+
+    it('gives each tool in a multi-tool turn a distinct messageId', () => {
+      const session = createSession()
+      const events = []
+      session.on('tool_start', (data) => events.push(data))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_a'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolUseStart('Bash', 'toolu_b'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolUseStart('Read', 'toolu_c'))
+
+      assert.equal(events.length, 3)
+      const ids = events.map((e) => e.messageId)
+      assert.deepEqual(ids, ['toolu_a', 'toolu_b', 'toolu_c'])
+      // Sanity: all distinct, none equals the turn-level _currentMessageId.
+      assert.equal(new Set(ids).size, 3)
+      assert.ok(!ids.includes('msg-1'))
+    })
+
+    it('falls back to a suffixed turn id when content_block.id is missing', () => {
+      const session = createSession()
+      const events = []
+      session.on('tool_start', (data) => events.push(data))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Bash' },
+        },
+      })
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].messageId, 'msg-1-tool')
+      assert.equal(events[0].toolUseId, undefined)
     })
   })
 

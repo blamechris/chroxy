@@ -576,8 +576,13 @@ export class CliSession extends BaseSession {
               ctx.toolInputChunks = ''
               ctx.toolInputBytes = 0
               ctx.toolInputOverflow = false
+              // Use the tool's content_block.id as the tool_start messageId
+              // so each tool in a multi-tool turn has a distinct id. Sharing
+              // the turn-level messageId across tools collides with the
+              // post-tool stream_start id and corrupts client message state.
+              // Mirrors sdk-session.js.
               const toolStartData = {
-                messageId,
+                messageId: event.content_block.id || `${messageId}-tool`,
                 toolUseId: event.content_block.id,
                 tool: event.content_block.name,
                 input: null,
