@@ -132,20 +132,33 @@ export function canonicalStringify(value) {
 }
 
 /**
- * Derive a "version stem" from a model fullId, used to detect retired model
- * versions in the disk cache (#3162). The stem strips trailing date suffixes
- * (`-20251201`) and the `[1m]` variant marker so that
- *   `claude-opus-4-7-20251201[1m]` and `claude-opus-4-7` share the same stem.
- * `loadCache()` then drops any cached entry whose stem is not present in
- * `FALLBACK_MODELS` (the version-pinned canonical list shipped with this
- * release) — that prevents a previously-cached `claude-opus-4-6` from
- * surfacing in the picker after the user upgrades to a build whose fallback
- * is `claude-opus-4-7`.
+ * Decompose a Claude model fullId into its `family` (e.g. `claude-opus-4`)
+ * and optional numeric `minor` (e.g. `7` for `claude-opus-4-7`). Used by
+ * `loadCache()` to detect retired model versions in the disk cache (#3162):
+ *
+ *   `claude-opus-4-7`            → { family: 'claude-opus-4', minor: 7 }
+ *   `claude-opus-4-7[1m]`        → { family: 'claude-opus-4', minor: 7 }
+ *   `claude-opus-4-7-20251201`   → { family: 'claude-opus-4', minor: 7 }
+ *   `claude-sonnet-4-20250514`   → { family: 'claude-sonnet-4', minor: null }
+ *   `claude-sonnet-4-6`          → { family: 'claude-sonnet-4', minor: 6 }
+ *
+ * `loadCache()` keeps cached entries whose family is present in
+ * `FALLBACK_MODELS` and (when minor is known) whose minor matches a fallback
+ * minor for the same family. SDK-reported dated ids like
+ * `claude-sonnet-4-20250514` carry no minor and pass through on family
+ * match — the API still accepts them. Family/major-only retirement (e.g.
+ * sonnet 3 family removed entirely) is caught by the family-not-in-fallback
+ * branch.
  */
-function modelVersionStem(fullId) {
-  if (typeof fullId !== 'string') return ''
-  const stripped = fullId.endsWith(ONE_M_SUFFIX) ? fullId.slice(0, -ONE_M_SUFFIX.length) : fullId
-  return stripped.replace(/-\d{8,}$/, '')
+function modelFamilyAndMinor(fullId) {
+  if (typeof fullId !== 'string') return { family: '', minor: null }
+  let stripped = fullId.endsWith(ONE_M_SUFFIX) ? fullId.slice(0, -ONE_M_SUFFIX.length) : fullId
+  stripped = stripped.replace(/-\d{8,}$/, '')
+  const m = stripped.match(/^(claude-[a-z]+-\d+)(?:-(\d+))?$/)
+  if (m) {
+    return { family: m[1], minor: m[2] ? parseInt(m[2], 10) : null }
+  }
+  return { family: stripped, minor: null }
 }
 
 /**
@@ -242,6 +255,34 @@ export function createModelsRegistry(hooks = {}) {
 
   function snapshotString() {
     return canonicalStringify({ models: activeModels, defaultModelId })
+  }
+
+  // Hoisted out of the returned method so loadCache() can heal the disk
+  // file in the same pass when stale entries are pruned (#3162).
+  function saveCacheImpl(path) {
+    const snapshot = snapshotString()
+    if (snapshot === lastSavedSnapshot) return true
+
+    const tmpPath = `${path}.tmp-${process.pid}`
+    try {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileRestricted(tmpPath, JSON.stringify({
+        models: activeModels,
+        defaultModelId,
+        savedAt: Date.now(),
+      }, null, 2))
+      renameSync(tmpPath, path)
+      lastSavedSnapshot = snapshot
+      return true
+    } catch (err) {
+      // Persisting the cache failed (permission denied, disk full, read-only
+      // parent). The in-memory list stays live for this process, but will be
+      // lost on restart — surface at warn level so operators can diagnose
+      // from ~/.chroxy/logs/chroxy.log.
+      log.warn(`saveCache: failed to persist models cache to ${path}: ${err?.code || ''} ${err?.message || err}`.trim())
+      try { unlinkSync(tmpPath) } catch {}
+      return false
+    }
   }
 
   rebuildLookups(fallbackModels)
@@ -427,19 +468,34 @@ export function createModelsRegistry(hooks = {}) {
         const parsed = JSON.parse(raw)
         if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return false
 
-        // Filter out cached entries whose family/version stem is no longer
-        // in FALLBACK_MODELS (#3162). FALLBACK_MODELS is version-pinned per
-        // release, so any cached entry whose stem isn't in that set is a
-        // retired model id that the API will reject. CLI-only users never
-        // have updateModels() called from the SDK, so without this filter
-        // a stale cache lingers indefinitely.
-        const supportedStems = new Set(fallbackModels.map(m => modelVersionStem(m.fullId)))
+        // Filter out cached entries whose family is no longer in
+        // FALLBACK_MODELS, OR whose minor version was superseded (#3162).
+        // FALLBACK_MODELS is version-pinned per release, so it's the
+        // authoritative set of currently-supported families/minors.
+        // Date-suffixed SDK ids (e.g. `claude-sonnet-4-20250514`) carry no
+        // explicit minor and pass through on family match — the API still
+        // accepts them. Family-only retirement (e.g. sonnet 3 dropped
+        // entirely) is caught by the family-not-in-fallback branch.
+        // CLI-only users never have updateModels() called, so without
+        // this filter a stale cache lingers indefinitely.
+        const fallbackByFamily = new Map()
+        for (const fb of fallbackModels) {
+          const { family, minor } = modelFamilyAndMinor(fb.fullId)
+          if (!family) continue
+          if (!fallbackByFamily.has(family)) fallbackByFamily.set(family, new Set())
+          if (minor !== null) fallbackByFamily.get(family).add(minor)
+        }
 
         const valid = parsed.models.filter(m =>
           m && typeof m.id === 'string' && typeof m.fullId === 'string',
         )
         const models = valid
-          .filter(m => supportedStems.has(modelVersionStem(m.fullId)))
+          .filter(m => {
+            const { family, minor } = modelFamilyAndMinor(m.fullId)
+            if (!fallbackByFamily.has(family)) return false
+            if (minor === null) return true
+            return fallbackByFamily.get(family).has(minor)
+          })
           .map(m => ({
             id: m.id,
             fullId: m.fullId,
@@ -484,14 +540,24 @@ export function createModelsRegistry(hooks = {}) {
         // otherwise resolveModelId would map a stale short id to the same
         // retired fullId on the first set_model call.
         let nextDefault = parsed.defaultModelId || null
-        if (nextDefault && !models.some(m => m.id === nextDefault || m.fullId === nextDefault)) {
-          nextDefault = null
-        }
+        const defaultDiscarded = nextDefault && !models.some(m => m.id === nextDefault || m.fullId === nextDefault)
+        if (defaultDiscarded) nextDefault = null
 
         applyModels(models, nextDefault)
         // Treat the loaded state as the last-saved baseline so subsequent
         // saveCache() calls only hit disk when the registry actually drifts.
         lastSavedSnapshot = snapshotString()
+
+        // Heal the disk file when we pruned anything. Without this the
+        // CLI-only/offline path would re-filter the same stale entries on
+        // every startup since updateModels() never runs to overwrite them.
+        if (droppedStaleCount > 0 || defaultDiscarded) {
+          // Force a write by clearing the snapshot baseline (saveCacheImpl
+          // skips when snapshot matches lastSavedSnapshot).
+          lastSavedSnapshot = null
+          saveCacheImpl(path)
+        }
+
         return true
       } catch {
         return false
@@ -512,29 +578,7 @@ export function createModelsRegistry(hooks = {}) {
      * writeFileRestricted (0600).
      */
     saveCache(path = getDefaultCachePath()) {
-      const snapshot = snapshotString()
-      if (snapshot === lastSavedSnapshot) return true
-
-      const tmpPath = `${path}.tmp-${process.pid}`
-      try {
-        mkdirSync(dirname(path), { recursive: true })
-        writeFileRestricted(tmpPath, JSON.stringify({
-          models: activeModels,
-          defaultModelId,
-          savedAt: Date.now(),
-        }, null, 2))
-        renameSync(tmpPath, path)
-        lastSavedSnapshot = snapshot
-        return true
-      } catch (err) {
-        // Persisting the cache failed (permission denied, disk full, read-only
-        // parent). The in-memory list stays live for this process, but will be
-        // lost on restart — surface at warn level so operators can diagnose
-        // from ~/.chroxy/logs/chroxy.log.
-        log.warn(`saveCache: failed to persist models cache to ${path}: ${err?.code || ''} ${err?.message || err}`.trim())
-        try { unlinkSync(tmpPath) } catch {}
-        return false
-      }
+      return saveCacheImpl(path)
     },
   }
 }
