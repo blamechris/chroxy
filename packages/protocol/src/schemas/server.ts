@@ -258,8 +258,13 @@ export const ServerSkillsListSchema = z.object({
     // those columns rather than showing fake data.
     version: z.string().optional(),
     hashPrefix: z.string().length(8).regex(/^[0-9a-f]{8}$/).optional(),
-    firstSeen: z.string().optional(),
-    lastVerified: z.string().optional(),
+    // #3250: ISO-8601 strings emitted by SkillsTrustStore.getRecord().
+    // Tightened from `z.string()` to `z.string().datetime()` so a future
+    // serialization drift (e.g. someone passing `Date.toString()` instead
+    // of `Date.toISOString()`) fails at the schema layer rather than
+    // surfacing as a "Never" / "Invalid Date" in the dashboard.
+    firstSeen: z.string().datetime().optional(),
+    lastVerified: z.string().datetime().optional(),
   })),
 })
 
