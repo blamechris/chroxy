@@ -247,6 +247,38 @@ describe('dashboard message-handler dispatch', () => {
       const toolUseMsg = ss.messages.find((m: any) => m.id === 'msg-1')
       expect(toolUseMsg?.content).toBe('ls')
     })
+
+    // Same defensive fallback in the flat-messages mode, exercised when the
+    // session isn't registered in sessionStates yet (pre-session bootstrap or
+    // server hasn't echoed session_switched). The collision must still route to
+    // a suffixed response id without polluting the tool_use bubble.
+    it('lazy-creates response bubble in flat-messages mode when collision hits a tool_use', async () => {
+      const toolMsg = { id: 'msg-flat', type: 'tool_use' as const, content: 'ls', timestamp: 1 }
+      store = createMockStore(baseState({
+        activeSessionId: null,
+        sessionStates: {},
+        messages: [toolMsg],
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-flat', delta: 'flat ' },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-flat', delta: 'response' },
+        ctx() as any,
+      )
+      await new Promise((r) => setTimeout(r, 150))
+
+      const flat = (store.getState() as any).messages
+      const responseMsg = flat.find((m: any) => m.id === 'msg-flat-response')
+      expect(responseMsg).toBeDefined()
+      expect(responseMsg?.type).toBe('response')
+      expect(responseMsg?.content).toBe('flat response')
+      const toolUseMsg = flat.find((m: any) => m.id === 'msg-flat')
+      expect(toolUseMsg?.content).toBe('ls')
+    })
   })
 
   describe('malformed input', () => {
