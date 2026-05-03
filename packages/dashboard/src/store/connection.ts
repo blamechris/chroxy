@@ -1354,6 +1354,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         contextUsage: null,
         lastResultCost: null,
         lastResultDuration: null,
+        isIdle: true,
         sessionNotifications: filteredNotifications,
       });
     }

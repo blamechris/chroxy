@@ -27,6 +27,7 @@ import {
   handleMessage,
   setStore,
   clearDeltaBuffers,
+  clearPermissionSplits,
   stopHeartbeat,
   resetReplayFlags,
 } from './message-handler'
@@ -93,6 +94,7 @@ describe('dashboard message-handler dispatch', () => {
     vi.clearAllMocks()
     localStorage.clear()
     clearDeltaBuffers()
+    clearPermissionSplits()
     mockSocket = createMockSocket()
     store = createMockStore(baseState())
     setStore(store)
@@ -101,6 +103,7 @@ describe('dashboard message-handler dispatch', () => {
   afterEach(() => {
     stopHeartbeat()
     clearDeltaBuffers()
+    clearPermissionSplits()
     resetReplayFlags()
   })
 
