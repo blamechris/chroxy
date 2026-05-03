@@ -268,8 +268,10 @@ describe('CliSession stream-event handling', () => {
       })
 
       assert.equal(events.length, 1)
+      // Both fields reuse the synthesized fallback id so the wire schema
+      // (ServerToolStartSchema.toolUseId: z.string()) still holds.
       assert.equal(events[0].messageId, 'msg-1-tool')
-      assert.equal(events[0].toolUseId, undefined)
+      assert.equal(events[0].toolUseId, 'msg-1-tool')
     })
   })
 

@@ -403,9 +403,14 @@ export class SdkSession extends BaseSession {
                     this.emit('stream_start', { messageId })
                   }
                 } else if (blockType === 'tool_use') {
+                  // Reuse a single derived toolId for both fields so the wire
+                  // schema (`ServerToolStartSchema.toolUseId: z.string()`)
+                  // holds even on the defensive fallback path. Mirrors
+                  // cli-session.js.
+                  const toolId = event.content_block.id || `${messageId}-tool`
                   const toolStartData = {
-                    messageId: event.content_block.id || `${messageId}-tool`,
-                    toolUseId: event.content_block.id,
+                    messageId: toolId,
+                    toolUseId: toolId,
                     tool: event.content_block.name,
                     input: null,
                   }
