@@ -390,9 +390,12 @@ function handleListSkills(ws, client, msg, ctx) {
   // layered scan with `includeInactive: true` against that session's
   // active set — the session's cached `_skills` only contains active
   // entries (manual ones are filtered at construction).
-  const activeSet = entry?.session?._activeManualSkills instanceof Set
-    ? entry.session._activeManualSkills
-    : new Set()
+  // #3252: prefer the public getter so future BaseSession internal
+  // refactors don't silently turn this into "no active skills" without
+  // a type error or test failure. Optional-chaining the getter keeps
+  // mock sessions (which don't define the method) compatible.
+  const activeSetCandidate = entry?.session?.getActiveManualSkillsRaw?.()
+  const activeSet = activeSetCandidate instanceof Set ? activeSetCandidate : new Set()
   // #3205: prefer the session's resolved skill dirs when available so
   // the response matches what the session is actually injecting. This
   // matters when the session was constructed with `skillsDir` /
@@ -412,7 +415,9 @@ function handleListSkills(ws, client, msg, ctx) {
   // didn't opt into 'warn' / 'block' modes), those fields are simply
   // omitted — the dashboard renders the panel without those columns
   // rather than showing fake data.
-  const trustStore = entry?.session?._trustStore || null
+  // #3252: same getter pattern as activeSet — keeps mock sessions
+  // working without forcing every test to add the method.
+  const trustStore = entry?.session?.getTrustStore?.() ?? null
 
   const skills = loadActiveSkillsLayered({
     globalDir: sessionSkillsDir,
