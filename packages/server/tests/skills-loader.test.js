@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -374,6 +374,160 @@ describe('skills-loader', () => {
       const skills = loadActiveSkillsLayered({ globalDir, repoDir: globalDir })
       assert.equal(skills.length, 1)
       assert.equal(skills[0].source, 'repo')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3201: symlink defense — realpath each candidate; reject escapes unless
+  // they land under an explicit allowlist root.
+  // -----------------------------------------------------------------------
+
+  describe('symlink defense (#3201)', () => {
+    let outsideDir
+    beforeEach(() => {
+      outsideDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-outside-'))
+    })
+    afterEach(() => {
+      rmSync(outsideDir, { recursive: true, force: true })
+    })
+
+    it('rejects a skill that is a symlink to a file outside the skills root', () => {
+      const evilSource = join(outsideDir, 'evil.md')
+      writeFileSync(evilSource, '# Evil\n\nLeaked from outside.\n')
+
+      const linkPath = join(dir, 'evil.md')
+      symlinkSync(evilSource, linkPath)
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 0, 'symlink to outside should be rejected')
+    })
+
+    it('accepts a symlink to a file within the skills root', () => {
+      // Real file inside the dir, plus a symlink (also inside) pointing at it.
+      const realPath = join(dir, 'real.md')
+      writeFileSync(realPath, '# Real\n\nbody\n')
+
+      const linkPath = join(dir, 'link.md')
+      symlinkSync(realPath, linkPath)
+
+      const skills = loadActiveSkills(dir)
+      const names = skills.map((s) => s.name).sort()
+      assert.deepEqual(names, ['link', 'real'])
+    })
+
+    it('accepts a symlink that resolves into an allowlisted root', () => {
+      const sharedRoot = mkdtempSync(join(tmpdir(), 'chroxy-shared-skills-'))
+      try {
+        const sharedSkill = join(sharedRoot, 'community.md')
+        writeFileSync(sharedSkill, '# Community skill\n\nshared body\n')
+
+        const linkPath = join(dir, 'community.md')
+        symlinkSync(sharedSkill, linkPath)
+
+        // Without the allowlist, the symlink is rejected.
+        const rejected = loadActiveSkills(dir)
+        assert.equal(rejected.length, 0)
+
+        // With the allowlist, it's accepted.
+        const accepted = loadActiveSkills(dir, { allowedRoots: [sharedRoot] })
+        assert.equal(accepted.length, 1)
+        assert.equal(accepted[0].name, 'community')
+        assert.equal(accepted[0].body, '# Community skill\n\nshared body\n')
+      } finally {
+        rmSync(sharedRoot, { recursive: true, force: true })
+      }
+    })
+
+    it('rejects a symlink whose target was deleted (broken link)', () => {
+      const evilSource = join(outsideDir, 'gone.md')
+      writeFileSync(evilSource, 'temp')
+      const linkPath = join(dir, 'gone.md')
+      symlinkSync(evilSource, linkPath)
+      rmSync(evilSource)
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 0)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3203: markdown-only enforcement — extension allowlist, content sniffing,
+  // vendored-directory skip list.
+  // -----------------------------------------------------------------------
+
+  describe('markdown-only enforcement (#3203)', () => {
+    it('rejects files with a non-markdown extension by default', () => {
+      writeFileSync(join(dir, 'evil.sh'), '#!/bin/sh\necho hi\n')
+      writeFileSync(join(dir, 'note.txt'), 'plain text but wrong extension')
+      writeFileSync(join(dir, 'good.md'), '# good')
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'good')
+    })
+
+    it('rejects a binary file even if it has a .md extension', () => {
+      // First bytes contain a NUL — common signature for executables / images.
+      const binaryContents = Buffer.concat([
+        Buffer.from('# Looks markdown but ', 'utf8'),
+        Buffer.from([0x00, 0x01, 0x02, 0x7f]),
+        Buffer.from(' more', 'utf8'),
+      ])
+      writeFileSync(join(dir, 'binary.md'), binaryContents)
+      writeFileSync(join(dir, 'fine.md'), '# Fine\n\nbody\n')
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'fine')
+    })
+
+    it('accepts UTF-8 markdown with multi-byte characters', () => {
+      // 你好 (Chinese), café (latin-1 supplement), and an emoji — every byte
+      // here is >= 0x80 and must NOT trip the binary detector.
+      const body = '# 你好\n\nA café in 東京 — 🎉\n'
+      writeFileSync(join(dir, 'unicode.md'), body)
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].body, body)
+    })
+
+    it('skips vendored-looking directories during scan', () => {
+      // Create vendored dirs (each with a planted "skill" inside) plus a
+      // legitimate top-level skill. The loader only looks at top-level files
+      // anyway; this confirms the dirs are filtered out cleanly when listed.
+      for (const name of ['.git', 'node_modules', '__pycache__', 'dist', 'build']) {
+        mkdirSync(join(dir, name), { recursive: true })
+        writeFileSync(join(dir, name, 'planted.md'), 'should not be loaded')
+      }
+      writeFileSync(join(dir, 'real.md'), '# real')
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1, 'only the top-level real.md should load')
+      assert.equal(skills[0].name, 'real')
+    })
+
+    it('honors a custom allowedExtensions list', () => {
+      writeFileSync(join(dir, 'instructions.txt'), 'I am a text-format skill.\n')
+      writeFileSync(join(dir, 'note.md'), '# Note')
+
+      // Default: only .md
+      const def = loadActiveSkills(dir)
+      assert.deepEqual(def.map((s) => s.name).sort(), ['note'])
+
+      // Custom: accept both .md and .txt — also confirms the leading-dot and
+      // case variants are normalized away.
+      const ext = loadActiveSkills(dir, { allowedExtensions: ['.MD', 'TXT'] })
+      assert.deepEqual(ext.map((s) => s.name).sort(), ['instructions', 'note'])
+    })
+
+    it('still respects the disabled-suffix convention for custom extensions', () => {
+      writeFileSync(join(dir, 'on.txt'), 'active')
+      writeFileSync(join(dir, 'off.disabled.txt'), 'disabled')
+
+      const skills = loadActiveSkills(dir, { allowedExtensions: ['txt'] })
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'on')
     })
   })
 })
