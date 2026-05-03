@@ -680,7 +680,7 @@ describe('dashboard message-handler dispatch', () => {
           activeSessionId: 's1',
           sessions: [{ sessionId: 's1', name: 'S1' } as any],
           sessionStates: {
-            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' as any },
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' },
           },
         }),
       )
@@ -697,6 +697,9 @@ describe('dashboard message-handler dispatch', () => {
         ctx() as any,
       )
       const ss = (store.getState() as any).sessionStates.s1
+      // streamingMessageId is bumped to the tool bubble's id, which matches
+      // the wire messageId when one is provided.
+      expect(ss.streamingMessageId).toBe(ss.messages[0].id)
       expect(ss.streamingMessageId).toBe('toolu_first')
       expect(ss.streamingMessageId).not.toBe('pending')
     })
@@ -727,13 +730,13 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.streamingMessageId).toBe('msg-real')
     })
 
-    it('bumps off "pending" with a fallback when tool_start has no messageId', () => {
+    it('bumps off "pending" using the synthesized tool bubble id when tool_start has no messageId', () => {
       store = createMockStore(
         baseState({
           activeSessionId: 's1',
           sessions: [{ sessionId: 's1', name: 'S1' } as any],
           sessionStates: {
-            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' as any },
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' },
           },
         }),
       )
@@ -750,11 +753,49 @@ describe('dashboard message-handler dispatch', () => {
         ctx() as any,
       )
       const ss = (store.getState() as any).sessionStates.s1
-      // Assert the contract (truthy, non-'pending') rather than the literal
-      // sentinel, so a future rename of 'tool-active' doesn't require lockstep
-      // test updates. The safety timer in sendInput only cares about !== 'pending'.
-      expect(ss.streamingMessageId).toBeTruthy()
+      // sharedToolStart synthesizes a 'tool-N-<ts>' id when msg.messageId is
+      // missing, and we bump streamingMessageId to that exact id so it always
+      // matches a real message in state. No separate sentinel needed.
+      expect(ss.messages).toHaveLength(1)
+      expect(ss.streamingMessageId).toBe(ss.messages[0].id)
       expect(ss.streamingMessageId).not.toBe('pending')
+      expect(ss.streamingMessageId).toMatch(/^tool-\d+-\d+$/)
+    })
+
+    // Flat-state branch (legacy / pre-session bootstrap): when the target
+    // session isn't in sessionStates, sendInput writes 'pending' to flat state
+    // and tool_start should bump it off 'pending' there too.
+    it('bumps off "pending" in the flat-state branch when sessionStates is empty', () => {
+      const flatBase = baseState({
+        activeSessionId: null,
+        sessions: [],
+        sessionStates: {},
+        messages: [],
+        streamingMessageId: 'pending',
+      }) as Record<string, unknown>
+      // The dashboard's tool_start handler calls get().addMessage in the
+      // flat-state path; provide a minimal mock that pushes to messages.
+      flatBase.addMessage = (m: unknown) => {
+        const s = store.getState() as { messages: unknown[] }
+        ;(store as { setState: (p: Record<string, unknown>) => void }).setState({ messages: [...s.messages, m] })
+      }
+      store = createMockStore(flatBase)
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'toolu_flat',
+          tool: 'Bash',
+          toolUseId: 'toolu_flat',
+          input: { command: 'ls' },
+          // No sessionId — flat-state path
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.streamingMessageId).toBe('toolu_flat')
+      expect(state.streamingMessageId).not.toBe('pending')
+      expect(state.messages.some((m: any) => m.id === 'toolu_flat' && m.type === 'tool_use')).toBe(true)
     })
   })
 

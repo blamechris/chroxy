@@ -1844,6 +1844,9 @@ describe('tool_start handler', () => {
     });
 
     const ss = store.getState().sessionStates.s1;
+    // streamingMessageId is bumped to the tool bubble's id, which matches the
+    // wire messageId when one is provided.
+    expect(ss.streamingMessageId).toBe(ss.messages[0].id);
     expect(ss.streamingMessageId).toBe('toolu_first');
     expect(ss.streamingMessageId).not.toBe('pending');
   });
@@ -1872,7 +1875,7 @@ describe('tool_start handler', () => {
     expect(ss.streamingMessageId).toBe('msg-real');
   });
 
-  it('bumps off "pending" with a fallback when tool_start has no messageId', () => {
+  it('bumps off "pending" using the synthesized tool bubble id when tool_start has no messageId', () => {
     const store = createMockStore({
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
@@ -1894,11 +1897,13 @@ describe('tool_start handler', () => {
     });
 
     const ss = store.getState().sessionStates.s1;
-    // Assert the contract (truthy, non-'pending') rather than the literal
-    // sentinel, so a future rename of 'tool-active' doesn't require lockstep
-    // test updates. The safety timer in sendInput only cares about !== 'pending'.
-    expect(ss.streamingMessageId).toBeTruthy();
+    // sharedToolStart synthesizes a 'tool-N-<ts>' id when msg.messageId is
+    // missing, and we bump streamingMessageId to that exact id so it always
+    // matches a real message in state. No separate sentinel needed.
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.streamingMessageId).toBe(ss.messages[0].id);
     expect(ss.streamingMessageId).not.toBe('pending');
+    expect(ss.streamingMessageId).toMatch(/^tool-\d+-\d+$/);
   });
 });
 

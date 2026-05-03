@@ -1437,11 +1437,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // If the turn opened with a tool (no preamble text → no stream_start),
           // streamingMessageId is still 'pending' from sendInput. The 5-second
           // safety timer in sendInput would clear it, hiding the stop button
-          // for the rest of the tool execution. Bump it to a non-'pending'
-          // value here so the timer no-ops; the next stream_start (when the
-          // assistant text starts) will overwrite with the real messageId.
+          // for the rest of the tool execution. Bump it to the tool bubble's
+          // id (already normalized by sharedToolStart — falls back to a
+          // synthesized id when msg.messageId is missing) so the timer
+          // no-ops; the next stream_start will overwrite with the response id.
           if (ss.streamingMessageId === 'pending') {
-            patch.streamingMessageId = typeof msg.messageId === 'string' ? msg.messageId : 'tool-active';
+            patch.streamingMessageId = toolMsg.id;
           }
           return patch;
         });
