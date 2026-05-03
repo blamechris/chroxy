@@ -391,12 +391,17 @@ describe('skills-loader', () => {
       rmSync(outsideDir, { recursive: true, force: true })
     })
 
+    // Note: each test wraps `symlinkSync` in a try/catch + early-return so the
+    // test silently skips on platforms where symlink creation is disallowed
+    // (Windows CI without Developer Mode / admin). Repo precedent — see e.g.
+    // packages/server/tests/file-ref-attachments.test.js:120.
+
     it('rejects a skill that is a symlink to a file outside the skills root', () => {
       const evilSource = join(outsideDir, 'evil.md')
       writeFileSync(evilSource, '# Evil\n\nLeaked from outside.\n')
 
       const linkPath = join(dir, 'evil.md')
-      symlinkSync(evilSource, linkPath)
+      try { symlinkSync(evilSource, linkPath) } catch { return }
 
       const skills = loadActiveSkills(dir)
       assert.equal(skills.length, 0, 'symlink to outside should be rejected')
@@ -408,7 +413,7 @@ describe('skills-loader', () => {
       writeFileSync(realPath, '# Real\n\nbody\n')
 
       const linkPath = join(dir, 'link.md')
-      symlinkSync(realPath, linkPath)
+      try { symlinkSync(realPath, linkPath) } catch { return }
 
       const skills = loadActiveSkills(dir)
       const names = skills.map((s) => s.name).sort()
@@ -422,7 +427,7 @@ describe('skills-loader', () => {
         writeFileSync(sharedSkill, '# Community skill\n\nshared body\n')
 
         const linkPath = join(dir, 'community.md')
-        symlinkSync(sharedSkill, linkPath)
+        try { symlinkSync(sharedSkill, linkPath) } catch { return }
 
         // Without the allowlist, the symlink is rejected.
         const rejected = loadActiveSkills(dir)
@@ -442,7 +447,7 @@ describe('skills-loader', () => {
       const evilSource = join(outsideDir, 'gone.md')
       writeFileSync(evilSource, 'temp')
       const linkPath = join(dir, 'gone.md')
-      symlinkSync(evilSource, linkPath)
+      try { symlinkSync(evilSource, linkPath) } catch { return }
       rmSync(evilSource)
 
       const skills = loadActiveSkills(dir)

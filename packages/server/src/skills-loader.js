@@ -153,7 +153,12 @@ function _resolveRoots(roots) {
 
 /**
  * Scan `dir` for active skills and return them as an array sorted by name.
- * A skill is any regular `*.md` file whose name does NOT end in `.disabled.md`.
+ *
+ * A skill is any regular file whose extension is in `opts.allowedExtensions`
+ * (defaults to `['md']`) and whose name does NOT end in `.disabled.<ext>` —
+ * the disabled-suffix convention is generalised per allowed extension so a
+ * `*.disabled.md` is off when `md` is allowed, `*.disabled.txt` is off when
+ * `txt` is allowed, etc.
  *
  * Returns `[]` if the directory does not exist or contains no active skills —
  * skills are optional, so a missing dir is not an error.
@@ -232,8 +237,10 @@ export function loadActiveSkills(dir, opts = {}) {
 
     const fullPath = join(dir, entry)
 
-    // Stat (no follow) — directories never become skills, regardless of how
-    // they were named. We re-check via realpath below for symlink defense.
+    // statSync FOLLOWS symlinks — that's intentional here. We just need to
+    // gate out non-files (dirs, sockets, devices). The realpath check below
+    // is the actual symlink-escape defense; it operates on the resolved
+    // target, so a symlink that points at /etc/passwd is rejected there.
     let st
     try {
       st = statSync(fullPath)
