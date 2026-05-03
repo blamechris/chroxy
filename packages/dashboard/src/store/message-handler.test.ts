@@ -279,6 +279,55 @@ describe('dashboard message-handler dispatch', () => {
       const toolUseMsg = flat.find((m: any) => m.id === 'msg-flat')
       expect(toolUseMsg?.content).toBe('ls')
     })
+
+    // Belt-and-suspenders: even if a stream_delta sneaks past the defensive
+    // remap in handleStreamDelta (e.g. the colliding tool_use is added to
+    // state AFTER the delta is queued), flushPendingDeltas itself must never
+    // apply delta text onto a non-response message.
+    it('flushPendingDeltas type-filter prevents tool_use corruption when collision slips past defensive remap', async () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState(), messages: [] },
+        },
+      }))
+      setStore(store)
+
+      // Step 1: dispatch delta when no message exists at this id — defensive
+      // remap can't catch the collision since the tool_use isn't there yet.
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-race', sessionId: 's1', delta: 'must not leak' },
+        ctx() as any,
+      )
+
+      // Step 2: race condition — tool_use is added AFTER the delta is queued
+      // but BEFORE the 100ms batcher flushes.
+      ;(store as any).setState((s: any) => ({
+        sessionStates: {
+          ...s.sessionStates,
+          s1: {
+            ...s.sessionStates.s1,
+            messages: [{ id: 'msg-race', type: 'tool_use' as const, content: 'ls', timestamp: 1 }],
+          },
+        },
+      }))
+
+      // Step 3: flush
+      await new Promise((r) => setTimeout(r, 150))
+
+      const ss = (store.getState() as any).sessionStates.s1
+      const toolUse = ss.messages.find((m: any) => m.id === 'msg-race' && m.type === 'tool_use')
+      // tool_use bubble must remain pristine — no delta concatenation
+      expect(toolUse?.content).toBe('ls')
+      // Orphan-create suffixes the response id when there's a non-response
+      // collision, so the messages array does not contain duplicate ids.
+      const orphan = ss.messages.find((m: any) => m.id === 'msg-race-response')
+      expect(orphan?.type).toBe('response')
+      expect(orphan?.content).toBe('must not leak')
+      // No two messages share an id.
+      const ids = ss.messages.map((m: any) => m.id)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
   })
 
   describe('malformed input', () => {

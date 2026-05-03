@@ -1713,6 +1713,50 @@ describe('stream_delta handler', () => {
     const toolUseMsg = ss.messages.find((m) => m.id === 'msg-1');
     expect(toolUseMsg?.content).toBe('ls');
   });
+
+  // Belt-and-suspenders: even if a stream_delta sneaks past the defensive
+  // remap in handleStreamDelta (e.g. the colliding tool_use is added to state
+  // AFTER the delta is queued in pendingDeltas), flushPendingDeltas itself
+  // must never apply delta text onto a non-response message.
+  it('flushPendingDeltas type-filter prevents tool_use corruption when collision slips past defensive remap', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Step 1: dispatch delta when no message exists at this id — defensive
+    // remap can't catch the collision since the tool_use isn't there yet.
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-race', sessionId: 's1', delta: 'must not leak' });
+
+    // Step 2: race condition — tool_use is added AFTER the delta is queued
+    // but BEFORE the 100ms batcher flushes.
+    store.setState((s: any) => ({
+      sessionStates: {
+        ...s.sessionStates,
+        s1: {
+          ...s.sessionStates.s1,
+          messages: [{ id: 'msg-race', type: 'tool_use' as const, content: 'ls', timestamp: 1 }],
+        },
+      },
+    }));
+
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const toolUse = ss.messages.find((m) => m.id === 'msg-race' && m.type === 'tool_use');
+    // tool_use bubble must remain pristine — no delta concatenation
+    expect(toolUse?.content).toBe('ls');
+    // App's flushPendingDeltas has no orphan-create safety net (the dashboard's
+    // #2611 fix is dashboard-only), so the colliding delta is silently dropped.
+    // No response message is created at the colliding id. This is more
+    // aggressive data loss than the dashboard but still strictly better than
+    // corrupting the tool_use bubble.
+    const responseAtSameId = ss.messages.find((m) => m.id === 'msg-race' && m.type === 'response');
+    expect(responseAtSameId).toBeUndefined();
+  });
 });
 
 describe('stream_end handler', () => {
