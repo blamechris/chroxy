@@ -132,6 +132,23 @@ export function canonicalStringify(value) {
 }
 
 /**
+ * Derive a "version stem" from a model fullId, used to detect retired model
+ * versions in the disk cache (#3162). The stem strips trailing date suffixes
+ * (`-20251201`) and the `[1m]` variant marker so that
+ *   `claude-opus-4-7-20251201[1m]` and `claude-opus-4-7` share the same stem.
+ * `loadCache()` then drops any cached entry whose stem is not present in
+ * `FALLBACK_MODELS` (the version-pinned canonical list shipped with this
+ * release) — that prevents a previously-cached `claude-opus-4-6` from
+ * surfacing in the picker after the user upgrades to a build whose fallback
+ * is `claude-opus-4-7`.
+ */
+export function modelVersionStem(fullId) {
+  if (typeof fullId !== 'string') return ''
+  const stripped = fullId.endsWith(ONE_M_SUFFIX) ? fullId.slice(0, -ONE_M_SUFFIX.length) : fullId
+  return stripped.replace(/-\d{8,}$/, '')
+}
+
+/**
  * Derive a human-readable label from a stripped model ID.
  * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4",
  * "opus-4-7[1m]" → "Opus 4.7 (1M)"
@@ -409,8 +426,20 @@ export function createModelsRegistry(hooks = {}) {
         const raw = readFileSync(path, 'utf-8')
         const parsed = JSON.parse(raw)
         if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return false
-        const models = parsed.models
-          .filter(m => m && typeof m.id === 'string' && typeof m.fullId === 'string')
+
+        // Filter out cached entries whose family/version stem is no longer
+        // in FALLBACK_MODELS (#3162). FALLBACK_MODELS is version-pinned per
+        // release, so any cached entry whose stem isn't in that set is a
+        // retired model id that the API will reject. CLI-only users never
+        // have updateModels() called from the SDK, so without this filter
+        // a stale cache lingers indefinitely.
+        const supportedStems = new Set(fallbackModels.map(m => modelVersionStem(m.fullId)))
+
+        const valid = parsed.models.filter(m =>
+          m && typeof m.id === 'string' && typeof m.fullId === 'string',
+        )
+        const models = valid
+          .filter(m => supportedStems.has(modelVersionStem(m.fullId)))
           .map(m => ({
             id: m.id,
             fullId: m.fullId,
@@ -419,8 +448,43 @@ export function createModelsRegistry(hooks = {}) {
               ? m.contextWindow
               : resolveContextWindowFn(m.fullId),
           }))
-        if (models.length === 0) return false
-        applyModels(models, parsed.defaultModelId || null)
+
+        const droppedStaleCount = valid.length - models.length
+        if (droppedStaleCount > 0) {
+          log.info(`loadCache: dropped ${droppedStaleCount} stale cache entr${droppedStaleCount === 1 ? 'y' : 'ies'} not in FALLBACK_MODELS`)
+        }
+
+        if (models.length === 0) {
+          if (valid.length > 0) {
+            log.warn(`loadCache: all ${valid.length} cached entries are stale; falling back to FALLBACK_MODELS`)
+          }
+          return false
+        }
+
+        // Merge in any fallback entries the filtered cache doesn't cover
+        // so the picker always has the canonical sonnet/opus/haiku aliases
+        // even when the cache was mostly stale.
+        const seenFullIds = new Set(models.map(m => m.fullId))
+        for (const fb of fallbackModels) {
+          if (!seenFullIds.has(fb.fullId)) {
+            const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
+            const id = providerMeta?.id ?? deriveIdFn(fb.fullId)
+            const label = providerMeta?.label || humanizeModelId(id)
+            const contextWindow = providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
+            models.push({ id, fullId: fb.fullId, label, contextWindow })
+            seenFullIds.add(fb.fullId)
+          }
+        }
+
+        // Drop the cached default if it points to a filtered-out entry —
+        // otherwise resolveModelId would map a stale short id to the same
+        // retired fullId on the first set_model call.
+        let nextDefault = parsed.defaultModelId || null
+        if (nextDefault && !models.some(m => m.id === nextDefault || m.fullId === nextDefault)) {
+          nextDefault = null
+        }
+
+        applyModels(models, nextDefault)
         // Treat the loaded state as the last-saved baseline so subsequent
         // saveCache() calls only hit disk when the registry actually drifts.
         lastSavedSnapshot = snapshotString()
