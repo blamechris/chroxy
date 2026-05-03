@@ -170,6 +170,14 @@ export class BaseSession extends EventEmitter {
       provider: this._provider,
       activeManualSkills: this._activeManualSkills,
       defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
+      // #3253: include inactive manual skills in the unified scan so
+      // `activateSkill` can validate names against `_manualSkillNames`
+      // without paying for a second validation-only scan. The active
+      // subset is partitioned out below before populating the
+      // prompt-context caches — inactive entries never reach the
+      // model. Cost: a few metadata-only entries; bodies are not
+      // loaded for inactive manual skills (skills-loader.js:646).
+      includeInactive: true,
     }
     if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
     if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
@@ -190,10 +198,27 @@ export class BaseSession extends EventEmitter {
       // construction.
     }
 
-    this._skills = loadActiveSkillsLayered(layerOpts)
+    const all = loadActiveSkillsLayered(layerOpts)
     if (this._trustStore && typeof this._trustStore.flush === 'function') {
       try { this._trustStore.flush() } catch { /* ignore */ }
     }
+
+    // #3253: partition the unified scan into the active subset (used
+    // for prompt injection) and a Set of all manual-skill names (used
+    // by activateSkill to validate without re-scanning). Inactive
+    // entries carry `active: false` from the loader; auto skills
+    // don't carry the field at all and are always active.
+    const manualNames = new Set()
+    const active = []
+    for (const s of all) {
+      const activation = typeof s.metadata?.activation === 'string'
+        ? s.metadata.activation.trim().toLowerCase()
+        : null
+      if (activation === 'manual') manualNames.add(s.name)
+      if (s.active !== false) active.push(s)
+    }
+    this._skills = active
+    this._manualSkillNames = manualNames
 
     const grouped = groupSkillsByInjectionMode(this._skills)
     this._skillsByMode = grouped
@@ -224,44 +249,6 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * Enumerate the names of every `activation: manual` skill visible
-   * to this session. Walks the layered loader with `includeInactive:
-   * true` so both currently-active and inactive manual skills are
-   * surfaced. Used to validate `activateSkill` / `deactivateSkill`
-   * inputs against real skill files (#3209) so a typo or an
-   * `activation: auto` skill name is rejected before we mutate the
-   * active set.
-   *
-   * @returns {Set<string>}
-   * @private
-   */
-  _listManualSkillNames() {
-    const layerOpts = {
-      globalDir: this._skillsDir,
-      repoDir: this._repoSkillsDir,
-      provider: this._provider,
-      activeManualSkills: this._activeManualSkills,
-      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
-      includeInactive: true,
-    }
-    if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
-    if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
-    if (this._providerSkillAllowlist) layerOpts.providerSkillAllowlist = this._providerSkillAllowlist
-    // Trust store omitted intentionally — discovery only, no inspect()
-    // calls. Trust handling stays attached to the active prompt path.
-
-    const all = loadActiveSkillsLayered(layerOpts)
-    const names = new Set()
-    for (const s of all) {
-      const activation = typeof s.metadata?.activation === 'string'
-        ? s.metadata.activation.trim().toLowerCase()
-        : null
-      if (activation === 'manual') names.add(s.name)
-    }
-    return names
-  }
-
-  /**
    * Activate a manual skill at runtime (#3209). The skill must
    * actually exist on disk AND declare `activation: manual` —
    * arbitrary strings, typos, and `activation: auto` skill names
@@ -281,9 +268,21 @@ export class BaseSession extends EventEmitter {
   activateSkill(skillName) {
     if (typeof skillName !== 'string' || skillName === '') return false
     if (this._activeManualSkills.has(skillName)) return false
-    if (!this._listManualSkillNames().has(skillName)) return false
+
+    // #3253: speculatively add and reload — the unified `_loadSkills`
+    // scan populates both the prompt-context caches AND the
+    // `_manualSkillNames` validation set, so we can reuse one scan
+    // for validation + reload rather than running a separate
+    // validation-only scan first. On the rare failure path (typo /
+    // auto-skill name) we run a rollback scan to restore the active
+    // set; the common success path stays at one layered scan.
     this._activeManualSkills.add(skillName)
     this._loadSkills()
+    if (!this._manualSkillNames.has(skillName)) {
+      this._activeManualSkills.delete(skillName)
+      this._loadSkills()
+      return false
+    }
     return true
   }
 

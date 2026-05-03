@@ -261,6 +261,72 @@ describe('BaseSession', () => {
       assert.equal(s.supportsRuntimeSkillToggle(), false)
     })
 
+    // #3253: activateSkill used to do TWO full layered scans per call —
+    // _listManualSkillNames() for validation, then _loadSkills() to
+    // refresh the prompt context. Now both share a single scan: the
+    // unified _loadSkills() returns manual-skill names as a side
+    // effect, so success-path activations do exactly one scan.
+    // #3253: a layered scan is exactly one `_loadSkills()` call —
+    // that's the method that invokes loadActiveSkillsLayered. After
+    // the refactor, validation no longer scans (it reads the cached
+    // `_manualSkillNames` populated by the most-recent `_loadSkills`).
+    function countScans(s) {
+      const counts = { load: 0 }
+      const origLoad = s._loadSkills.bind(s)
+      s._loadSkills = function loadSpy(...args) {
+        counts.load++
+        return origLoad(...args)
+      }
+      return counts
+    }
+
+    it('activateSkill performs exactly one full layered scan in the success path (#3253)', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      const counts = countScans(s)
+
+      const ok = s.activateSkill('manual-a')
+      assert.equal(ok, true)
+      assert.equal(counts.load, 1,
+        `expected exactly one _loadSkills call on success — got ${counts.load} (was 2 before #3253: list + reload)`)
+    })
+
+    // #3253: deactivateSkill is symmetric — already a single scan
+    // pre-fix (no validation step), but we lock that in with a regression
+    // guard so a future "add validation symmetry" refactor doesn't
+    // regress to two scans.
+    it('deactivateSkill performs exactly one full layered scan (#3253)', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: dir,
+        repoSkillsDir: null,
+        activeManualSkills: ['manual-a'],
+      })
+      const counts = countScans(s)
+
+      const ok = s.deactivateSkill('manual-a')
+      assert.equal(ok, true)
+      assert.equal(counts.load, 1,
+        `deactivateSkill must stay at one scan — got ${counts.load}`)
+    })
+
+    // #3253: invalid input (typo / auto-skill name) is the rare path.
+    // The current implementation does ONE rollback scan after the
+    // speculative add, so two _loadSkills calls total. This is
+    // acceptable per the issue's "at most one in success path"
+    // criterion — locked in here so a future "skip rollback" attempt
+    // doesn't accidentally leave a bogus name in `_activeManualSkills`.
+    it('activateSkill on a bogus name does not pollute the active set (#3253)', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.activateSkill('does-not-exist'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+      assert.equal(s.activateSkill('auto-skill'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+      // After a rejected activation, a real one still works — confirms
+      // the rollback restored a clean state.
+      assert.equal(s.activateSkill('manual-a'), true)
+      assert.deepEqual(s.getActiveManualSkills(), ['manual-a'])
+    })
+
     it('multiple toggles compose — A, then B, then A off — all reflected in prompt', () => {
       const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
       s.activateSkill('manual-a')
