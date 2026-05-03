@@ -319,12 +319,14 @@ describe('dashboard message-handler dispatch', () => {
       const toolUse = ss.messages.find((m: any) => m.id === 'msg-race' && m.type === 'tool_use')
       // tool_use bubble must remain pristine — no delta concatenation
       expect(toolUse?.content).toBe('ls')
-      // Orphan-create safety net (#2611) still fires: a response message at
-      // the colliding id is pushed with the delta content. ChatView dedup will
-      // make it invisible (since tool_use was first at this id), so the delta
-      // is effectively lost from the user's view — but data is not corrupted.
-      const orphan = ss.messages.find((m: any) => m.id === 'msg-race' && m.type === 'response')
+      // Orphan-create suffixes the response id when there's a non-response
+      // collision, so the messages array does not contain duplicate ids.
+      const orphan = ss.messages.find((m: any) => m.id === 'msg-race-response')
+      expect(orphan?.type).toBe('response')
       expect(orphan?.content).toBe('must not leak')
+      // No two messages share an id.
+      const ids = ss.messages.map((m: any) => m.id)
+      expect(new Set(ids).size).toBe(ids.length)
     })
   })
 

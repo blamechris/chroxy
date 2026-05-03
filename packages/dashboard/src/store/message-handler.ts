@@ -425,12 +425,25 @@ function flushPendingDeltas(): void {
         }
         return m;
       });
-      // Safety net: create response messages for orphaned deltas (#2611)
+      // Safety net: create response messages for orphaned deltas (#2611).
+      // If a non-response message already occupies the colliding id, use a
+      // suffixed response id and register a remap so we don't introduce
+      // duplicate ids in the messages array. Mirrors handleStreamDelta's
+      // defensive remap, applied here as a final guard for collisions that
+      // slipped past it (e.g. tool_use was added after the delta was queued).
       const finalMessages = updatedMessages;
       for (const [msgId, delta] of deltas) {
-        if (!matched.has(msgId)) {
-          finalMessages.push({ id: msgId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
+        if (matched.has(msgId)) continue;
+        const colliding = finalMessages.some((m) => m.id === msgId && m.type !== 'response');
+        const targetId = colliding ? `${msgId}-response` : msgId;
+        const existing = finalMessages.find((m) => m.id === targetId);
+        if (existing) {
+          const idx = finalMessages.indexOf(existing);
+          finalMessages[idx] = { ...existing, content: existing.content + delta };
+        } else {
+          finalMessages.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
         }
+        if (colliding) _deltaIdRemaps.set(msgId, targetId);
       }
       newSessionStates = {
         ...newSessionStates,
@@ -451,11 +464,21 @@ function flushPendingDeltas(): void {
           }
           return m;
         });
-        // Safety net: create response messages for orphaned deltas (#2611)
+        // Safety net: create response messages for orphaned deltas (#2611).
+        // Suffix on collision to avoid duplicate ids — mirrors the
+        // sessionStates branch above.
         for (const [msgId, delta] of deltas) {
-          if (!matched2.has(msgId)) {
-            updated.push({ id: msgId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
+          if (matched2.has(msgId)) continue;
+          const colliding = updated.some((m) => m.id === msgId && m.type !== 'response');
+          const targetId = colliding ? `${msgId}-response` : msgId;
+          const existing = updated.find((m) => m.id === targetId);
+          if (existing) {
+            const idx = updated.indexOf(existing);
+            updated[idx] = { ...existing, content: existing.content + delta };
+          } else {
+            updated.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
           }
+          if (colliding) _deltaIdRemaps.set(msgId, targetId);
         }
         return { messages: updated };
       });
