@@ -134,6 +134,14 @@ export class BaseSession extends EventEmitter {
     }
     this._trustStore = resolvedTrustStore
 
+    // #3248: per-session parse cache. Map keyed by realpath; values
+    // hold mtime+size+parsed body so subsequent _loadSkills() calls
+    // (every activate/deactivate toggle) skip readFileSync /
+    // parseFrontmatter for files whose mtime is unchanged. The
+    // loader writes through to this Map — invalidation is automatic
+    // when the on-disk mtime moves.
+    this._skillsParseCache = new Map()
+
     // Skills are scanned at construction. #3209 adds a runtime reload
     // path for manual activation toggles. Mismatch events are
     // collected during the synchronous loader call and re-emitted on
@@ -182,6 +190,9 @@ export class BaseSession extends EventEmitter {
     if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
     if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
     if (this._providerSkillAllowlist) layerOpts.providerSkillAllowlist = this._providerSkillAllowlist
+    // #3248: hand the per-session parse cache to the loader. Cache
+    // hits skip readFileSync + parseFrontmatter; misses populate.
+    if (this._skillsParseCache instanceof Map) layerOpts.parseCache = this._skillsParseCache
 
     const pendingTrustEvents = []
     if (this._trustStore) {
