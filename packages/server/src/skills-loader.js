@@ -463,9 +463,12 @@ function _stripUnquotedTrailingComment(s) {
  *     `inspect(absPath, body)` and `mode`). When provided, the loader
  *     records / verifies a SHA-256 hash for each skill (#3204).
  *   - `onTrustMismatch`: optional callback invoked with the mismatch
- *     info `{ name, source, path, oldHash, newHash, blocked }` for every
- *     skill whose stored hash differs. Loader callers (BaseSession)
- *     fan this into a `skill_changed` WS event for #3205.
+ *     info `{ name, source, path, oldHash, newHash, blocked, mode }` for
+ *     every skill whose stored hash differs. `mode` (#3241) is projected
+ *     from `trustStore.mode` so downstream consumers can render
+ *     mode-specific UX without re-deriving it from `blocked`. Loader
+ *     callers (BaseSession) fan this into a `skill_changed` WS event for
+ *     #3205.
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -657,6 +660,13 @@ export function loadActiveSkills(dir, opts = {}) {
               oldHash: inspectResult.oldHash,
               newHash: inspectResult.newHash,
               blocked: !!inspectResult.blocked,
+              // #3241: project the active trust mode directly from the store
+              // rather than letting the normaliser reverse-engineer it from
+              // `blocked`. Today the two coincide (only `block` mode sets
+              // `blocked: true`); future modes (e.g. `block-once`,
+              // `soft-block`) may filter the skill while still wanting their
+              // own UX label on the wire.
+              mode: trustStore.mode,
             })
           } catch (err) {
             // Callback errors are swallowed — they shouldn't change the

@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
+import { ServerSkillChangedSchema } from '@chroxy/protocol'
 
 // -- Helper to create a standard multi-session context --
 function makeCtx(overrides = {}) {
@@ -328,6 +329,7 @@ describe('EventNormalizer', () => {
         oldHash: 'abcdef0123456789' + '0'.repeat(48),
         newHash: '0123456789abcdef' + '0'.repeat(48),
         blocked: false,
+        mode: 'warn',
       }
       const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: 'sess-42' }))
       const msg = result.messages[0].msg
@@ -337,11 +339,69 @@ describe('EventNormalizer', () => {
       assert.equal(msg.oldHashPrefix, 'abcdef01')
       assert.equal(msg.newHashPrefix, '01234567')
       assert.equal(msg.mode, 'warn')
+
+      // #3239: end-to-end shape — the normaliser's output must validate
+      // against the wire schema. A regression that drops a required field
+      // (oldHash, newHash, etc.) silently emits an empty prefix today;
+      // schema round-trip catches it before the dashboard does.
+      const validation = ServerSkillChangedSchema.safeParse(msg)
+      assert.ok(
+        validation.success,
+        `EventNormalizer output must validate against ServerSkillChangedSchema: ${JSON.stringify(validation.error?.issues)}`,
+      )
     })
 
-    it('reports mode = "block" when blocked = true', () => {
+    it('reports mode = "block" when payload mode = "block"', () => {
       const data = {
         name: 'coding-style',
+        oldHash: 'a'.repeat(64),
+        newHash: 'b'.repeat(64),
+        blocked: true,
+        mode: 'block',
+      }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: 's1' }))
+      const msg = result.messages[0].msg
+      assert.equal(msg.mode, 'block')
+      assert.ok(ServerSkillChangedSchema.safeParse(msg).success)
+    })
+
+    it('emits null sessionId for legacy single-CLI mode', () => {
+      const data = {
+        name: 'x',
+        oldHash: 'a'.repeat(64),
+        newHash: 'b'.repeat(64),
+        blocked: false,
+        mode: 'warn',
+      }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: null }))
+      const msg = result.messages[0].msg
+      assert.equal(msg.sessionId, null)
+      assert.ok(ServerSkillChangedSchema.safeParse(msg).success)
+    })
+
+    // #3241: explicit mode wins over derived mode. A future trust mode
+    // ('block-once', 'soft-block', etc.) could set blocked=true while the
+    // operator-facing mode is still 'warn' — the wire signal must reflect
+    // the operator config, not the consequence.
+    it('prefers explicit mode field over deriving from blocked', () => {
+      const data = {
+        name: 'x',
+        oldHash: 'a'.repeat(64),
+        newHash: 'b'.repeat(64),
+        blocked: true,
+        mode: 'warn',
+      }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: 's1' }))
+      assert.equal(result.messages[0].msg.mode, 'warn')
+    })
+
+    // Defensive fallback for older callers that don't carry the explicit
+    // mode field — derive from blocked the same way the original handler
+    // did. Keeps the component back-compatible in the (unlikely) case
+    // someone synthesises a skill_changed event from outside the loader.
+    it('falls back to deriving from blocked when mode is absent', () => {
+      const data = {
+        name: 'x',
         oldHash: 'a'.repeat(64),
         newHash: 'b'.repeat(64),
         blocked: true,
@@ -350,10 +410,21 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.mode, 'block')
     })
 
-    it('emits null sessionId for legacy single-CLI mode', () => {
-      const data = { name: 'x', oldHash: 'a'.repeat(64), newHash: 'b'.repeat(64), blocked: false }
-      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: null }))
-      assert.equal(result.messages[0].msg.sessionId, null)
+    // Defensive against unexpected mode values (typo, future enum value
+    // from a newer server build talking to an older normaliser, etc.):
+    // ignore the bogus mode and fall back to deriving from blocked. The
+    // wire schema only accepts 'warn' | 'block' — emitting anything else
+    // would fail validation downstream.
+    it('ignores unknown mode strings and falls back to derive', () => {
+      const data = {
+        name: 'x',
+        oldHash: 'a'.repeat(64),
+        newHash: 'b'.repeat(64),
+        blocked: false,
+        mode: 'soft-block',
+      }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: 's1' }))
+      assert.equal(result.messages[0].msg.mode, 'warn')
     })
   })
 
