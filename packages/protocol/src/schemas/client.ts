@@ -96,6 +96,23 @@ export const SetPromptEvaluatorSchema = z.object({
   sessionId: z.string().max(256).optional(),
 })
 
+// #3209: runtime activate/deactivate of a manual skill. The skill name
+// is the loader-resolved name (the file's basename without extension);
+// the server validates it matches a real skill before mutating state.
+// `sessionId` is optional — the handler falls back to the client's
+// bound active session.
+export const SkillActivateSchema = z.object({
+  type: z.literal('skill_activate'),
+  skillName: z.string().min(1).max(256),
+  sessionId: z.string().max(256).optional(),
+})
+
+export const SkillDeactivateSchema = z.object({
+  type: z.literal('skill_deactivate'),
+  skillName: z.string().min(1).max(256),
+  sessionId: z.string().max(256).optional(),
+})
+
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
   requestId: z.string().min(1).max(256),
@@ -439,6 +456,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetThinkingLevelSchema,
   SetPermissionRulesSchema,
   SetPromptEvaluatorSchema,
+  SkillActivateSchema,
+  SkillDeactivateSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,

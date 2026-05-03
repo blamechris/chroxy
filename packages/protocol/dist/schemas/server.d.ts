@@ -213,6 +213,11 @@ export declare const ServerSkillsListSchema: z.ZodObject<{
             global: "global";
             repo: "repo";
         }>>;
+        activation: z.ZodOptional<z.ZodEnum<{
+            auto: "auto";
+            manual: "manual";
+        }>>;
+        active: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 /**
@@ -245,6 +250,16 @@ export declare const ServerSkillChangedSchema: z.ZodObject<{
         warn: "warn";
         block: "block";
     }>;
+}, z.core.$strip>;
+export declare const ServerSkillActivatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_activated">;
+    sessionId: z.ZodString;
+    skillName: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerSkillDeactivatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_deactivated">;
+    sessionId: z.ZodString;
+    skillName: z.ZodString;
 }, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"server_error">;

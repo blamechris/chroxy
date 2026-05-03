@@ -478,6 +478,12 @@ export function loadActiveSkills(dir, opts = {}) {
   const defaultInjectionMode = _normalizeInjectionMode(opts.defaultInjectionMode) || 'append'
   const trustStore = opts.trustStore || null
   const onTrustMismatch = typeof opts.onTrustMismatch === 'function' ? opts.onTrustMismatch : null
+  // #3209: when true, manual skills that aren't in `activeManualSkills`
+  // are still returned but tagged with `active: false`. Used by the
+  // dashboard's `list_skills` so it can render toggles for inactive
+  // manual skills. Runtime prompt-build callers keep the default (false)
+  // so an inactive manual skill never lands in the system prompt.
+  const includeInactive = !!opts.includeInactive
   let entries
   try {
     entries = readdirSync(dir)
@@ -624,7 +630,24 @@ export function loadActiveSkills(dir, opts = {}) {
 
     // Manual activation (#3199): skills with `activation: manual` are off
     // by default and require explicit opt-in via `activeManualSkills`.
-    if (!_skillIsActive(frontmatter, name, activeManualSkills)) continue
+    // #3209: `includeInactive` keeps inactive manual skills in the
+    // result so the dashboard can render toggles for them; they are
+    // tagged with `active: false` and the trust-hash branch is
+    // skipped (the skill body never reaches the prompt, so a hash
+    // mismatch on an inactive skill is meaningless to the operator
+    // until they actually activate it).
+    const isActive = _skillIsActive(frontmatter, name, activeManualSkills)
+    if (!isActive && !includeInactive) continue
+    if (!isActive) {
+      // Minimal metadata-only entry. Don't include `body` because the
+      // dashboard only needs name + description + metadata to render
+      // the toggle, and shipping the body to the WS client when the
+      // skill is inactive wastes bandwidth.
+      const inactive = { name, description, metadata: frontmatter, active: false }
+      if (source) inactive.source = source
+      skills.push(inactive)
+      continue
+    }
 
     // Resolve the per-skill injection mode (#3200). Fall through to the
     // caller-supplied default (typically the provider's preferred channel)
@@ -683,6 +706,10 @@ export function loadActiveSkills(dir, opts = {}) {
 
     const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
     if (source) skill.source = source
+    // #3209: tag the skill so the dashboard can render the right
+    // toggle state. `auto` skills are always active; `manual` ones
+    // reflect the live `activeManualSkills` membership at load time.
+    skill.active = isActive
     skills.push(skill)
   }
 
@@ -860,6 +887,7 @@ export function loadActiveSkillsLayered({
   providerSkillAllowlist,
   trustStore,
   onTrustMismatch,
+  includeInactive,
 } = {}) {
   const sameDir = globalDir && repoDir && _sameAbsolutePath(globalDir, repoDir)
 
@@ -872,6 +900,10 @@ export function loadActiveSkillsLayered({
   if (defaultInjectionMode != null) loaderOpts.defaultInjectionMode = defaultInjectionMode
   if (trustStore != null) loaderOpts.trustStore = trustStore
   if (typeof onTrustMismatch === 'function') loaderOpts.onTrustMismatch = onTrustMismatch
+  // #3209: pass-through. The per-tier loader applies the inactive-
+  // skill marking; the merge step below treats them like any other
+  // entry (repo overrides global on conflict, etc.).
+  if (includeInactive) loaderOpts.includeInactive = true
 
   const globals = (globalDir && !sameDir)
     ? loadActiveSkills(globalDir, { ...loaderOpts, source: 'global' })

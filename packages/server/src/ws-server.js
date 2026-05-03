@@ -221,6 +221,8 @@ function _isSecureRequest(req) {
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
+ *   { type: 'skill_activate', skillName, sessionId? }   — activate a manual skill at runtime (#3209)
+ *   { type: 'skill_deactivate', skillName, sessionId? } — deactivate a manual skill at runtime (#3209)
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *   { type: 'create_environment', name, cwd, image?, ... } — create persistent container environment
  *   { type: 'list_environments' }                       — list all persistent environments
@@ -314,8 +316,10 @@ function _isSecureRequest(req) {
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
  *   { type: 'provider_list', providers }                — available providers
- *   { type: 'skills_list', skills }                     — active skills (name, description per entry)
+ *   { type: 'skills_list', skills }                     — active skills (name, description, activation, active per entry)
  *   { type: 'skill_changed', skillName, sessionId, oldHashPrefix, newHashPrefix, mode } — skill content-hash mismatch (#3234, transient)
+ *   { type: 'skill_activated', sessionId, skillName }   — manual skill toggled on at runtime (#3209)
+ *   { type: 'skill_deactivated', sessionId, skillName } — manual skill toggled off at runtime (#3209)
  *   { type: 'push_token_error', message }               — push token registration error
  *   { type: 'cost_update', sessionId, cost }            — session cost update
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit

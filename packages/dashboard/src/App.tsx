@@ -24,6 +24,7 @@ import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
+import { SkillsPanel } from './components/SkillsPanel'
 import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
@@ -258,6 +259,7 @@ export function App() {
     activeAgents,
     isPlanPending,
     thinkingLevel,
+    skills: activeSkills,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // Fire native notifications for permission requests when window is not focused
@@ -293,6 +295,11 @@ export function App() {
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
   const setPromptEvaluator = useConnectionStore(s => s.setPromptEvaluator)
+  // #3209: skills runtime API
+  const requestListSkills = useConnectionStore(s => s.requestListSkills)
+  const activateSkill = useConnectionStore(s => s.activateSkill)
+  const deactivateSkill = useConnectionStore(s => s.deactivateSkill)
+  const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
@@ -1070,6 +1077,24 @@ export function App() {
             promptEvaluator={sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator}
             onPromptEvaluatorChange={setPromptEvaluator}
           />
+          {/* #3209: Skills toggle. Refreshes the list on open so the
+              panel reflects any out-of-band changes (file edits,
+              another client's toggles after reconnect). */}
+          <button
+            type="button"
+            className="header-icon-btn"
+            data-testid="btn-toggle-skills-panel"
+            onClick={() => {
+              setSkillsPanelOpen(prev => {
+                const next = !prev
+                if (next) requestListSkills()
+                return next
+              })
+            }}
+            title="Skills"
+          >
+            Skills
+          </button>
         </div>
         <div className="header-right">
           {viewMode === 'chat' && storeMessages.length > 0 && (
@@ -1384,6 +1409,16 @@ export function App() {
             : 'Scan with Chroxy app to pair your phone'
         }
       />
+
+      {/* #3209: SkillsPanel — popover for manual-skill toggles */}
+      {skillsPanelOpen && (
+        <SkillsPanel
+          skills={activeSkills}
+          onActivate={activateSkill}
+          onDeactivate={deactivateSkill}
+          onClose={() => setSkillsPanelOpen(false)}
+        />
+      )}
 
       {/* Modals */}
       <CreateSessionModal

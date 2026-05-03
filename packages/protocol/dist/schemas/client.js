@@ -72,12 +72,19 @@ export const SetPermissionRulesSchema = z.object({
     rules: z.array(PermissionRuleSchema).max(1000),
     sessionId: z.string().max(256).optional(),
 });
-// #3185: per-session promptEvaluator toggle. Strict boolean — the server
-// rejects anything else with a `session_error`. `sessionId` is optional;
-// the handler falls back to the client's bound active session.
-export const SetPromptEvaluatorSchema = z.object({
-    type: z.literal('set_prompt_evaluator'),
-    value: z.boolean(),
+// #3209: runtime activate/deactivate of a manual skill. The skill name
+// is the loader-resolved name (the file's basename without extension);
+// the server validates it matches a real skill before mutating state.
+// `sessionId` is optional — the handler falls back to the client's
+// bound active session.
+export const SkillActivateSchema = z.object({
+    type: z.literal('skill_activate'),
+    skillName: z.string().min(1).max(256),
+    sessionId: z.string().max(256).optional(),
+});
+export const SkillDeactivateSchema = z.object({
+    type: z.literal('skill_deactivate'),
+    skillName: z.string().min(1).max(256),
     sessionId: z.string().max(256).optional(),
 });
 export const PermissionResponseSchema = z.object({
@@ -357,7 +364,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SetPermissionModeSchema,
     SetThinkingLevelSchema,
     SetPermissionRulesSchema,
-    SetPromptEvaluatorSchema,
+    SkillActivateSchema,
+    SkillDeactivateSchema,
     PermissionResponseSchema,
     ListSessionsSchema,
     SwitchSessionSchema,

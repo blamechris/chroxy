@@ -96,44 +96,26 @@ export class BaseSession extends EventEmitter {
 
     // Per-session manually-activated skill names (#3199). Skills declared
     // `activation: manual` are off by default and only load when their
-    // name is in this Set. The runtime toggle WS API that mutates this
-    // Set is tracked in #3209; for now the Set is populated from
-    // constructor input and never changes. Stored for forward
-    // compatibility so a future toggle handler can mutate + re-load
-    // without changing the BaseSession shape.
+    // name is in this Set. #3209 adds the WS toggle path
+    // (activateSkill/deactivateSkill) that mutates this Set + reloads.
     this._activeManualSkills = activeManualSkills instanceof Set
       ? new Set(activeManualSkills)
       : (Array.isArray(activeManualSkills) ? new Set(activeManualSkills) : new Set())
 
-    // Skills are scanned once at construction.
-    // - skillsDir overrides the global directory (#2957) — primarily for tests.
-    // - repoSkillsDir overrides the per-repo directory walk-up (#3067) so tests
-    //   can pin both layers without touching the real filesystem; if omitted,
-    //   walk up from this.cwd looking for the nearest .chroxy/skills/.
-    // - maxSkillBytes / maxTotalSkillBytes override the loader's 32KB / 256KB
-    //   defaults (#3202); plumbed from server config via SessionManager.
+    // Cache the immutable load-time inputs so the runtime toggle path
+    // (#3209) can rebuild layerOpts without re-parsing constructor args.
+    // These are set once at construction and never mutate.
     this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
     this._repoSkillsDir = repoSkillsDir !== undefined
       ? repoSkillsDir
       : findRepoSkillsDir(this.cwd)
-    const layerOpts = {
-      globalDir: this._skillsDir,
-      repoDir: this._repoSkillsDir,
-      provider: this._provider,
-      activeManualSkills: this._activeManualSkills,
-      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
-    }
-    if (Number.isFinite(maxSkillBytes)) layerOpts.maxSkillBytes = maxSkillBytes
-    if (Number.isFinite(maxTotalSkillBytes)) layerOpts.maxTotalSkillBytes = maxTotalSkillBytes
-    // Per-provider skill allowlist (#3207). When omitted, the loader is
-    // permissive (legacy behaviour). When supplied, non-Claude providers
-    // are filtered to the named subset and a missing entry filters all
-    // skills for that provider (fail-secure). Plumbed by SessionManager
-    // from the server config.
-    if (providerSkillAllowlist != null && typeof providerSkillAllowlist === 'object'
-      && !Array.isArray(providerSkillAllowlist)) {
-      layerOpts.providerSkillAllowlist = providerSkillAllowlist
-    }
+    this._maxSkillBytes = Number.isFinite(maxSkillBytes) ? maxSkillBytes : null
+    this._maxTotalSkillBytes = Number.isFinite(maxTotalSkillBytes) ? maxTotalSkillBytes : null
+    this._providerSkillAllowlist = providerSkillAllowlist != null
+      && typeof providerSkillAllowlist === 'object'
+      && !Array.isArray(providerSkillAllowlist)
+      ? providerSkillAllowlist
+      : null
 
     // Trust store (#3204). Two activation paths:
     //   - `trustStore: <SkillsTrustStore-like>` — caller-supplied store
@@ -144,10 +126,6 @@ export class BaseSession extends EventEmitter {
     //     SessionManager always passes one of these strings through;
     //     direct BaseSession construction without it (existing tests,
     //     ad-hoc instantiation) keeps the legacy no-op behaviour.
-    // Mismatch events are collected during the synchronous loader call
-    // and re-emitted on `process.nextTick` because SessionManager wires
-    // event listeners AFTER the constructor returns — a synchronous
-    // emit here would land on an empty listener set.
     let resolvedTrustStore = null
     if (trustStore) {
       resolvedTrustStore = trustStore
@@ -155,37 +133,108 @@ export class BaseSession extends EventEmitter {
       resolvedTrustStore = new SkillsTrustStore({ mode: trustMismatchMode })
     }
     this._trustStore = resolvedTrustStore
-    const pendingTrustEvents = []
-    if (resolvedTrustStore) {
-      layerOpts.trustStore = resolvedTrustStore
-      layerOpts.onTrustMismatch = (info) => { pendingTrustEvents.push(info) }
-    }
-    this._skills = loadActiveSkillsLayered(layerOpts)
-    // Persist any newly-recorded hashes / lastVerified bumps. Failure to
-    // write is non-fatal — the SkillsTrustStore swallows errors.
-    if (resolvedTrustStore && typeof resolvedTrustStore.flush === 'function') {
-      try { resolvedTrustStore.flush() } catch { /* ignore */ }
-    }
+
+    // Skills are scanned at construction. #3209 adds a runtime reload
+    // path for manual activation toggles. Mismatch events are
+    // collected during the synchronous loader call and re-emitted on
+    // `process.nextTick` because SessionManager wires event listeners
+    // AFTER the constructor returns — a synchronous emit here would
+    // land on an empty listener set.
+    const pendingTrustEvents = this._loadSkills({ collectTrustEvents: true })
     if (pendingTrustEvents.length > 0) {
-      // `process.nextTick` runs before any pending I/O / setImmediate
-      // but after the current call stack unwinds, so SessionManager has
-      // had a chance to attach event listeners by the time we fire.
       process.nextTick(() => {
         for (const ev of pendingTrustEvents) {
           this.emit('skill_changed', ev)
         }
       })
     }
-    // Split skills by injection mode (#3200). Each provider implementation
-    // calls _buildSystemPrompt() (back-compat alias for the append/system
-    // bucket) and _buildPrependPrompt() (the prepend bucket); subprocess
-    // providers that have no system-prompt channel concatenate both in
-    // their first-message prepend path so a skill that asks for `system`
-    // injection still ends up in front of the user message.
+  }
+
+  /**
+   * Build the layered-loader options + run the loader, populating the
+   * skill caches (`_skills`, `_skillsByMode`, `_skillsText`,
+   * `_prependSkillsText`). Used by both the constructor and the
+   * runtime activate/deactivate toggle (#3209) so the loader-side
+   * state stays the single source of truth.
+   *
+   * @param {{ collectTrustEvents?: boolean }} [opts]
+   * @returns {Array<object>} - array of pending trust events when
+   *   `collectTrustEvents` is true; an empty array otherwise. Caller
+   *   decides whether/when to emit them.
+   * @private
+   */
+  _loadSkills({ collectTrustEvents = false } = {}) {
+    const layerOpts = {
+      globalDir: this._skillsDir,
+      repoDir: this._repoSkillsDir,
+      provider: this._provider,
+      activeManualSkills: this._activeManualSkills,
+      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
+    }
+    if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
+    if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
+    if (this._providerSkillAllowlist) layerOpts.providerSkillAllowlist = this._providerSkillAllowlist
+
+    const pendingTrustEvents = []
+    if (this._trustStore) {
+      layerOpts.trustStore = this._trustStore
+      if (collectTrustEvents) {
+        layerOpts.onTrustMismatch = (info) => { pendingTrustEvents.push(info) }
+      }
+      // On runtime reload (collectTrustEvents=false), still pass a
+      // callback so the loader records new hashes — but drop the events
+      // (no `skill_changed` emit). Reload is a user-initiated toggle,
+      // not a content scan; the trust file stays consistent without
+      // double-firing the mismatch UX.
+    }
+
+    this._skills = loadActiveSkillsLayered(layerOpts)
+    if (this._trustStore && typeof this._trustStore.flush === 'function') {
+      try { this._trustStore.flush() } catch { /* ignore */ }
+    }
+
     const grouped = groupSkillsByInjectionMode(this._skills)
     this._skillsByMode = grouped
     this._skillsText = formatSkillsForPrompt(grouped.append)
     this._prependSkillsText = formatSkillsForPrompt(grouped.prepend)
+
+    return pendingTrustEvents
+  }
+
+  /**
+   * Activate a manual skill at runtime (#3209). The skill must declare
+   * `activation: manual` in its frontmatter — calling this for a
+   * non-manual skill is a no-op return false (the loader has the
+   * authoritative metadata; we don't duplicate it here).
+   *
+   * Returns `true` when the active set actually changed (caller can
+   * broadcast `skill_activated` and re-emit). `false` when already
+   * active or when the input isn't a valid skill name.
+   *
+   * @param {string} skillName
+   * @returns {boolean}
+   */
+  activateSkill(skillName) {
+    if (typeof skillName !== 'string' || skillName === '') return false
+    if (this._activeManualSkills.has(skillName)) return false
+    this._activeManualSkills.add(skillName)
+    this._loadSkills()
+    return true
+  }
+
+  /**
+   * Deactivate a manual skill at runtime (#3209). Returns true when
+   * the active set actually changed; false otherwise.
+   *
+   * @param {string} skillName
+   * @returns {boolean}
+   */
+  deactivateSkill(skillName) {
+    if (typeof skillName !== 'string' || skillName === '') return false
+    if (!this._activeManualSkills.has(skillName)) return false
+    this._activeManualSkills.delete(skillName)
+    this._loadSkills()
+    return true
   }
 
   get isRunning() {
@@ -291,6 +340,19 @@ export class BaseSession extends EventEmitter {
    */
   _getSkills() {
     return Array.isArray(this._skills) ? this._skills : []
+  }
+
+  /**
+   * Return the set of currently-active manual-skill names (#3209).
+   * The dashboard reads this to know which checkboxes to render
+   * checked. Callers MUST treat the return as read-only — mutate via
+   * `activateSkill()` / `deactivateSkill()` so the loader rebuild
+   * fires.
+   *
+   * @returns {string[]}
+   */
+  getActiveManualSkills() {
+    return Array.from(this._activeManualSkills)
   }
 
   /**

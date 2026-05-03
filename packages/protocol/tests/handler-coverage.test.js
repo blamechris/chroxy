@@ -46,7 +46,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'discovered_sessions', // multi-server discovery, handled at connection layer
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
-  'skills_list',        // MVP (#2957) — no client UI yet; client-side display planned for v2 (#2958)
+  // 'skills_list' removed — dashboard now handles it (#3209)
   'skill_changed',      // #3234: protocol schema added; client UI (dashboard prompt) tracked in #3205
 ])
 
@@ -75,6 +75,9 @@ const PLATFORM_SPECIFIC = {
   'environment_error': 'dashboard',   // environment panel is dashboard-only
   'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
   'prompt_evaluator_changed': 'dashboard', // per-session promptEvaluator toggle (#3185) is dashboard-only — same epic as evaluate_draft_result, mobile app exposure tracked in #3068
+  'skills_list': 'dashboard',       // skills list response (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
+  'skill_activated': 'dashboard',   // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
+  'skill_deactivated': 'dashboard', // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
 }
 
 // ---------------------------------------------------------------------------
