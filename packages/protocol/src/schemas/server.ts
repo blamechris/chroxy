@@ -261,8 +261,17 @@ export const ServerSkillsListSchema = z.object({
     // #3250: ISO-8601 strings emitted by SkillsTrustStore.getRecord().
     // Tightened from `z.string()` to `z.string().datetime()` so a future
     // serialization drift (e.g. someone passing `Date.toString()` instead
-    // of `Date.toISOString()`) fails at the schema layer rather than
-    // surfacing as a "Never" / "Invalid Date" in the dashboard.
+    // of `Date.toISOString()`) fails fast at the schema layer rather
+    // than reaching the dashboard's `formatTimestamp` defensive fallback,
+    // which would render the malformed string verbatim with no error
+    // signal — the regression would silently slip past review.
+    //
+    // The producer (settings-handlers.handleListSkills) validates each
+    // trust-ledger timestamp against `Number.isFinite(Date.parse(...))`
+    // before forwarding so a hand-edited or corrupted
+    // `~/.chroxy/skills-trust.json` cannot fail the entire `skills_list`
+    // payload — malformed values are dropped from the per-skill entry
+    // and the response still parses.
     firstSeen: z.string().datetime().optional(),
     lastVerified: z.string().datetime().optional(),
   })),
