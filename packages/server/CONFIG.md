@@ -26,6 +26,31 @@ Configuration values are resolved in the following order (highest priority first
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
 | `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
 | `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. |
+| `promptEvaluatorSkipPattern` | string | - | - | Per-session regex source (case-insensitive) extending the default skip list used by the prompt evaluator's trivial-message heuristic. See [Prompt evaluator skip heuristic](#prompt-evaluator-skip-heuristic) below. |
+
+### Prompt evaluator skip heuristic
+
+The prompt evaluator (see #3068) is gated by a fast local heuristic so trivial
+follow-ups (`y`, `go`, `looks good`) don't pay the cost of an Anthropic
+round-trip. A draft message **skips** evaluation when any of the following is
+true:
+
+- Length (after trim) is less than 20 characters
+- The trimmed message matches the built-in continuation regex
+  (case-insensitive): `^(y|n|yes|no|go|continue|run it|ok|okay|sure|sounds good|looks good|do it)\.?$`
+- The trimmed message matches the per-session
+  `promptEvaluatorSkipPattern` regex (also case-insensitive)
+
+`promptEvaluatorSkipPattern` is a regex *source string* — for example
+`"^please proceed"` or `"^(ship it|merge it|that's good)$"` — not a literal
+phrase list. The pattern is OR-ed with the default; setting it cannot
+**unblock** evaluation for messages already covered by the default rules. If
+the source fails to compile (unbalanced brackets, etc.) the server logs a
+warning and falls back to the default pattern only.
+
+This config is consumed by the auto-evaluator hook (see `shouldSkipEvaluator`
+in `packages/server/src/prompt-evaluator.js`); the on-demand "Evaluate"
+button in the dashboard always evaluates, regardless of this setting.
 
 ### Provider selection
 

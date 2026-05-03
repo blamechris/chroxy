@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { evaluateDraft } from '../src/prompt-evaluator.js'
+import { evaluateDraft, shouldSkipEvaluator } from '../src/prompt-evaluator.js'
 
 /**
  * The evaluator wraps a single Anthropic API call and parses its JSON response.
@@ -330,6 +330,259 @@ describe('evaluateDraft', () => {
         assert.equal(capturedArgs.model, 'claude-explicit')
       } finally {
         delete process.env.CHROXY_EVALUATOR_MODEL
+      }
+    })
+  })
+})
+
+describe('shouldSkipEvaluator', () => {
+  describe('non-string + empty input', () => {
+    it('skips when message is undefined', () => {
+      assert.equal(shouldSkipEvaluator(undefined), true)
+    })
+
+    it('skips when message is null', () => {
+      assert.equal(shouldSkipEvaluator(null), true)
+    })
+
+    it('skips when message is a number', () => {
+      assert.equal(shouldSkipEvaluator(42), true)
+    })
+
+    it('skips empty string', () => {
+      assert.equal(shouldSkipEvaluator(''), true)
+    })
+
+    it('skips whitespace-only string', () => {
+      assert.equal(shouldSkipEvaluator('   \n  \t '), true)
+    })
+  })
+
+  describe('short messages', () => {
+    it('skips message under 20 chars (after trim)', () => {
+      assert.equal(shouldSkipEvaluator('please fix it'), true)
+    })
+
+    it('skips message at 19 chars', () => {
+      const msg = 'a'.repeat(19)
+      assert.equal(msg.length, 19)
+      assert.equal(shouldSkipEvaluator(msg), true)
+    })
+
+    it('does not skip on length alone at 20 chars', () => {
+      // 20 chars, not a continuation pattern — should NOT skip on length
+      const msg = 'please make it work!'
+      assert.equal(msg.length, 20)
+      assert.equal(shouldSkipEvaluator(msg), false)
+    })
+
+    it('trims before measuring length', () => {
+      // Long-with-padding draft whose trimmed length is < 20
+      assert.equal(shouldSkipEvaluator('     short      '), true)
+    })
+  })
+
+  describe('continuation / ack patterns', () => {
+    const cases = [
+      'y',
+      'n',
+      'yes',
+      'YES',
+      'no',
+      'go',
+      'Go.',
+      'continue',
+      'run it',
+      'ok',
+      'OK.',
+      'okay',
+      'sure',
+      'sounds good',
+      'looks good',
+      'Looks good.',
+      'do it',
+    ]
+    for (const c of cases) {
+      it(`skips continuation pattern: ${JSON.stringify(c)}`, () => {
+        assert.equal(shouldSkipEvaluator(c), true)
+      })
+    }
+
+    it('does not match when continuation phrase has extra prose', () => {
+      // "yes please add a test for the new helper" is substantive
+      assert.equal(
+        shouldSkipEvaluator('yes please add a test for the new helper'),
+        false,
+      )
+    })
+  })
+
+  describe('substantive messages', () => {
+    it('does not skip a substantive code request', () => {
+      const msg = 'Refactor processQueue() to use a worker pool of 4 instead of recursion.'
+      assert.equal(shouldSkipEvaluator(msg), false)
+    })
+
+    it('does not skip a question that exceeds the length threshold', () => {
+      const msg = 'How should I handle the case where the input array is empty?'
+      assert.equal(shouldSkipEvaluator(msg), false)
+    })
+  })
+
+  describe('config.promptEvaluatorSkipPattern', () => {
+    it('skips when custom pattern matches', () => {
+      // Default would NOT skip "please proceed when ready" (substantive,
+      // doesn't match the default ack regex). Custom pattern adds it.
+      const msg = 'please proceed when ready'
+      assert.equal(shouldSkipEvaluator(msg), false)
+      assert.equal(
+        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '^please proceed' }),
+        true,
+      )
+    })
+
+    it('still applies the length and default rules when custom pattern does not match', () => {
+      // Custom pattern is unrelated; "y" should still skip via the default.
+      assert.equal(
+        shouldSkipEvaluator('y', { promptEvaluatorSkipPattern: '^foo$' }),
+        true,
+      )
+    })
+
+    it('falls back gracefully when custom pattern is malformed', () => {
+      // Unbalanced bracket — should not throw, should fall through to defaults.
+      const msg = 'this is a long substantive message that should be evaluated normally'
+      assert.equal(
+        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '[invalid' }),
+        false,
+      )
+      // Default rules still apply with a malformed custom pattern.
+      assert.equal(
+        shouldSkipEvaluator('yes', { promptEvaluatorSkipPattern: '[invalid' }),
+        true,
+      )
+    })
+
+    it('ignores empty custom pattern', () => {
+      const msg = 'this message is long enough not to skip on length'
+      assert.equal(
+        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '' }),
+        false,
+      )
+    })
+
+    it('ignores non-string custom pattern', () => {
+      const msg = 'this message is long enough not to skip on length'
+      assert.equal(
+        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: 123 }),
+        false,
+      )
+    })
+
+    it('treats custom pattern as case-insensitive', () => {
+      assert.equal(
+        shouldSkipEvaluator('PROCEED', { promptEvaluatorSkipPattern: '^proceed$' }),
+        true,
+      )
+    })
+
+    it('accepts an undefined config without throwing', () => {
+      assert.equal(shouldSkipEvaluator('y', undefined), true)
+      assert.equal(shouldSkipEvaluator('y'), true)
+    })
+  })
+
+  describe('compiled-pattern cache (#3213)', () => {
+    it('reuses the same compiled regex across repeated calls', async () => {
+      // Stub global RegExp constructor to count compilations of one specific
+      // source. Uses node:test's mocking via a module-level wrapper since
+      // we can't easily peek into the cache directly.
+      const { _resetSkipPatternCache } = await import('../src/prompt-evaluator.js')
+      _resetSkipPatternCache()
+
+      const OriginalRegExp = global.RegExp
+      let constructed = 0
+      global.RegExp = function (source, flags) {
+        if (source === '^cached pattern$') constructed++
+        return new OriginalRegExp(source, flags)
+      }
+      try {
+        const msg = 'this message is long enough to pass the trivial-skip check'
+        for (let i = 0; i < 50; i++) {
+          shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '^cached pattern$' })
+        }
+        assert.equal(constructed, 1, 'pattern should compile exactly once across 50 calls')
+      } finally {
+        global.RegExp = OriginalRegExp
+        _resetSkipPatternCache()
+      }
+    })
+
+    it('does not re-warn on a malformed pattern across repeated calls', async () => {
+      // Capture log output by patching node's console.warn — the server
+      // logger ultimately writes through it. Asserting on logger internals
+      // would couple to its implementation; this is the integration check.
+      const { _resetSkipPatternCache } = await import('../src/prompt-evaluator.js')
+      _resetSkipPatternCache()
+
+      const writes = []
+      const originalWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = (chunk, ...rest) => {
+        const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        if (s.includes('Invalid promptEvaluatorSkipPattern')) writes.push(s)
+        return originalWrite(chunk, ...rest)
+      }
+      try {
+        const msg = 'this message is long enough to pass the trivial-skip check'
+        for (let i = 0; i < 10; i++) {
+          shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '[unclosed' })
+        }
+        // The cache stores `null` for invalid sources, so the warning fires
+        // once on first compilation, not on every subsequent call.
+        assert.equal(writes.length, 1, `expected one warn, got ${writes.length}`)
+      } finally {
+        process.stderr.write = originalWrite
+        _resetSkipPatternCache()
+      }
+    })
+
+    it('warning message does not echo the user-supplied regex source (#3212)', async () => {
+      // Reachable channel: log.warn fans out to paired WS clients via
+      // log_entry events. The raw regex source is user-supplied config and
+      // must not be leaked back to the network — see comment at the top of
+      // _compileSkipPattern.
+      const { _resetSkipPatternCache } = await import('../src/prompt-evaluator.js')
+      _resetSkipPatternCache()
+
+      const writes = []
+      const originalWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = (chunk, ...rest) => {
+        const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        writes.push(s)
+        return originalWrite(chunk, ...rest)
+      }
+      try {
+        const sentinelSource = '[REDACTED-SENTINEL-PATTERN-XYZ123'
+        const msg = 'this message is long enough to pass the trivial-skip check'
+        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: sentinelSource })
+        const haystack = writes.join('')
+        assert.ok(
+          /Invalid promptEvaluatorSkipPattern/.test(haystack),
+          'expected the generic warn line to appear',
+        )
+        assert.ok(
+          !haystack.includes(sentinelSource),
+          'warn output must not echo the raw regex source — see #3212 (log.warn fans out via log_entry)',
+        )
+        // Also verify the SDK error message itself isn't leaked, which
+        // typically embeds the bad source verbatim.
+        assert.ok(
+          !haystack.includes('SyntaxError'),
+          'warn output must not include the underlying SyntaxError',
+        )
+      } finally {
+        process.stderr.write = originalWrite
+        _resetSkipPatternCache()
       }
     })
   })

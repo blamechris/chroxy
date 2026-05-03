@@ -57,6 +57,98 @@ Rules:
 
 const VALID_VERDICTS = new Set(['forward', 'rewrite', 'clarify'])
 
+// Minimum length (after trim) for a draft to be worth evaluating. Below this
+// the message is almost certainly a continuation/ack ("y", "go ahead", "do it
+// please") that won't benefit from an evaluator round-trip.
+const SKIP_MIN_LENGTH = 20
+
+// Default continuation/ack pattern. Matches single-word affirmatives and a few
+// common short phrases ("looks good", "sounds good", "run it"). Anchored to
+// the full string so substantive messages that happen to start with "yes" or
+// "ok" still get evaluated.
+const DEFAULT_SKIP_PATTERN = /^(y|n|yes|no|go|continue|run it|ok|okay|sure|sounds good|looks good|do it)\.?$/i
+
+/**
+ * Decide whether a draft message is too trivial to be worth running through
+ * `evaluateDraft`. The auto-evaluator hook (sibling sub-task) consults this
+ * before paying for an Anthropic round-trip.
+ *
+ * Returns `true` to SKIP evaluation (forward the message as-is).
+ *
+ * Skip rules:
+ *   - Non-string or empty (after trim) — nothing to evaluate
+ *   - Length (after trim) < SKIP_MIN_LENGTH (20)
+ *   - Matches the default continuation regex, OR a session-supplied
+ *     `promptEvaluatorSkipPattern` regex source
+ *
+ * @param {unknown} message - The draft user message
+ * @param {object} [config]
+ * @param {string} [config.promptEvaluatorSkipPattern] - Per-session regex
+ *   source string to OR with the default pattern. Malformed sources are
+ *   logged and ignored — the default pattern still applies.
+ * @returns {boolean} true if the message should skip the evaluator
+ */
+export function shouldSkipEvaluator(message, config = {}) {
+  if (typeof message !== 'string') return true
+  const trimmed = message.trim()
+  if (!trimmed) return true
+  if (trimmed.length < SKIP_MIN_LENGTH) return true
+
+  if (DEFAULT_SKIP_PATTERN.test(trimmed)) return true
+
+  const customSource = config?.promptEvaluatorSkipPattern
+  if (typeof customSource === 'string' && customSource.length > 0) {
+    const customPattern = _compileSkipPattern(customSource)
+    if (customPattern && customPattern.test(trimmed)) return true
+  }
+
+  return false
+}
+
+// Compiled-regex cache keyed by source string. Avoids recompiling on every
+// `shouldSkipEvaluator` call (the auto-evaluator hook will run this on the
+// `user_input` hot path). Stores `null` for invalid sources so we don't
+// re-warn on every message either.
+//
+// Bounded by SKIP_PATTERN_CACHE_MAX so a session that flips through many
+// distinct patterns can't grow the cache unboundedly. LRU-ish eviction:
+// when full we drop the oldest insertion (Map preserves insertion order).
+const SKIP_PATTERN_CACHE_MAX = 64
+const _skipPatternCache = new Map()
+
+/**
+ * Compile a user-supplied regex source, with caching for the hot path.
+ * Returns null for invalid sources so the caller falls back to the default
+ * pattern only. The warning log is intentionally GENERIC — the regex source
+ * is user-supplied config and `log.warn` is fanned out to paired WS clients
+ * via `log_entry` events, so echoing the raw source / the SDK's error
+ * message would create a config-leak channel.
+ */
+function _compileSkipPattern(source) {
+  if (_skipPatternCache.has(source)) return _skipPatternCache.get(source)
+  let compiled = null
+  try {
+    compiled = new RegExp(source, 'i')
+  } catch {
+    log.warn('Invalid promptEvaluatorSkipPattern (rejected source); falling back to default skip pattern only')
+  }
+  if (_skipPatternCache.size >= SKIP_PATTERN_CACHE_MAX) {
+    // Evict the oldest entry — Map iteration order is insertion order.
+    const oldestKey = _skipPatternCache.keys().next().value
+    _skipPatternCache.delete(oldestKey)
+  }
+  _skipPatternCache.set(source, compiled)
+  return compiled
+}
+
+/**
+ * Reset the compiled-pattern cache. Test-only — production code should
+ * never need this. Exported so tests can isolate one another.
+ */
+export function _resetSkipPatternCache() {
+  _skipPatternCache.clear()
+}
+
 /**
  * Evaluate a draft user message.
  *
