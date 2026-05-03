@@ -142,7 +142,7 @@ export function canonicalStringify(value) {
  * surfacing in the picker after the user upgrades to a build whose fallback
  * is `claude-opus-4-7`.
  */
-export function modelVersionStem(fullId) {
+function modelVersionStem(fullId) {
   if (typeof fullId !== 'string') return ''
   const stripped = fullId.endsWith(ONE_M_SUFFIX) ? fullId.slice(0, -ONE_M_SUFFIX.length) : fullId
   return stripped.replace(/-\d{8,}$/, '')
@@ -463,7 +463,11 @@ export function createModelsRegistry(hooks = {}) {
 
         // Merge in any fallback entries the filtered cache doesn't cover
         // so the picker always has the canonical sonnet/opus/haiku aliases
-        // even when the cache was mostly stale.
+        // even when the cache was mostly stale. The `[1m]` variant
+        // synthesis that updateModels() does is intentionally NOT repeated
+        // here — variants are already in the saved cache for SDK users,
+        // and CLI-only users would not have a working SDK call to populate
+        // them anyway.
         const seenFullIds = new Set(models.map(m => m.fullId))
         for (const fb of fallbackModels) {
           if (!seenFullIds.has(fb.fullId)) {
