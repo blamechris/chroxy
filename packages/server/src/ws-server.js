@@ -220,6 +220,7 @@ function _isSecureRequest(req) {
  *   { type: 'unsubscribe_sessions' }                    — unsubscribe from session discovery
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
+ *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *   { type: 'create_environment', name, cwd, image?, ... } — create persistent container environment
  *   { type: 'list_environments' }                       — list all persistent environments
@@ -328,6 +329,7 @@ function _isSecureRequest(req) {
  *   { type: 'environment_info', environment: {...} }    — single environment details
  *   { type: 'environment_error', error, environmentId? } — environment operation error
  *   { type: 'evaluate_draft_result', requestId, verdict?, rewritten?, clarification?, reasoning?, error? } — prompt evaluator response (#3068)
+ *   { type: 'prompt_evaluator_changed', sessionId, value: boolean } — per-session promptEvaluator toggle changed (#3185)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }

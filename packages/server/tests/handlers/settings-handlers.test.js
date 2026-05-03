@@ -594,6 +594,92 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #3185: per-session promptEvaluator toggle. The handler must validate
+  // the strict-boolean payload, broadcast a `prompt_evaluator_changed`
+  // event when state actually flips, and trigger persistence so a
+  // restart preserves the toggle. Unchanged toggles stay silent.
+  describe('set_prompt_evaluator (#3185)', () => {
+    it('rejects non-boolean values with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator(makeWs(), client, { value: 'true' }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /boolean/)
+      assert.equal(session.setPromptEvaluator.callCount, 0)
+    })
+
+    it('rejects when no active session', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.set_prompt_evaluator(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('toggles to true and broadcasts prompt_evaluator_changed', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      // Persist hook so we can verify serializeState() is invoked once
+      // per actual change.
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { ...sessions, getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(session.setPromptEvaluator.callCount, 1)
+      assert.equal(session.setPromptEvaluator.lastCall[0], true)
+      assert.equal(session.promptEvaluator, true)
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'prompt_evaluator_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, true)
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('idempotent on no-op (already false)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      // promptEvaluator default is false on the mock — toggling to
+      // false again must not broadcast or persist.
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator(makeWs(), client, { value: false }, ctx)
+
+      // Setter is consulted (records the no-op) but no broadcast.
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('rejects when the session does not implement setPromptEvaluator', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      // Custom provider missing the BaseSession setter — handler must
+      // refuse cleanly rather than crashing on an undefined call.
+      delete session.setPromptEvaluator
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /does not support promptEvaluator/)
+    })
+  })
+
   // #3067: list_skills should walk up from the active session's cwd to pick up
   // the per-repo .chroxy/skills/ overlay and tag each entry with its source.
   // We can't stub the global ~/.chroxy/skills tier here — that's the user's

@@ -292,6 +292,7 @@ export function App() {
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
+  const setPromptEvaluator = useConnectionStore(s => s.setPromptEvaluator)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
@@ -1066,6 +1067,8 @@ export function App() {
             })()}
             thinkingLevel={thinkingLevel}
             onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
+            promptEvaluator={!!sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator}
+            onPromptEvaluatorChange={setPromptEvaluator}
           />
         </div>
         <div className="header-right">

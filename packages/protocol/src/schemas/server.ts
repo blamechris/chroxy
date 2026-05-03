@@ -97,6 +97,15 @@ export const ServerModelChangedSchema = z.object({
   model: z.string().nullable(),
 })
 
+// #3185: per-session promptEvaluator toggle changed. Broadcast to every
+// client bound to `sessionId` whenever the value actually flips. Clients
+// re-render the toggle and can refetch session_list for confirmation.
+export const ServerPromptEvaluatorChangedSchema = z.object({
+  type: z.literal('prompt_evaluator_changed'),
+  sessionId: z.string(),
+  value: z.boolean(),
+})
+
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *

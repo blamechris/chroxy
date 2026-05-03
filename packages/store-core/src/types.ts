@@ -85,6 +85,10 @@ export interface SessionInfo {
   conversationId: string | null;
   provider?: string;
   worktree?: boolean;
+  // #3185: per-session promptEvaluator toggle. Optional in the type so
+  // older servers that don't include the field don't break the parser.
+  // Renderers should treat `undefined` as `false` (toggle off).
+  promptEvaluator?: boolean;
 }
 
 export interface AgentInfo {

@@ -444,6 +444,10 @@ export interface ConnectionState {
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
+  // #3185: toggle the per-session promptEvaluator. Server broadcasts a
+  // `prompt_evaluator_changed` event back which updates the session
+  // entry — no optimistic update here.
+  setPromptEvaluator: (value: boolean) => void;
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
   resize: (cols: number, rows: number) => void;

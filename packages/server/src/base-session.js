@@ -65,11 +65,18 @@ export class BaseSession extends EventEmitter {
     providerSkillAllowlist,
     trustStore,
     trustMismatchMode,
+    promptEvaluator,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
     this.permissionMode = permissionMode || 'approve'
+    // #3185: per-session toggle for the auto-evaluator chain (parent epic
+    // #3068). Default `false` — the existing manual `evaluate_draft` flow
+    // (PR #3089) is unaffected by this flag. Coerced to a strict boolean
+    // here so JSON.stringify produces `true`/`false` (not `1`/`null`) on
+    // the auth_ok / session_list wires.
+    this.promptEvaluator = !!promptEvaluator
 
     this._isBusy = false
     this._processReady = false
@@ -225,6 +232,32 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.permissionMode = mode
+    return true
+  }
+
+  /**
+   * Toggle the per-session promptEvaluator flag (#3185). Returns `true`
+   * when the value changes (so callers can decide whether to broadcast a
+   * `prompt_evaluator_changed` event and persist state) and `false` when
+   * the input is invalid OR the value is unchanged. Strict-boolean only —
+   * a non-boolean input is rejected without mutating state, defending
+   * against malformed WS payloads.
+   *
+   * Unlike `setPermissionMode`, this is safe to flip while the session is
+   * busy: the flag is only read at the start of the next prompt, so a
+   * mid-turn change has no in-flight side effects.
+   *
+   * @param {boolean} value
+   * @returns {boolean}
+   */
+  setPromptEvaluator(value) {
+    if (typeof value !== 'boolean') {
+      return false
+    }
+    if (value === this.promptEvaluator) {
+      return false
+    }
+    this.promptEvaluator = value
     return true
   }
 

@@ -1190,6 +1190,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #3185: per-session promptEvaluator toggle. Strict-boolean payload
+  // matches the server's validation; `sessionId` is passed when present
+  // so the toggle targets the active session in multi-session mode.
+  setPromptEvaluator: (value: boolean) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const payload: Record<string, unknown> = { type: 'set_prompt_evaluator', value };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    }
+  },
+
   confirmPermissionMode: (mode: string) => {
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

@@ -120,6 +120,24 @@
   border-color: var(--accent-blue);
 }
 
+/* #3185: per-session promptEvaluator toggle in the header dropdown
+   group. Compact native checkbox with a label so accessibility is
+   inherited; sized to match the surrounding selects' font scale. */
+.prompt-evaluator-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.prompt-evaluator-toggle input[type='checkbox'] {
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+}
+
 
 .header-right {
   display: flex;

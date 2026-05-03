@@ -18,6 +18,11 @@ export interface ChatSettingsDropdownProps {
   showThinkingLevel: boolean
   thinkingLevel: string | null
   onThinkingLevelChange: (level: string) => void
+  // #3185: per-session auto-evaluator toggle. Optional so legacy parent
+  // call sites that don't yet wire it (single-CLI mode without
+  // session_list, etc.) compile without a forced default.
+  promptEvaluator?: boolean
+  onPromptEvaluatorChange?: (value: boolean) => void
 }
 
 export function ChatSettingsDropdown({
@@ -31,6 +36,8 @@ export function ChatSettingsDropdown({
   showThinkingLevel,
   thinkingLevel,
   onThinkingLevelChange,
+  promptEvaluator,
+  onPromptEvaluatorChange,
 }: ChatSettingsDropdownProps) {
   const handleModelChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value
@@ -88,6 +95,23 @@ export function ChatSettingsDropdown({
           <option value="high">High</option>
           <option value="max">Max</option>
         </select>
+      )}
+
+      {/* #3185: per-session promptEvaluator toggle. Renders only when the
+          parent wires the change handler — feature-gates the UI without
+          requiring a separate capability flag. Native checkbox keeps
+          accessibility (label association, keyboard) without an extra
+          dependency. */}
+      {onPromptEvaluatorChange && (
+        <label className="prompt-evaluator-toggle" data-testid="prompt-evaluator-toggle" title="Auto-evaluate prompts before send">
+          <input
+            type="checkbox"
+            checked={!!promptEvaluator}
+            onChange={e => onPromptEvaluatorChange(e.target.checked)}
+            data-testid="prompt-evaluator-checkbox"
+          />
+          <span>Auto-evaluate</span>
+        </label>
       )}
     </>
   )
