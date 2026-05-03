@@ -321,6 +321,45 @@ describe('skills integration — true end-to-end', () => {
         rmSync(scopedDir, { recursive: true, force: true })
       }
     })
+
+    // -------------------------------------------------------------------
+    // #3228: when a session has BOTH a prepend-mode skill and an
+    // append-mode skill (rare on subprocess providers, but possible if
+    // the user pinned `injection: append` in frontmatter), the spawned
+    // user-message prefix must contain exactly ONE `# User skills`
+    // header. Pre-fix: the concat of two bucket-formatted strings
+    // produced two headers in the prompt sent to codex.
+    // -------------------------------------------------------------------
+
+    it('spawned user message has exactly one `# User skills` header even with mixed buckets (#3228)', async () => {
+      const mixedDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-mixed-'))
+      try {
+        writeFileSync(
+          join(mixedDir, 'pre.md'),
+          '---\nname: pre\ninjection: prepend\n---\nPREPEND_BODY\n',
+        )
+        writeFileSync(
+          join(mixedDir, 'sys.md'),
+          '---\nname: sys\ninjection: append\n---\nAPPEND_BODY\n',
+        )
+
+        const session = makeShimmedCodex({ cwd: '/tmp', skillsDir: mixedDir })
+        await session.sendMessage('hello')
+        await waitFor(() => existsSync(recordPath), { label: 'shim record' })
+        await waitFor(() => !session.isRunning, { label: 'subprocess closed' })
+
+        const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
+        const sentText = recordedArgv[1]
+        const headerCount = (sentText.match(/# User skills/g) || []).length
+        assert.equal(headerCount, 1,
+          `expected exactly one '# User skills' header in spawned argv, got ${headerCount}\n---\n${sentText.slice(0, 600)}`)
+        assert.ok(sentText.includes('PREPEND_BODY'), 'prepend skill body should be present')
+        assert.ok(sentText.includes('APPEND_BODY'), 'append skill body should be present')
+        assert.ok(sentText.endsWith('hello'), 'user prompt should still terminate the prefix')
+      } finally {
+        rmSync(mixedDir, { recursive: true, force: true })
+      }
+    })
   })
 
   // -----------------------------------------------------------------------

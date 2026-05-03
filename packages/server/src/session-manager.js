@@ -149,6 +149,8 @@ export class SessionManager extends EventEmitter {
     costBudget,
     maxSkillBytes,
     maxTotalSkillBytes,
+    providerSkillAllowlist,
+    trustMismatchMode,
 
     // State persistence
     stateFilePath,
@@ -186,6 +188,27 @@ export class SessionManager extends EventEmitter {
     // Setting either to 0 in config disables that cap.
     this._maxSkillBytes = Number.isFinite(maxSkillBytes) ? maxSkillBytes : null
     this._maxTotalSkillBytes = Number.isFinite(maxTotalSkillBytes) ? maxTotalSkillBytes : null
+    // Per-provider skill allowlist (#3207). Stored verbatim and forwarded
+    // to BaseSession via providerOpts; the loader applies the gate after
+    // the per-skill / per-budget filters so an out-of-allowlist skill is
+    // dropped before its body reaches the prompt. `null` (or any
+    // non-object) means "no allowlist configured" — keeps the legacy
+    // permissive behaviour.
+    this._providerSkillAllowlist = (
+      providerSkillAllowlist && typeof providerSkillAllowlist === 'object' && !Array.isArray(providerSkillAllowlist)
+    )
+      ? providerSkillAllowlist
+      : null
+    // Skill content-hash trust mode (#3204). One of 'warn' / 'block' /
+    // null. Null = trust check disabled (the loader skips hashing
+    // entirely; behaviour identical to the pre-#3204 server). Operators
+    // opt in via the `trustMismatchMode` config key. Tests that don't
+    // pass this option keep the legacy no-op behaviour, so the default
+    // trust file at ~/.chroxy/skills-trust.json is never touched
+    // unless explicitly enabled.
+    this._trustMismatchMode = (trustMismatchMode === 'warn' || trustMismatchMode === 'block')
+      ? trustMismatchMode
+      : null
 
     // State persistence (delegated to SessionStatePersistence)
     this._persistence = new SessionStatePersistence({
@@ -393,6 +416,18 @@ export class SessionManager extends EventEmitter {
     // these to loadActiveSkillsLayered. (#3202)
     if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes
     if (this._maxTotalSkillBytes !== null) providerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
+    // Per-provider skill allowlist — passed through verbatim. BaseSession
+    // resolves the per-provider entry against the session's `provider`
+    // key when constructing the loader options. (#3207)
+    if (this._providerSkillAllowlist !== null) {
+      providerOpts.providerSkillAllowlist = this._providerSkillAllowlist
+    }
+    // Skill content-hash trust mode (#3204). Only forwarded when the
+    // operator explicitly configured one of 'warn' / 'block' — leaves
+    // BaseSession's no-op default in place when omitted.
+    if (this._trustMismatchMode !== null) {
+      providerOpts.trustMismatchMode = this._trustMismatchMode
+    }
     // Sandbox: per-session overrides server-level default
     const resolvedSandbox = sandbox || this._sandbox
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
@@ -1057,8 +1092,13 @@ export class SessionManager extends EventEmitter {
       })
     }
 
-    // Transient events — forwarded but not recorded in history (not replayed on reconnect)
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers']
+    // Transient events — forwarded but not recorded in history (not replayed on reconnect).
+    // `skill_changed` (#3204) lands here so a paired dashboard / mobile client can
+    // surface a "this skill's content has changed since first activation" prompt
+    // without the event being replayed on every reconnect (the loader re-checks
+    // the hash every time skills are scanned, so the latest state is always
+    // canonical).
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {

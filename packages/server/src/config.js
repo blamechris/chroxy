@@ -96,6 +96,28 @@ const CONFIG_SCHEMA = {
   // to 0 disables that cap. Documented in CONFIG.md.
   maxSkillBytes: 'number',
   maxTotalSkillBytes: 'number',
+  // Per-provider skill allowlist (#3207). An object keyed by provider id
+  // (e.g. `codex`, `gemini`) whose value is an array of skill names that
+  // are permitted to load for that provider. When this map is omitted
+  // entirely, the loader keeps the v1 permissive behaviour (every loaded
+  // skill is eligible for every provider). When the map is present:
+  //   - Claude-family providers (`claude-sdk`, `claude-cli`, `docker-*`)
+  //     stay permissive — Claude has built-in tool gating so skills there
+  //     are lower risk.
+  //   - For non-Claude providers (`codex`, `gemini`, …) only the skills
+  //     listed in the allowlist for that provider load. A missing key
+  //     OR an empty array filters out ALL skills for that provider —
+  //     fail-secure.
+  // Documented in CONFIG.md.
+  providerSkillAllowlist: 'object',
+  // Skill content-hash mismatch mode (#3204). One of:
+  //   - 'warn' (default): a hash mismatch logs a sanitised warn and
+  //     emits a `skill_changed` WS event but the skill still loads.
+  //   - 'block': same warn + event, but the skill is filtered out of
+  //     the active set until the operator explicitly re-trusts it.
+  // Anything other than the two valid values is treated as 'warn'.
+  // Documented in CONFIG.md.
+  trustMismatchMode: 'string',
 }
 
 /**

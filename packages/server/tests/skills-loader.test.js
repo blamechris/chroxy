@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { createHash } from 'crypto'
 import {
   loadActiveSkills,
   loadActiveSkillsLayered,
@@ -1235,6 +1236,316 @@ describe('skills-loader', () => {
       )
       assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
       assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3207: per-provider skill allowlist. Only `loadActiveSkillsLayered`
+  // applies it (not `loadActiveSkills`) — it's an operator-level gate
+  // that runs after the merge of global + repo so a deny-listed skill
+  // never reaches the budget pass.
+  // -----------------------------------------------------------------------
+
+  describe('per-provider skill allowlist (#3207)', () => {
+    it('with no allowlist configured: every skill loads (back-compat permissive)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      writeFileSync(join(dir, 'b.md'), 'b body')
+      const skills = loadActiveSkillsLayered({ globalDir: dir, provider: 'codex' })
+      assert.equal(skills.length, 2)
+    })
+
+    it('with allowlist defined and skill in allowlist: skill is loaded for codex', () => {
+      writeFileSync(join(dir, 'allowed.md'), 'allowed body')
+      writeFileSync(join(dir, 'denied.md'), 'denied body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        providerSkillAllowlist: { codex: ['allowed'] },
+      })
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'allowed')
+    })
+
+    it('with allowlist defined and skill NOT in allowlist: skill is filtered for codex', () => {
+      writeFileSync(join(dir, 'denied.md'), 'denied body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        providerSkillAllowlist: { codex: ['something-else'] },
+      })
+      assert.deepEqual(skills, [])
+    })
+
+    it('with allowlist defined but no entry for codex: ALL skills filtered (fail-secure)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      writeFileSync(join(dir, 'b.md'), 'b body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        // gemini has an entry but codex doesn't — codex must drop everything.
+        providerSkillAllowlist: { gemini: ['a'] },
+      })
+      assert.deepEqual(skills, [])
+    })
+
+    it('with allowlist defined as empty array for codex: ALL skills filtered (fail-secure)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        providerSkillAllowlist: { codex: [] },
+      })
+      assert.deepEqual(skills, [])
+    })
+
+    it('claude-sdk session is permissive even when allowlist is configured', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      writeFileSync(join(dir, 'b.md'), 'b body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'claude-sdk',
+        // Allowlist exists but doesn't reference claude-sdk. Claude family
+        // stays permissive — it has its own tool gating.
+        providerSkillAllowlist: { codex: ['a'] },
+      })
+      assert.equal(skills.length, 2)
+    })
+
+    it('claude-cli session is permissive', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'claude-cli',
+        providerSkillAllowlist: { codex: ['a'] },
+      })
+      assert.equal(skills.length, 1)
+    })
+
+    it('bare `claude` provider alias is permissive', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'claude',
+        providerSkillAllowlist: { codex: [] },
+      })
+      assert.equal(skills.length, 1)
+    })
+
+    it('null provider with allowlist configured: fail-secure (drop all)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: null,
+        providerSkillAllowlist: { codex: ['a'] },
+      })
+      assert.deepEqual(skills, [])
+    })
+
+    it('non-object allowlist (array) is treated as missing (permissive)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        providerSkillAllowlist: ['a'], // wrong shape
+      })
+      assert.equal(skills.length, 1)
+    })
+
+    it('multiple skills allowed: order preserved (alphabetical)', () => {
+      writeFileSync(join(dir, 'alpha.md'), 'alpha body')
+      writeFileSync(join(dir, 'beta.md'), 'beta body')
+      writeFileSync(join(dir, 'gamma.md'), 'gamma body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        providerSkillAllowlist: { codex: ['alpha', 'gamma'] },
+      })
+      assert.deepEqual(skills.map((s) => s.name), ['alpha', 'gamma'])
+    })
+
+    it('allowlist key matches provider id case-insensitively', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'CODEX', // upper-case input is normalised to lower-case
+        providerSkillAllowlist: { codex: ['a'] },
+      })
+      assert.equal(skills.length, 1)
+    })
+
+    it('does not interact with provider gating: a skill with `providers: [codex]` AND in the allowlist still loads', () => {
+      writeFileSync(
+        join(dir, 'scoped.md'),
+        '---\nname: scoped\nproviders: [codex]\n---\nbody\n',
+      )
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'codex',
+        providerSkillAllowlist: { codex: ['scoped'] },
+      })
+      assert.equal(skills.length, 1)
+    })
+
+    it('a skill scoped to claude survives the allowlist gate when running claude-sdk', () => {
+      writeFileSync(
+        join(dir, 'cs.md'),
+        '---\nname: cs\nproviders: [claude]\n---\nbody\n',
+      )
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'claude-sdk',
+        providerSkillAllowlist: { codex: [] },
+      })
+      assert.equal(skills.length, 1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3204: trust-hash integration with the loader.
+  //
+  // The store's own behaviour is exhaustively covered in
+  // skills-trust.test.js. These tests verify the loader honours the
+  // store: first-seen → recorded, unchanged → verified, changed → mismatch
+  // emit + (in block mode) filter.
+  // -----------------------------------------------------------------------
+
+  describe('trust hash integration (#3204)', () => {
+    function makeFakeStore(records, mode = 'warn') {
+      // Minimal store-shaped object — just enough to satisfy the loader.
+      // Not the real SkillsTrustStore so these tests stay decoupled from
+      // its persistence path.
+      return {
+        mode,
+        records: { ...records },
+        inspect(absPath, body) {
+          const h = createHash('sha256').update(body).digest('hex')
+          const existing = this.records[absPath]
+          if (!existing) {
+            this.records[absPath] = { sha256: h, firstSeen: 'now', lastVerified: 'now' }
+            return { status: 'recorded', hash: h }
+          }
+          if (existing.sha256 === h) {
+            return { status: 'verified', hash: h }
+          }
+          return {
+            status: 'mismatch',
+            hash: h,
+            oldHash: existing.sha256,
+            newHash: h,
+            blocked: this.mode === 'block',
+          }
+        },
+      }
+    }
+
+    it('first activation records a hash and the skill loads normally', () => {
+      writeFileSync(join(dir, 'a.md'), '# a\n\nbody one\n')
+      const store = makeFakeStore({})
+      const skills = loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+      assert.equal(skills.length, 1, 'first-seen skill must load')
+      assert.ok(Object.keys(store.records).length === 1, 'one hash recorded')
+    })
+
+    it('second activation with unchanged content: no callback fired, skill still loads', () => {
+      writeFileSync(join(dir, 'a.md'), '# a\n\nbody\n')
+      const store = makeFakeStore({})
+      // First load — records the hash.
+      loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+
+      const mismatches = []
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        trustStore: store,
+        onTrustMismatch: (info) => mismatches.push(info),
+      })
+      assert.equal(skills.length, 1)
+      assert.deepEqual(mismatches, [], 'no mismatch fires for unchanged content')
+    })
+
+    it('second activation with changed content (warn mode): callback fires, skill still loads', () => {
+      writeFileSync(join(dir, 'a.md'), '# a\n\noriginal body\n')
+      const store = makeFakeStore({}, 'warn')
+      loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+
+      // Mutate the file.
+      writeFileSync(join(dir, 'a.md'), '# a\n\nrewritten body\n')
+
+      const mismatches = []
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        trustStore: store,
+        onTrustMismatch: (info) => mismatches.push(info),
+      })
+      assert.equal(skills.length, 1, 'in warn mode the skill still loads')
+      assert.equal(mismatches.length, 1, 'mismatch callback should have fired exactly once')
+      assert.equal(mismatches[0].name, 'a')
+      assert.ok(typeof mismatches[0].oldHash === 'string')
+      assert.ok(typeof mismatches[0].newHash === 'string')
+      assert.notEqual(mismatches[0].oldHash, mismatches[0].newHash)
+      assert.equal(mismatches[0].blocked, false)
+    })
+
+    it('second activation with changed content (block mode): callback fires AND skill is filtered', () => {
+      writeFileSync(join(dir, 'a.md'), 'original')
+      const store = makeFakeStore({}, 'block')
+      loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+      writeFileSync(join(dir, 'a.md'), 'rewritten')
+
+      const mismatches = []
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        trustStore: store,
+        onTrustMismatch: (info) => mismatches.push(info),
+      })
+      assert.equal(skills.length, 0, 'block mode must filter the changed skill out')
+      assert.equal(mismatches.length, 1)
+      assert.equal(mismatches[0].blocked, true)
+    })
+
+    it('does not crash if onTrustMismatch is omitted (mismatch in warn mode)', () => {
+      writeFileSync(join(dir, 'a.md'), 'original')
+      const store = makeFakeStore({}, 'warn')
+      loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+      writeFileSync(join(dir, 'a.md'), 'rewritten')
+
+      // No onTrustMismatch passed.
+      const skills = loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+      assert.equal(skills.length, 1)
+    })
+
+    it('does not crash if onTrustMismatch throws — failure isolated, skill still loads in warn mode', () => {
+      writeFileSync(join(dir, 'a.md'), 'original')
+      const store = makeFakeStore({}, 'warn')
+      loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+      writeFileSync(join(dir, 'a.md'), 'rewritten')
+
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        trustStore: store,
+        onTrustMismatch: () => { throw new Error('boom') },
+      })
+      assert.equal(skills.length, 1, 'callback errors must not block skill loading')
+    })
+
+    it('hashes the post-frontmatter body, not the raw file', () => {
+      // Two skills with identical bodies but different frontmatter — same
+      // hash means a frontmatter rename / activation flip alone does NOT
+      // trigger a mismatch.
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\n---\nshared body\n')
+      const store = makeFakeStore({}, 'warn')
+      loadActiveSkillsLayered({ globalDir: dir, trustStore: store })
+      const recordedHash = Object.values(store.records)[0].sha256
+
+      // Edit the frontmatter only.
+      writeFileSync(join(dir, 'a.md'), '---\nname: a-renamed\npriority: 50\n---\nshared body\n')
+      const mismatches = []
+      loadActiveSkillsLayered({
+        globalDir: dir,
+        trustStore: store,
+        onTrustMismatch: (info) => mismatches.push(info),
+      })
+      assert.deepEqual(mismatches, [],
+        `frontmatter-only edits must NOT count as a trust mismatch; recorded ${recordedHash}`)
     })
   })
 })
