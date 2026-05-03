@@ -105,17 +105,48 @@ export function shouldSkipEvaluator(message, config = {}) {
   return false
 }
 
+// Compiled-regex cache keyed by source string. Avoids recompiling on every
+// `shouldSkipEvaluator` call (the auto-evaluator hook will run this on the
+// `user_input` hot path). Stores `null` for invalid sources so we don't
+// re-warn on every message either.
+//
+// Bounded by SKIP_PATTERN_CACHE_MAX so a session that flips through many
+// distinct patterns can't grow the cache unboundedly. LRU-ish eviction:
+// when full we drop the oldest insertion (Map preserves insertion order).
+const SKIP_PATTERN_CACHE_MAX = 64
+const _skipPatternCache = new Map()
+
 /**
- * Compile a user-supplied regex source. Returns null (and logs at warn) if
- * the source is invalid — the caller falls back to the default pattern only.
+ * Compile a user-supplied regex source, with caching for the hot path.
+ * Returns null for invalid sources so the caller falls back to the default
+ * pattern only. The warning log is intentionally GENERIC — the regex source
+ * is user-supplied config and `log.warn` is fanned out to paired WS clients
+ * via `log_entry` events, so echoing the raw source / the SDK's error
+ * message would create a config-leak channel.
  */
 function _compileSkipPattern(source) {
+  if (_skipPatternCache.has(source)) return _skipPatternCache.get(source)
+  let compiled = null
   try {
-    return new RegExp(source, 'i')
-  } catch (err) {
-    log.warn(`Invalid promptEvaluatorSkipPattern (${err.message}); falling back to default skip pattern only`)
-    return null
+    compiled = new RegExp(source, 'i')
+  } catch {
+    log.warn('Invalid promptEvaluatorSkipPattern (rejected source); falling back to default skip pattern only')
   }
+  if (_skipPatternCache.size >= SKIP_PATTERN_CACHE_MAX) {
+    // Evict the oldest entry — Map iteration order is insertion order.
+    const oldestKey = _skipPatternCache.keys().next().value
+    _skipPatternCache.delete(oldestKey)
+  }
+  _skipPatternCache.set(source, compiled)
+  return compiled
+}
+
+/**
+ * Reset the compiled-pattern cache. Test-only — production code should
+ * never need this. Exported so tests can isolate one another.
+ */
+export function _resetSkipPatternCache() {
+  _skipPatternCache.clear()
 }
 
 /**

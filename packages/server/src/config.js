@@ -84,6 +84,11 @@ const CONFIG_SCHEMA = {
   // the 2026-04-11 audit Adversary A7 fix to close the "register any
   // attacker-controlled image and run it" attack path.
   allowedDockerImages: 'array',
+  // Per-session regex source string used by `shouldSkipEvaluator` to extend
+  // the default continuation-pattern skip list. Wrapped in try/catch when
+  // compiled — malformed sources are logged and ignored, the default
+  // pattern still applies. Documented in CONFIG.md. Added in #3187.
+  promptEvaluatorSkipPattern: 'string',
 }
 
 /**

@@ -491,4 +491,99 @@ describe('shouldSkipEvaluator', () => {
       assert.equal(shouldSkipEvaluator('y'), true)
     })
   })
+
+  describe('compiled-pattern cache (#3213)', () => {
+    it('reuses the same compiled regex across repeated calls', async () => {
+      // Stub global RegExp constructor to count compilations of one specific
+      // source. Uses node:test's mocking via a module-level wrapper since
+      // we can't easily peek into the cache directly.
+      const { _resetSkipPatternCache } = await import('../src/prompt-evaluator.js')
+      _resetSkipPatternCache()
+
+      const OriginalRegExp = global.RegExp
+      let constructed = 0
+      global.RegExp = function (source, flags) {
+        if (source === '^cached pattern$') constructed++
+        return new OriginalRegExp(source, flags)
+      }
+      try {
+        const msg = 'this message is long enough to pass the trivial-skip check'
+        for (let i = 0; i < 50; i++) {
+          shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '^cached pattern$' })
+        }
+        assert.equal(constructed, 1, 'pattern should compile exactly once across 50 calls')
+      } finally {
+        global.RegExp = OriginalRegExp
+        _resetSkipPatternCache()
+      }
+    })
+
+    it('does not re-warn on a malformed pattern across repeated calls', async () => {
+      // Capture log output by patching node's console.warn — the server
+      // logger ultimately writes through it. Asserting on logger internals
+      // would couple to its implementation; this is the integration check.
+      const { _resetSkipPatternCache } = await import('../src/prompt-evaluator.js')
+      _resetSkipPatternCache()
+
+      const writes = []
+      const originalWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = (chunk, ...rest) => {
+        const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        if (s.includes('Invalid promptEvaluatorSkipPattern')) writes.push(s)
+        return originalWrite(chunk, ...rest)
+      }
+      try {
+        const msg = 'this message is long enough to pass the trivial-skip check'
+        for (let i = 0; i < 10; i++) {
+          shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: '[unclosed' })
+        }
+        // The cache stores `null` for invalid sources, so the warning fires
+        // once on first compilation, not on every subsequent call.
+        assert.equal(writes.length, 1, `expected one warn, got ${writes.length}`)
+      } finally {
+        process.stderr.write = originalWrite
+        _resetSkipPatternCache()
+      }
+    })
+
+    it('warning message does not echo the user-supplied regex source (#3212)', async () => {
+      // Reachable channel: log.warn fans out to paired WS clients via
+      // log_entry events. The raw regex source is user-supplied config and
+      // must not be leaked back to the network — see comment at the top of
+      // _compileSkipPattern.
+      const { _resetSkipPatternCache } = await import('../src/prompt-evaluator.js')
+      _resetSkipPatternCache()
+
+      const writes = []
+      const originalWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = (chunk, ...rest) => {
+        const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        writes.push(s)
+        return originalWrite(chunk, ...rest)
+      }
+      try {
+        const sentinelSource = '[REDACTED-SENTINEL-PATTERN-XYZ123'
+        const msg = 'this message is long enough to pass the trivial-skip check'
+        shouldSkipEvaluator(msg, { promptEvaluatorSkipPattern: sentinelSource })
+        const haystack = writes.join('')
+        assert.ok(
+          /Invalid promptEvaluatorSkipPattern/.test(haystack),
+          'expected the generic warn line to appear',
+        )
+        assert.ok(
+          !haystack.includes(sentinelSource),
+          'warn output must not echo the raw regex source — see #3212 (log.warn fans out via log_entry)',
+        )
+        // Also verify the SDK error message itself isn't leaked, which
+        // typically embeds the bad source verbatim.
+        assert.ok(
+          !haystack.includes('SyntaxError'),
+          'warn output must not include the underlying SyntaxError',
+        )
+      } finally {
+        process.stderr.write = originalWrite
+        _resetSkipPatternCache()
+      }
+    })
+  })
 })
