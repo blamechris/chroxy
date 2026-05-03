@@ -195,9 +195,16 @@ export function handleClaudeReady(): { claudeReady: true } {
 // agent_idle / agent_busy
 // ---------------------------------------------------------------------------
 
-/** State patch for `agent_idle`. */
-export function handleAgentIdle(): { isIdle: true } {
-  return { isIdle: true }
+/** State patch for `agent_idle`.
+ *
+ * Also clears `streamingMessageId` so the stop button hides if the agent
+ * reaches idle without a closing `stream_end`/`result` (abnormal Agent SDK
+ * shutdown). Pre-#3170 the 5s safety timer in `sendInput` recovered this
+ * case; post-#3170 the timer is bypassed once `tool_start` bumps the value,
+ * so `agent_idle` is the remaining recovery hook. See #3171.
+ */
+export function handleAgentIdle(): { isIdle: true; streamingMessageId: null } {
+  return { isIdle: true, streamingMessageId: null }
 }
 
 /** State patch for `agent_busy`. */

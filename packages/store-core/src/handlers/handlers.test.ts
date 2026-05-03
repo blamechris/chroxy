@@ -306,8 +306,8 @@ describe('handleClaudeReady', () => {
 // handleAgentIdle / handleAgentBusy
 // ---------------------------------------------------------------------------
 describe('handleAgentIdle', () => {
-  it('returns isIdle: true', () => {
-    expect(handleAgentIdle()).toEqual({ isIdle: true })
+  it('returns isIdle: true and clears streamingMessageId', () => {
+    expect(handleAgentIdle()).toEqual({ isIdle: true, streamingMessageId: null })
   })
 })
 

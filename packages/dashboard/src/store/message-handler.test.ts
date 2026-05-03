@@ -809,6 +809,70 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // Regression for #3171: when the Agent SDK shuts down abnormally, agent_idle
+  // can fire without a closing stream_end/result. Pre-#3171 the only paths that
+  // cleared streamingMessageId mid-turn were stream_end, result, disconnect, or
+  // a subsequent stream_start/tool_start — none of which arrive in this corner.
+  // The 5s safety timer in sendInput used to recover this case but was bypassed
+  // by #3170. agent_idle is now the recovery hook: it must clear streamingMessageId
+  // so the stop button hides.
+  describe('agent_idle clears streamingMessageId (#3171)', () => {
+    it('clears streamingMessageId when agent_idle fires mid-stream', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'msg-active', isIdle: false },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage({ type: 'agent_idle', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+      expect(ss.streamingMessageId).toBeNull()
+    })
+
+    it('also clears the "pending" sentinel left by sendInput on abnormal shutdown', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending', isIdle: false },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage({ type: 'agent_idle', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.streamingMessageId).toBeNull()
+    })
+
+    // Legacy/pre-bootstrap path: when the session isn't registered in
+    // sessionStates yet, sendInput writes flat 'pending' and the dashboard UI
+    // reads flat streamingMessageId directly. agent_idle must clear flat state
+    // here too — without this, abnormal idle in legacy/PTY mode leaves the
+    // stop button stuck. (Copilot review feedback on initial PR.)
+    it('clears flat streamingMessageId when no sessionState is registered (legacy/pre-bootstrap)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: null,
+          sessions: [],
+          sessionStates: {},
+          streamingMessageId: 'pending',
+          isIdle: false,
+        } as any),
+      )
+      setStore(store)
+      handleMessage({ type: 'agent_idle' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.streamingMessageId).toBeNull()
+      expect(state.isIdle).toBe(true)
+    })
+  })
+
   describe('pairing_refreshed dispatch (#2916)', () => {
     it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
       store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))

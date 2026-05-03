@@ -1935,6 +1935,50 @@ describe('tool_start handler', () => {
   });
 });
 
+// Regression for #3171: when the Agent SDK shuts down abnormally, agent_idle
+// can fire without a closing stream_end/result. Pre-#3171 the only paths that
+// cleared streamingMessageId mid-turn were stream_end, result, disconnect, or
+// a subsequent stream_start/tool_start — none of which arrive in this corner.
+// The 5s safety timer in sendInput used to recover this case but was bypassed
+// by #3170. agent_idle is now the recovery hook: it must clear streamingMessageId
+// so the stop button hides.
+describe('agent_idle handler (#3171)', () => {
+  it('clears streamingMessageId when agent_idle fires mid-stream', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'msg-active', isIdle: false },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'agent_idle', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.isIdle).toBe(true);
+    expect(ss.streamingMessageId).toBeNull();
+  });
+
+  it('also clears the "pending" sentinel left by sendInput on abnormal shutdown', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending', isIdle: false },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'agent_idle', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.streamingMessageId).toBeNull();
+  });
+});
+
 describe('tool_result handler', () => {
   it('patches the matching tool_use message with the result', () => {
     const toolMsg = {
