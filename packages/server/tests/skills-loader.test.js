@@ -8,6 +8,7 @@ import {
   loadActiveSkillsLayered,
   findRepoSkillsDir,
   formatSkillsForPrompt,
+  groupSkillsByInjectionMode,
   parseFrontmatter,
 } from '../src/skills-loader.js'
 
@@ -870,6 +871,370 @@ describe('skills-loader', () => {
       assert.equal(skill.metadata, null)
       // body keeps the raw frontmatter when parsing fails — still loads
       assert.ok(skill.body.includes('not-a-number'))
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3198: providers gating. Skills with `providers:` frontmatter only
+  // load for sessions whose provider id matches an entry in the list.
+  // Missing `providers:` keeps the v1 apply-to-all behaviour.
+  // -----------------------------------------------------------------------
+
+  describe('providers gating (#3198)', () => {
+    it('skill with no `providers:` is included regardless of session provider', () => {
+      writeFileSync(join(dir, 'a.md'), '# no frontmatter\n\nbody\n')
+      writeFileSync(join(dir, 'b.md'), '---\nname: b\n---\nbody only, no providers field\n')
+
+      const codex = loadActiveSkills(dir, { provider: 'codex' })
+      assert.equal(codex.length, 2, 'both skills load for codex')
+      const sdk = loadActiveSkills(dir, { provider: 'claude-sdk' })
+      assert.equal(sdk.length, 2, 'both skills load for claude-sdk')
+    })
+
+    it('skill scoped to [claude] is included for a claude-sdk session, excluded for codex', () => {
+      writeFileSync(
+        join(dir, 'claude-only.md'),
+        '---\nname: claude-only\nproviders: [claude]\n---\nbody\n',
+      )
+      writeFileSync(
+        join(dir, 'shared.md'),
+        '# shared\n\nbody\n',
+      )
+
+      const sdkSkills = loadActiveSkills(dir, { provider: 'claude-sdk' })
+      assert.deepEqual(sdkSkills.map((s) => s.name).sort(), ['claude-only', 'shared'])
+
+      const codexSkills = loadActiveSkills(dir, { provider: 'codex' })
+      assert.deepEqual(codexSkills.map((s) => s.name).sort(), ['shared'])
+    })
+
+    it('skill scoped to [codex] is excluded for a claude session', () => {
+      writeFileSync(
+        join(dir, 'codex-only.md'),
+        '---\nname: codex-only\nproviders:\n  - codex\n---\nbody\n',
+      )
+
+      const sdk = loadActiveSkills(dir, { provider: 'claude-sdk' })
+      assert.equal(sdk.length, 0)
+      const codex = loadActiveSkills(dir, { provider: 'codex' })
+      assert.equal(codex.length, 1)
+    })
+
+    it('matches `claude-sdk` against scope `[claude]` (family alias)', () => {
+      writeFileSync(
+        join(dir, 'claude-fam.md'),
+        '---\nname: claude-fam\nproviders: [claude]\n---\nbody\n',
+      )
+
+      const sdk = loadActiveSkills(dir, { provider: 'claude-sdk' })
+      assert.equal(sdk.length, 1)
+      const cli = loadActiveSkills(dir, { provider: 'claude-cli' })
+      assert.equal(cli.length, 1)
+    })
+
+    it('matches case-insensitively', () => {
+      writeFileSync(
+        join(dir, 'mixed-case.md'),
+        '---\nname: mixed-case\nproviders: [Codex, GEMINI]\n---\nbody\n',
+      )
+
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'gemini' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 0)
+    })
+
+    it('an empty providers list behaves as no providers list (apply-to-all)', () => {
+      writeFileSync(
+        join(dir, 'empty.md'),
+        '---\nname: empty\nproviders: []\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+    })
+
+    it('a scoped skill with no provider supplied is filtered out (defensive)', () => {
+      writeFileSync(
+        join(dir, 'scoped.md'),
+        '---\nname: scoped\nproviders: [codex]\n---\nbody\n',
+      )
+      writeFileSync(
+        join(dir, 'unscoped.md'),
+        '# unscoped\n\nbody\n',
+      )
+
+      const skills = loadActiveSkills(dir) // no provider opt
+      // unscoped passes; scoped is filtered because we cannot determine fit.
+      assert.deepEqual(skills.map((s) => s.name), ['unscoped'])
+    })
+
+    it('loadActiveSkillsLayered forwards provider to both tiers', () => {
+      const repo = mkdtempSync(join(tmpdir(), 'chroxy-prov-repo-'))
+      try {
+        writeFileSync(
+          join(dir, 'g.md'),
+          '---\nname: g\nproviders: [claude-sdk]\n---\nglobal body\n',
+        )
+        writeFileSync(
+          join(repo, 'r.md'),
+          '---\nname: r\nproviders: [codex]\n---\nrepo body\n',
+        )
+
+        const sdk = loadActiveSkillsLayered({ globalDir: dir, repoDir: repo, provider: 'claude-sdk' })
+        assert.deepEqual(sdk.map((s) => s.name), ['g'])
+
+        const codex = loadActiveSkillsLayered({ globalDir: dir, repoDir: repo, provider: 'codex' })
+        assert.deepEqual(codex.map((s) => s.name), ['r'])
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3199: `activation: manual` keeps a skill out of the default-active set.
+  // Manual skills only load when their name is in `activeManualSkills`.
+  // -----------------------------------------------------------------------
+
+  describe('manual activation (#3199)', () => {
+    it('skill with no activation field is in the default-active set', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\n---\nbody\n')
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+    })
+
+    it('skill with `activation: auto` is in the default-active set', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\nactivation: auto\n---\nbody\n')
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+    })
+
+    it('skill with `activation: manual` is filtered out when no manual set passed', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\nactivation: manual\n---\nbody\n')
+      writeFileSync(join(dir, 'b.md'), '---\nname: b\n---\nbody\n')
+      const skills = loadActiveSkills(dir)
+      assert.deepEqual(skills.map((s) => s.name), ['b'])
+    })
+
+    it('skill with `activation: manual` IS included when its name is in activeManualSkills', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\nactivation: manual\n---\nbody\n')
+      writeFileSync(join(dir, 'b.md'), '---\nname: b\nactivation: manual\n---\nbody\n')
+
+      const skills = loadActiveSkills(dir, { activeManualSkills: new Set(['a']) })
+      assert.deepEqual(skills.map((s) => s.name), ['a'], 'only the toggled skill loads')
+    })
+
+    it('accepts an array of names for activeManualSkills', () => {
+      writeFileSync(join(dir, 'manual-one.md'), '---\nname: manual-one\nactivation: manual\n---\nbody\n')
+      writeFileSync(join(dir, 'manual-two.md'), '---\nname: manual-two\nactivation: manual\n---\nbody\n')
+      writeFileSync(join(dir, 'auto.md'), '# auto\n\nbody\n')
+
+      const skills = loadActiveSkills(dir, { activeManualSkills: ['manual-one', 'auto'] })
+      // 'auto' was already in the default set, the array doesn't change it;
+      // manual-one is now active, manual-two is still off.
+      assert.deepEqual(skills.map((s) => s.name).sort(), ['auto', 'manual-one'])
+    })
+
+    it('unrecognised activation value defaults to auto (typo tolerance)', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\nactivation: maunal\n---\nbody\n')
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+    })
+
+    it('loadActiveSkillsLayered forwards activeManualSkills to both tiers', () => {
+      const repo = mkdtempSync(join(tmpdir(), 'chroxy-act-repo-'))
+      try {
+        writeFileSync(join(dir, 'global-manual.md'), '---\nname: global-manual\nactivation: manual\n---\nbody\n')
+        writeFileSync(join(repo, 'repo-manual.md'), '---\nname: repo-manual\nactivation: manual\n---\nbody\n')
+
+        const off = loadActiveSkillsLayered({ globalDir: dir, repoDir: repo })
+        assert.equal(off.length, 0, 'both manual skills off by default')
+
+        const on = loadActiveSkillsLayered({
+          globalDir: dir,
+          repoDir: repo,
+          activeManualSkills: new Set(['global-manual', 'repo-manual']),
+        })
+        assert.deepEqual(on.map((s) => s.name).sort(), ['global-manual', 'repo-manual'])
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3200: per-skill injection mode. Each skill gets an `injectionMode`
+  // attached; default is the caller-supplied default; explicit
+  // `injection:` frontmatter overrides.
+  // -----------------------------------------------------------------------
+
+  describe('injection mode (#3200)', () => {
+    it('skill with no injection field gets the caller-supplied default', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\n---\nbody\n')
+
+      const append = loadActiveSkills(dir, { defaultInjectionMode: 'append' })
+      assert.equal(append[0].injectionMode, 'append')
+
+      const prepend = loadActiveSkills(dir, { defaultInjectionMode: 'prepend' })
+      assert.equal(prepend[0].injectionMode, 'prepend')
+    })
+
+    it('default-default is `append` when no defaultInjectionMode is supplied', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\n---\nbody\n')
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills[0].injectionMode, 'append')
+    })
+
+    it('explicit `injection: prepend` overrides the default', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\ninjection: prepend\n---\nbody\n')
+      const skills = loadActiveSkills(dir, { defaultInjectionMode: 'append' })
+      assert.equal(skills[0].injectionMode, 'prepend')
+    })
+
+    it('explicit `injection: system` is recorded as `system`', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\ninjection: system\n---\nbody\n')
+      const skills = loadActiveSkills(dir, { defaultInjectionMode: 'prepend' })
+      assert.equal(skills[0].injectionMode, 'system')
+    })
+
+    it('unrecognised injection value falls through to default (typo tolerance)', () => {
+      writeFileSync(join(dir, 'a.md'), '---\nname: a\ninjection: bogus\n---\nbody\n')
+      const skills = loadActiveSkills(dir, { defaultInjectionMode: 'append' })
+      assert.equal(skills[0].injectionMode, 'append')
+    })
+
+    it('skill with no frontmatter at all gets the default mode', () => {
+      writeFileSync(join(dir, 'plain.md'), '# plain\n\nbody\n')
+      const skills = loadActiveSkills(dir, { defaultInjectionMode: 'prepend' })
+      assert.equal(skills[0].injectionMode, 'prepend')
+    })
+  })
+
+  describe('groupSkillsByInjectionMode (#3200)', () => {
+    it('returns empty buckets for null / empty input', () => {
+      assert.deepEqual(groupSkillsByInjectionMode(null), { prepend: [], append: [] })
+      assert.deepEqual(groupSkillsByInjectionMode([]), { prepend: [], append: [] })
+    })
+
+    it('routes prepend skills to .prepend, append/system to .append', () => {
+      const skills = [
+        { name: 'p', body: 'p', injectionMode: 'prepend' },
+        { name: 'a', body: 'a', injectionMode: 'append' },
+        { name: 's', body: 's', injectionMode: 'system' },
+      ]
+      const out = groupSkillsByInjectionMode(skills)
+      assert.deepEqual(out.prepend.map((s) => s.name), ['p'])
+      assert.deepEqual(out.append.map((s) => s.name).sort(), ['a', 's'])
+    })
+
+    it('treats unknown modes as append (default channel)', () => {
+      const skills = [{ name: 'x', body: 'x', injectionMode: 'bogus' }]
+      const out = groupSkillsByInjectionMode(skills)
+      assert.equal(out.append.length, 1)
+      assert.equal(out.prepend.length, 0)
+    })
+
+    it('feeding each bucket through formatSkillsForPrompt produces the expected payloads', () => {
+      writeFileSync(join(dir, 'sys.md'), '---\nname: sys\ninjection: append\n---\nappend body\n')
+      writeFileSync(join(dir, 'pre.md'), '---\nname: pre\ninjection: prepend\n---\nprepend body\n')
+
+      const skills = loadActiveSkills(dir, { defaultInjectionMode: 'append' })
+      const grouped = groupSkillsByInjectionMode(skills)
+
+      const appendText = formatSkillsForPrompt(grouped.append)
+      const prependText = formatSkillsForPrompt(grouped.prepend)
+
+      assert.ok(appendText.includes('append body'), 'append bucket should carry append-injection skill')
+      assert.ok(!appendText.includes('prepend body'), 'append bucket must NOT carry prepend-injection skill')
+      assert.ok(prependText.includes('prepend body'), 'prepend bucket should carry prepend-injection skill')
+      assert.ok(!prependText.includes('append body'), 'prepend bucket must NOT carry append-injection skill')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3227: claude family alias must use the `-` boundary, not a bare prefix.
+  // The old startsWith('claude') match incorrectly pulled in unrelated names
+  // like `claudette`.
+  // -----------------------------------------------------------------------
+
+  describe('claude family alias precision (#3227)', () => {
+    it('does NOT match `claudette` against scope `[claude]`', () => {
+      writeFileSync(
+        join(dir, 'claude-only.md'),
+        '---\nname: claude-only\nproviders: [claude]\n---\nbody\n',
+      )
+      const skills = loadActiveSkills(dir, { provider: 'claudette' })
+      assert.equal(skills.length, 0, '`claudette` is not in the claude family')
+    })
+
+    it('does NOT match session `claude` against scope `[claudette]`', () => {
+      writeFileSync(
+        join(dir, 'unrelated.md'),
+        '---\nname: unrelated\nproviders: [claudette]\n---\nbody\n',
+      )
+      const skills = loadActiveSkills(dir, { provider: 'claude' })
+      assert.equal(skills.length, 0, 'reverse direction must also reject the prefix overlap')
+    })
+
+    it('still matches `claude-sdk` and `claude-cli` against `[claude]`', () => {
+      writeFileSync(
+        join(dir, 'fam.md'),
+        '---\nname: fam\nproviders: [claude]\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-cli' }).length, 1)
+    })
+
+    it('exact match `claude` ↔ `claude` is preserved', () => {
+      writeFileSync(
+        join(dir, 'exact.md'),
+        '---\nname: exact\nproviders: [claude]\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude' }).length, 1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3229: providers value as a scalar string (`providers: claude`) must be
+  // normalised to a single-element list at consumption time. Previously a
+  // string was silently treated as a no-op (Array.isArray check failed) and
+  // the scoping was lost.
+  // -----------------------------------------------------------------------
+
+  describe('providers as scalar string (#3229)', () => {
+    it('normalises a quoted single-string scalar', () => {
+      writeFileSync(
+        join(dir, 'string-scalar.md'),
+        '---\nname: ss\nproviders: "claude-sdk"\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 0)
+    })
+
+    it('normalises a bare single-string scalar', () => {
+      writeFileSync(
+        join(dir, 'bare-scalar.md'),
+        '---\nname: bs\nproviders: codex\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 0)
+    })
+
+    it('honours the claude family alias when scalar is `claude`', () => {
+      writeFileSync(
+        join(dir, 'fam-scalar.md'),
+        '---\nname: fs\nproviders: claude\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 0)
+    })
+
+    it('an empty string scalar behaves as no providers list (apply-to-all)', () => {
+      writeFileSync(
+        join(dir, 'empty-scalar.md'),
+        '---\nname: es\nproviders: ""\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
     })
   })
 })

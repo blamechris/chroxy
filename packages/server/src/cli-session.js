@@ -153,8 +153,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -409,6 +409,32 @@ export class CliSession extends BaseSession {
       })
     }
 
+    // Per-skill injection mode (#3200): skills with `injection: prepend`
+    // need to ride on the first user message. The append/system bucket is
+    // already wired through `--append-system-prompt` at process start
+    // (see _buildArgs); only the prepend bucket is handled here, once
+    // per session.
+    //
+    // `_skillsPrepended` is NOT flipped here — we wait for the stdin write
+    // to succeed (#3225). If the write throws (EPIPE on a dead child), a
+    // retry needs to re-include the prepend bucket, otherwise the skill
+    // text is silently lost. The flag is set just after the successful
+    // `_child.stdin.write(...)` below.
+    let willPrependSkills = false
+    if (!this._skillsPrepended && typeof transformedPrompt === 'string') {
+      const prependText = typeof this._buildPrependPrompt === 'function'
+        ? this._buildPrependPrompt()
+        : ''
+      if (prependText) {
+        transformedPrompt = `${prependText}\n\n---\n\n${transformedPrompt}`
+        willPrependSkills = true
+      } else {
+        // Nothing to prepend — flag flip is a no-op cost-saver only;
+        // mark prepended so we skip the cost on every subsequent turn.
+        willPrependSkills = true
+      }
+    }
+
     this._isBusy = true
     this._messageCounter++
     this._currentMessageId = `msg-${this._messageCounter}`
@@ -432,6 +458,13 @@ export class CliSession extends BaseSession {
       this._clearMessageState()
       this.emit('error', { message: `Failed to send message: ${err.message}` })
       return
+    }
+
+    // Skills text is committed to the wire — safe to flip the flag now (#3225).
+    // If the write threw above we returned early, leaving the flag false so
+    // the next attempt re-injects the prepend bucket.
+    if (willPrependSkills) {
+      this._skillsPrepended = true
     }
 
     // Safety timeout: force-clear if result never arrives (5 min).
@@ -811,6 +844,14 @@ export class CliSession extends BaseSession {
     this._respawning = true
     this._processReady = false
     this._sessionId = null
+
+    // The new child process has no conversation state — and on Claude CLI
+    // the append/system bucket rides on `--append-system-prompt` at spawn,
+    // so it's already part of the new argv. The prepend bucket, however,
+    // is concatenated onto the FIRST user message; a respawn means the
+    // next sendMessage() is once again that first message. Reset the
+    // flag so the prepend bucket flows through on the next turn (#3225).
+    this._skillsPrepended = false
 
     if (this._interruptTimer) {
       clearTimeout(this._interruptTimer)

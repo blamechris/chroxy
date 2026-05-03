@@ -82,8 +82,28 @@ export class JsonlSubprocessSession extends BaseSession {
   // Lifecycle
   // ------------------------------------------------------------------
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir } = {}) {
-    super({ cwd, model, permissionMode: permissionMode || 'auto', skillsDir, repoSkillsDir })
+  constructor({
+    cwd,
+    model,
+    permissionMode,
+    skillsDir,
+    repoSkillsDir,
+    maxSkillBytes,
+    maxTotalSkillBytes,
+    provider,
+    activeManualSkills,
+  } = {}) {
+    super({
+      cwd,
+      model,
+      permissionMode: permissionMode || 'auto',
+      skillsDir,
+      repoSkillsDir,
+      maxSkillBytes,
+      maxTotalSkillBytes,
+      provider,
+      activeManualSkills,
+    })
     this.resumeSessionId = null
     this._process = null
     // Skills MVP (#2957) — providers without a system-prompt flag (Codex,
@@ -198,21 +218,57 @@ export class JsonlSubprocessSession extends BaseSession {
     // Skills MVP (#2957) — prepend skills text to the first user message when
     // the provider has no system-prompt flag (Codex, Gemini). Only done once
     // per session; subsequent messages flow through unmodified.
+    //
+    // Per-skill injection mode (#3200): subprocess providers have only one
+    // injection channel — the user message. Skills that asked for
+    // `injection: append` / `system` (the system-prompt channel) have
+    // nowhere else to land here, so we concatenate both buckets. The
+    // provider-default mode for Codex / Gemini is `prepend`, so in
+    // practice every loaded skill ends up in the prepend bucket and the
+    // system-prompt bucket is empty; the concat is defensive against
+    // user-authored frontmatter that pins `injection: append` explicitly.
+    //
+    // The `_skillsPrepended` flag is flipped AFTER the spawn succeeds (#3225).
+    // If spawn throws synchronously, leaving the flag false ensures the next
+    // sendMessage() retry still includes the skills text — otherwise a
+    // failed first turn would leak the skill bucket forever.
     let effectiveText = text
+    let willPrependSkills = false
     if (!this._skillsPrepended) {
-      const skillsText = this._buildSystemPrompt()
-      if (skillsText) {
-        effectiveText = `${skillsText}\n\n---\n\n${text}`
+      const prependText = typeof this._buildPrependPrompt === 'function'
+        ? this._buildPrependPrompt()
+        : ''
+      const appendText = this._buildSystemPrompt()
+      const combined = [prependText, appendText].filter((s) => typeof s === 'string' && s.length > 0).join('\n\n---\n\n')
+      if (combined) {
+        effectiveText = `${combined}\n\n---\n\n${text}`
       }
-      this._skillsPrepended = true
+      willPrependSkills = true
     }
 
     const args = this._buildArgs(effectiveText)
-    const proc = spawn(Klass.resolvedBinary, args, {
-      cwd: this.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: this._buildChildEnv(),
-    })
+    let proc
+    try {
+      proc = spawn(Klass.resolvedBinary, args, {
+        cwd: this.cwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: this._buildChildEnv(),
+      })
+    } catch (err) {
+      // spawn() can throw synchronously (ENOENT for missing binary, EACCES,
+      // etc.) — leave _skillsPrepended false so a retry still injects the
+      // skills text. Reset busy state and surface the error to the caller.
+      this._isBusy = false
+      this.emit('error', {
+        message: err && err.message ? err.message : `Failed to spawn ${Klass.providerName}`,
+      })
+      return
+    }
+
+    // Spawn succeeded: argv is committed to the wire, so flip the flag.
+    if (willPrependSkills) {
+      this._skillsPrepended = true
+    }
 
     this._process = proc
 
@@ -272,6 +328,17 @@ export class JsonlSubprocessSession extends BaseSession {
     proc.on('error', (err) => {
       this._process = null
       this._isBusy = false
+      // Spawn-level error (ENOENT, EACCES, etc.) means the argv never
+      // reached a real process — revert `_skillsPrepended` so the next
+      // sendMessage retry still injects the prepend bucket (#3225). We
+      // can't distinguish a launch failure from a runtime crash via this
+      // event alone, but in practice 'error' on a ChildProcess fires for
+      // launch failures; runtime crashes flow through 'close' with a
+      // non-zero exit code (where the argv DID reach the process, so
+      // the flag rightly stays true).
+      if (willPrependSkills) {
+        this._skillsPrepended = false
+      }
       if (this._destroying) return
       this.emit('error', {
         message: err.message || `Failed to spawn ${Klass.providerName}`,
