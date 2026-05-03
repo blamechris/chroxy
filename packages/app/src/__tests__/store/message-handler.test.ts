@@ -1749,6 +1749,13 @@ describe('stream_delta handler', () => {
     const toolUse = ss.messages.find((m) => m.id === 'msg-race' && m.type === 'tool_use');
     // tool_use bubble must remain pristine — no delta concatenation
     expect(toolUse?.content).toBe('ls');
+    // App's flushPendingDeltas has no orphan-create safety net (the dashboard's
+    // #2611 fix is dashboard-only), so the colliding delta is silently dropped.
+    // No response message is created at the colliding id. This is more
+    // aggressive data loss than the dashboard but still strictly better than
+    // corrupting the tool_use bubble.
+    const responseAtSameId = ss.messages.find((m) => m.id === 'msg-race' && m.type === 'response');
+    expect(responseAtSameId).toBeUndefined();
   });
 });
 

@@ -415,8 +415,8 @@ function flushPendingDeltas(): void {
       const sessionState = newSessionStates[sessionId];
       const matched = new Set<string>();
       // Type guard: never apply deltas to non-response messages, even if id
-      // matches. Defense against future server regressions or races where a
-      // collision slips past handleStreamDelta's defensive remap.
+      // matches. Defense against future server regressions that reintroduce
+      // id collisions across tool_start and stream_start.
       const updatedMessages = sessionState.messages.map((m) => {
         const d = deltas.get(m.id);
         if (d && m.type === 'response') {
