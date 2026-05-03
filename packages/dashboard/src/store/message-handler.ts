@@ -870,6 +870,53 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     deltaId = newId;
   } else if (_deltaIdRemaps.has(deltaId)) {
     deltaId = _deltaIdRemaps.get(deltaId)!;
+  } else {
+    // Defensive: server reuses messageId for tool_start and the post-tool
+    // stream_start. If stream_start was dropped or hasn't registered the
+    // remap yet (e.g., session not in store at the time), the delta would
+    // otherwise concatenate onto the tool_use bubble. Detect that here and
+    // route to a suffixed response id, lazy-creating the bubble.
+    const targetId = capturedSessionId;
+    const effectiveSessionId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
+    if (effectiveSessionId && get().sessionStates[effectiveSessionId]) {
+      const ss = get().sessionStates[effectiveSessionId]!;
+      const existing = ss.messages.find((m) => m.id === deltaId);
+      if (existing && existing.type !== 'response') {
+        const suffixed = `${deltaId}-response`;
+        _deltaIdRemaps.set(deltaId, suffixed);
+        if (!ss.messages.some((m) => m.id === suffixed)) {
+          updateSession(effectiveSessionId, (s) => ({
+            streamingMessageId: suffixed,
+            messages: [
+              ...s.messages,
+              { id: suffixed, type: 'response' as const, content: '', timestamp: Date.now() },
+            ],
+          }));
+        }
+        deltaId = suffixed;
+      }
+    } else {
+      // Flat-messages fallback: when no session state is active (e.g., pre-session
+      // bootstrap, or the session hasn't been registered in sessionStates yet),
+      // the same collision can occur on the flat messages array. Mirror the
+      // sessionStates branch here so deltas don't leak into a tool_use bubble.
+      const flat = get().messages;
+      const existing = flat.find((m) => m.id === deltaId);
+      if (existing && existing.type !== 'response') {
+        const suffixed = `${deltaId}-response`;
+        _deltaIdRemaps.set(deltaId, suffixed);
+        if (!flat.some((m) => m.id === suffixed)) {
+          set((s) => ({
+            streamingMessageId: suffixed,
+            messages: [
+              ...s.messages,
+              { id: suffixed, type: 'response' as const, content: '', timestamp: Date.now() },
+            ],
+          }));
+        }
+        deltaId = suffixed;
+      }
+    }
   }
 
   const existingDelta = pendingDeltas.get(deltaId);

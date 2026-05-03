@@ -27,6 +27,7 @@ import {
   handleMessage,
   setStore,
   clearDeltaBuffers,
+  clearPermissionSplits,
   stopHeartbeat,
   resetReplayFlags,
 } from './message-handler'
@@ -93,6 +94,7 @@ describe('dashboard message-handler dispatch', () => {
     vi.clearAllMocks()
     localStorage.clear()
     clearDeltaBuffers()
+    clearPermissionSplits()
     mockSocket = createMockSocket()
     store = createMockStore(baseState())
     setStore(store)
@@ -101,6 +103,7 @@ describe('dashboard message-handler dispatch', () => {
   afterEach(() => {
     stopHeartbeat()
     clearDeltaBuffers()
+    clearPermissionSplits()
     resetReplayFlags()
   })
 
@@ -206,6 +209,75 @@ describe('dashboard message-handler dispatch', () => {
       )
       const state = store.getState() as any
       expect(state._terminalWrites).toContain('hello ')
+    })
+
+    // #3071 — when stream_start is dropped (e.g., session not yet in store at
+    // the time it arrived), the next stream_delta with the same messageId must
+    // NOT concatenate onto the existing tool_use bubble. The delta handler
+    // defends by detecting the type collision and lazy-creating a suffixed
+    // response. Mirrors the equivalent fix in the mobile app handler.
+    it('lazy-creates response bubble when stream_delta lands on a tool_use id', async () => {
+      const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 }
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState(), messages: [toolMsg] },
+        },
+      }))
+      setStore(store)
+
+      // Skip stream_start — simulate the dropped/raced case
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'After tool ' },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'response' },
+        ctx() as any,
+      )
+      // Flush the 100ms delta batcher
+      await new Promise((r) => setTimeout(r, 150))
+
+      const ss = (store.getState() as any).sessionStates.s1
+      const responseMsg = ss.messages.find((m: any) => m.id === 'msg-1-response')
+      expect(responseMsg).toBeDefined()
+      expect(responseMsg?.type).toBe('response')
+      expect(responseMsg?.content).toBe('After tool response')
+      // tool_use bubble must remain pristine — no concatenated assistant text
+      const toolUseMsg = ss.messages.find((m: any) => m.id === 'msg-1')
+      expect(toolUseMsg?.content).toBe('ls')
+    })
+
+    // Same defensive fallback in the flat-messages mode, exercised when the
+    // session isn't registered in sessionStates yet (pre-session bootstrap or
+    // server hasn't echoed session_switched). The collision must still route to
+    // a suffixed response id without polluting the tool_use bubble.
+    it('lazy-creates response bubble in flat-messages mode when collision hits a tool_use', async () => {
+      const toolMsg = { id: 'msg-flat', type: 'tool_use' as const, content: 'ls', timestamp: 1 }
+      store = createMockStore(baseState({
+        activeSessionId: null,
+        sessionStates: {},
+        messages: [toolMsg],
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-flat', delta: 'flat ' },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-flat', delta: 'response' },
+        ctx() as any,
+      )
+      await new Promise((r) => setTimeout(r, 150))
+
+      const flat = (store.getState() as any).messages
+      const responseMsg = flat.find((m: any) => m.id === 'msg-flat-response')
+      expect(responseMsg).toBeDefined()
+      expect(responseMsg?.type).toBe('response')
+      expect(responseMsg?.content).toBe('flat response')
+      const toolUseMsg = flat.find((m: any) => m.id === 'msg-flat')
+      expect(toolUseMsg?.content).toBe('ls')
     })
   })
 

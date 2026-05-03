@@ -1335,6 +1335,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         contextUsage: cached.contextUsage,
         lastResultCost: cached.lastResultCost,
         lastResultDuration: cached.lastResultDuration,
+        isIdle: cached.isIdle,
         sessionNotifications: filteredNotifications,
       });
     } else {
@@ -1353,6 +1354,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         contextUsage: null,
         lastResultCost: null,
         lastResultDuration: null,
+        isIdle: true,
         sessionNotifications: filteredNotifications,
       });
     }
