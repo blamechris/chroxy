@@ -147,6 +147,8 @@ export class SessionManager extends EventEmitter {
     transforms,
     sandbox,
     costBudget,
+    maxSkillBytes,
+    maxTotalSkillBytes,
 
     // State persistence
     stateFilePath,
@@ -180,6 +182,10 @@ export class SessionManager extends EventEmitter {
     this._transforms = transforms || []
     this._sandbox = sandbox || null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
+    // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
+    // Setting either to 0 in config disables that cap.
+    this._maxSkillBytes = Number.isFinite(maxSkillBytes) ? maxSkillBytes : null
+    this._maxTotalSkillBytes = Number.isFinite(maxTotalSkillBytes) ? maxTotalSkillBytes : null
 
     // State persistence (delegated to SessionStatePersistence)
     this._persistence = new SessionStatePersistence({
@@ -378,6 +384,10 @@ export class SessionManager extends EventEmitter {
       transforms: this._transforms,
     }
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
+    // Skills size budgets — pass through if configured. BaseSession forwards
+    // these to loadActiveSkillsLayered. (#3202)
+    if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes
+    if (this._maxTotalSkillBytes !== null) providerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
     // Sandbox: per-session overrides server-level default
     const resolvedSandbox = sandbox || this._sandbox
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox

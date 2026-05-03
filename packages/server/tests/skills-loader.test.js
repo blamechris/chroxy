@@ -8,6 +8,7 @@ import {
   loadActiveSkillsLayered,
   findRepoSkillsDir,
   formatSkillsForPrompt,
+  parseFrontmatter,
 } from '../src/skills-loader.js'
 
 describe('skills-loader', () => {
@@ -533,6 +534,342 @@ describe('skills-loader', () => {
       const skills = loadActiveSkills(dir, { allowedExtensions: ['txt'] })
       assert.equal(skills.length, 1)
       assert.equal(skills[0].name, 'on')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3216: full-content sniff — reject NUL/control bytes anywhere in the
+  // file, not just the first 512 bytes.
+  // -----------------------------------------------------------------------
+
+  describe('full-content sniff (#3216)', () => {
+    it('rejects a 600-byte file with valid head and a NUL at offset 580', () => {
+      // 580 bytes of valid ASCII markdown, NUL byte, then a trailing tail.
+      // The legacy 512-byte sniff would have seen only printable text and
+      // accepted it.
+      const headStr = '# Looks fine\n\n' + 'a'.repeat(580 - '# Looks fine\n\n'.length)
+      const headBytes = Buffer.from(headStr, 'utf8')
+      assert.equal(headBytes.length, 580, 'head buffer setup')
+      const tail = Buffer.concat([
+        Buffer.from([0x00]),
+        Buffer.from(' tail bytes past the legacy sniff window\n', 'utf8'),
+      ])
+      const full = Buffer.concat([headBytes, tail])
+      assert.ok(full.length > 600, 'file should exceed 600 bytes')
+      writeFileSync(join(dir, 'sneaky.md'), full)
+      writeFileSync(join(dir, 'fine.md'), '# Fine')
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'fine')
+    })
+
+    it('rejects a control byte (0x01) past the 512-byte boundary', () => {
+      const head = Buffer.from('# Heading\n\n' + 'a'.repeat(600), 'utf8')
+      const evil = Buffer.concat([head, Buffer.from([0x01]), Buffer.from('\nmore\n', 'utf8')])
+      writeFileSync(join(dir, 'late-control.md'), evil)
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 0)
+    })
+
+    it('still accepts large valid markdown (no control bytes anywhere)', () => {
+      const body = '# ok\n\n' + 'word '.repeat(2000)
+      writeFileSync(join(dir, 'big.md'), body)
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'big')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3215: rejection warnings must not leak absolute paths through the
+  // logger fan-out (warn → addLogListener → log_entry → paired clients).
+  // -----------------------------------------------------------------------
+
+  describe('rejection log sanitization (#3215)', () => {
+    let originalWarn
+    let warnLines
+
+    beforeEach(() => {
+      warnLines = []
+      // The createLogger output goes through console.warn for warn-level.
+      originalWarn = console.warn
+      console.warn = (line) => { warnLines.push(String(line)) }
+    })
+
+    afterEach(() => {
+      console.warn = originalWarn
+    })
+
+    it('warn output for a binary skill omits absolute path, includes basename + hash', () => {
+      const binaryContents = Buffer.concat([
+        Buffer.from('# Looks markdown but ', 'utf8'),
+        Buffer.from([0x00, 0x01]),
+      ])
+      writeFileSync(join(dir, 'leaky.md'), binaryContents)
+
+      loadActiveSkills(dir)
+
+      assert.ok(warnLines.length > 0, 'expected at least one warn line')
+      const joined = warnLines.join('\n')
+      assert.ok(
+        joined.includes('leaky.md#'),
+        `expected basename#hash label in warn output, got:\n${joined}`,
+      )
+      assert.ok(
+        !joined.includes(dir),
+        `warn output must NOT include absolute path ${dir}, got:\n${joined}`,
+      )
+    })
+
+    it('warn output for an oversized skill omits absolute path', () => {
+      const big = Buffer.alloc(64 * 1024, 0x61) // 64KB of 'a'
+      writeFileSync(join(dir, 'oversized.md'), big)
+
+      loadActiveSkills(dir, { maxSkillBytes: 1024 })
+
+      const joined = warnLines.join('\n')
+      assert.ok(joined.includes('oversized.md#'), `expected sanitized label, got:\n${joined}`)
+      assert.ok(!joined.includes(dir), `warn output must NOT include absolute path, got:\n${joined}`)
+    })
+
+    // Note: the realpath-fail warn path (`Skipping skill X: realpath failed
+    // (CODE)`) was hardened in this round to surface only the error code,
+    // not the embedded path that Node interpolates into `err.message`. The
+    // path is hard to exercise deterministically — statSync usually fails
+    // first on dangling/circular symlinks and short-circuits via the silent
+    // continue. The fix is straightforward (`err.message` → `err.code`)
+    // and verified by inspection in the diff.
+  })
+
+  // -----------------------------------------------------------------------
+  // #3219: `markdown` extension is in the default allowlist alongside `md`.
+  // -----------------------------------------------------------------------
+
+  describe('default allowedExtensions includes markdown (#3219)', () => {
+    it('loads .markdown files at default settings', () => {
+      writeFileSync(join(dir, 'long-form.markdown'), '# Long form\n\nbody\n')
+      writeFileSync(join(dir, 'short.md'), '# Short')
+
+      const skills = loadActiveSkills(dir)
+      const names = skills.map((s) => s.name).sort()
+      assert.deepEqual(names, ['long-form', 'short'])
+    })
+
+    it('still excludes .disabled.markdown files', () => {
+      writeFileSync(join(dir, 'on.markdown'), 'active')
+      writeFileSync(join(dir, 'off.disabled.markdown'), 'disabled')
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'on')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3202: per-skill cap and global skills budget.
+  // -----------------------------------------------------------------------
+
+  describe('size budgets (#3202)', () => {
+    it('rejects a single skill that exceeds the per-skill cap', () => {
+      const big = Buffer.alloc(40 * 1024, 0x61) // 40KB
+      writeFileSync(join(dir, 'huge.md'), big)
+      writeFileSync(join(dir, 'small.md'), '# small')
+
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'small')
+    })
+
+    it('honors a custom maxSkillBytes', () => {
+      writeFileSync(join(dir, 'a.md'), 'a'.repeat(2000)) // 2KB
+      writeFileSync(join(dir, 'b.md'), 'b'.repeat(500))
+
+      const tight = loadActiveSkills(dir, { maxSkillBytes: 1024 })
+      assert.deepEqual(tight.map((s) => s.name), ['b'])
+
+      const loose = loadActiveSkills(dir, { maxSkillBytes: 4096 })
+      assert.deepEqual(loose.map((s) => s.name).sort(), ['a', 'b'])
+    })
+
+    it('drops lower-priority skills first when the global budget is exceeded', () => {
+      // priority 10 → keep, priority 1 → drop. Bodies are sized so the pair
+      // exceeds the budget but either alone fits.
+      const fmHigh = '---\nname: high\npriority: 10\n---\n' + 'a'.repeat(2000)
+      const fmLow = '---\nname: low\npriority: 1\n---\n' + 'b'.repeat(2000)
+
+      writeFileSync(join(dir, 'high.md'), fmHigh)
+      writeFileSync(join(dir, 'low.md'), fmLow)
+
+      // Total budget 3KB — only one fits.
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        repoDir: null,
+        maxTotalSkillBytes: 3 * 1024,
+      })
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'high')
+    })
+
+    it('falls back to alphabetical order when no priority info is present', () => {
+      writeFileSync(join(dir, 'alpha.md'), 'a'.repeat(2000))
+      writeFileSync(join(dir, 'bravo.md'), 'b'.repeat(2000))
+
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        repoDir: null,
+        maxTotalSkillBytes: 3 * 1024,
+      })
+      // Alphabetical tiebreaker — alpha wins, bravo is dropped.
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'alpha')
+    })
+
+    it('honors a custom maxTotalSkillBytes', () => {
+      writeFileSync(join(dir, 'one.md'), 'x'.repeat(1500))
+      writeFileSync(join(dir, 'two.md'), 'y'.repeat(1500))
+      writeFileSync(join(dir, 'three.md'), 'z'.repeat(1500))
+
+      // Default 256KB budget keeps all three.
+      const wide = loadActiveSkillsLayered({ globalDir: dir, repoDir: null })
+      assert.equal(wide.length, 3)
+
+      // 2KB budget keeps just one (alphabetical wins).
+      const tight = loadActiveSkillsLayered({
+        globalDir: dir,
+        repoDir: null,
+        maxTotalSkillBytes: 2 * 1024,
+      })
+      assert.equal(tight.length, 1)
+      assert.equal(tight[0].name, 'one')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3197: YAML frontmatter parser. Adds `metadata` to every loaded Skill.
+  // -----------------------------------------------------------------------
+
+  describe('parseFrontmatter (#3197)', () => {
+    it('returns null metadata for empty / non-string input', () => {
+      assert.deepEqual(parseFrontmatter(''), { frontmatter: null, body: '' })
+      assert.deepEqual(parseFrontmatter(null), { frontmatter: null, body: '' })
+      assert.deepEqual(parseFrontmatter(undefined), { frontmatter: null, body: '' })
+    })
+
+    it('returns null metadata when body has no frontmatter (back-compat with v1)', () => {
+      const text = '# A heading\n\nbody only\n'
+      const out = parseFrontmatter(text)
+      assert.equal(out.frontmatter, null)
+      assert.equal(out.body, text)
+    })
+
+    it('parses scalar fields', () => {
+      const text = '---\nname: my-skill\ndescription: short text\nversion: "1.0"\npriority: 5\n---\n# body\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, {
+        name: 'my-skill',
+        description: 'short text',
+        version: '1.0',
+        priority: 5,
+      })
+      assert.equal(out.body, '# body\n')
+    })
+
+    it('parses inline list values', () => {
+      const text = "---\nallowed-tools: [Read, Edit, Bash]\nproviders: ['claude', 'codex']\n---\nbody\n"
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter['allowed-tools'], ['Read', 'Edit', 'Bash'])
+      assert.deepEqual(out.frontmatter.providers, ['claude', 'codex'])
+    })
+
+    it('parses indented list values', () => {
+      const text = '---\nallowed-tools:\n  - Read\n  - Edit\n  - Bash\nname: x\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter['allowed-tools'], ['Read', 'Edit', 'Bash'])
+      assert.equal(out.frontmatter.name, 'x')
+    })
+
+    it('drops unknown keys silently', () => {
+      const text = '---\nname: x\nbogus: should-be-dropped\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.equal(out.frontmatter.name, 'x')
+      assert.equal(out.frontmatter.bogus, undefined)
+    })
+
+    it('returns null metadata for malformed frontmatter (no crash)', () => {
+      // Missing closing fence — treat as no frontmatter.
+      const text = '---\nname: x\nbody never closes the fence\n'
+      const out = parseFrontmatter(text)
+      assert.equal(out.frontmatter, null)
+      assert.equal(out.body, text)
+    })
+
+    it('returns null metadata when a value cannot be parsed', () => {
+      // priority must be numeric.
+      const text = '---\nname: x\npriority: not-a-number\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.equal(out.frontmatter, null)
+    })
+
+    it('partial frontmatter (only one known key) parses', () => {
+      const text = '---\nname: just-a-name\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'just-a-name' })
+      assert.equal(out.body, 'body\n')
+    })
+
+    // Regression for the Copilot review on PR #3220: the inline-comment
+    // stripper was not quote-aware. A value like `description: "Fix issue
+    // #123"` contains a ` #` sequence INSIDE the quoted string, so the old
+    // stripper truncated to `"Fix issue` and returned malformed metadata.
+    it('preserves "#" inside double-quoted values (no false-positive comment strip)', () => {
+      const text = '---\nname: x\ndescription: "Fix issue #123 in repo"\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'x', description: 'Fix issue #123 in repo' })
+    })
+
+    it('preserves "#" inside single-quoted values', () => {
+      const text = "---\nname: 'C# tips'\ndescription: 'short'\n---\nbody\n"
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'C# tips', description: 'short' })
+    })
+
+    it('strips an actual trailing comment after whitespace + # outside quotes', () => {
+      const text = '---\nname: foo  # this is a comment\ndescription: bar\n---\nbody\n'
+      const out = parseFrontmatter(text)
+      assert.deepEqual(out.frontmatter, { name: 'foo', description: 'bar' })
+    })
+  })
+
+  describe('skill metadata field (#3197 integration)', () => {
+    it('attaches metadata: null when no frontmatter', () => {
+      writeFileSync(join(dir, 'plain.md'), '# Plain\n\nbody\n')
+      const [skill] = loadActiveSkills(dir)
+      assert.equal(skill.metadata, null)
+      // body unchanged when no frontmatter
+      assert.equal(skill.body, '# Plain\n\nbody\n')
+    })
+
+    it('attaches parsed metadata and strips frontmatter from body', () => {
+      const text = '---\nname: coding-style\npriority: 7\n---\n# Coding style\n\nUse single quotes.\n'
+      writeFileSync(join(dir, 'coding-style.md'), text)
+
+      const [skill] = loadActiveSkills(dir)
+      assert.deepEqual(skill.metadata, { name: 'coding-style', priority: 7 })
+      assert.equal(skill.body, '# Coding style\n\nUse single quotes.\n')
+      assert.equal(skill.description, '# Coding style')
+    })
+
+    it('falls back to metadata: null on malformed frontmatter, keeps full body', () => {
+      const text = '---\nname: bad\npriority: not-a-number\n---\nbody\n'
+      writeFileSync(join(dir, 'bad.md'), text)
+
+      const [skill] = loadActiveSkills(dir)
+      assert.equal(skill.metadata, null)
+      // body keeps the raw frontmatter when parsing fails — still loads
+      assert.ok(skill.body.includes('not-a-number'))
     })
   })
 })

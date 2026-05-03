@@ -19,16 +19,28 @@
  *     Reject if the resolved path escapes the configured skills root unless
  *     it lands under an explicit allowlist root.
  *   - Markdown-only enforcement (#3203): only configured extensions are
- *     accepted (default `['md']`); content sniffing rejects files whose
- *     first ~512 bytes contain non-printable bytes (NUL, control chars
- *     outside whitespace). Vendored / executable subtrees (`.git`,
- *     `node_modules`, `__pycache__`, `dist`, `build`) are skipped.
+ *     accepted (default `['md', 'markdown']`); content sniffing scans the
+ *     ENTIRE file for NUL bytes and non-whitespace control chars (#3216).
+ *     Vendored / executable subtrees (`.git`, `node_modules`,
+ *     `__pycache__`, `dist`, `build`) are skipped.
+ *   - Path sanitization in logs (#3215): rejection warnings expose only the
+ *     basename + an 8-char SHA-256 hash. The full path is logged once at
+ *     debug level (which does not fan out to dashboards at default info).
+ *   - Size budgets (#3202): each skill is capped at `maxSkillBytes`
+ *     (default 32KB) and the merged set is capped at `maxTotalSkillBytes`
+ *     (default 256KB). Lower-priority skills are dropped first when the
+ *     total budget is exceeded; absent priority info, alphabetical order
+ *     is the tiebreaker.
  *
- * v2 (frontmatter, full trust model, UI toggle) is tracked in #2958 / #2959.
+ * v2 (frontmatter parser, full trust model, UI toggle) is tracked in
+ * #2958 / #2959. This file ships #3197 (parseFrontmatter helper +
+ * `metadata` field on each Skill); consumers gating on metadata land in
+ * #3198 / #3199 / #3200.
  */
-import { readdirSync, readFileSync, statSync, realpathSync, openSync, readSync, closeSync } from 'fs'
-import { dirname, join, resolve, sep } from 'path'
+import { readdirSync, readFileSync, statSync, realpathSync } from 'fs'
+import { basename, dirname, join, resolve, sep } from 'path'
 import { homedir } from 'os'
+import { createHash } from 'crypto'
 import { createLogger } from './logger.js'
 
 const log = createLogger('skills-loader')
@@ -39,7 +51,9 @@ export const DEFAULT_SKILLS_DIR = join(homedir(), '.chroxy', 'skills')
 const REPO_DISCOVERY_MAX_DEPTH = 100
 
 // Default extensions accepted for skills. Just the suffix without the dot.
-const DEFAULT_ALLOWED_EXTENSIONS = ['md']
+// `markdown` is included alongside `md` because some editors / users prefer
+// the long form (#3219).
+const DEFAULT_ALLOWED_EXTENSIONS = ['md', 'markdown']
 
 // Subdirectories we never recurse into. Keeps the loader from accidentally
 // inhaling vendored trees, build outputs, or compiled caches if a user drops
@@ -54,10 +68,26 @@ const SKIP_DIRECTORY_NAMES = new Set([
   'build',
 ])
 
-// Bytes to sample for content sniffing. 512 is enough to catch the common
-// "binary file" markers (ELF, Mach-O, PE headers, embedded NULs) without
-// pulling huge files just to throw them away.
-const CONTENT_SNIFF_BYTES = 512
+// Per-skill byte cap and global skills budget (#3202). Tuned to keep skills
+// from ballooning the system prompt — 32KB is roughly 8K tokens, 256KB is
+// ~64K tokens, both well under any provider's context window but large
+// enough that no honest skill should bump them.
+const DEFAULT_MAX_SKILL_BYTES = 32 * 1024
+const DEFAULT_MAX_TOTAL_SKILL_BYTES = 256 * 1024
+
+// Recognized YAML frontmatter keys (#3197). The parser only accepts these —
+// anything else is dropped to keep the surface area tight while we wire up
+// providers / activation / injection in follow-up issues (#3198–#3200).
+const FRONTMATTER_KEYS = new Set([
+  'name',
+  'description',
+  'allowed-tools',
+  'providers',
+  'activation',
+  'injection',
+  'priority',
+  'version',
+])
 
 /**
  * Return true if `s` is a string of `[a-z0-9]+` (i.e., a clean extension
@@ -73,38 +103,55 @@ function _normalizeExtension(ext) {
 }
 
 /**
- * Sniff the first `CONTENT_SNIFF_BYTES` of a file and decide whether it
- * looks like printable text. UTF-8 multi-byte sequences are fine — we only
- * reject NUL bytes and control characters outside the whitespace set
- * (\t, \n, \r, \v, \f).
+ * Validate that `body` looks like printable text (#3203 + #3216). UTF-8
+ * multi-byte sequences are fine — we only reject NUL bytes and control
+ * characters outside the standard whitespace set (\t, \n, \v, \f, \r).
  *
- * Returns true if the file looks textual, false if binary-like or unreadable.
+ * The earlier implementation only sniffed the first 512 bytes, which let a
+ * file with a valid markdown head and a binary tail past that window load
+ * as a skill. We now walk every byte; cost is linear in file size, which is
+ * already bounded by `maxSkillBytes` upstream.
+ *
+ * @param {Buffer} buf - Full file contents (raw bytes, not decoded).
+ * @returns {boolean} true when every byte is acceptable, false on first violation.
  */
-function _looksLikeText(fullPath) {
-  let fd
-  try {
-    fd = openSync(fullPath, 'r')
-    const buf = Buffer.alloc(CONTENT_SNIFF_BYTES)
-    const n = readSync(fd, buf, 0, CONTENT_SNIFF_BYTES, 0)
-    for (let i = 0; i < n; i++) {
-      const byte = buf[i]
-      if (byte === 0) return false
-      // Allow standard ASCII whitespace control chars.
-      if (byte === 0x09 || byte === 0x0a || byte === 0x0b || byte === 0x0c || byte === 0x0d) continue
-      // Reject other control chars (0x00–0x1F, 0x7F). Bytes >= 0x80 are
-      // accepted: they're either valid UTF-8 continuation bytes for
-      // non-ASCII text, or genuinely binary content that we'd rather let
-      // pass than risk false-rejecting unicode markdown.
-      if (byte < 0x20 || byte === 0x7f) return false
-    }
-    return true
-  } catch {
-    return false
-  } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd) } catch { /* nothing useful to do */ }
-    }
+function _bufferLooksLikeText(buf) {
+  for (let i = 0; i < buf.length; i++) {
+    const byte = buf[i]
+    if (byte === 0) return false
+    // Allow standard ASCII whitespace control chars.
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0b || byte === 0x0c || byte === 0x0d) continue
+    // Reject other control chars (0x00–0x1F, 0x7F). Bytes >= 0x80 are
+    // accepted: they're either valid UTF-8 continuation bytes for
+    // non-ASCII text, or genuinely binary content that we'd rather let
+    // pass than risk false-rejecting unicode markdown.
+    if (byte < 0x20 || byte === 0x7f) return false
   }
+  return true
+}
+
+/**
+ * Build a sanitized label for a skill file path (#3215). The label includes
+ * the basename plus an 8-char SHA-256 prefix of the absolute path so server
+ * operators correlating across log lines still get a stable identifier,
+ * but a fan-out to a paired dashboard / mobile client (`log_entry`) does not
+ * reveal the user's filesystem layout.
+ *
+ * Example: `evil.md#a1b2c3d4`
+ *
+ * @param {string} absPath
+ * @returns {string}
+ */
+function _pathLabel(absPath) {
+  const safeBase = typeof absPath === 'string' ? basename(absPath) : '<unknown>'
+  let hashPrefix = '00000000'
+  try {
+    hashPrefix = createHash('sha256').update(String(absPath)).digest('hex').slice(0, 8)
+  } catch {
+    // Hash failures should never block skill loading — fall back to a fixed
+    // sentinel so the label still has a recognisable shape.
+  }
+  return `${safeBase}#${hashPrefix}`
 }
 
 /**
@@ -152,38 +199,213 @@ function _resolveRoots(roots) {
 }
 
 /**
+ * Parse a YAML-ish frontmatter block from the start of a markdown document
+ * (#3197). Returns `{ frontmatter, body }`:
+ *   - `frontmatter` is `null` when no leading `---` block is present, or
+ *     when the block is malformed (which is non-fatal — callers fall back
+ *     to body-only behaviour).
+ *   - `body` is the remaining text after the closing `---` and one trailing
+ *     newline. When there is no frontmatter, `body === text`.
+ *
+ * The parser accepts only the documented schema (see `FRONTMATTER_KEYS`)
+ * and only handles three value shapes:
+ *   - scalar:           `key: value`
+ *   - inline list:      `key: [a, b, c]`
+ *   - indented list:    `key:\n  - a\n  - b`
+ *
+ * Numeric `priority` is coerced; everything else stays as a string.
+ * Unknown keys are ignored (silently dropped). This keeps the surface area
+ * tight while we wire up consumers in follow-up issues.
+ *
+ * @param {string} text
+ * @returns {{ frontmatter: Record<string, unknown> | null, body: string }}
+ */
+export function parseFrontmatter(text) {
+  if (typeof text !== 'string' || text.length === 0) {
+    return { frontmatter: null, body: typeof text === 'string' ? text : '' }
+  }
+
+  // Frontmatter must start at byte 0 with `---` followed by a newline.
+  // Anything else (including a leading BOM or blank line) means no frontmatter.
+  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) {
+    return { frontmatter: null, body: text }
+  }
+
+  const afterOpen = text.startsWith('---\r\n') ? 5 : 4
+  const rest = text.slice(afterOpen)
+
+  // Find the closing fence. Accept `---` on its own line.
+  const closeMatch = rest.match(/(^|\r?\n)---(\r?\n|$)/)
+  if (!closeMatch) {
+    log.debug('parseFrontmatter: missing closing fence — treating as body')
+    return { frontmatter: null, body: text }
+  }
+
+  const closeIdx = closeMatch.index + closeMatch[1].length
+  const yamlRaw = rest.slice(0, closeIdx)
+  const bodyStart = closeIdx + 3 + (closeMatch[2] === '' ? 0 : closeMatch[2].length)
+  const body = rest.slice(bodyStart)
+
+  let frontmatter
+  try {
+    frontmatter = _parseFrontmatterBody(yamlRaw)
+  } catch (err) {
+    log.debug(`parseFrontmatter: malformed frontmatter — ${err && err.message ? err.message : err}`)
+    return { frontmatter: null, body: text }
+  }
+
+  return { frontmatter, body }
+}
+
+/**
+ * Hand-rolled YAML parser that handles only the documented schema. Returns
+ * an object on success, throws on anything weird (caller catches and falls
+ * back to `metadata: null`).
+ */
+function _parseFrontmatterBody(yaml) {
+  const out = {}
+  // Normalise line endings + drop trailing whitespace per line; we'll re-walk
+  // the array to support indented list values.
+  const lines = yaml.split(/\r?\n/)
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    // Allow blank lines and full-line comments.
+    if (/^\s*$/.test(raw)) continue
+    if (/^\s*#/.test(raw)) continue
+
+    // Top-level key/value at column 0 (no leading whitespace).
+    const m = raw.match(/^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/)
+    if (!m) {
+      throw new Error(`unrecognised line: ${raw.slice(0, 60)}`)
+    }
+    const key = m[1]
+    let valueText = m[2]
+
+    // Strip inline trailing comment (e.g., `key: foo  # note`) — quote-aware
+    // so a `#` inside a quoted string is preserved. Examples that must NOT
+    // truncate: `description: "Fix issue #123"`, `name: 'C# tips'`,
+    // `summary: "foo # bar"`. Walk char-by-char tracking quote state and
+    // only treat ` #` (whitespace then hash) as a comment opener when
+    // outside any quote.
+    valueText = _stripUnquotedTrailingComment(valueText)
+    valueText = valueText.trim()
+
+    if (!FRONTMATTER_KEYS.has(key)) continue // silently drop unknown keys
+
+    if (valueText === '') {
+      // Indented list: collect subsequent `  - item` lines.
+      const items = []
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1]
+        if (/^\s*$/.test(next)) { i++; continue }
+        const itemMatch = next.match(/^\s+-\s+(.*)$/)
+        if (!itemMatch) break
+        items.push(_unquote(itemMatch[1].trim()))
+        i++
+      }
+      out[key] = items
+      continue
+    }
+
+    // Inline list: `[a, b, c]`
+    if (valueText.startsWith('[') && valueText.endsWith(']')) {
+      const inner = valueText.slice(1, -1).trim()
+      const items = inner === ''
+        ? []
+        : inner.split(',').map((s) => _unquote(s.trim())).filter((s) => s.length > 0)
+      out[key] = items
+      continue
+    }
+
+    // Scalar.
+    const unquoted = _unquote(valueText)
+    if (key === 'priority') {
+      const n = Number(unquoted)
+      if (!Number.isFinite(n)) throw new Error(`priority must be numeric: ${valueText}`)
+      out[key] = n
+    } else {
+      out[key] = unquoted
+    }
+  }
+
+  return out
+}
+
+function _unquote(s) {
+  if (typeof s !== 'string') return ''
+  const t = s.trim()
+  if ((t.startsWith('"') && t.endsWith('"') && t.length >= 2)
+    || (t.startsWith("'") && t.endsWith("'") && t.length >= 2)) {
+    return t.slice(1, -1)
+  }
+  return t
+}
+
+/**
+ * Strip a trailing `# comment` from a YAML scalar value, but only when the
+ * `#` is OUTSIDE any quoted string. Without quote awareness, a value like
+ * `"Fix issue #123"` would truncate to `"Fix issue` — corrupting metadata
+ * and turning valid frontmatter into garbage.
+ *
+ * Walks char-by-char tracking single/double-quote state. Only the FIRST
+ * unquoted ` #` (whitespace+hash) is treated as a comment opener; everything
+ * before it is returned verbatim.
+ */
+function _stripUnquotedTrailingComment(s) {
+  if (typeof s !== 'string' || s.length === 0) return s
+  let inSingle = false
+  let inDouble = false
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (!inSingle && ch === '"') {
+      inDouble = !inDouble
+      continue
+    }
+    if (!inDouble && ch === "'") {
+      inSingle = !inSingle
+      continue
+    }
+    if (inSingle || inDouble) continue
+    // Outside any quote — does this position open a trailing comment?
+    if (ch === '#' && i > 0 && /\s/.test(s[i - 1])) {
+      return s.slice(0, i - 1)
+    }
+  }
+  return s
+}
+
+/**
  * Scan `dir` for active skills and return them as an array sorted by name.
  *
  * A skill is any regular file whose extension is in `opts.allowedExtensions`
- * (defaults to `['md']`) and whose name does NOT end in `.disabled.<ext>` —
- * the disabled-suffix convention is generalised per allowed extension so a
- * `*.disabled.md` is off when `md` is allowed, `*.disabled.txt` is off when
- * `txt` is allowed, etc.
+ * (defaults to `['md', 'markdown']`) and whose name does NOT end in
+ * `.disabled.<ext>` — the disabled-suffix convention is generalised per
+ * allowed extension so a `*.disabled.md` is off when `md` is allowed,
+ * `*.disabled.txt` is off when `txt` is allowed, etc.
  *
  * Returns `[]` if the directory does not exist or contains no active skills —
  * skills are optional, so a missing dir is not an error.
  *
- * Security hardening (#3201, #3203):
+ * Security hardening (#3201, #3203, #3215, #3216, #3202):
  *   - Each candidate's real path is resolved with `fs.realpathSync` and must
  *     either remain inside `dir` or land under one of `opts.allowedRoots`.
- *   - Files outside `opts.allowedExtensions` (default `['md']`) are skipped.
- *   - The first ~512 bytes are sniffed; files containing NUL or other
- *     non-whitespace control chars are rejected.
+ *   - Files outside `opts.allowedExtensions` (default `['md', 'markdown']`)
+ *     are skipped.
+ *   - Each candidate's full bytes are scanned; files containing NUL or
+ *     other non-whitespace control chars are rejected (#3216).
+ *   - Each skill is capped at `opts.maxSkillBytes` (default 32KB).
+ *   - Rejection warnings include only `basename#hash` (#3215); the full
+ *     absolute path is logged once at debug level.
  *
  * @param {string} dir - Directory to scan (e.g. ~/.chroxy/skills)
  * @param {{
  *   source?: 'global' | 'repo',
  *   allowedRoots?: string[],
  *   allowedExtensions?: string[],
+ *   maxSkillBytes?: number,
  * }} [opts]
- *   - `source`: tag added to each returned skill, used by
- *     `loadActiveSkillsLayered` to distinguish global vs repo-scoped skills.
- *   - `allowedRoots`: extra absolute paths that legitimate symlink targets
- *     may resolve into (e.g., a shared community skills repo).
- *   - `allowedExtensions`: extensions accepted for skills, without the dot.
- *     Defaults to `['md']`. Disabled-suffix logic (`.disabled.md`) is
- *     applied per-extension.
- * @returns {Array<{ name: string, body: string, description: string, source?: string }>}
+ * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
   const { source } = opts
@@ -216,7 +438,13 @@ export function loadActiveSkills(dir, opts = {}) {
     const norm = _normalizeExtension(ext)
     if (norm) allowedExtensions.add(norm)
   }
-  if (allowedExtensions.size === 0) allowedExtensions.add('md')
+  if (allowedExtensions.size === 0) {
+    for (const ext of DEFAULT_ALLOWED_EXTENSIONS) allowedExtensions.add(ext)
+  }
+
+  const maxSkillBytes = Number.isFinite(opts.maxSkillBytes) && opts.maxSkillBytes > 0
+    ? Math.floor(opts.maxSkillBytes)
+    : DEFAULT_MAX_SKILL_BYTES
 
   const skills = []
   for (const entry of entries) {
@@ -236,6 +464,7 @@ export function loadActiveSkills(dir, opts = {}) {
     if (entry.endsWith(`.disabled.${ext}`)) continue
 
     const fullPath = join(dir, entry)
+    const label = _pathLabel(fullPath)
 
     // statSync FOLLOWS symlinks — that's intentional here. We just need to
     // gate out non-files (dirs, sockets, devices). The realpath check below
@@ -249,6 +478,14 @@ export function loadActiveSkills(dir, opts = {}) {
     }
     if (!st.isFile()) continue
 
+    // Per-skill size cap (#3202). Stat already followed the symlink, so the
+    // size we're checking is the size of the underlying file.
+    if (typeof st.size === 'number' && st.size > maxSkillBytes) {
+      log.warn(`Skipping skill ${label}: size ${st.size} exceeds per-skill cap ${maxSkillBytes}`)
+      log.debug(`skill ${label} full path: ${fullPath}`)
+      continue
+    }
+
     // Symlink defense: resolve to the real path and confirm it lives inside
     // an allowed root. realpathSync follows the chain, so a symlink that
     // points outside the skills tree is caught here even though statSync
@@ -257,43 +494,123 @@ export function loadActiveSkills(dir, opts = {}) {
     try {
       realPath = realpathSync(fullPath)
     } catch (err) {
-      log.warn(`Skipping skill ${entry}: realpath failed (${err.message})`)
+      // Node's realpathSync errors interpolate the offending path into
+      // `err.message` (e.g. ENOENT 'no such file or directory, lstat ...').
+      // log.warn fans out via log_entry to paired WS clients — same leak
+      // channel addressed by #3215. Strip to the error code only; full
+      // path is logged separately at debug.
+      const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+      log.warn(`Skipping skill ${label}: realpath failed (${code})`)
+      log.debug(`skill ${label} full path: ${fullPath}`)
       continue
     }
 
     const inAllowedRoot = allowedRoots.some((root) => _pathContains(root, realPath))
     if (!inAllowedRoot) {
-      log.warn(`Skipping skill ${entry}: real path ${realPath} escapes skills root ${dirReal}`)
+      log.warn(`Skipping skill ${label}: real path escapes skills root`)
+      log.debug(`skill ${label} full path: ${fullPath} resolved to ${realPath}, root ${dirReal}`)
       continue
     }
 
-    // Content sniffing: read a small head buffer and reject anything that
-    // looks binary. We do this before the full read to keep huge binaries
-    // from being slurped just to be discarded.
-    if (!_looksLikeText(realPath)) {
-      log.warn(`Skipping skill ${entry}: content does not look like text (binary marker in first ${CONTENT_SNIFF_BYTES} bytes)`)
-      continue
-    }
-
-    let body
+    // Read the file once as raw bytes, validate the entire content, then
+    // decode as UTF-8. This avoids two reads (sniff + read) and ensures
+    // a binary tail past 512 bytes can't slip through (#3216).
+    let buf
     try {
-      body = readFileSync(realPath, 'utf8')
+      buf = readFileSync(realPath)
     } catch {
       continue
     }
+
+    if (buf.length > maxSkillBytes) {
+      log.warn(`Skipping skill ${label}: size ${buf.length} exceeds per-skill cap ${maxSkillBytes}`)
+      log.debug(`skill ${label} full path: ${fullPath}`)
+      continue
+    }
+
+    if (!_bufferLooksLikeText(buf)) {
+      log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
+      log.debug(`skill ${label} full path: ${fullPath}`)
+      continue
+    }
+
+    const body = buf.toString('utf8')
 
     // Strip the matching extension (case-preserving) when computing the
     // display name. We checked the lower-cased suffix above, so trim the
     // same number of chars (+1 for the dot).
     const name = entry.slice(0, -(ext.length + 1))
-    const description = _firstNonEmptyLine(body) || name
-    const skill = { name, body, description }
+
+    // Parse YAML frontmatter (#3197). Failures are non-fatal — the body is
+    // returned unchanged and metadata is null. Every Skill carries a
+    // `metadata` field for forward compatibility, even when null.
+    const { frontmatter, body: bodyAfterFrontmatter } = parseFrontmatter(body)
+    const finalBody = frontmatter !== null ? bodyAfterFrontmatter : body
+    const description = _firstNonEmptyLine(finalBody) || name
+
+    const skill = { name, body: finalBody, description, metadata: frontmatter }
     if (source) skill.source = source
     skills.push(skill)
   }
 
   skills.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   return skills
+}
+
+/**
+ * Apply the global skills budget (#3202). Skills are sorted by priority
+ * descending (higher priority kept first), with alphabetical name as the
+ * tiebreaker — same direction as the existing top-level sort. We then walk
+ * the list, accumulating bytes until we'd exceed the cap; the first skill
+ * that wouldn't fit (and every later one) is dropped.
+ *
+ * Returns a fresh array sorted by name (for deterministic ordering downstream).
+ *
+ * @param {Array<object>} skills
+ * @param {number} maxTotalBytes
+ * @returns {Array<object>}
+ */
+function _enforceTotalBudget(skills, maxTotalBytes) {
+  if (!Array.isArray(skills) || skills.length === 0) return []
+
+  const ranked = skills.slice().sort((a, b) => {
+    const pa = _priorityOf(a)
+    const pb = _priorityOf(b)
+    if (pa !== pb) return pb - pa // higher priority first
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  })
+
+  const kept = []
+  let total = 0
+  for (const s of ranked) {
+    const size = typeof s.body === 'string' ? Buffer.byteLength(s.body, 'utf8') : 0
+    if (total + size > maxTotalBytes) {
+      log.warn(
+        `Skipping skill ${_pathLabel(s.name)}: cumulative size would exceed total cap ${maxTotalBytes}`,
+      )
+      continue
+    }
+    total += size
+    kept.push(s)
+  }
+
+  kept.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  return kept
+}
+
+// Default priority for skills without an explicit `priority:` in frontmatter
+// (and for v1 skills that have no frontmatter at all). Per the #2958 schema,
+// the documented default is 100. Returning 0 here (the previous behaviour)
+// would push v1 / no-priority skills to the BOTTOM of the budget-prune order,
+// so any new v2 skill with even `priority: 1` would outrank them — wrong for
+// mixed v1/v2 sets.
+const DEFAULT_SKILL_PRIORITY = 100
+
+function _priorityOf(skill) {
+  if (skill && skill.metadata && Number.isFinite(skill.metadata.priority)) {
+    return skill.metadata.priority
+  }
+  return DEFAULT_SKILL_PRIORITY
 }
 
 /**
@@ -366,20 +683,35 @@ export function findRepoSkillsDir(cwd) {
  * paths resolve to the same absolute directory, the global load is skipped to
  * avoid double-counting the same files under conflicting source tags.
  *
+ * Size budgets (#3202): per-skill cap is enforced inside `loadActiveSkills`;
+ * the global budget is applied here, AFTER the merge — repo overrides win
+ * before we trim, which keeps the trimming behaviour consistent with what
+ * the user actually has on disk.
+ *
  * @param {{
  *   globalDir?: string|null,
  *   repoDir?: string|null,
  *   allowedRoots?: string[],
  *   allowedExtensions?: string[],
+ *   maxSkillBytes?: number,
+ *   maxTotalSkillBytes?: number,
  * }} [opts]
- * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo' }>}
+ * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo', metadata: object|null }>}
  */
-export function loadActiveSkillsLayered({ globalDir, repoDir, allowedRoots, allowedExtensions } = {}) {
+export function loadActiveSkillsLayered({
+  globalDir,
+  repoDir,
+  allowedRoots,
+  allowedExtensions,
+  maxSkillBytes,
+  maxTotalSkillBytes,
+} = {}) {
   const sameDir = globalDir && repoDir && _sameAbsolutePath(globalDir, repoDir)
 
   const loaderOpts = {}
   if (Array.isArray(allowedRoots)) loaderOpts.allowedRoots = allowedRoots
   if (Array.isArray(allowedExtensions)) loaderOpts.allowedExtensions = allowedExtensions
+  if (Number.isFinite(maxSkillBytes) && maxSkillBytes > 0) loaderOpts.maxSkillBytes = maxSkillBytes
 
   const globals = (globalDir && !sameDir)
     ? loadActiveSkills(globalDir, { ...loaderOpts, source: 'global' })
@@ -394,9 +726,15 @@ export function loadActiveSkillsLayered({ globalDir, repoDir, allowedRoots, allo
   for (const s of globals) byName.set(s.name, s)
   for (const s of repos) byName.set(s.name, s)
 
-  return Array.from(byName.values()).sort(
+  const merged = Array.from(byName.values()).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
   )
+
+  const totalCap = Number.isFinite(maxTotalSkillBytes) && maxTotalSkillBytes > 0
+    ? Math.floor(maxTotalSkillBytes)
+    : DEFAULT_MAX_TOTAL_SKILL_BYTES
+
+  return _enforceTotalBudget(merged, totalCap)
 }
 
 // macOS (HFS+/APFS) and Windows (NTFS) are case-insensitive by default. A

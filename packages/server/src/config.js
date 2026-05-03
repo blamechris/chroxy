@@ -89,6 +89,13 @@ const CONFIG_SCHEMA = {
   // compiled — malformed sources are logged and ignored, the default
   // pattern still applies. Documented in CONFIG.md. Added in #3187.
   promptEvaluatorSkipPattern: 'string',
+  // Per-skill byte cap and global skills-context budget (#3202). Skills
+  // exceeding the per-skill cap are rejected; a merged set exceeding the
+  // global cap is pruned by ascending priority then alphabetical name.
+  // Defaults: 32768 (32KB) per skill, 262144 (256KB) total. Setting either
+  // to 0 disables that cap. Documented in CONFIG.md.
+  maxSkillBytes: 'number',
+  maxTotalSkillBytes: 'number',
 }
 
 /**
