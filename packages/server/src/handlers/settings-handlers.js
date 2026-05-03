@@ -14,6 +14,16 @@ import { createLogger } from '../logger.js'
 // These are safe file-operation tools that don't execute code or make network requests.
 const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
 
+// #3250: strict ISO-8601 datetime gate matching the shape z.string().datetime()
+// accepts. Used by handleListSkills to drop malformed timestamps from a
+// hand-edited trust ledger before forwarding — see comment in handleListSkills
+// for context. Date.parse is intentionally NOT used here: it accepts forms
+// like "2026-03-18 10:00:00" (space separator) that the wire schema rejects.
+const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/
+function _isIsoDatetime(s) {
+  return typeof s === 'string' && ISO_DATETIME_RE.test(s)
+}
+
 // Tools that must never be auto-allowed regardless of user rules.
 const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
 
@@ -390,9 +400,12 @@ function handleListSkills(ws, client, msg, ctx) {
   // layered scan with `includeInactive: true` against that session's
   // active set — the session's cached `_skills` only contains active
   // entries (manual ones are filtered at construction).
-  const activeSet = entry?.session?._activeManualSkills instanceof Set
-    ? entry.session._activeManualSkills
-    : new Set()
+  // #3252: prefer the public getter so future BaseSession internal
+  // refactors don't silently turn this into "no active skills" without
+  // a type error or test failure. Optional-chaining the getter keeps
+  // mock sessions (which don't define the method) compatible.
+  const activeSetCandidate = entry?.session?.getActiveManualSkillsRaw?.()
+  const activeSet = activeSetCandidate instanceof Set ? activeSetCandidate : new Set()
   // #3205: prefer the session's resolved skill dirs when available so
   // the response matches what the session is actually injecting. This
   // matters when the session was constructed with `skillsDir` /
@@ -412,7 +425,9 @@ function handleListSkills(ws, client, msg, ctx) {
   // didn't opt into 'warn' / 'block' modes), those fields are simply
   // omitted — the dashboard renders the panel without those columns
   // rather than showing fake data.
-  const trustStore = entry?.session?._trustStore || null
+  // #3252: same getter pattern as activeSet — keeps mock sessions
+  // working without forcing every test to add the method.
+  const trustStore = entry?.session?.getTrustStore?.() ?? null
 
   const skills = loadActiveSkillsLayered({
     globalDir: sessionSkillsDir,
@@ -454,8 +469,25 @@ function handleListSkills(ws, client, msg, ctx) {
         // wire format from #3215 / #3234. The full SHA never leaves
         // the server.
         out.hashPrefix = record.sha256.slice(0, 8)
-        if (typeof record.lastVerified === 'string') out.lastVerified = record.lastVerified
-        if (typeof record.firstSeen === 'string') out.firstSeen = record.firstSeen
+        // #3250: producer-side ISO-8601 validation. The wire schema
+        // (ServerSkillsListSchema) tightened these to z.string().datetime();
+        // a hand-edited or corrupted ~/.chroxy/skills-trust.json could
+        // otherwise emit a non-ISO string that fails the WHOLE
+        // skills_list payload at the dashboard parser. Drop the
+        // offending field instead — the dashboard renders the panel
+        // without that column rather than rejecting the response.
+        //
+        // Date.parse is too permissive (accepts e.g. "2026-03-18 10:00:00"
+        // which z.string().datetime() rejects). Match Zod's strict
+        // ISO-8601 shape: T separator + Z or numeric offset.
+        if (typeof record.lastVerified === 'string'
+            && _isIsoDatetime(record.lastVerified)) {
+          out.lastVerified = record.lastVerified
+        }
+        if (typeof record.firstSeen === 'string'
+            && _isIsoDatetime(record.firstSeen)) {
+          out.firstSeen = record.firstSeen
+        }
       }
     }
 

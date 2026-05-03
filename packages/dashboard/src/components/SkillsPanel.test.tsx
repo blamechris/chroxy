@@ -226,6 +226,31 @@ describe('SkillsPanel (#3209)', () => {
       expect(screen.getByTestId('skill-mismatch-manual-changed')).toBeInTheDocument()
     })
 
+    // #3251 — clicking the mismatch flag must NOT toggle the checkbox.
+    // Browser <label> association would tick the checkbox if the flag
+    // sits inside the label; the operator hovers the warning to read
+    // the tooltip and accidentally activates a skill they were about
+    // to inspect more carefully. The flag is rendered as a sibling of
+    // the <label> so it stays hoverable without firing the toggle.
+    it('clicking the mismatch flag does not toggle the manual-skill checkbox (#3251)', () => {
+      const onActivate = vi.fn()
+      const onDeactivate = vi.fn()
+      renderPanel({
+        skills: [{ name: 'risky', activation: 'manual', active: false }],
+        mismatchedSkillNames: new Set(['risky']),
+        canToggle: true,
+        onActivate,
+        onDeactivate,
+      })
+
+      const flag = screen.getByTestId('skill-mismatch-risky')
+      fireEvent.click(flag)
+
+      expect(onActivate).not.toHaveBeenCalled()
+      expect(onDeactivate).not.toHaveBeenCalled()
+      expect((screen.getByTestId('skill-toggle-risky') as HTMLInputElement).checked).toBe(false)
+    })
+
     it('handles malformed timestamps without crashing (returns raw string)', () => {
       // Defensive — if a future server emits a non-ISO timestamp,
       // the component must still render rather than throwing.

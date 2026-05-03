@@ -424,6 +424,38 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * Return the raw active-manual-skills Set (#3252).
+   *
+   * Same data as `getActiveManualSkills()` but as the underlying Set
+   * so callers can do cheap `.has(name)` membership checks without
+   * rebuilding from the array form. The returned Set is the same
+   * instance held by this session — callers MUST treat it as
+   * read-only and mutate via `activateSkill()` / `deactivateSkill()`
+   * so the loader rebuild fires.
+   *
+   * @returns {Set<string>}
+   */
+  getActiveManualSkillsRaw() {
+    return this._activeManualSkills
+  }
+
+  /**
+   * Return the wired SkillsTrustStore, or null when trust is disabled
+   * (#3252).
+   *
+   * Trust is opt-in: the operator sets `trustMismatchMode` to 'warn'
+   * or 'block' to record per-skill content hashes and surface
+   * mismatch warnings. Without that opt-in, the field is null and
+   * the dashboard renders the panel without hash / last-verified
+   * columns rather than showing fake data.
+   *
+   * @returns {import('./skills-trust.js').SkillsTrustStore | null}
+   */
+  getTrustStore() {
+    return this._trustStore
+  }
+
+  /**
    * Return the formatted skills text for injection into the provider's
    * system prompt (Claude SDK `systemPrompt.append`, CLI
    * `--append-system-prompt`). Returns an empty string when no skills are

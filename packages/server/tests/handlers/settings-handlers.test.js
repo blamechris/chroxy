@@ -903,5 +903,109 @@ describe('settings-handlers', () => {
           `expected only global-sourced skills with no active session, got: ${JSON.stringify(s)}`)
       }
     })
+
+    // #3250 producer-side guard: when the trust ledger is hand-edited
+    // or corrupted, malformed `firstSeen`/`lastVerified` strings must
+    // be dropped so the tightened ServerSkillsListSchema (which
+    // requires z.string().datetime()) doesn't reject the entire
+    // `skills_list` payload at the dashboard parser.
+    it('drops non-ISO firstSeen/lastVerified from a corrupted trust ledger (#3250)', () => {
+      let repoRoot
+      try {
+        repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-trust-'))
+        mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'audited.md'),
+          'A trusted skill.\n',
+        )
+
+        // Fake trust store returning malformed timestamp strings.
+        const fakeTrustStore = {
+          getRecord(_path) {
+            return {
+              sha256: 'abcdef0123456789'.padEnd(64, '0'),
+              firstSeen: '2026-03-18 10:00:00', // space-separated, not ISO
+              lastVerified: 'Sun May 03 2026',  // Date.toString() form
+            }
+          },
+        }
+
+        const sessions = new Map()
+        const session = createMockSession()
+        session.cwd = repoRoot
+        session._trustStore = fakeTrustStore
+        // #3252: handler now reads via getters with optional-chaining
+        // fallback. Mocks need both forms because the merged-main HEAD
+        // includes the public-getters refactor.
+        session.getTrustStore = () => fakeTrustStore
+        sessions.set('s1', { session, name: 'S', cwd: repoRoot })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+        const msg = ctx._sent[0]
+        const audited = msg.skills.find((s) => s.name === 'audited')
+        assert.ok(audited, 'audited skill should be in payload')
+        // Hash prefix derived from sha256 — still emitted because the
+        // SHA itself is well-formed.
+        assert.ok(typeof audited.hashPrefix === 'string')
+        // Malformed timestamps DROPPED rather than forwarded — the
+        // tightened wire schema (z.string().datetime()) would reject
+        // the whole payload otherwise.
+        assert.equal(audited.firstSeen, undefined,
+          'malformed firstSeen must be dropped before forwarding')
+        assert.equal(audited.lastVerified, undefined,
+          'malformed lastVerified must be dropped before forwarding')
+      } finally {
+        if (repoRoot) rmSync(repoRoot, { recursive: true, force: true })
+      }
+    })
+
+    // Sister test: ISO-8601 timestamps from a healthy trust ledger
+    // pass through unchanged.
+    it('forwards ISO-8601 firstSeen/lastVerified verbatim (#3250)', () => {
+      let repoRoot
+      try {
+        repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-trust-iso-'))
+        mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'verified.md'),
+          'A verified skill.\n',
+        )
+
+        const fakeTrustStore = {
+          getRecord(_path) {
+            return {
+              sha256: '0123456789abcdef'.padEnd(64, '0'),
+              firstSeen: '2026-01-15T08:00:00.000Z',
+              lastVerified: '2026-05-03T12:34:56.000Z',
+            }
+          },
+        }
+
+        const sessions = new Map()
+        const session = createMockSession()
+        session.cwd = repoRoot
+        session._trustStore = fakeTrustStore
+        // #3252: handler now reads via getters with optional-chaining
+        // fallback. Mocks need both forms because the merged-main HEAD
+        // includes the public-getters refactor.
+        session.getTrustStore = () => fakeTrustStore
+        sessions.set('s1', { session, name: 'S', cwd: repoRoot })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+        const msg = ctx._sent[0]
+        const verified = msg.skills.find((s) => s.name === 'verified')
+        assert.ok(verified, 'verified skill should be in payload')
+        assert.equal(verified.firstSeen, '2026-01-15T08:00:00.000Z')
+        assert.equal(verified.lastVerified, '2026-05-03T12:34:56.000Z')
+      } finally {
+        if (repoRoot) rmSync(repoRoot, { recursive: true, force: true })
+      }
+    })
   })
 })
