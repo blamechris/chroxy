@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { SessionMessageHistory } from '../src/session-message-history.js'
@@ -343,20 +343,16 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
         event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'partial before interrupt' } },
       })
 
-      // Interrupt fires SIGINT. The 5-second safety timer would force-emit
-      // stream_end if claude doesn't respond. Drive that path.
-      session.interrupt()
-      // Force the safety timeout to fire immediately so the test isn't slow.
-      const timer = session._interruptTimer
-      session._interruptTimer = null
-      clearTimeout(timer)
-      // Manually invoke the same logic the timer runs.
-      if (session._isBusy) {
-        const messageId = session._currentMessageId
-        if (session._currentCtx?.hasStreamStarted) {
-          session.emit('stream_end', { messageId })
-        }
-        session._clearMessageState()
+      // Interrupt fires SIGINT. The 5-second safety timer force-emits
+      // stream_end if claude doesn't respond. Drive that path with fake
+      // timers so the real callback body executes — keeps the test
+      // faithful to production behaviour as interrupt() evolves.
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session.interrupt()
+        mock.timers.tick(5000)
+      } finally {
+        mock.timers.reset()
       }
 
       // The persisted response is the partial content — this is the expected
