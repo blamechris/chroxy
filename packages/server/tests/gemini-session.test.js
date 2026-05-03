@@ -41,6 +41,31 @@ describe('GeminiSession', () => {
     assert.equal(session.model, 'gemini-2.5-pro')
   })
 
+  // ---------------------------------------------------------------------
+  // #3225: JsonlSubprocessSession previously dropped these constructor
+  // opts at the middle layer, so providers gating and manual activation
+  // silently no-op'd for Gemini sessions. Pin the pass-through.
+  // ---------------------------------------------------------------------
+
+  it('passes `provider` through to BaseSession (#3225)', () => {
+    const session = new GeminiSession({ cwd: '/tmp' })
+    assert.equal(session._provider, 'gemini')
+  })
+
+  it('passes a custom `provider` through to BaseSession (#3225)', () => {
+    const session = new GeminiSession({ cwd: '/tmp', provider: 'gemini-vertex' })
+    assert.equal(session._provider, 'gemini-vertex')
+  })
+
+  it('passes `activeManualSkills` through to BaseSession (#3225)', () => {
+    const session = new GeminiSession({
+      cwd: '/tmp',
+      activeManualSkills: new Set(['gemini-skill']),
+    })
+    assert.ok(session._activeManualSkills instanceof Set)
+    assert.equal(session._activeManualSkills.has('gemini-skill'), true)
+  })
+
   it('setModel updates the model property', () => {
     const session = new GeminiSession({ cwd: '/tmp' })
     session.setModel('gemini-2.5-flash')

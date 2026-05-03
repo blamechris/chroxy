@@ -493,4 +493,49 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(processedCount, 1, 'only the one valid JSONL line should reach the mapper')
     })
   })
+
+  // -----------------------------------------------------------------------
+  // #3225: `_skillsPrepended` must only flip after the spawn succeeds. If
+  // spawn() throws synchronously (e.g. ENOENT for a missing binary), the
+  // flag must stay false so a retry still injects the prepend bucket.
+  // -----------------------------------------------------------------------
+
+  describe('_skillsPrepended deferral (#3225)', () => {
+    it('stays false when spawn() throws synchronously', async () => {
+      // Pick a binary path that cannot exist; spawn should throw ENOENT.
+      const missing = '/nonexistent/no/such/binary'
+      const P = makeTestProviderClass({ binary: missing })
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+
+      assert.equal(s._skillsPrepended, false, 'starts false')
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      await s.sendMessage('hi')
+      await waitFor(() => errors.length >= 1, { label: 'error', timeoutMs: 2000 })
+
+      // Cleanup any spawned process from the failure path.
+      assert.equal(s._skillsPrepended, false,
+        'flag must stay false when spawn fails so the next retry re-injects skills')
+      assert.equal(s._isBusy, false, 'busy flag must be cleared so retry is allowed')
+    })
+
+    it('flips to true after a successful spawn', async () => {
+      writeShim([{ type: 'done' }])
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+
+      assert.equal(s._skillsPrepended, false, 'starts false')
+
+      const results = []
+      s.on('result', (d) => results.push(d))
+      await s.sendMessage('hi')
+      await waitFor(() => results.length >= 1, { label: 'result' })
+
+      assert.equal(s._skillsPrepended, true,
+        'flag must flip to true once spawn argv is committed')
+    })
+  })
 })

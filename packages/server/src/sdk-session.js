@@ -276,7 +276,12 @@ export class SdkSession extends BaseSession {
     if (skillsText) {
       systemPrompt.append = skillsText
     }
+    // Don't flip `_skillsPrepended` until _callQuery() has accepted the
+    // prompt (#3225). If the call throws synchronously — bad SDK args,
+    // missing claude binary in DockerSdkSession's spawnClaudeCodeProcess,
+    // etc. — the prepend bucket needs to ride on the next attempt.
     let firstMessagePrefix = ''
+    let willPrependSkills = false
     if (!this._skillsPrepended) {
       const prependText = typeof this._buildPrependPrompt === 'function'
         ? this._buildPrependPrompt()
@@ -284,7 +289,7 @@ export class SdkSession extends BaseSession {
       if (prependText) {
         firstMessagePrefix = `${prependText}\n\n---\n\n`
       }
-      this._skillsPrepended = true
+      willPrependSkills = true
     }
     const options = {
       cwd: this.cwd,
@@ -366,6 +371,15 @@ export class SdkSession extends BaseSession {
         queryArgs.prompt = buildContentBlocks(promptWithSkills, attachments)
       }
       this._query = this._callQuery(queryArgs)
+
+      // _callQuery returned an iterable without throwing — the prepend
+      // bucket is committed to this turn's prompt, so flip the flag (#3225).
+      // If _callQuery threw synchronously, control falls into the catch
+      // below with the flag still false, ensuring the next retry
+      // re-includes the prepend skills.
+      if (willPrependSkills) {
+        this._skillsPrepended = true
+      }
 
       for await (const msg of this._query) {
         if (this._destroying) break

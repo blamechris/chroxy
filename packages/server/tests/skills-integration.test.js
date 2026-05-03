@@ -290,6 +290,37 @@ describe('skills integration — true end-to-end', () => {
         rmSync(empty, { recursive: true, force: true })
       }
     })
+
+    // -------------------------------------------------------------------
+    // #3225: a `providers: [codex]` skill must reach a CodexSession. The
+    // pre-fix middle layer dropped `provider` on its way to BaseSession,
+    // so the loader treated the session as having no provider and
+    // filtered out every scoped skill (including ones scoped to codex
+    // itself). This test pins the post-fix behaviour: a codex-scoped
+    // skill IS included.
+    // -------------------------------------------------------------------
+
+    it('skill with `providers: [codex]` is included for a CodexSession (#3225)', async () => {
+      const scopedDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-prov-codex-'))
+      try {
+        writeFileSync(
+          join(scopedDir, 'codex-scoped.md'),
+          '---\nname: codex-scoped\nproviders: [codex]\n---\nbody. SKILL_MARKER_CODEX_ONLY\n',
+        )
+        const session = makeShimmedCodex({ cwd: '/tmp', skillsDir: scopedDir })
+
+        await session.sendMessage('user msg')
+        await waitFor(() => existsSync(recordPath), { label: 'shim record' })
+        await waitFor(() => !session.isRunning, { label: 'subprocess closed' })
+
+        const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
+        const sentText = recordedArgv[1]
+        assert.ok(sentText.includes('SKILL_MARKER_CODEX_ONLY'),
+          `codex-scoped skill must be present in spawned argv; got: ${sentText.slice(0, 200)}`)
+      } finally {
+        rmSync(scopedDir, { recursive: true, force: true })
+      }
+    })
   })
 
   // -----------------------------------------------------------------------

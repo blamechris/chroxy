@@ -782,3 +782,50 @@ describe('CliSession._buildChildEnv', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// #3225: `_skillsPrepended` deferral + reset on respawn.
+//
+// Two behaviours pinned here:
+//   1. The flag flips to true ONLY after stdin.write() succeeds. A throwing
+//      write must leave it false so the next sendMessage retry re-injects.
+//   2. _killAndRespawn() resets the flag — the respawned child is a fresh
+//      conversation, and the prepend bucket rides on the FIRST user message
+//      of the new process.
+// ---------------------------------------------------------------------------
+
+describe('CliSession _skillsPrepended deferral (#3225)', () => {
+  it('_killAndRespawn resets _skillsPrepended to false', () => {
+    const session = createReadySession({ model: 'sonnet' })
+    session._skillsPrepended = true
+
+    // Stub start() so we don't actually respawn a real process.
+    session.start = () => {}
+    // Bypass setModel guards so we can directly trigger the kill path.
+    session._killAndRespawn()
+
+    assert.equal(session._skillsPrepended, false,
+      'a respawn produces a fresh conversation; the prepend bucket must ride the next first message')
+  })
+
+  it('flag stays falsy when stdin.write throws (skills not committed to wire)', async () => {
+    const session = createReadySession()
+    // Make stdin.write throw to simulate EPIPE on a dead child.
+    session._child.stdin = new Writable({
+      write(_chunk, _enc, cb) { cb() }
+    })
+    session._child.stdin.write = () => {
+      throw new Error('EPIPE')
+    }
+
+    assert.ok(!session._skillsPrepended, 'starts falsy (uninitialized or false)')
+
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    await session.sendMessage('hi')
+
+    assert.ok(!session._skillsPrepended,
+      'flag must stay falsy when the write fails — skills text never reached the child')
+    assert.ok(errors.length >= 1, 'sendMessage should have surfaced the EPIPE error')
+  })
+})

@@ -969,8 +969,23 @@ function _coerceManualSet(input) {
  * with `providers: [claude]` matches.
  */
 function _skillMatchesProvider(frontmatter, provider) {
-  if (!frontmatter || !Array.isArray(frontmatter.providers)) return true
-  const list = frontmatter.providers
+  if (!frontmatter) return true
+  // Accept both list and scalar shapes for `providers:` (#3229). YAML
+  // beginners write `providers: claude` and expect it to work; without
+  // this normalization the field is silently treated as a no-op string
+  // and the scoping is lost. A non-empty string is wrapped to a
+  // single-element list at consumption time.
+  let list
+  if (Array.isArray(frontmatter.providers)) {
+    list = frontmatter.providers
+  } else if (typeof frontmatter.providers === 'string' && frontmatter.providers.trim() !== '') {
+    list = [frontmatter.providers]
+  } else if (frontmatter.providers === undefined || frontmatter.providers === null
+    || frontmatter.providers === '') {
+    return true
+  } else {
+    return true
+  }
   if (list.length === 0) return true
   if (!provider) return false // skill scoped, but we don't know the provider
   const target = provider // already lowercased
@@ -979,11 +994,13 @@ function _skillMatchesProvider(frontmatter, provider) {
     const v = raw.trim().toLowerCase()
     if (!v) continue
     if (v === target) return true
-    // Family alias: `claude` matches any claude-* provider, and a
-    // skill scoped to `claude-sdk` matches a session whose provider was
-    // declared as the bare `claude` alias.
-    if (v === 'claude' && target.startsWith('claude')) return true
-    if (target === 'claude' && v.startsWith('claude')) return true
+    // Family alias: `claude` matches any `claude-*` provider, and a skill
+    // scoped to `claude-sdk` matches a session declared as the bare
+    // `claude` alias. Use the `-` boundary instead of a bare prefix so
+    // unrelated names like `claudette` don't get pulled into the family
+    // (#3227).
+    if (v === 'claude' && target.startsWith('claude-')) return true
+    if (target === 'claude' && v.startsWith('claude-')) return true
   }
   return false
 }

@@ -228,6 +228,44 @@ describe('CodexSession', () => {
       assert.equal(session.isRunning, false)
       assert.equal(session.isReady, false)
     })
+
+    // -------------------------------------------------------------------
+    // #3225: JsonlSubprocessSession's constructor previously dropped
+    // `provider` and `activeManualSkills` (and the budget overrides). The
+    // codex/gemini subclasses passed them to super(), but the middle layer
+    // didn't accept them — so providers gating, manual activation, and
+    // size budgets silently no-op'd for these providers. These tests pin
+    // the pass-through.
+    // -------------------------------------------------------------------
+
+    it('passes `provider` through to BaseSession (#3225)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      // Default provider id when caller doesn't override.
+      assert.equal(session._provider, 'codex')
+    })
+
+    it('passes a custom `provider` through to BaseSession (#3225)', () => {
+      const session = new CodexSession({ cwd: '/tmp', provider: 'codex-experimental' })
+      assert.equal(session._provider, 'codex-experimental')
+    })
+
+    it('passes `activeManualSkills` through to BaseSession (#3225)', () => {
+      const session = new CodexSession({
+        cwd: '/tmp',
+        activeManualSkills: new Set(['my-skill']),
+      })
+      assert.ok(session._activeManualSkills instanceof Set)
+      assert.equal(session._activeManualSkills.has('my-skill'), true)
+    })
+
+    it('accepts `activeManualSkills` as an array (#3225)', () => {
+      const session = new CodexSession({
+        cwd: '/tmp',
+        activeManualSkills: ['a', 'b'],
+      })
+      assert.equal(session._activeManualSkills.has('a'), true)
+      assert.equal(session._activeManualSkills.has('b'), true)
+    })
   })
 
   describe('start()', () => {

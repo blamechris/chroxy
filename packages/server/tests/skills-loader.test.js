@@ -1149,4 +1149,92 @@ describe('skills-loader', () => {
       assert.ok(!prependText.includes('append body'), 'prepend bucket must NOT carry append-injection skill')
     })
   })
+
+  // -----------------------------------------------------------------------
+  // #3227: claude family alias must use the `-` boundary, not a bare prefix.
+  // The old startsWith('claude') match incorrectly pulled in unrelated names
+  // like `claudette`.
+  // -----------------------------------------------------------------------
+
+  describe('claude family alias precision (#3227)', () => {
+    it('does NOT match `claudette` against scope `[claude]`', () => {
+      writeFileSync(
+        join(dir, 'claude-only.md'),
+        '---\nname: claude-only\nproviders: [claude]\n---\nbody\n',
+      )
+      const skills = loadActiveSkills(dir, { provider: 'claudette' })
+      assert.equal(skills.length, 0, '`claudette` is not in the claude family')
+    })
+
+    it('does NOT match session `claude` against scope `[claudette]`', () => {
+      writeFileSync(
+        join(dir, 'unrelated.md'),
+        '---\nname: unrelated\nproviders: [claudette]\n---\nbody\n',
+      )
+      const skills = loadActiveSkills(dir, { provider: 'claude' })
+      assert.equal(skills.length, 0, 'reverse direction must also reject the prefix overlap')
+    })
+
+    it('still matches `claude-sdk` and `claude-cli` against `[claude]`', () => {
+      writeFileSync(
+        join(dir, 'fam.md'),
+        '---\nname: fam\nproviders: [claude]\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-cli' }).length, 1)
+    })
+
+    it('exact match `claude` ↔ `claude` is preserved', () => {
+      writeFileSync(
+        join(dir, 'exact.md'),
+        '---\nname: exact\nproviders: [claude]\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude' }).length, 1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3229: providers value as a scalar string (`providers: claude`) must be
+  // normalised to a single-element list at consumption time. Previously a
+  // string was silently treated as a no-op (Array.isArray check failed) and
+  // the scoping was lost.
+  // -----------------------------------------------------------------------
+
+  describe('providers as scalar string (#3229)', () => {
+    it('normalises a quoted single-string scalar', () => {
+      writeFileSync(
+        join(dir, 'string-scalar.md'),
+        '---\nname: ss\nproviders: "claude-sdk"\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 0)
+    })
+
+    it('normalises a bare single-string scalar', () => {
+      writeFileSync(
+        join(dir, 'bare-scalar.md'),
+        '---\nname: bs\nproviders: codex\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 0)
+    })
+
+    it('honours the claude family alias when scalar is `claude`', () => {
+      writeFileSync(
+        join(dir, 'fam-scalar.md'),
+        '---\nname: fs\nproviders: claude\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 0)
+    })
+
+    it('an empty string scalar behaves as no providers list (apply-to-all)', () => {
+      writeFileSync(
+        join(dir, 'empty-scalar.md'),
+        '---\nname: es\nproviders: ""\n---\nbody\n',
+      )
+      assert.equal(loadActiveSkills(dir, { provider: 'codex' }).length, 1)
+      assert.equal(loadActiveSkills(dir, { provider: 'claude-sdk' }).length, 1)
+    })
+  })
 })
