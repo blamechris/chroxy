@@ -6,6 +6,7 @@ import {
   InterruptSchema,
   SetModelSchema,
   SetPermissionModeSchema,
+  SetPromptEvaluatorSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,
@@ -49,6 +50,7 @@ import {
   ServerResultSchema,
   ServerModelChangedSchema,
   ServerPermissionModeChangedSchema,
+  ServerPromptEvaluatorChangedSchema,
   ServerPermissionRequestSchema,
   ServerUserQuestionSchema,
   ServerAgentBusySchema,
@@ -133,6 +135,27 @@ describe('SetPermissionModeSchema', () => {
 
   it('rejects invalid mode value', () => {
     assert.ok(!SetPermissionModeSchema.safeParse({ type: 'set_permission_mode', mode: 'bypassAll' }).success)
+  })
+})
+
+describe('SetPromptEvaluatorSchema (#3244)', () => {
+  it('accepts boolean true and false', () => {
+    assert.ok(SetPromptEvaluatorSchema.safeParse({ type: 'set_prompt_evaluator', value: true }).success)
+    assert.ok(SetPromptEvaluatorSchema.safeParse({ type: 'set_prompt_evaluator', value: false }).success)
+  })
+
+  it('rejects truthy non-boolean values', () => {
+    assert.ok(!SetPromptEvaluatorSchema.safeParse({ type: 'set_prompt_evaluator', value: 'true' }).success)
+    assert.ok(!SetPromptEvaluatorSchema.safeParse({ type: 'set_prompt_evaluator', value: 1 }).success)
+    assert.ok(!SetPromptEvaluatorSchema.safeParse({ type: 'set_prompt_evaluator', value: null }).success)
+    assert.ok(!SetPromptEvaluatorSchema.safeParse({ type: 'set_prompt_evaluator' }).success)
+  })
+
+  it('routes through ClientMessageSchema discriminated union', () => {
+    const ok = ClientMessageSchema.safeParse({ type: 'set_prompt_evaluator', value: true })
+    assert.ok(ok.success)
+    const bad = ClientMessageSchema.safeParse({ type: 'set_prompt_evaluator', value: 'true' })
+    assert.ok(!bad.success)
   })
 })
 
@@ -398,6 +421,7 @@ describe('simple server schemas', () => {
     ['ServerToolResultSchema', ServerToolResultSchema, { type: 'tool_result', toolUseId: 'tu1', result: 'contents' }],
     ['ServerModelChangedSchema', ServerModelChangedSchema, { type: 'model_changed', model: null }],
     ['ServerPermissionModeChangedSchema', ServerPermissionModeChangedSchema, { type: 'permission_mode_changed', mode: 'approve' }],
+    ['ServerPromptEvaluatorChangedSchema (#3244)', ServerPromptEvaluatorChangedSchema, { type: 'prompt_evaluator_changed', sessionId: 'sess-1', value: true }],
     ['ServerPermissionRequestSchema', ServerPermissionRequestSchema, { type: 'permission_request', requestId: 'req-1', tool: 'Bash', input: 'ls -la' }],
     ['ServerUserQuestionSchema', ServerUserQuestionSchema, { type: 'user_question', toolUseId: 'tu1', questions: [{ question: 'Which?', options: ['A', 'B'] }] }],
     ['ServerAgentBusySchema', ServerAgentBusySchema, { type: 'agent_busy' }],

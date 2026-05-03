@@ -323,6 +323,37 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject non-string description')
   })
 
+  it('validates ServerSkillsListSchema with ISO-8601 firstSeen / lastVerified (#3250)', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [{
+        name: 'commit',
+        firstSeen: '2026-03-18T10:00:00.000Z',
+        lastVerified: '2026-05-03T12:34:56Z',
+      }],
+    })
+    assert.ok(result.success, 'Should validate ISO-8601 datetimes')
+  })
+
+  it('rejects ServerSkillsListSchema with non-ISO firstSeen (#3250)', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [{ name: 'commit', firstSeen: '2026-03-18 10:00:00' }],
+    })
+    assert.ok(!result.success, 'Should reject space-separated date instead of ISO-8601')
+  })
+
+  it('rejects ServerSkillsListSchema with non-ISO lastVerified (#3250)', async () => {
+    const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillsListSchema.safeParse({
+      type: 'skills_list',
+      skills: [{ name: 'commit', lastVerified: 'Sun May 03 2026' }],
+    })
+    assert.ok(!result.success, 'Should reject Date.toString() form')
+  })
+
   it('validates ServerWebTaskErrorSchema with generic-task-failure shape', async () => {
     const { ServerWebTaskErrorSchema } = await import('../src/schemas/server.ts')
     const result = ServerWebTaskErrorSchema.safeParse({
