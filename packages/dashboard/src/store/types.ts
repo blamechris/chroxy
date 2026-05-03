@@ -38,6 +38,16 @@ export type {
   Checkpoint,
   BaseSessionState,
   PendingPermissionConfirm,
+  // Re-export shared log types so consumers in the dashboard import them via
+  // dashboard/store/types — eliminates the local LogEntry/LogLevel duplication
+  // (#3114).
+  LogEntry,
+  LogLevel,
+  // Re-export shared git result element types (#3132). Local definitions
+  // are now redundant; canonical types live in @chroxy/store-core.
+  DiffFile,
+  DiffHunk,
+  DiffHunkLine,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
@@ -50,7 +60,9 @@ import type {
   ContextUsage,
   ConversationSummary,
   CustomAgent,
+  DiffFile,
   InputSettings,
+  LogEntry,
   MessageAttachment,
   ModelInfo,
   PendingPermissionConfirm,
@@ -146,23 +158,8 @@ export interface GitStatusResult {
   error: string | null;
 }
 
-export interface DiffHunkLine {
-  type: 'context' | 'addition' | 'deletion';
-  content: string;
-}
-
-export interface DiffHunk {
-  header: string;
-  lines: DiffHunkLine[];
-}
-
-export interface DiffFile {
-  path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
-  additions: number;
-  deletions: number;
-  hunks: DiffHunk[];
-}
+// `DiffHunkLine`, `DiffHunk`, and `DiffFile` are now re-exported from
+// `@chroxy/store-core` above (#3132).
 
 export interface DiffResult {
   files: DiffFile[];
@@ -200,15 +197,6 @@ export interface EvaluatorResultPayload {
   clarification?: string | null;
   reasoning?: string;
   error?: { code: string; message: string };
-}
-
-export interface LogEntry {
-  id: string;
-  component: string;
-  level: 'debug' | 'info' | 'warn' | 'error';
-  message: string;
-  timestamp: number;
-  sessionId?: string;
 }
 
 export interface SessionNotification {

@@ -31,3 +31,5 @@ export const CLIENT_CAPABILITIES = {
 export const MIN_PROTOCOL_VERSION = 1;
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from "./schemas/index.js";
+// Re-export client-side error-category detection (#3151)
+export * from "./error-categories.js";

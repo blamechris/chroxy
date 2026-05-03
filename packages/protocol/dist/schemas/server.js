@@ -83,6 +83,37 @@ export const ServerModelChangedSchema = z.object({
     type: z.literal('model_changed'),
     model: z.string().nullable(),
 });
+/**
+ * Schema for one entry of `available_models.models` (#3138).
+ *
+ * Matches the inferred `ModelInfo` type used by the dashboard / app model
+ * picker. `id`, `label`, and `fullId` are required strings; `contextWindow`
+ * is an optional positive number. The handler in `@chroxy/store-core` does
+ * additional empty-string rejection / capitalisation; this schema is the
+ * minimum well-formed shape for a wire-level `passthrough()` parse.
+ *
+ * **Established Zod-handler pattern (#3138)** — first migrated handler that
+ * pulls its element validation up to `@chroxy/protocol`. Future handler
+ * migrations should mirror this layout: declare a Zod schema next to the
+ * other server schemas, parse with `safeParse` inside the store-core
+ * handler, drop malformed entries fail-soft, and retain the handler's
+ * existing return shape so call sites need no changes.
+ */
+export const ServerAvailableModelsEntrySchema = z.object({
+    id: z.string(),
+    label: z.string(),
+    fullId: z.string(),
+    // `contextWindow` accepts any value at the schema level — the handler
+    // applies an additional `typeof === 'number' && > 0` filter so a bad
+    // value drops the field but does NOT reject the whole entry. Preserves
+    // prior behaviour: malformed `contextWindow` is tolerated, not fatal.
+    contextWindow: z.unknown().optional(),
+});
+export const ServerAvailableModelsSchema = z.object({
+    type: z.literal('available_models'),
+    models: z.array(z.unknown()).optional(),
+    defaultModel: z.string().optional(),
+});
 export const ServerPermissionModeChangedSchema = z.object({
     type: z.literal('permission_mode_changed'),
     mode: z.string(),

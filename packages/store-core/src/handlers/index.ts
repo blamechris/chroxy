@@ -17,7 +17,13 @@ import type {
   ContextUsage,
   ConversationSummary,
   DevPreview,
+  DiffFile,
+  DiffHunk,
+  DiffHunkLine,
+  GitBranch,
+  GitFileStatus,
   ModelInfo,
+  SearchResult,
   ServerError,
   SessionInfo,
   ToolResultImage,
@@ -27,6 +33,10 @@ import { nextMessageId, stripAnsi } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
+// Centralised client-side error-category detection (#3151).
+import { isRateLimitMessage } from '@chroxy/protocol'
+// Established Zod-handler pattern (#3138).
+import { ServerAvailableModelsEntrySchema } from '@chroxy/protocol'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -84,9 +94,19 @@ export interface SessionPatch {
 }
 
 /**
- * Resolve which session a message targets.
+ * Resolve which session a per-message-event targets — **fallback semantics**.
+ *
  * Most server messages include an optional `sessionId`; when absent, the
- * active session ID is used as a fallback.
+ * active session ID is used as a fallback. The returned value is non-null
+ * unless BOTH `msg.sessionId` and `activeSessionId` are missing/empty.
+ *
+ * Intended for events that should always be applied somewhere (e.g.
+ * `message`, `tool_start`, `tool_result`, `permission_request`): if the
+ * server omits the explicit routing tag, route to the user's current session.
+ *
+ * Distinct from {@link shouldSkipForSessionMismatch}, which uses
+ * **broadcast guard** semantics (drop the event when the explicit tag does
+ * not match).
  */
 export function resolveSessionId(
   msg: Record<string, unknown>,
@@ -653,23 +673,19 @@ export function handleError(msg: Record<string, unknown>): {
   code: string
   message: string
   requestId: string | null
-  systemMessage: ChatMessage
 } {
   const code = typeof msg.code === 'string' ? msg.code : 'UNKNOWN'
   const rawMessage =
     typeof msg.message === 'string' ? stripAnsi(msg.message).trim() : ''
   const message = rawMessage.length > 0 ? rawMessage : DEFAULT_ERROR_MESSAGE
   const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
+  // `systemMessage` was dropped from the return shape (#3112) — neither
+  // call site (`dashboard:store/message-handler.ts:case 'error'`,
+  // `app:store/message-handler.ts:case 'error'`) consumed it.
   return {
     code,
     message,
     requestId,
-    systemMessage: {
-      id: nextMessageId('system'),
-      type: 'system',
-      content: message,
-      timestamp: Date.now(),
-    },
   }
 }
 
@@ -715,7 +731,6 @@ export function handleSessionError(
   boundSessionName: string | null
   message: string | null
   sessionPatch: SessionPatch | null
-  systemMessage: ChatMessage | null
 } {
   const category = typeof msg.category === 'string' ? msg.category : null
   const code = typeof msg.code === 'string' ? msg.code : null
@@ -734,7 +749,6 @@ export function handleSessionError(
         sessionId: resolveSessionId(msg, activeSessionId),
         patch: { health: 'crashed' },
       },
-      systemMessage: null,
     }
   }
 
@@ -745,18 +759,15 @@ export function handleSessionError(
     message = parseStringField(msg, 'message') ?? 'Unknown error'
   }
 
+  // `systemMessage` was dropped from the return shape (#3112) — neither
+  // call site consumed it (dashboard surfaces via `addServerError`/alert,
+  // app surfaces via `Alert.alert`/native modal).
   return {
     category,
     code,
     boundSessionName,
     message,
     sessionPatch: null,
-    systemMessage: {
-      id: nextMessageId('system'),
-      type: 'system',
-      content: message,
-      timestamp: Date.now(),
-    },
   }
 }
 
@@ -1351,13 +1362,10 @@ export interface PermissionRule {
  * - `tool` / `description`: null when missing/non-string. The app uses these
  *   to build the prompt content string `"${tool}: ${description}"` with a
  *   "Permission required" fallback at the call site.
- * - `input`: the raw message payload's `input` when it is a non-null object;
- *   null otherwise. Matches `msg.input && typeof msg.input === 'object'` —
- *   note that arrays satisfy this guard and are forwarded verbatim. The
- *   declared `Record<string, unknown> | null` type is a known shallow lie
- *   for the array case; tightening either the type or the guard requires
- *   downstream changes (`ChatMessage.toolInput`, PermissionDetail) and is
- *   out of scope for this mechanical migration.
+ * - `input`: the raw message payload's `input` when it is a non-null
+ *   non-array object; null otherwise (#3123). The declared
+ *   `Record<string, unknown> | null` type now matches the runtime guard —
+ *   arrays are rejected so the type is no longer a shallow lie.
  * - `sessionId`: explicit sessionId from the message (no active-session
  *   fallback here — pending-permission routing is platform-specific).
  * - `remainingMs`: numeric value forwarded verbatim, including 0; null for
@@ -1384,7 +1392,7 @@ export function handlePermissionRequest(
   const tool = typeof msg.tool === 'string' ? msg.tool : null
   const description = typeof msg.description === 'string' ? msg.description : null
   const input =
-    msg.input && typeof msg.input === 'object'
+    msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input)
       ? (msg.input as Record<string, unknown>)
       : null
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
@@ -1516,6 +1524,28 @@ export function handlePermissionRulesUpdated(
 // site casts to its own concrete type when forwarding to the callback.
 // ---------------------------------------------------------------------------
 
+/**
+ * Internal helper that extracts the `(path, parentPath, entries, error)`
+ * quadruple shared by `directory_listing` and `file_listing` messages
+ * (#3131). Per-element shape of `entries` is NOT validated — callers cast
+ * to their own concrete entry type when invoking the callback.
+ */
+function extractEntriesPayload(
+  msg: Record<string, unknown>,
+): {
+  path: string | null
+  parentPath: string | null
+  entries: unknown[]
+  error: string | null
+} {
+  return {
+    path: typeof msg.path === 'string' ? msg.path : null,
+    parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
+    entries: Array.isArray(msg.entries) ? (msg.entries as unknown[]) : [],
+    error: typeof msg.error === 'string' ? msg.error : null,
+  }
+}
+
 /** Parsed payload for a `directory_listing` message. */
 export interface DirectoryListingPayload {
   /** Directory path that was listed (raw string, not trimmed). Null if missing/non-string. */
@@ -1532,21 +1562,14 @@ export interface DirectoryListingPayload {
  * Parse a `directory_listing` message into the fields the dashboard and app
  * forward to their `_directoryListingCallback` / `getCallback('directoryListing')`.
  *
- * Behaviour-preserving: matches both clients' inline pattern of
- * `typeof === 'string' ? ... : null` for string fields and
- * `Array.isArray(...) ? ... : []` for `entries`. Per-element shape is NOT
- * validated — callers cast to their own concrete entry type when invoking
- * the callback.
+ * Behaviour-preserving: delegates to {@link extractEntriesPayload} (#3131).
+ * Per-element shape of `entries` is NOT validated — callers cast to their
+ * own concrete entry type when invoking the callback.
  */
 export function handleDirectoryListing(
   msg: Record<string, unknown>,
 ): DirectoryListingPayload {
-  return {
-    path: typeof msg.path === 'string' ? msg.path : null,
-    parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-    entries: Array.isArray(msg.entries) ? (msg.entries as unknown[]) : [],
-    error: typeof msg.error === 'string' ? msg.error : null,
-  }
+  return extractEntriesPayload(msg)
 }
 
 /** Parsed payload for a `file_listing` message. */
@@ -1568,15 +1591,11 @@ export interface FileListingPayload {
  * `(path, parentPath, entries, error)` quadruple, but they target different
  * callback channels (`fileBrowser` vs `directoryListing`). The downstream
  * concrete entry types (`FileEntry` vs `DirectoryEntry`) live in the
- * dashboard/app and are applied via cast at the call site.
+ * dashboard/app and are applied via cast at the call site. Delegates to
+ * the shared {@link extractEntriesPayload} helper (#3131).
  */
 export function handleFileListing(msg: Record<string, unknown>): FileListingPayload {
-  return {
-    path: typeof msg.path === 'string' ? msg.path : null,
-    parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-    entries: Array.isArray(msg.entries) ? (msg.entries as unknown[]) : [],
-    error: typeof msg.error === 'string' ? msg.error : null,
-  }
+  return extractEntriesPayload(msg)
 }
 
 /** Parsed payload for a `file_content` message. */
@@ -1658,8 +1677,19 @@ export function handleWriteFileResult(
 
 /**
  * Apply the `if (msg.sessionId && active && msg.sessionId !== active) skip`
- * guard used by `slash_commands` and `agent_list`. Returns true when the
- * caller should skip the message.
+ * guard used by `slash_commands` and `agent_list` — **broadcast-guard semantics**.
+ *
+ * Returns true when the caller should DROP the message because the explicit
+ * `msg.sessionId` does not match the user's current `activeSessionId`. When
+ * either side is missing, the message is allowed through (either because it
+ * was a server-wide broadcast or because there is no active session yet to
+ * mismatch against).
+ *
+ * Distinct from {@link resolveSessionId}, which uses **fallback semantics**
+ * (default to the active session when the message omits the tag). This guard
+ * is the right primitive for list-replacement events (`slash_commands`,
+ * `agent_list`) where applying a stale session's list to the wrong session
+ * would clobber unrelated UI state.
  *
  * Mirrors the prior inline truthiness-based guard exactly: any truthy
  * `msg.sessionId` (including non-string values like `123`) counts as "set",
@@ -1758,10 +1788,125 @@ export function handleFileList(msg: Record<string, unknown>): { files: unknown[]
 // of scope for the #2661 mechanical migration.
 // ---------------------------------------------------------------------------
 
+// Per-element validation helpers (#3132). Hand-rolled type guards, fail-soft:
+// drop malformed elements rather than reject the whole payload. A debug log
+// is emitted for each rejection so server-side regressions are visible in
+// the browser/RN console.
+
+const VALID_GIT_FILE_STATUSES: ReadonlySet<GitFileStatus['status']> = new Set([
+  'modified',
+  'added',
+  'deleted',
+  'renamed',
+  'copied',
+  'unknown',
+])
+
+const VALID_DIFF_STATUSES: ReadonlySet<DiffFile['status']> = new Set([
+  'modified',
+  'added',
+  'deleted',
+  'renamed',
+  'untracked',
+])
+
+const VALID_DIFF_LINE_TYPES: ReadonlySet<DiffHunkLine['type']> = new Set([
+  'context',
+  'addition',
+  'deletion',
+])
+
+function isGitFileStatus(v: unknown): v is GitFileStatus {
+  if (typeof v !== 'object' || v === null) return false
+  const o = v as Record<string, unknown>
+  return (
+    typeof o.path === 'string' &&
+    typeof o.status === 'string' &&
+    VALID_GIT_FILE_STATUSES.has(o.status as GitFileStatus['status'])
+  )
+}
+
+function isGitBranch(v: unknown): v is GitBranch {
+  if (typeof v !== 'object' || v === null) return false
+  const o = v as Record<string, unknown>
+  return (
+    typeof o.name === 'string' &&
+    typeof o.isCurrent === 'boolean' &&
+    typeof o.isRemote === 'boolean'
+  )
+}
+
+function isDiffHunkLine(v: unknown): v is DiffHunkLine {
+  if (typeof v !== 'object' || v === null) return false
+  const o = v as Record<string, unknown>
+  return (
+    typeof o.type === 'string' &&
+    VALID_DIFF_LINE_TYPES.has(o.type as DiffHunkLine['type']) &&
+    typeof o.content === 'string'
+  )
+}
+
+function isDiffHunk(v: unknown): v is DiffHunk {
+  if (typeof v !== 'object' || v === null) return false
+  const o = v as Record<string, unknown>
+  if (typeof o.header !== 'string') return false
+  if (!Array.isArray(o.lines)) return false
+  for (const line of o.lines) {
+    if (!isDiffHunkLine(line)) return false
+  }
+  return true
+}
+
+function isDiffFile(v: unknown): v is DiffFile {
+  if (typeof v !== 'object' || v === null) return false
+  const o = v as Record<string, unknown>
+  if (typeof o.path !== 'string') return false
+  if (
+    typeof o.status !== 'string' ||
+    !VALID_DIFF_STATUSES.has(o.status as DiffFile['status'])
+  ) {
+    return false
+  }
+  if (typeof o.additions !== 'number') return false
+  if (typeof o.deletions !== 'number') return false
+  if (!Array.isArray(o.hunks)) return false
+  for (const h of o.hunks) {
+    if (!isDiffHunk(h)) return false
+  }
+  return true
+}
+
+/**
+ * Drop malformed elements from `arr` using the supplied type guard. Logs a
+ * `console.debug` message identifying the handler name and the rejected
+ * element's index so server-side regressions are visible without throwing.
+ * The element value itself is intentionally NOT logged to keep the debug
+ * output narrow and avoid leaking large/sensitive payloads in production.
+ */
+function validateGitElements<T>(
+  arr: unknown[],
+  isValid: (v: unknown) => v is T,
+  handlerName: string,
+): T[] {
+  const out: T[] = []
+  for (let i = 0; i < arr.length; i++) {
+    const elem = arr[i]
+    if (isValid(elem)) {
+      out.push(elem)
+    } else {
+      // Fail-soft: drop the malformed element. Keep the debug log narrow so
+      // production noise is bounded.
+      // eslint-disable-next-line no-console
+      console.debug(`[${handlerName}] dropping malformed element at index ${i}`)
+    }
+  }
+  return out
+}
+
 /** Parsed payload from a `diff_result` message. */
 export interface DiffResultPayload {
-  /** File entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
-  files: unknown[]
+  /** Validated file entries (#3132). Malformed elements are dropped fail-soft. */
+  files: DiffFile[]
   /** Error string from the server, or null when missing/non-string. */
   error: string | null
 }
@@ -1769,14 +1914,14 @@ export interface DiffResultPayload {
 /**
  * Parse a `diff_result` message.
  *
- * Mirrors the inline `Array.isArray(msg.files) ? msg.files as DiffFile[] : []`
- * + `typeof msg.error === 'string' ? msg.error : null` guards in both clients.
- * The callback dispatch (`get()._diffCallback` / `getCallback('diff')`) stays
- * platform-specific.
+ * Per-element validation added in #3132 — `files` entries that fail the
+ * `DiffFile` shape guard are dropped fail-soft (with a `console.debug`
+ * message). The `error` string passes through verbatim when present.
  */
 export function handleDiffResult(msg: Record<string, unknown>): DiffResultPayload {
+  const rawFiles = Array.isArray(msg.files) ? (msg.files as unknown[]) : []
   return {
-    files: Array.isArray(msg.files) ? (msg.files as unknown[]) : [],
+    files: validateGitElements(rawFiles, isDiffFile, 'handleDiffResult.files'),
     error: typeof msg.error === 'string' ? msg.error : null,
   }
 }
@@ -1785,12 +1930,12 @@ export function handleDiffResult(msg: Record<string, unknown>): DiffResultPayloa
 export interface GitStatusResultPayload {
   /** Current branch name, or null when missing/non-string. */
   branch: string | null
-  /** Staged file entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
-  staged: unknown[]
-  /** Unstaged file entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
-  unstaged: unknown[]
-  /** Untracked file paths (validated as array); elements are left as `unknown[]` and cast/handled by consumers. */
-  untracked: unknown[]
+  /** Validated staged file entries (#3132). Malformed elements are dropped fail-soft. */
+  staged: GitFileStatus[]
+  /** Validated unstaged file entries (#3132). Malformed elements are dropped fail-soft. */
+  unstaged: GitFileStatus[]
+  /** Untracked file paths — validated as array of strings (#3132). Non-strings dropped. */
+  untracked: string[]
   /** Error string from the server, or null when missing/non-string. */
   error: string | null
 }
@@ -1798,27 +1943,38 @@ export interface GitStatusResultPayload {
 /**
  * Parse a `git_status_result` message.
  *
- * Behaviour-preserving: `branch` and `error` use bare `typeof === 'string'`
- * (no trim, empty strings preserved verbatim) to match the inline guards in
- * both clients prior to this migration. Tightening to `parseStringField`
- * would be a behaviour change.
+ * Behaviour-preserving for `branch` and `error`: bare `typeof === 'string'`
+ * guard (no trim, empty strings preserved verbatim) to match the prior inline
+ * guards in both clients.
+ *
+ * Per-element validation added in #3132 — `staged`, `unstaged`, and
+ * `untracked` entries that fail their type guards are dropped fail-soft.
  */
 export function handleGitStatusResult(
   msg: Record<string, unknown>,
 ): GitStatusResultPayload {
+  const rawStaged = Array.isArray(msg.staged) ? (msg.staged as unknown[]) : []
+  const rawUnstaged = Array.isArray(msg.unstaged) ? (msg.unstaged as unknown[]) : []
+  const rawUntracked = Array.isArray(msg.untracked)
+    ? (msg.untracked as unknown[])
+    : []
   return {
     branch: typeof msg.branch === 'string' ? msg.branch : null,
-    staged: Array.isArray(msg.staged) ? (msg.staged as unknown[]) : [],
-    unstaged: Array.isArray(msg.unstaged) ? (msg.unstaged as unknown[]) : [],
-    untracked: Array.isArray(msg.untracked) ? (msg.untracked as unknown[]) : [],
+    staged: validateGitElements(rawStaged, isGitFileStatus, 'handleGitStatusResult.staged'),
+    unstaged: validateGitElements(rawUnstaged, isGitFileStatus, 'handleGitStatusResult.unstaged'),
+    untracked: validateGitElements(
+      rawUntracked,
+      (v): v is string => typeof v === 'string',
+      'handleGitStatusResult.untracked',
+    ),
     error: typeof msg.error === 'string' ? msg.error : null,
   }
 }
 
 /** Parsed payload from a `git_branches_result` message (app-only today). */
 export interface GitBranchesResultPayload {
-  /** Branch entries passed through verbatim; elements are left as `unknown[]` and cast/handled by consumers. */
-  branches: unknown[]
+  /** Validated branch entries (#3132). Malformed elements are dropped fail-soft. */
+  branches: GitBranch[]
   /** Currently checked-out branch name, or null when missing/non-string. */
   currentBranch: string | null
   /** Error string from the server, or null when missing/non-string. */
@@ -1830,12 +1986,22 @@ export interface GitBranchesResultPayload {
  *
  * App-only handler today (the dashboard does not subscribe to git branches).
  * Extracted here so the dashboard can adopt the same parser later.
+ *
+ * Per-element validation added in #3132 — `branches` entries that fail the
+ * `GitBranch` shape guard are dropped fail-soft.
  */
 export function handleGitBranchesResult(
   msg: Record<string, unknown>,
 ): GitBranchesResultPayload {
+  const rawBranches = Array.isArray(msg.branches)
+    ? (msg.branches as unknown[])
+    : []
   return {
-    branches: Array.isArray(msg.branches) ? (msg.branches as unknown[]) : [],
+    branches: validateGitElements(
+      rawBranches,
+      isGitBranch,
+      'handleGitBranchesResult.branches',
+    ),
     currentBranch: typeof msg.currentBranch === 'string' ? msg.currentBranch : null,
     error: typeof msg.error === 'string' ? msg.error : null,
   }
@@ -2046,9 +2212,8 @@ export function handleEnvironmentError(
 //    `{id, label: capitalized, fullId}` (label = first char uppercased).
 //
 // Malformed entries are dropped. Also extracts `defaultModelId` from
-// `msg.defaultModel` (string passthrough; non-string → null) — preserving the
-// dashboard's prior inline behaviour, which did NOT trim. The app previously
-// trimmed; that minor behaviour change is intentional per the migration spec.
+// `msg.defaultModel` via `parseStringField` (trim + reject empty/whitespace),
+// aligning both clients on the stricter normalisation (#3137).
 // ---------------------------------------------------------------------------
 
 /**
@@ -2066,13 +2231,17 @@ export interface AvailableModelsPayload {
  * Parse and normalize an `available_models` message.
  *
  * Behaviour-preserving (matches the dashboard's prior inline implementation):
- * - Object entries require non-empty trimmed `id`, `label`, `fullId`. Fields
- *   are NOT trimmed in the output (preserves verbatim values).
+ * - Object entries are parsed with `ServerAvailableModelsEntrySchema` from
+ *   `@chroxy/protocol` (#3138 — first migrated handler in the established
+ *   Zod-handler pattern). After Zod parse, additional empty-string trim
+ *   rejection is applied to `id`, `label`, and `fullId`. Fields are NOT
+ *   trimmed in the output (preserves verbatim values).
  * - `contextWindow` is included only when `typeof === 'number' && > 0`.
  * - String entries are trimmed; the trimmed value is used as `id` and `fullId`,
  *   and `label` is the trimmed value with its first character uppercased.
- * - `defaultModel` is passed through verbatim when it's a string (no trim,
- *   empty string preserved).
+ * - `defaultModel` is normalised via `parseStringField` — trimmed; empty or
+ *   whitespace-only inputs return `null` (#3137). The model picker treats
+ *   empty string the same as null, so this aligns the two clients.
  */
 export function handleAvailableModels(
   msg: Record<string, unknown>,
@@ -2083,17 +2252,18 @@ export function handleAvailableModels(
   const cleaned = (msg.models as unknown[])
     .map((m: unknown): ModelInfo | null => {
       if (typeof m === 'object' && m !== null) {
-        const { id, label, fullId, contextWindow } = m as ModelInfo
-        if (
-          typeof id === 'string' && id.trim() !== '' &&
-          typeof label === 'string' && label.trim() !== '' &&
-          typeof fullId === 'string' && fullId.trim() !== ''
-        ) {
-          const info: ModelInfo = { id, label, fullId }
-          if (typeof contextWindow === 'number' && contextWindow > 0) {
-            info.contextWindow = contextWindow
+        const parsed = ServerAvailableModelsEntrySchema.safeParse(m)
+        if (parsed.success) {
+          const { id, label, fullId, contextWindow } = parsed.data
+          // Reject whitespace-only / empty fields after Zod parse — schema
+          // requires `string` but does not enforce non-empty trimming.
+          if (id.trim() !== '' && label.trim() !== '' && fullId.trim() !== '') {
+            const info: ModelInfo = { id, label, fullId }
+            if (typeof contextWindow === 'number' && contextWindow > 0) {
+              info.contextWindow = contextWindow
+            }
+            return info
           }
-          return info
         }
       }
       if (typeof m === 'string' && m.trim().length > 0) {
@@ -2103,8 +2273,7 @@ export function handleAvailableModels(
       return null
     })
     .filter((m: ModelInfo | null): m is ModelInfo => m !== null)
-  const defaultModelId =
-    typeof msg.defaultModel === 'string' ? msg.defaultModel : null
+  const defaultModelId = parseStringField(msg, 'defaultModel')
   return { models: cleaned, defaultModelId }
 }
 
@@ -2508,10 +2677,11 @@ export function handleWebFeatureStatus(
 export interface SearchResultsPayload {
   /**
    * Validated results array (non-array `msg.results` defaults to `[]`).
-   * Element type stays `unknown` — callers cast to `SearchResult[]` where
-   * useful. Always defined; meaningful only when `shouldApply` is `true`.
+   * Typed as `SearchResult[]` (#3146) — per-element shape is NOT validated;
+   * the cast trusts the wire format. Always defined; meaningful only when
+   * `shouldApply` is `true`.
    */
-  results: unknown[]
+  results: SearchResult[]
   /**
    * Whether the caller should apply the results. Returns `false` when the
    * server-echoed `query` no longer matches the current in-flight `query`,
@@ -2538,8 +2708,8 @@ export function handleSearchResults(
   msg: Record<string, unknown>,
   currentQuery: string | null,
 ): SearchResultsPayload {
-  const results: unknown[] = Array.isArray(msg.results)
-    ? (msg.results as unknown[])
+  const results: SearchResult[] = Array.isArray(msg.results)
+    ? (msg.results as SearchResult[])
     : []
   const msgQuery: string | null =
     typeof msg.query === 'string' ? (msg.query as string) : null
@@ -2701,29 +2871,36 @@ export function handleUserInput(
 // alert when `isRateLimitError` is true.
 // ---------------------------------------------------------------------------
 
-export interface MessagePayload {
-  /** Whether the caller should dispatch the chat message. */
-  shouldDispatch: boolean
-  /** Resolved target session, or null when no session context exists. */
-  sessionId: string | null
-  /** Pre-built ChatMessage when `shouldDispatch` is true, else null. */
-  chatMessage: ChatMessage | null
-  /** True when the error message contains rate-limit / quota / overloaded text. */
-  isRateLimitError: boolean
-  /**
-   * Original error content when `isRateLimitError` is true (so caller can
-   * surface it via `Alert.alert('Usage Limit', errorContent)`). Null otherwise.
-   */
-  errorContent: string | null
-}
-
-const RATE_LIMIT_KEYWORDS = ['rate limit', 'usage limit', 'quota', 'overloaded']
+/**
+ * Result of {@link handleMessage} — a discriminated union on `shouldDispatch`
+ * so callers can use `chatMessage` without a non-null assertion (#3150).
+ *
+ * `sessionId` was dropped from the payload (#3149): both call sites re-derive
+ * it locally via `resolveSessionId(msg, get().activeSessionId)` to pick the
+ * right cache for replay-dedup, so the field on the payload was unused.
+ */
+export type MessagePayload =
+  | {
+      /** Caller should NOT dispatch a chat message. */
+      shouldDispatch: false
+    }
+  | {
+      /** Caller should dispatch the chat message. */
+      shouldDispatch: true
+      /** Pre-built ChatMessage to dispatch. Always present in this branch. */
+      chatMessage: ChatMessage
+      /** True when the error message contains rate-limit / quota / overloaded text. */
+      isRateLimitError: boolean
+      /**
+       * Original error content when `isRateLimitError` is true (so caller can
+       * surface it via `Alert.alert('Usage Limit', errorContent)`). Null otherwise.
+       */
+      errorContent: string | null
+    }
 
 /**
  * Validate, gate, and normalize a generic forwarded `message` event.
  *
- * - Resolves the target session via `resolveSessionId` (trims, rejects
- *   empty/whitespace strings — consistent with the other store-core handlers).
  * - Resolves `msgType = msg.messageType || msg.type` and rejects payloads
  *   where `msgType` / `content` / `timestamp` fail their runtime type checks
  *   (`shouldDispatch: false`). The resulting `ChatMessage` declares
@@ -2737,9 +2914,14 @@ const RATE_LIMIT_KEYWORDS = ['rate limit', 'usage limit', 'quota', 'overloaded']
  * - Builds a ChatMessage with `id = stableMessageId || nextMessageId(msgType)`
  *   for ALL message types (canonical #2902 behaviour — adopt dashboard's
  *   semantics across both clients; this is a fix for the app).
- * - Detects rate-limit / quota / overloaded errors via case-insensitive
- *   substring match on the error content; returns `isRateLimitError: true`
- *   and `errorContent` so the caller can surface a platform-specific alert.
+ * - Detects rate-limit / quota / overloaded errors via the shared
+ *   `isRateLimitMessage` helper (`@chroxy/protocol`); returns
+ *   `isRateLimitError: true` and `errorContent` so the caller can surface a
+ *   platform-specific alert.
+ *
+ * `_activeSessionId` is preserved as a reserved parameter for signature
+ * compatibility — both call sites re-derive their own session id locally
+ * (#3149 dropped the unused `sessionId` from the payload).
  *
  * The caller still owns the thinking-placeholder filter and the
  * `addMessage` vs `updateSession` choice — this helper returns the built
@@ -2747,21 +2929,11 @@ const RATE_LIMIT_KEYWORDS = ['rate limit', 'usage limit', 'quota', 'overloaded']
  */
 export function handleMessage(
   msg: Record<string, unknown>,
-  activeSessionId: string | null,
+  _activeSessionId: string | null,
   receivingHistoryReplay: boolean,
   cachedMessages: readonly ChatMessage[],
 ): MessagePayload {
-  // Resolve canonical session routing via the shared helper so trim /
-  // empty-string normalization stays consistent with the other handlers.
-  const sessionId = resolveSessionId(msg, activeSessionId)
-
-  const empty: MessagePayload = {
-    shouldDispatch: false,
-    sessionId,
-    chatMessage: null,
-    isRateLimitError: false,
-    errorContent: null,
-  }
+  const empty: MessagePayload = { shouldDispatch: false }
 
   // Runtime validation: this function accepts raw WS payloads
   // (`Record<string, unknown>`) and the resulting `ChatMessage` declares
@@ -2813,7 +2985,7 @@ export function handleMessage(
   let errorContent: string | null = null
   if (msgType === 'error') {
     const lower = msg.content.toLowerCase()
-    if (RATE_LIMIT_KEYWORDS.some((kw) => lower.includes(kw))) {
+    if (isRateLimitMessage(lower)) {
       isRateLimitError = true
       errorContent = msg.content
     }
@@ -2821,7 +2993,6 @@ export function handleMessage(
 
   return {
     shouldDispatch: true,
-    sessionId,
     chatMessage,
     isRateLimitError,
     errorContent,

@@ -1,7 +1,7 @@
 /**
  * Tests for shared stateless message handler functions.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   resolveSessionId,
   handleModelChanged,
@@ -631,26 +631,22 @@ describe('handleCheckpointCreated', () => {
 // handleError
 // ---------------------------------------------------------------------------
 describe('handleError', () => {
-  it('extracts code + message and builds a system ChatMessage', () => {
+  // #3112: systemMessage was dropped from the return shape; neither call
+  // site consumed it. Tests now assert only the fields callers actually use.
+  it('extracts code + message', () => {
     const result = handleError({ code: 'BAD_THING', message: 'Something broke' })
     expect(result.code).toBe('BAD_THING')
     expect(result.message).toBe('Something broke')
-    expect(result.systemMessage.type).toBe('system')
-    expect(result.systemMessage.content).toBe('Something broke')
-    expect(result.systemMessage.id).toMatch(/^system-/)
-    expect(result.systemMessage.timestamp).toBeGreaterThan(0)
   })
 
   it('strips ANSI escape sequences from message', () => {
     const result = handleError({ message: '[31mred error[0m' })
     expect(result.message).toBe('red error')
-    expect(result.systemMessage.content).toBe('red error')
   })
 
   it('falls back to default message when missing or non-string', () => {
     const r1 = handleError({})
     expect(r1.message).toBe('An unexpected server error occurred')
-    expect(r1.systemMessage.content).toBe('An unexpected server error occurred')
 
     const r2 = handleError({ message: 42 })
     expect(r2.message).toBe('An unexpected server error occurred')
@@ -687,7 +683,6 @@ describe('handleSessionError', () => {
       patch: { health: 'crashed' },
     })
     expect(result.message).toBeNull()
-    expect(result.systemMessage).toBeNull()
   })
 
   it('falls back to active session for crash without explicit sessionId', () => {
@@ -713,8 +708,6 @@ describe('handleSessionError', () => {
     expect(result.boundSessionName).toBe('My Session')
     expect(result.message).toContain('"My Session"')
     expect(result.message).toContain('Disconnect')
-    expect(result.systemMessage).not.toBeNull()
-    expect(result.systemMessage!.type).toBe('system')
     expect(result.sessionPatch).toBeNull()
   })
 
@@ -724,14 +717,12 @@ describe('handleSessionError', () => {
       null,
     )
     expect(result.message).toBe('Slow down')
-    expect(result.systemMessage!.content).toBe('Slow down')
     expect(result.sessionPatch).toBeNull()
   })
 
   it('falls back to "Unknown error" when non-crash has no message', () => {
     const result = handleSessionError({ category: 'rate_limit' }, null)
     expect(result.message).toBe('Unknown error')
-    expect(result.systemMessage!.content).toBe('Unknown error')
   })
 
   it('falls back to "Unknown error" when message is an empty string', () => {
@@ -740,7 +731,6 @@ describe('handleSessionError', () => {
       null,
     )
     expect(result.message).toBe('Unknown error')
-    expect(result.systemMessage!.content).toBe('Unknown error')
   })
 
   it('falls back to "Unknown error" when message is whitespace only', () => {
@@ -749,7 +739,6 @@ describe('handleSessionError', () => {
       null,
     )
     expect(result.message).toBe('Unknown error')
-    expect(result.systemMessage!.content).toBe('Unknown error')
   })
 
   it('treats SESSION_TOKEN_MISMATCH without boundSessionName as a generic error', () => {
@@ -1703,12 +1692,13 @@ describe('handlePermissionRequest', () => {
     ).toBe(0)
   })
 
-  it('forwards array input verbatim (arrays pass the inline object guard)', () => {
-    // Inline guard: `msg.input && typeof msg.input === 'object'` — arrays pass
-    // this guard. Preserve that behaviour: forward arrays verbatim.
+  it('rejects array input (#3123 — type guard now excludes arrays)', () => {
+    // Updated guard: `!Array.isArray(msg.input)` — arrays no longer satisfy
+    // the object check. This aligns the runtime guard with the declared
+    // `Record<string, unknown> | null` return type.
     const arr = [1, 2, 3]
     const result = handlePermissionRequest({ requestId: 'r', input: arr })
-    expect(result.input).toBe(arr)
+    expect(result.input).toBeNull()
   })
 })
 
@@ -2524,11 +2514,50 @@ describe('handleFileList', () => {
 // handleDiffResult
 // ---------------------------------------------------------------------------
 describe('handleDiffResult', () => {
-  it('extracts files array and error verbatim', () => {
-    const files = [{ path: 'a.txt', additions: 1, deletions: 0 }]
+  // #3132: per-element validation added — entries must conform to the
+  // canonical `DiffFile` shape (path/status/additions/deletions/hunks).
+  // Malformed entries are dropped fail-soft.
+  it('extracts well-formed file entries', () => {
+    const files = [
+      {
+        path: 'a.txt',
+        status: 'modified',
+        additions: 1,
+        deletions: 0,
+        hunks: [],
+      },
+    ]
     const result = handleDiffResult({ files, error: null })
-    expect(result.files).toBe(files)
+    expect(result.files).toEqual(files)
     expect(result.error).toBeNull()
+  })
+
+  it('drops malformed entries fail-soft (#3132)', () => {
+    // Suppress the debug-log spam from validateGitElements during this test.
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const files = [
+      {
+        path: 'good.txt',
+        status: 'added',
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+      },
+      // Missing required `status`
+      { path: 'bad.txt', additions: 1, deletions: 0, hunks: [] },
+      // Wrong `status` enum
+      {
+        path: 'bad2.txt',
+        status: 'invalid',
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+      },
+    ]
+    const result = handleDiffResult({ files })
+    expect(result.files.length).toBe(1)
+    expect(result.files[0].path).toBe('good.txt')
+    debugSpy.mockRestore()
   })
 
   it('defaults to [] for missing/non-array files', () => {
@@ -2555,22 +2584,44 @@ describe('handleDiffResult', () => {
 // handleGitStatusResult
 // ---------------------------------------------------------------------------
 describe('handleGitStatusResult', () => {
+  // #3132: per-element validation added — `staged`/`unstaged` entries must
+  // conform to `GitFileStatus` (path + valid status enum). `untracked` is
+  // validated as `string[]`. Malformed entries are dropped fail-soft.
   it('extracts all fields from a valid payload', () => {
     expect(
       handleGitStatusResult({
         branch: 'main',
-        staged: [{ path: 'a' }],
-        unstaged: [{ path: 'b' }],
+        staged: [{ path: 'a', status: 'modified' }],
+        unstaged: [{ path: 'b', status: 'added' }],
         untracked: ['c'],
         error: null,
       }),
     ).toEqual({
       branch: 'main',
-      staged: [{ path: 'a' }],
-      unstaged: [{ path: 'b' }],
+      staged: [{ path: 'a', status: 'modified' }],
+      unstaged: [{ path: 'b', status: 'added' }],
       untracked: ['c'],
       error: null,
     })
+  })
+
+  it('drops malformed staged/unstaged/untracked entries fail-soft (#3132)', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const result = handleGitStatusResult({
+      branch: 'main',
+      staged: [
+        { path: 'good', status: 'modified' },
+        { path: 'bad-no-status' }, // missing status
+        { path: 'bad-status', status: 'invalid' }, // bad enum
+        'not-an-object', // wrong type entirely
+      ],
+      unstaged: [],
+      untracked: ['ok', 42, null, 'also-ok'],
+    })
+    expect(result.staged.length).toBe(1)
+    expect(result.staged[0]).toEqual({ path: 'good', status: 'modified' })
+    expect(result.untracked).toEqual(['ok', 'also-ok'])
+    debugSpy.mockRestore()
   })
 
   it('defaults to nulls and empty arrays when missing', () => {
@@ -2618,11 +2669,31 @@ describe('handleGitStatusResult', () => {
 // handleGitBranchesResult
 // ---------------------------------------------------------------------------
 describe('handleGitBranchesResult', () => {
+  // #3132: per-element validation added — `branches` entries must conform
+  // to `GitBranch` (name + isCurrent + isRemote booleans). Malformed
+  // entries are dropped fail-soft.
   it('extracts all fields from a valid payload', () => {
-    const branches = [{ name: 'main' }, { name: 'feat/x' }]
+    const branches = [
+      { name: 'main', isCurrent: true, isRemote: false },
+      { name: 'feat/x', isCurrent: false, isRemote: false },
+    ]
     expect(
       handleGitBranchesResult({ branches, currentBranch: 'main', error: null }),
     ).toEqual({ branches, currentBranch: 'main', error: null })
+  })
+
+  it('drops malformed branch entries fail-soft (#3132)', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const result = handleGitBranchesResult({
+      branches: [
+        { name: 'good', isCurrent: false, isRemote: false },
+        { name: 'no-flags' }, // missing isCurrent/isRemote
+        'not-an-object',
+      ],
+    })
+    expect(result.branches.length).toBe(1)
+    expect(result.branches[0].name).toBe('good')
+    debugSpy.mockRestore()
   })
 
   it('defaults to nulls and empty array when missing', () => {
@@ -3051,6 +3122,30 @@ describe('handleAvailableModels', () => {
       defaultModel: 'claude-sonnet-4',
     })
     expect(result.defaultModelId).toBe('claude-sonnet-4')
+  })
+
+  it('trims whitespace from defaultModelId (#3137)', () => {
+    const result = handleAvailableModels({
+      models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4' }],
+      defaultModel: '  claude-sonnet-4  ',
+    })
+    expect(result.defaultModelId).toBe('claude-sonnet-4')
+  })
+
+  it('returns null defaultModelId for empty string (#3137)', () => {
+    const result = handleAvailableModels({
+      models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'sonnet' }],
+      defaultModel: '',
+    })
+    expect(result.defaultModelId).toBeNull()
+  })
+
+  it('returns null defaultModelId for whitespace-only string (#3137)', () => {
+    const result = handleAvailableModels({
+      models: [{ id: 'sonnet', label: 'Sonnet', fullId: 'sonnet' }],
+      defaultModel: '   \t\n  ',
+    })
+    expect(result.defaultModelId).toBeNull()
   })
 
   it('returns null defaultModelId when missing', () => {
@@ -4101,7 +4196,9 @@ describe('handleMessage', () => {
       [],
     )
     expect(out1.shouldDispatch).toBe(true)
-    expect(out1.chatMessage!.type).toBe('response')
+    if (out1.shouldDispatch) {
+      expect(out1.chatMessage.type).toBe('response')
+    }
 
     const out2 = handleMessage(
       { type: 'error', content: 'oh no', timestamp: 2 },
@@ -4110,7 +4207,9 @@ describe('handleMessage', () => {
       [],
     )
     expect(out2.shouldDispatch).toBe(true)
-    expect(out2.chatMessage!.type).toBe('error')
+    if (out2.shouldDispatch) {
+      expect(out2.chatMessage.type).toBe('error')
+    }
   })
 
   it('skips user_input outside replay (live echo handled elsewhere)', () => {
@@ -4121,7 +4220,6 @@ describe('handleMessage', () => {
       [],
     )
     expect(out.shouldDispatch).toBe(false)
-    expect(out.chatMessage).toBeNull()
   })
 
   it('renders user_input during replay', () => {
@@ -4132,7 +4230,9 @@ describe('handleMessage', () => {
       [],
     )
     expect(out.shouldDispatch).toBe(true)
-    expect(out.chatMessage!.type).toBe('user_input')
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.type).toBe('user_input')
+    }
   })
 
   it('skips replay duplicates', () => {
@@ -4183,7 +4283,8 @@ describe('handleMessage', () => {
       false,
       [],
     )
-    expect(out1.chatMessage!.id).toBe('srv-resp-1')
+    if (!out1.shouldDispatch) throw new Error('expected dispatch')
+    expect(out1.chatMessage.id).toBe('srv-resp-1')
 
     const out2 = handleMessage(
       {
@@ -4196,7 +4297,8 @@ describe('handleMessage', () => {
       true,
       [],
     )
-    expect(out2.chatMessage!.id).toBe('srv-input-1')
+    if (!out2.shouldDispatch) throw new Error('expected dispatch')
+    expect(out2.chatMessage.id).toBe('srv-input-1')
 
     const out3 = handleMessage(
       {
@@ -4209,7 +4311,8 @@ describe('handleMessage', () => {
       false,
       [],
     )
-    expect(out3.chatMessage!.id).toBe('srv-err-1')
+    if (!out3.shouldDispatch) throw new Error('expected dispatch')
+    expect(out3.chatMessage.id).toBe('srv-err-1')
   })
 
   it('generates a fresh id when no stableMessageId is provided', () => {
@@ -4219,7 +4322,8 @@ describe('handleMessage', () => {
       false,
       [],
     )
-    expect(out.chatMessage!.id).toMatch(/^response-\d+-\d+$/)
+    if (!out.shouldDispatch) throw new Error('expected dispatch')
+    expect(out.chatMessage.id).toMatch(/^response-\d+-\d+$/)
   })
 
   it('builds ChatMessage with content, tool, options, timestamp passed through', () => {
@@ -4236,10 +4340,11 @@ describe('handleMessage', () => {
       false,
       [],
     )
-    expect(out.chatMessage!.content).toBe('using bash')
-    expect(out.chatMessage!.tool).toBe('Bash')
-    expect(out.chatMessage!.options).toBe(opts)
-    expect(out.chatMessage!.timestamp).toBe(999)
+    if (!out.shouldDispatch) throw new Error('expected dispatch')
+    expect(out.chatMessage.content).toBe('using bash')
+    expect(out.chatMessage.tool).toBe('Bash')
+    expect(out.chatMessage.options).toBe(opts)
+    expect(out.chatMessage.timestamp).toBe(999)
   })
 
   it('detects rate-limit errors (case-insensitive)', () => {
@@ -4256,6 +4361,7 @@ describe('handleMessage', () => {
         false,
         [],
       )
+      if (!out.shouldDispatch) throw new Error('expected dispatch')
       expect(out.isRateLimitError).toBe(true)
       expect(out.errorContent).toBe(content)
     }
@@ -4268,6 +4374,7 @@ describe('handleMessage', () => {
       false,
       [],
     )
+    if (!out.shouldDispatch) throw new Error('expected dispatch')
     expect(out.isRateLimitError).toBe(false)
     expect(out.errorContent).toBeNull()
   })
@@ -4283,6 +4390,7 @@ describe('handleMessage', () => {
       false,
       [],
     )
+    if (!out.shouldDispatch) throw new Error('expected dispatch')
     expect(out.isRateLimitError).toBe(false)
   })
 
@@ -4293,42 +4401,8 @@ describe('handleMessage', () => {
       false,
       [],
     )
-    expect(out.isRateLimitError).toBe(false)
-  })
-
-  it('resolves sessionId from message when present', () => {
-    const out = handleMessage(
-      {
-        messageType: 'response',
-        sessionId: 'sess-1',
-        content: 'hi',
-        timestamp: 1,
-      },
-      'sess-active',
-      false,
-      [],
-    )
-    expect(out.sessionId).toBe('sess-1')
-  })
-
-  it('falls back to activeSessionId when msg.sessionId is missing', () => {
-    const out = handleMessage(
-      { messageType: 'response', content: 'hi', timestamp: 1 },
-      'sess-active',
-      false,
-      [],
-    )
-    expect(out.sessionId).toBe('sess-active')
-  })
-
-  it('returns null sessionId when neither msg.sessionId nor activeSessionId is set', () => {
-    const out = handleMessage(
-      { messageType: 'response', content: 'hi', timestamp: 1 },
-      null,
-      false,
-      [],
-    )
-    expect(out.sessionId).toBeNull()
+    // content: 42 fails the `typeof content === 'string'` guard, so dispatch is dropped.
+    expect(out.shouldDispatch).toBe(false)
   })
 
   // Runtime validation guards (Copilot review on PR #3148): handleMessage now
@@ -4342,7 +4416,6 @@ describe('handleMessage', () => {
       [],
     )
     expect(out.shouldDispatch).toBe(false)
-    expect(out.chatMessage).toBeNull()
   })
 
   it('drops dispatch when messageType is non-string', () => {
@@ -4363,7 +4436,6 @@ describe('handleMessage', () => {
       [],
     )
     expect(out.shouldDispatch).toBe(false)
-    expect(out.chatMessage).toBeNull()
   })
 
   it('drops dispatch when timestamp is non-number', () => {
@@ -4374,26 +4446,9 @@ describe('handleMessage', () => {
       [],
     )
     expect(out.shouldDispatch).toBe(false)
-    expect(out.chatMessage).toBeNull()
   })
 
-  it('uses resolveSessionId — rejects whitespace-only sessionId', () => {
-    const out = handleMessage(
-      {
-        messageType: 'response',
-        sessionId: '   ',
-        content: 'hi',
-        timestamp: 1,
-      },
-      'sess-active',
-      false,
-      [],
-    )
-    // Whitespace is not a valid sessionId — should fall back to activeSessionId.
-    expect(out.sessionId).toBe('sess-active')
-  })
-
-  it('drops dispatch when tool is non-string (sanitises rather than passing through)', () => {
+  it('drops tool field when non-string (sanitises rather than passing through)', () => {
     const out = handleMessage(
       {
         messageType: 'tool_use',
@@ -4406,7 +4461,9 @@ describe('handleMessage', () => {
       [],
     )
     expect(out.shouldDispatch).toBe(true)
-    expect(out.chatMessage!.tool).toBeUndefined()
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.tool).toBeUndefined()
+    }
   })
 })
 

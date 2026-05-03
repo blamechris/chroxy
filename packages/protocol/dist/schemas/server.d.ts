@@ -90,6 +90,33 @@ export declare const ServerModelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"model_changed">;
     model: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+/**
+ * Schema for one entry of `available_models.models` (#3138).
+ *
+ * Matches the inferred `ModelInfo` type used by the dashboard / app model
+ * picker. `id`, `label`, and `fullId` are required strings; `contextWindow`
+ * is an optional positive number. The handler in `@chroxy/store-core` does
+ * additional empty-string rejection / capitalisation; this schema is the
+ * minimum well-formed shape for a wire-level `passthrough()` parse.
+ *
+ * **Established Zod-handler pattern (#3138)** — first migrated handler that
+ * pulls its element validation up to `@chroxy/protocol`. Future handler
+ * migrations should mirror this layout: declare a Zod schema next to the
+ * other server schemas, parse with `safeParse` inside the store-core
+ * handler, drop malformed entries fail-soft, and retain the handler's
+ * existing return shape so call sites need no changes.
+ */
+export declare const ServerAvailableModelsEntrySchema: z.ZodObject<{
+    id: z.ZodString;
+    label: z.ZodString;
+    fullId: z.ZodString;
+    contextWindow: z.ZodOptional<z.ZodUnknown>;
+}, z.core.$strip>;
+export declare const ServerAvailableModelsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"available_models">;
+    models: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
+    defaultModel: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerPermissionModeChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_mode_changed">;
     mode: z.ZodString;

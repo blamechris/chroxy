@@ -38,6 +38,13 @@ export type {
   Checkpoint,
   BaseSessionState,
   PendingPermissionConfirm,
+  // Re-export shared git result element types (#3132). Local definitions
+  // are now redundant; canonical types live in @chroxy/store-core.
+  GitFileStatus,
+  GitBranch,
+  DiffFile,
+  DiffHunk,
+  DiffHunkLine,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
@@ -51,6 +58,9 @@ import type {
   ConversationSummary,
   CustomAgent,
   DevPreview,
+  DiffFile,
+  GitBranch,
+  GitFileStatus,
   InputSettings,
   McpServer,
   MessageAttachment,
@@ -105,16 +115,8 @@ export interface FileWriteResult {
   error: string | null;
 }
 
-export interface GitFileStatus {
-  path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'unknown';
-}
-
-export interface GitBranch {
-  name: string;
-  isCurrent: boolean;
-  isRemote: boolean;
-}
+// `GitFileStatus`, `GitBranch`, `DiffHunkLine`, `DiffHunk`, and `DiffFile`
+// are now re-exported from `@chroxy/store-core` above (#3132).
 
 export interface GitStatusResult {
   branch: string | null;
@@ -138,24 +140,6 @@ export interface GitCommitResult {
   hash: string | null;
   message: string | null;
   error: string | null;
-}
-
-export interface DiffHunkLine {
-  type: 'context' | 'addition' | 'deletion';
-  content: string;
-}
-
-export interface DiffHunk {
-  header: string;
-  lines: DiffHunkLine[];
-}
-
-export interface DiffFile {
-  path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
-  additions: number;
-  deletions: number;
-  hunks: DiffHunk[];
 }
 
 export interface DiffResult {

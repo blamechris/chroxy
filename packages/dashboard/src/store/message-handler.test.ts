@@ -966,6 +966,59 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('permission_request content rendering (#3122)', () => {
+    it('renders just the tool name when description is missing', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-perm',
+          sessionStates: {
+            's-perm': createEmptySessionState(),
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          sessionId: 's-perm',
+          requestId: 'perm-no-desc',
+          tool: 'Bash',
+          input: { command: 'ls' },
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates['s-perm'].messages
+      const promptMsg = msgs.find((m: any) => m.type === 'prompt')
+      expect(promptMsg).toBeDefined()
+      expect(promptMsg.content).toBe('Bash')
+      expect(promptMsg.content).not.toContain('undefined')
+    })
+
+    it('falls back to "Permission required" when both tool and description are missing', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-perm',
+          sessionStates: {
+            's-perm': createEmptySessionState(),
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          sessionId: 's-perm',
+          requestId: 'perm-bare',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates['s-perm'].messages
+      const promptMsg = msgs.find((m: any) => m.type === 'prompt')
+      expect(promptMsg).toBeDefined()
+      expect(promptMsg.content).toBe('Permission required')
+    })
+  })
+
   describe('unknown message types', () => {
     it('does not throw on unknown types', () => {
       expect(() =>

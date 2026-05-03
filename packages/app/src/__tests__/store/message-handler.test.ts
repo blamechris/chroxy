@@ -2331,6 +2331,55 @@ describe('permission_request message handler', () => {
     const msg = store.getState().sessionStates.s1.messages[0];
     expect(msg.expiresAt).toBeGreaterThanOrEqual(before + 60_000);
   });
+
+  // #3122: prior `${tool}: ${description}` template produced a literal
+  // "Tool: undefined" when description was missing. New behaviour: render
+  // just the tool name when description is missing.
+  it('renders just the tool name when description is missing (#3122)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-no-desc',
+      tool: 'Bash',
+      // description intentionally omitted
+      input: { command: 'ls' },
+    });
+
+    const msg = store.getState().sessionStates.s1.messages[0];
+    expect(msg.content).toBe('Bash');
+    expect(msg.content).not.toContain('undefined');
+  });
+
+  it('falls back to "Permission required" when both tool and description are missing (#3122)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-bare',
+    });
+
+    const msg = store.getState().sessionStates.s1.messages[0];
+    expect(msg.content).toBe('Permission required');
+  });
 });
 
 describe('session_context handler', () => {
@@ -3120,5 +3169,85 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
     // Targeted alert still surfaces — user is informed the rejection
     // happened, even if no revert was needed.
     expect(alertSpy.mock.calls[0][0]).toBe('Permission Mode Unavailable');
+  });
+});
+
+// #3141: scoped routing for session-tagged server_error messages on the app
+// (dashboard parity).
+describe('server_error session-scoped routing (#3141)', () => {
+  it('routes to the session named on the message when present', () => {
+    const store = createMockStore({
+      activeSessionId: 'sActive',
+      sessions: [
+        { sessionId: 'sActive', name: 'Active' } as any,
+        { sessionId: 'sScoped', name: 'Scoped' } as any,
+      ],
+      sessionStates: {
+        sActive: createEmptySessionState(),
+        sScoped: createEmptySessionState(),
+      },
+      serverErrors: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      sessionId: 'sScoped',
+      message: 'something broke',
+      recoverable: true,
+    });
+
+    const scopedMsgs = store.getState().sessionStates['sScoped'].messages;
+    const activeMsgs = store.getState().sessionStates['sActive'].messages;
+    expect(scopedMsgs.length).toBe(1);
+    expect(scopedMsgs[0].content).toContain('something broke');
+    // Active session must not receive the scoped error.
+    expect(activeMsgs.length).toBe(0);
+  });
+
+  it('falls back to the active session when message has no sessionId', () => {
+    const store = createMockStore({
+      activeSessionId: 'sActive',
+      sessions: [{ sessionId: 'sActive', name: 'Active' } as any],
+      sessionStates: { sActive: createEmptySessionState() },
+      serverErrors: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      message: 'global oops',
+      recoverable: true,
+    });
+
+    const activeMsgs = store.getState().sessionStates['sActive'].messages;
+    expect(activeMsgs.length).toBe(1);
+    expect(activeMsgs[0].content).toContain('global oops');
+  });
+
+  it('still records the error via serverErrors when no session is available (#3141 fallback)', () => {
+    // App's ConnectionState has no top-level `messages` array (unlike the
+    // dashboard). Without a session, the error is surfaced via the
+    // serverErrors array + notification store, no further fallback needed.
+    const store = createMockStore({
+      activeSessionId: null,
+      sessions: [],
+      sessionStates: {},
+      serverErrors: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      message: 'pre-session oops',
+      recoverable: true,
+    });
+
+    const errs = store.getState().serverErrors;
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toContain('pre-session oops');
   });
 });
