@@ -484,6 +484,15 @@ export function loadActiveSkills(dir, opts = {}) {
   // manual skills. Runtime prompt-build callers keep the default (false)
   // so an inactive manual skill never lands in the system prompt.
   const includeInactive = !!opts.includeInactive
+  // #3248: optional caller-supplied parse cache. Keyed by realpath,
+  // value is `{ mtimeMs, size, body, frontmatter, finalBody, description }`.
+  // When the cache holds an entry whose mtimeMs+size match the
+  // current statSync result, the loader skips readFileSync and
+  // parseFrontmatter. Trust hashing still runs (cheap on the
+  // already-parsed body). Callers (BaseSession) pass a per-session
+  // Map; first call populates, subsequent calls hit. Invalidation
+  // is automatic — any on-disk edit bumps mtimeMs.
+  const parseCache = opts.parseCache instanceof Map ? opts.parseCache : null
   let entries
   try {
     entries = readdirSync(dir)
@@ -587,41 +596,77 @@ export function loadActiveSkills(dir, opts = {}) {
       continue
     }
 
-    // Read the file once as raw bytes, validate the entire content, then
-    // decode as UTF-8. This avoids two reads (sniff + read) and ensures
-    // a binary tail past 512 bytes can't slip through (#3216).
-    let buf
-    try {
-      buf = readFileSync(realPath)
-    } catch {
-      continue
-    }
-
-    if (buf.length > maxSkillBytes) {
-      log.warn(`Skipping skill ${label}: size ${buf.length} exceeds per-skill cap ${maxSkillBytes}`)
-      log.debug(`skill ${label} full path: ${fullPath}`)
-      continue
-    }
-
-    if (!_bufferLooksLikeText(buf)) {
-      log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
-      log.debug(`skill ${label} full path: ${fullPath}`)
-      continue
-    }
-
-    const body = buf.toString('utf8')
-
     // Strip the matching extension (case-preserving) when computing the
     // display name. We checked the lower-cased suffix above, so trim the
     // same number of chars (+1 for the dot).
     const name = entry.slice(0, -(ext.length + 1))
 
-    // Parse YAML frontmatter (#3197). Failures are non-fatal — the body is
-    // returned unchanged and metadata is null. Every Skill carries a
-    // `metadata` field for forward compatibility, even when null.
-    const { frontmatter, body: bodyAfterFrontmatter } = parseFrontmatter(body)
-    const finalBody = frontmatter !== null ? bodyAfterFrontmatter : body
-    const description = _firstNonEmptyLine(finalBody) || name
+    // #3248: parse-cache fast path. statSync's mtimeMs already gave
+    // us the file's mtime above; if the cache entry's mtimeMs+size
+    // match, skip readFileSync / text-validation / parseFrontmatter
+    // and reuse the cached parse. Mismatch (or no entry) falls
+    // through to the full read+parse path below.
+    let body
+    let frontmatter
+    let finalBody
+    let description
+    const cached = parseCache?.get(realPath)
+    const cacheHit = cached
+      && typeof st.mtimeMs === 'number'
+      && cached.mtimeMs === st.mtimeMs
+      && cached.size === st.size
+
+    if (cacheHit) {
+      body = cached.body
+      frontmatter = cached.frontmatter
+      finalBody = cached.finalBody
+      description = cached.description
+    } else {
+      // Read the file once as raw bytes, validate the entire content,
+      // then decode as UTF-8. This avoids two reads (sniff + read) and
+      // ensures a binary tail past 512 bytes can't slip through (#3216).
+      let buf
+      try {
+        buf = readFileSync(realPath)
+      } catch {
+        continue
+      }
+
+      if (buf.length > maxSkillBytes) {
+        log.warn(`Skipping skill ${label}: size ${buf.length} exceeds per-skill cap ${maxSkillBytes}`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
+      if (!_bufferLooksLikeText(buf)) {
+        log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
+      body = buf.toString('utf8')
+
+      // Parse YAML frontmatter (#3197). Failures are non-fatal — the body
+      // is returned unchanged and metadata is null. Every Skill carries a
+      // `metadata` field for forward compatibility, even when null.
+      const parsed = parseFrontmatter(body)
+      frontmatter = parsed.frontmatter
+      finalBody = parsed.frontmatter !== null ? parsed.body : body
+      description = _firstNonEmptyLine(finalBody) || name
+
+      // Populate the cache for next time. Stamp mtimeMs+size from the
+      // statSync above (already paid the syscall cost).
+      if (parseCache && typeof st.mtimeMs === 'number') {
+        parseCache.set(realPath, {
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          body,
+          frontmatter,
+          finalBody,
+          description,
+        })
+      }
+    }
 
     // Provider gating (#3198): if frontmatter declares a `providers:` list,
     // include the skill only when the session's provider is in it. Missing
@@ -894,6 +939,11 @@ export function loadActiveSkillsLayered({
   trustStore,
   onTrustMismatch,
   includeInactive,
+  // #3248: per-session parse cache. Forwarded as-is to both tier
+  // loaders so they share the same Map (skill name collisions
+  // resolve at the realpath level — global/repo overlay can both
+  // cache distinct entries).
+  parseCache,
 } = {}) {
   const sameDir = globalDir && repoDir && _sameAbsolutePath(globalDir, repoDir)
 
@@ -910,6 +960,7 @@ export function loadActiveSkillsLayered({
   // skill marking; the merge step below treats them like any other
   // entry (repo overrides global on conflict, etc.).
   if (includeInactive) loaderOpts.includeInactive = true
+  if (parseCache instanceof Map) loaderOpts.parseCache = parseCache
 
   const globals = (globalDir && !sameDir)
     ? loadActiveSkills(globalDir, { ...loaderOpts, source: 'global' })

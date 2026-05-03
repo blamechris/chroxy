@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { BaseSession } from '../src/base-session.js'
@@ -261,11 +261,6 @@ describe('BaseSession', () => {
       assert.equal(s.supportsRuntimeSkillToggle(), false)
     })
 
-    // #3253: activateSkill used to do TWO full layered scans per call —
-    // _listManualSkillNames() for validation, then _loadSkills() to
-    // refresh the prompt context. Now both share a single scan: the
-    // unified _loadSkills() returns manual-skill names as a side
-    // effect, so success-path activations do exactly one scan.
     // #3253: a layered scan is exactly one `_loadSkills()` call —
     // that's the method that invokes loadActiveSkillsLayered. After
     // the refactor, validation no longer scans (it reads the cached
@@ -325,6 +320,116 @@ describe('BaseSession', () => {
       // the rollback restored a clean state.
       assert.equal(s.activateSkill('manual-a'), true)
       assert.deepEqual(s.getActiveManualSkills(), ['manual-a'])
+    })
+
+    // #3248: mtime-keyed parse cache. activate/deactivate toggles
+    // re-run _loadSkills() on every flip; without caching, every
+    // file's body is re-read + re-parsed even when nothing on disk
+    // changed. The cache stores the parsed result keyed by realpath
+    // + mtime so toggles skip readFileSync / parseFrontmatter for
+    // unchanged files.
+    describe('skills parse cache (#3248)', () => {
+      it('populates the parse cache at construction', () => {
+        const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+        assert.ok(s._skillsParseCache instanceof Map,
+          '_skillsParseCache should be a Map')
+        assert.ok(s._skillsParseCache.size >= 3,
+          `expected at least 3 cached skills (auto, manual-a, manual-b) — got ${s._skillsParseCache.size}`)
+        // Each cache entry should carry mtime + parsed body fields.
+        for (const [path, entry] of s._skillsParseCache) {
+          assert.equal(typeof entry.mtimeMs, 'number', `entry for ${path} missing mtimeMs`)
+          assert.equal(typeof entry.body, 'string', `entry for ${path} missing body`)
+          assert.ok('frontmatter' in entry, `entry for ${path} missing frontmatter`)
+        }
+      })
+
+      it('invalidates cache when file mtime changes', () => {
+        const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+
+        // Bump mtime AHEAD by 5s to defeat any sub-second filesystem
+        // mtime resolution. statSync.mtimeMs is in milliseconds, so
+        // this is unambiguous across HFS+/APFS/ext4.
+        const target = join(dir, 'manual-a.md')
+        // Mutate body first so the new content is on disk.
+        writeFileSync(target, '---\nactivation: manual\n---\n\nupdated A body\n')
+        const future = new Date(Date.now() + 5000)
+        utimesSync(target, future, future)
+
+        const ok = s.activateSkill('manual-a')
+        assert.equal(ok, true)
+        const prompt = s._buildSystemPrompt()
+        assert.ok(prompt.includes('updated A body'),
+          'cache must invalidate on mtime change so the new body is in the prompt')
+      })
+
+      // #3248 acceptance criterion 4: 100-skill toggle should
+      // complete in <10ms. Measures the cached toggle path — first
+      // toggle warms, second toggle is the steady-state target.
+      // Loose threshold (50ms) for CI variance — the goal is to
+      // catch order-of-magnitude regressions, not micro-benchmark.
+      it('100-skill toggle stays well under regression threshold', () => {
+        const big = mkdtempSync(join(tmpdir(), 'chroxy-3248-big-'))
+        try {
+          // Create 100 manual skills (off by default).
+          for (let i = 0; i < 100; i++) {
+            writeFileSync(
+              join(big, `manual-${i}.md`),
+              `---\nactivation: manual\n---\n\nSkill ${i} body content for benchmarking.\n`,
+            )
+          }
+          const s = new BaseSession({ cwd: '/tmp', skillsDir: big, repoSkillsDir: null })
+          // Warm: first activate populates the cache for any
+          // file the constructor scan didn't see (in this setup
+          // they're all seen, so the warm-up just exercises the
+          // hot path once).
+          s.activateSkill('manual-0')
+          s.deactivateSkill('manual-0')
+
+          const start = process.hrtime.bigint()
+          s.activateSkill('manual-50')
+          s.deactivateSkill('manual-50')
+          const elapsedMs = Number(process.hrtime.bigint() - start) / 1_000_000
+
+          assert.ok(elapsedMs < 50,
+            `100-skill toggle took ${elapsedMs.toFixed(2)}ms — expected <50ms with cache (issue target: <10ms)`)
+        } finally {
+          rmSync(big, { recursive: true, force: true })
+        }
+      })
+
+      it('still records trust hashes correctly when cache is hot', () => {
+        const trustDir = mkdtempSync(join(tmpdir(), 'chroxy-3248-trust-'))
+        try {
+          const trustStore = new SkillsTrustStore({
+            filePath: join(trustDir, 'trust.json'),
+            mode: 'warn',
+          })
+          const s = new BaseSession({
+            cwd: '/tmp',
+            skillsDir: dir,
+            repoSkillsDir: null,
+            trustStore,
+          })
+
+          // Force a cache-hit path by toggling. Trust store should
+          // still see verifications (hashes already recorded at
+          // construction; subsequent calls are 'verified' not 'recorded').
+          s.activateSkill('manual-a')
+          s.deactivateSkill('manual-a')
+
+          // Both manual files should be in the trust store after the
+          // active toggle (manual-a was active for one cycle).
+          const records = trustStore._records
+          const recordedSkills = Object.keys(records)
+          assert.ok(recordedSkills.length > 0, 'trust store should have recorded hashes')
+          for (const path of recordedSkills) {
+            assert.ok(records[path].sha256, 'each record must carry a sha256')
+            assert.ok(records[path].firstSeen, 'each record must carry firstSeen')
+          }
+        } finally {
+          rmSync(trustDir, { recursive: true, force: true })
+        }
+      })
     })
 
     it('multiple toggles compose — A, then B, then A off — all reflected in prompt', () => {
