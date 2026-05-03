@@ -57,6 +57,67 @@ Rules:
 
 const VALID_VERDICTS = new Set(['forward', 'rewrite', 'clarify'])
 
+// Minimum length (after trim) for a draft to be worth evaluating. Below this
+// the message is almost certainly a continuation/ack ("y", "go ahead", "do it
+// please") that won't benefit from an evaluator round-trip.
+const SKIP_MIN_LENGTH = 20
+
+// Default continuation/ack pattern. Matches single-word affirmatives and a few
+// common short phrases ("looks good", "sounds good", "run it"). Anchored to
+// the full string so substantive messages that happen to start with "yes" or
+// "ok" still get evaluated.
+const DEFAULT_SKIP_PATTERN = /^(y|n|yes|no|go|continue|run it|ok|okay|sure|sounds good|looks good|do it)\.?$/i
+
+/**
+ * Decide whether a draft message is too trivial to be worth running through
+ * `evaluateDraft`. The auto-evaluator hook (sibling sub-task) consults this
+ * before paying for an Anthropic round-trip.
+ *
+ * Returns `true` to SKIP evaluation (forward the message as-is).
+ *
+ * Skip rules:
+ *   - Non-string or empty (after trim) — nothing to evaluate
+ *   - Length (after trim) < SKIP_MIN_LENGTH (20)
+ *   - Matches the default continuation regex, OR a session-supplied
+ *     `promptEvaluatorSkipPattern` regex source
+ *
+ * @param {unknown} message - The draft user message
+ * @param {object} [config]
+ * @param {string} [config.promptEvaluatorSkipPattern] - Per-session regex
+ *   source string to OR with the default pattern. Malformed sources are
+ *   logged and ignored — the default pattern still applies.
+ * @returns {boolean} true if the message should skip the evaluator
+ */
+export function shouldSkipEvaluator(message, config = {}) {
+  if (typeof message !== 'string') return true
+  const trimmed = message.trim()
+  if (!trimmed) return true
+  if (trimmed.length < SKIP_MIN_LENGTH) return true
+
+  if (DEFAULT_SKIP_PATTERN.test(trimmed)) return true
+
+  const customSource = config?.promptEvaluatorSkipPattern
+  if (typeof customSource === 'string' && customSource.length > 0) {
+    const customPattern = _compileSkipPattern(customSource)
+    if (customPattern && customPattern.test(trimmed)) return true
+  }
+
+  return false
+}
+
+/**
+ * Compile a user-supplied regex source. Returns null (and logs at warn) if
+ * the source is invalid — the caller falls back to the default pattern only.
+ */
+function _compileSkipPattern(source) {
+  try {
+    return new RegExp(source, 'i')
+  } catch (err) {
+    log.warn(`Invalid promptEvaluatorSkipPattern (${err.message}); falling back to default skip pattern only`)
+    return null
+  }
+}
+
 /**
  * Evaluate a draft user message.
  *
