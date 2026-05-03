@@ -920,10 +920,17 @@ function _sameAbsolutePath(a, b) {
 // providers, which concat the prepend + append buckets into one user-message
 // prefix — #3228) can render the header exactly once at the concat boundary
 // instead of producing two `# User skills` sections.
+//
+// The header terminates with a literal blank line (`\n\n`) so callers can
+// concatenate it directly with the first `## Skill: …` section without
+// losing the visual separator. Without the trailing blank line the
+// preamble runs straight into the first heading (`Apply them...\n## Skill:`)
+// — caught by PR #3231 review (Copilot #3 / #4).
 export const SKILLS_PROMPT_HEADER = [
   '# User skills',
   '',
   'The following skills have been shared from the user\'s skills directory. Apply them when relevant to the task at hand.',
+  '',
   '',
 ].join('\n')
 
@@ -1025,6 +1032,31 @@ function _normalizeProviderName(p) {
   if (typeof p !== 'string') return null
   const v = p.trim().toLowerCase()
   return v.length === 0 ? null : v
+}
+
+/**
+ * Decide whether a normalised provider id belongs to the Claude family.
+ *
+ * Members:
+ *   - bare alias `claude`
+ *   - `claude-*` (e.g. `claude-sdk`, `claude-cli`)
+ *   - `docker` alias and `docker-*` variants (`docker-cli`, `docker-sdk`)
+ *     both wrap Claude sessions in a container — they share Claude's
+ *     built-in tool gating, so for trust / allowlist purposes they are
+ *     part of the family.
+ *
+ * The `-` boundary on `claude-` / `docker-` keeps unrelated names such as
+ * `claudette` or `dockerize` from matching.
+ *
+ * @param {string|null|undefined} provider  raw or pre-normalised id
+ * @returns {boolean}
+ */
+function _isClaudeFamilyProvider(provider) {
+  const norm = _normalizeProviderName(provider)
+  if (!norm) return false
+  if (norm === 'claude' || norm.startsWith('claude-')) return true
+  if (norm === 'docker' || norm.startsWith('docker-')) return true
+  return false
 }
 
 /**
@@ -1136,11 +1168,13 @@ function _filterByProviderAllowlist(skills, provider, allowlist) {
 
   const norm = _normalizeProviderName(provider)
   // Claude-family providers stay permissive even when an allowlist is
-  // configured. The bare alias `claude` matches any `claude-*` family
-  // member; the family check uses the same `claude-` boundary as
-  // `_skillMatchesProvider` so unrelated names like `claudette` don't
-  // benefit from the looser policy.
-  if (norm === 'claude' || (norm && norm.startsWith('claude-'))) return skills
+  // configured. Membership covers the bare alias `claude`, the
+  // `claude-*` variants (`claude-sdk`, `claude-cli`), and the Docker
+  // wrappers (`docker`, `docker-cli`, `docker-sdk`) which inherit
+  // Claude's built-in tool gating. The shared
+  // `_isClaudeFamilyProvider` helper keeps the membership rule in one
+  // place so the trust / allowlist / family-alias paths can't drift.
+  if (_isClaudeFamilyProvider(norm)) return skills
 
   // No provider id at all — fail-secure: the operator scoped the
   // allowlist but we can't tell which bucket this session belongs to.

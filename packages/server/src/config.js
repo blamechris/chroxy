@@ -111,11 +111,14 @@ const CONFIG_SCHEMA = {
   // Documented in CONFIG.md.
   providerSkillAllowlist: 'object',
   // Skill content-hash mismatch mode (#3204). One of:
-  //   - 'warn' (default): a hash mismatch logs a sanitised warn and
-  //     emits a `skill_changed` WS event but the skill still loads.
+  //   - 'warn': a hash mismatch logs a sanitised warn and emits a
+  //     `skill_changed` WS event but the skill still loads.
   //   - 'block': same warn + event, but the skill is filtered out of
   //     the active set until the operator explicitly re-trusts it.
-  // Anything other than the two valid values is treated as 'warn'.
+  // Invalid values disable trust checking — the operator must
+  // explicitly opt into 'warn' or 'block' to enable it. This was an
+  // intentional design choice so the trust ledger is opt-in, not
+  // implicit.
   // Documented in CONFIG.md.
   trustMismatchMode: 'string',
 }

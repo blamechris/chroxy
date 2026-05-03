@@ -1,12 +1,13 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { writeFileSync, unlinkSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { CodexSession, buildCodexArgs } from '../src/codex-session.js'
+import { SkillsTrustStore } from '../src/skills-trust.js'
 import { waitFor } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -265,6 +266,102 @@ describe('CodexSession', () => {
       })
       assert.equal(session._activeManualSkills.has('a'), true)
       assert.equal(session._activeManualSkills.has('b'), true)
+    })
+
+    // -------------------------------------------------------------------
+    // PR #3231 review (agent-review): JsonlSubprocessSession was the
+    // middle layer between CodexSession and BaseSession and silently
+    // dropped the second batch of round-2 opts —
+    // `providerSkillAllowlist`, `trustStore`, `trustMismatchMode` — even
+    // though Codex/Gemini both passed them to super(). The result was
+    // that allowlist filtering and trust hashing silently no-op'd for
+    // the subprocess providers (the exact regression #3225 was filed
+    // to prevent).
+    //
+    // These tests construct CodexSession directly and verify each opt
+    // reaches BaseSession's plumbing.
+    // -------------------------------------------------------------------
+
+    describe('round-2 skills opts plumb through JsonlSubprocessSession (#3231)', () => {
+      let skillsDir
+      beforeEach(() => { skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-r2-')) })
+      afterEach(() => { rmSync(skillsDir, { recursive: true, force: true }) })
+
+      it('passes `providerSkillAllowlist` through — denied skills are filtered', () => {
+        writeFileSync(join(skillsDir, 'allowed.md'), 'allowed body')
+        writeFileSync(join(skillsDir, 'denied.md'), 'denied body')
+        const session = new CodexSession({
+          cwd: '/tmp',
+          provider: 'codex',
+          skillsDir,
+          repoSkillsDir: null,
+          providerSkillAllowlist: { codex: ['allowed'] },
+        })
+        const names = session._getSkills().map((sk) => sk.name)
+        assert.deepEqual(names, ['allowed'])
+      })
+
+      it('passes `providerSkillAllowlist` through — fail-secure when entry is missing', () => {
+        writeFileSync(join(skillsDir, 'a.md'), 'a body')
+        const session = new CodexSession({
+          cwd: '/tmp',
+          provider: 'codex',
+          skillsDir,
+          repoSkillsDir: null,
+          // Allowlist configured for a different provider — codex should drop everything.
+          providerSkillAllowlist: { gemini: ['a'] },
+        })
+        assert.deepEqual(session._getSkills(), [])
+      })
+
+      it('passes `trustStore` through so the loader records hashes', () => {
+        writeFileSync(join(skillsDir, 'a.md'), 'body a')
+        const trustDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-r2-trust-'))
+        const trustPath = join(trustDir, 'trust.json')
+        try {
+          const trustStore = new SkillsTrustStore({ filePath: trustPath })
+          const session = new CodexSession({
+            cwd: '/tmp',
+            skillsDir,
+            repoSkillsDir: null,
+            trustStore,
+          })
+          assert.equal(session._trustStore, trustStore,
+            'CodexSession must forward the caller-supplied trust store to BaseSession')
+          assert.equal(session._getSkills().length, 1)
+          // Records should be populated — the loader hit `inspect()` for `a.md`.
+          assert.ok(Object.keys(trustStore._records).length >= 1,
+            'trust store should have recorded at least one hash via the loader')
+        } finally {
+          rmSync(trustDir, { recursive: true, force: true })
+        }
+      })
+
+      it('passes `trustMismatchMode` through so the default store is wired', () => {
+        writeFileSync(join(skillsDir, 'a.md'), 'body a')
+        const session = new CodexSession({
+          cwd: '/tmp',
+          skillsDir,
+          repoSkillsDir: null,
+          trustMismatchMode: 'warn',
+        })
+        // No explicit `trustStore` but `trustMismatchMode` should still
+        // result in a wired store (BaseSession constructs the default).
+        assert.ok(session._trustStore,
+          'CodexSession must forward trustMismatchMode so BaseSession wires the default trust store')
+        assert.equal(session._trustStore.mode, 'warn')
+      })
+
+      it('without round-2 opts, no trust store is wired (back-compat)', () => {
+        writeFileSync(join(skillsDir, 'a.md'), 'body a')
+        const session = new CodexSession({
+          cwd: '/tmp',
+          skillsDir,
+          repoSkillsDir: null,
+        })
+        assert.equal(session._trustStore, null,
+          'trust must remain opt-in: no opts → no store')
+      })
     })
   })
 

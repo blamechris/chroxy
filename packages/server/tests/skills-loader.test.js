@@ -1331,6 +1331,42 @@ describe('skills-loader', () => {
       assert.equal(skills.length, 1)
     })
 
+    // PR #3231 Copilot #2: docker-* providers wrap Claude sessions in a
+    // container so they share Claude's built-in tool gating. They MUST
+    // be treated as the Claude family for allowlist purposes.
+    it('docker-cli session is permissive (claude-family member)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      writeFileSync(join(dir, 'b.md'), 'b body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'docker-cli',
+        // Allowlist exists but doesn't mention docker-cli. Family
+        // membership should keep it permissive.
+        providerSkillAllowlist: { codex: ['a'] },
+      })
+      assert.equal(skills.length, 2)
+    })
+
+    it('docker-sdk session is permissive (claude-family member)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'docker-sdk',
+        providerSkillAllowlist: { codex: [] },
+      })
+      assert.equal(skills.length, 1)
+    })
+
+    it('bare `docker` alias is permissive (claude-family member)', () => {
+      writeFileSync(join(dir, 'a.md'), 'a body')
+      const skills = loadActiveSkillsLayered({
+        globalDir: dir,
+        provider: 'docker',
+        providerSkillAllowlist: { codex: [] },
+      })
+      assert.equal(skills.length, 1)
+    })
+
     it('null provider with allowlist configured: fail-secure (drop all)', () => {
       writeFileSync(join(dir, 'a.md'), 'a body')
       const skills = loadActiveSkillsLayered({

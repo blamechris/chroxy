@@ -60,6 +60,14 @@ export const TRUST_MODE_WARN = 'warn'
 export const TRUST_MODE_BLOCK = 'block'
 const VALID_TRUST_MODES = new Set([TRUST_MODE_WARN, TRUST_MODE_BLOCK])
 
+// `lastVerified` is informational ("when did I last successfully verify
+// this skill?") so a millisecond-fresh value carries no operational
+// benefit — bumping it on every load just rewrites the trust file every
+// time a session starts. Throttle the bump to once per 24 hours by
+// default. Tests pass a smaller value via the constructor to exercise
+// the bump path without sleeping.
+export const DEFAULT_VERIFY_THROTTLE_MS = 24 * 60 * 60 * 1000
+
 /**
  * Compute the SHA-256 hex digest of a string. Exported so tests / future
  * callers (CLI `chroxy skills doctor`) can reuse the exact algorithm
@@ -78,11 +86,18 @@ export function sha256Hex(body) {
  */
 export class SkillsTrustStore {
   /**
-   * @param {{ filePath?: string, mode?: 'warn'|'block' }} [opts]
+   * @param {{ filePath?: string, mode?: 'warn'|'block', verifyThrottleMs?: number }} [opts]
    */
-  constructor({ filePath, mode } = {}) {
+  constructor({ filePath, mode, verifyThrottleMs } = {}) {
     this._filePath = filePath || DEFAULT_TRUST_FILE
     this._mode = VALID_TRUST_MODES.has(mode) ? mode : TRUST_MODE_WARN
+    // How long a `lastVerified` timestamp stays "fresh enough" to skip
+    // an update. Caller may override (tests pass 0 to force a bump on
+    // every load); default is 24 hours so the trust file isn't
+    // rewritten on every session start in steady state.
+    this._verifyThrottleMs = Number.isFinite(verifyThrottleMs) && verifyThrottleMs >= 0
+      ? verifyThrottleMs
+      : DEFAULT_VERIFY_THROTTLE_MS
     this._records = this._load()
     // Track whether anything changed since the last persist so we can
     // skip writes when a session loaded skills with no mismatches and no
@@ -214,11 +229,23 @@ export class SkillsTrustStore {
     }
 
     if (existing.sha256 === newHash) {
-      // Steady state — only mark dirty if we'd genuinely update the
-      // timestamp, otherwise the persist amortises over many bumps.
-      // `lastVerified` is informational (operator can see "when did I
-      // last see this skill?") so we update it lazily.
-      if (existing.lastVerified !== now) {
+      // Steady state — `lastVerified` is informational (operator can
+      // see "when did I last see this skill?"), so we throttle the
+      // bump to amortise the disk write. Without throttling, a
+      // millisecond-fresh `now` value made the previous `!= now`
+      // guard toothless and the trust file got rewritten on every
+      // session start, contradicting the "amortise" intent (caught in
+      // PR #3231 review, Copilot #5).
+      //
+      // Bump only when at least `_verifyThrottleMs` has elapsed since
+      // the last recorded `lastVerified` (default 24h). A
+      // missing / unparseable timestamp is treated as "stale" and
+      // forces a bump so the record self-heals.
+      const lastMs = existing.lastVerified ? Date.parse(existing.lastVerified) : NaN
+      const elapsed = Number.isFinite(lastMs)
+        ? Date.parse(now) - lastMs
+        : Number.POSITIVE_INFINITY
+      if (elapsed >= this._verifyThrottleMs) {
         existing.lastVerified = now
         this._dirty = true
       }

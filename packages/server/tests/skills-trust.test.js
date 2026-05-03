@@ -100,6 +100,53 @@ describe('skills-trust', () => {
       const r = store2.inspect('/abs/skill.md', 'body')
       assert.equal(r.status, 'verified')
     })
+
+    // PR #3231 Copilot #5: lastVerified was being bumped on every load
+    // because the millisecond-fresh `now` always differed from the
+    // recorded value. The result was that the trust file got rewritten
+    // on every session start, contradicting the "amortise writes"
+    // intent. The fix throttles the bump (default 24h).
+    it('does NOT bump lastVerified within the throttle window (default 24h, default not exceeded)', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+      const before = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+
+      // Re-load and re-inspect. With the default 24h throttle the
+      // record's lastVerified should NOT advance, and the store should
+      // not be marked dirty (no rewrite).
+      const store2 = new SkillsTrustStore({ filePath: trustPath })
+      const r = store2.inspect('/abs/skill.md', 'body')
+      assert.equal(r.status, 'verified')
+      assert.equal(store2._dirty, false,
+        'verified-with-fresh-record path must not mark the store dirty')
+
+      // Force a flush and confirm the persisted record was not
+      // rewritten with a newer timestamp.
+      store2.flush()
+      const after = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+      assert.equal(after, before,
+        'lastVerified must not advance inside the throttle window')
+    })
+
+    it('DOES bump lastVerified once the throttle window has elapsed (verifyThrottleMs: 0)', async () => {
+      const store = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+      const before = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+
+      // Sleep just long enough for the ISO timestamp to advance — 1ms
+      // can land on the same string with low resolution clocks, so use
+      // a small but reliable gap. throttle=0 means "always eligible".
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      const store2 = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      store2.inspect('/abs/skill.md', 'body')
+      assert.equal(store2._dirty, true, 'throttle=0 should always bump and mark dirty')
+      store2.flush()
+      const after = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+      assert.notEqual(after, before, 'lastVerified must advance once the throttle has elapsed')
+    })
   })
 
   describe('inspect — mismatch (warn mode)', () => {

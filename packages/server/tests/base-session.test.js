@@ -390,6 +390,29 @@ describe('BaseSession', () => {
       assert.equal(headerCount, 1)
       assert.ok(combined.includes('append body'))
     })
+
+    // PR #3231 Copilot #3 / #4: the SKILLS_PROMPT_HEADER previously
+    // ended with a single `\n`, so a naive concat with the first
+    // `## Skill: …` section produced output where the preamble ran
+    // straight into the heading without a blank-line separator. Pin
+    // the visual separator so a future refactor doesn't regress it.
+    it('separates the header from the first skill section with a blank line (#3231)', () => {
+      writeFileSync(join(skillsDir, 'a.md'), '# a\n\nbody a\n')
+      const s = new BaseSession({
+        cwd: '/tmp',
+        provider: 'codex',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+
+      const combined = s._buildCombinedSkillsPrefix()
+      // The preamble line ends with the period after "task at hand."; a
+      // blank line should precede the first `## Skill:` heading.
+      assert.ok(
+        /task at hand\.\n\n## Skill: /.test(combined),
+        `expected blank line between header and first skill heading\n---\n${combined}`,
+      )
+    })
   })
 
   // -----------------------------------------------------------------------

@@ -1,9 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, unlinkSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { GeminiSession } from '../src/gemini-session.js'
+import { SkillsTrustStore } from '../src/skills-trust.js'
 import { waitFor } from './test-helpers.js'
 
 describe('GeminiSession', () => {
@@ -64,6 +65,95 @@ describe('GeminiSession', () => {
     })
     assert.ok(session._activeManualSkills instanceof Set)
     assert.equal(session._activeManualSkills.has('gemini-skill'), true)
+  })
+
+  // ---------------------------------------------------------------------
+  // PR #3231 review (agent-review): JsonlSubprocessSession was the
+  // middle layer between GeminiSession and BaseSession and silently
+  // dropped the second batch of round-2 opts —
+  // `providerSkillAllowlist`, `trustStore`, `trustMismatchMode` — even
+  // though Codex/Gemini both passed them to super(). The result was
+  // that allowlist filtering and trust hashing silently no-op'd for
+  // the subprocess providers.
+  // ---------------------------------------------------------------------
+
+  describe('round-2 skills opts plumb through JsonlSubprocessSession (#3231)', () => {
+    let skillsDir
+    beforeEach(() => { skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-r2-')) })
+    afterEach(() => { rmSync(skillsDir, { recursive: true, force: true }) })
+
+    it('passes `providerSkillAllowlist` through — denied skills are filtered', () => {
+      writeFileSync(join(skillsDir, 'allowed.md'), 'allowed body')
+      writeFileSync(join(skillsDir, 'denied.md'), 'denied body')
+      const session = new GeminiSession({
+        cwd: '/tmp',
+        provider: 'gemini',
+        skillsDir,
+        repoSkillsDir: null,
+        providerSkillAllowlist: { gemini: ['allowed'] },
+      })
+      const names = session._getSkills().map((sk) => sk.name)
+      assert.deepEqual(names, ['allowed'])
+    })
+
+    it('passes `providerSkillAllowlist` through — fail-secure when entry is missing', () => {
+      writeFileSync(join(skillsDir, 'a.md'), 'a body')
+      const session = new GeminiSession({
+        cwd: '/tmp',
+        provider: 'gemini',
+        skillsDir,
+        repoSkillsDir: null,
+        // Allowlist configured for a different provider — gemini should drop everything.
+        providerSkillAllowlist: { codex: ['a'] },
+      })
+      assert.deepEqual(session._getSkills(), [])
+    })
+
+    it('passes `trustStore` through so the loader records hashes', () => {
+      writeFileSync(join(skillsDir, 'a.md'), 'body a')
+      const trustDir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-r2-trust-'))
+      const trustPath = join(trustDir, 'trust.json')
+      try {
+        const trustStore = new SkillsTrustStore({ filePath: trustPath })
+        const session = new GeminiSession({
+          cwd: '/tmp',
+          skillsDir,
+          repoSkillsDir: null,
+          trustStore,
+        })
+        assert.equal(session._trustStore, trustStore,
+          'GeminiSession must forward the caller-supplied trust store to BaseSession')
+        assert.equal(session._getSkills().length, 1)
+        assert.ok(Object.keys(trustStore._records).length >= 1,
+          'trust store should have recorded at least one hash via the loader')
+      } finally {
+        rmSync(trustDir, { recursive: true, force: true })
+      }
+    })
+
+    it('passes `trustMismatchMode` through so the default store is wired', () => {
+      writeFileSync(join(skillsDir, 'a.md'), 'body a')
+      const session = new GeminiSession({
+        cwd: '/tmp',
+        skillsDir,
+        repoSkillsDir: null,
+        trustMismatchMode: 'block',
+      })
+      assert.ok(session._trustStore,
+        'GeminiSession must forward trustMismatchMode so BaseSession wires the default trust store')
+      assert.equal(session._trustStore.mode, 'block')
+    })
+
+    it('without round-2 opts, no trust store is wired (back-compat)', () => {
+      writeFileSync(join(skillsDir, 'a.md'), 'body a')
+      const session = new GeminiSession({
+        cwd: '/tmp',
+        skillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(session._trustStore, null,
+        'trust must remain opt-in: no opts → no store')
+    })
   })
 
   it('setModel updates the model property', () => {

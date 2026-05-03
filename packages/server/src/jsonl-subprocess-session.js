@@ -92,6 +92,9 @@ export class JsonlSubprocessSession extends BaseSession {
     maxTotalSkillBytes,
     provider,
     activeManualSkills,
+    providerSkillAllowlist,
+    trustStore,
+    trustMismatchMode,
   } = {}) {
     super({
       cwd,
@@ -103,6 +106,9 @@ export class JsonlSubprocessSession extends BaseSession {
       maxTotalSkillBytes,
       provider,
       activeManualSkills,
+      providerSkillAllowlist,
+      trustStore,
+      trustMismatchMode,
     })
     this.resumeSessionId = null
     this._process = null
