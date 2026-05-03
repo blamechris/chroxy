@@ -74,6 +74,7 @@ const PLATFORM_SPECIFIC = {
   'environment_info': 'dashboard',    // environment panel is dashboard-only
   'environment_error': 'dashboard',   // environment panel is dashboard-only
   'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
+  'prompt_evaluator_changed': 'dashboard', // per-session promptEvaluator toggle (#3185) is dashboard-only — same epic as evaluate_draft_result, mobile app exposure tracked in #3068
 }
 
 // ---------------------------------------------------------------------------
