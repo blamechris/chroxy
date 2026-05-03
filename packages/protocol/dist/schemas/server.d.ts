@@ -90,6 +90,11 @@ export declare const ServerModelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"model_changed">;
     model: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerPromptEvaluatorChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"prompt_evaluator_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodBoolean;
+}, z.core.$strip>;
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *

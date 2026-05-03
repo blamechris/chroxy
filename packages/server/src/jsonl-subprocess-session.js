@@ -95,6 +95,7 @@ export class JsonlSubprocessSession extends BaseSession {
     providerSkillAllowlist,
     trustStore,
     trustMismatchMode,
+    promptEvaluator,
   } = {}) {
     super({
       cwd,
@@ -109,6 +110,7 @@ export class JsonlSubprocessSession extends BaseSession {
       providerSkillAllowlist,
       trustStore,
       trustMismatchMode,
+      promptEvaluator,
     })
     this.resumeSessionId = null
     this._process = null

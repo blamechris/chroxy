@@ -317,13 +317,15 @@ export class SessionManager extends EventEmitter {
    * @param {string} [options.provider]
    * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
+   * @param {boolean} [options.promptEvaluator] - Per-session toggle for the auto-evaluator
+   *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
    * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
    *   `restoreState()`, which must seed history and budget after createSession before the
    *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
    *   empty history and destroy the very data we're restoring.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -427,6 +429,13 @@ export class SessionManager extends EventEmitter {
     // BaseSession's no-op default in place when omitted.
     if (this._trustMismatchMode !== null) {
       providerOpts.trustMismatchMode = this._trustMismatchMode
+    }
+    // Per-session promptEvaluator toggle (#3185). Forwarded as-is —
+    // BaseSession coerces to a strict boolean, so passing `undefined`
+    // (omitted by client) yields the safe `false` default. Restored
+    // sessions persist this in session-state.json (see serializeState).
+    if (typeof promptEvaluator === 'boolean') {
+      providerOpts.promptEvaluator = promptEvaluator
     }
     // Sandbox: per-session overrides server-level default
     const resolvedSandbox = sandbox || this._sandbox
@@ -559,6 +568,11 @@ export class SessionManager extends EventEmitter {
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
         isolation: entry.isolation || 'none',
+        // #3185: surface the per-session promptEvaluator toggle so the
+        // dashboard can render the toggle's current state without a
+        // separate round-trip. Defensive coerce in case a custom
+        // provider class skips the BaseSession field initialiser.
+        promptEvaluator: !!entry.session.promptEvaluator,
       })
     }
     return list
@@ -759,6 +773,11 @@ export class SessionManager extends EventEmitter {
         provider: entry.provider || null,
         name: entry.name,
         history,
+        // #3185: persist promptEvaluator so reconnects across restarts
+        // preserve the user's toggle state. Strict-boolean coerce so
+        // older state files (pre-#3185) round-trip as `false` rather
+        // than `undefined` after restore.
+        promptEvaluator: !!entry.session.promptEvaluator,
       })
     }
 
@@ -810,6 +829,10 @@ export class SessionManager extends EventEmitter {
           permissionMode: saved.permissionMode,
           resumeSessionId: saved.sdkSessionId,
           provider: saved.provider || undefined,
+          // #3185: forward the persisted toggle through the typed
+          // pathway. createSession ignores non-boolean inputs (older
+          // state files lack the field), so this round-trips cleanly.
+          promptEvaluator: typeof saved.promptEvaluator === 'boolean' ? saved.promptEvaluator : undefined,
           skipPersist: true,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)

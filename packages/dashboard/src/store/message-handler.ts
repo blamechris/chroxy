@@ -708,6 +708,21 @@ function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _
   }
 }
 
+// #3185: per-session promptEvaluator toggle changed. Update the
+// `sessions` array entry for the affected session so the UI reflects
+// the new toggle state immediately. Other clients on the same session
+// receive the broadcast and stay in sync.
+function handlePromptEvaluatorChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const value = typeof msg.value === 'boolean' ? msg.value : null;
+  if (value === null) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId) return;
+  const sessions = get().sessions.map(s =>
+    s.sessionId === targetId ? { ...s, promptEvaluator: value } : s,
+  );
+  _set({ sessions });
+}
+
 function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const { mode } = sharedPermissionModeChanged(msg);
   const targetId = resolveSessionId(msg, get().activeSessionId);
@@ -1267,6 +1282,7 @@ const HANDLERS: Record<string, Handler> = {
   conversations_list: handleConversationsList,
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
+  prompt_evaluator_changed: handlePromptEvaluatorChanged,
   permission_mode_changed: handlePermissionModeChanged,
   available_permission_modes: handleAvailablePermissionModes,
   session_updated: handleSessionUpdated,

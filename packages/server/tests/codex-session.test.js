@@ -352,6 +352,21 @@ describe('CodexSession', () => {
         assert.equal(session._trustStore.mode, 'warn')
       })
 
+      // #3185: same middle-layer trap, fresh opt. Without forwarding,
+      // a CodexSession started with `promptEvaluator: true` would
+      // silently land at BaseSession's `false` default and the
+      // toggle would be a no-op for Codex / Gemini specifically.
+      it('passes `promptEvaluator` through to BaseSession (#3185)', () => {
+        const session = new CodexSession({
+          cwd: '/tmp',
+          skillsDir,
+          repoSkillsDir: null,
+          promptEvaluator: true,
+        })
+        assert.equal(session.promptEvaluator, true,
+          'CodexSession must forward promptEvaluator so BaseSession state matches')
+      })
+
       it('without round-2 opts, no trust store is wired (back-compat)', () => {
         writeFileSync(join(skillsDir, 'a.md'), 'body a')
         const session = new CodexSession({

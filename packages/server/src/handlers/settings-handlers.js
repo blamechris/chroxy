@@ -443,6 +443,68 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #3185 — toggle the per-session promptEvaluator flag. Strict-boolean
+ * payload validation, idempotent (no-op when value unchanged so the
+ * dashboard can re-send the current value without churning state-file
+ * writes), and broadcast on actual change so multi-client UIs stay in
+ * sync.
+ *
+ * Persistence is an immediate `serializeState()` flush rather than the
+ * debounced `schedulePersist` other handlers use. Toggles are operator
+ * actions — rare enough that the synchronous write is free, and a crash
+ * within the debounce window would otherwise silently lose the change.
+ */
+function handleSetPromptEvaluator(ws, client, msg, ctx) {
+  if (typeof msg.value !== 'boolean') {
+    ctx.send(ws, {
+      type: 'session_error',
+      message: 'set_prompt_evaluator requires a boolean `value`',
+    })
+    return
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  if (typeof entry.session.setPromptEvaluator !== 'function') {
+    // Defensive — every shipping provider extends BaseSession which adds
+    // the setter. A custom provider that bypasses BaseSession would land
+    // here; refuse rather than silently dropping the toggle.
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluator toggling' })
+    return
+  }
+
+  const changed = entry.session.setPromptEvaluator(msg.value)
+  if (!changed) {
+    // Either invalid input (already validated above so unreachable) or
+    // a redundant set. Either way: no broadcast, no persist — the
+    // dashboard already shows the current value.
+    return
+  }
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'prompt_evaluator_changed',
+    sessionId,
+    value: entry.session.promptEvaluator,
+  })
+
+  // Persist immediately rather than waiting for the debounced
+  // schedulePersist — toggles are rare enough that the extra write is
+  // free, and a crash within the debounce window would otherwise
+  // silently lose the change. Keep best-effort: failures here log but
+  // don't surface to the client (the in-memory state is correct).
+  try {
+    ctx.sessionManager?.serializeState?.()
+  } catch (err) {
+    log.warn(`Failed to persist promptEvaluator toggle for ${sessionId}: ${err?.message || err}`)
+  }
+}
+
 function handleSetPermissionRules(ws, client, msg, ctx) {
   const rules = msg.rules
 
@@ -516,6 +578,7 @@ export const settingsHandlers = {
   list_skills: handleListSkills,
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
+  set_prompt_evaluator: handleSetPromptEvaluator,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }

@@ -103,6 +103,57 @@ describe('ChatSettingsDropdown', () => {
     expect(onThinkingLevelChange).toHaveBeenCalledWith('high')
   })
 
+  // #3185: per-session promptEvaluator toggle. The toggle is opt-in —
+  // parent must wire `onPromptEvaluatorChange` for it to render. When
+  // present, the checkbox reflects the current value and emits the new
+  // value on click.
+  describe('promptEvaluator toggle (#3185)', () => {
+    it('does not render the toggle when onPromptEvaluatorChange is omitted', () => {
+      renderDropdown()
+      expect(screen.queryByTestId('prompt-evaluator-toggle')).toBeNull()
+    })
+
+    // Capability gate: even with the change handler wired, the toggle
+    // stays hidden until the active session reports a boolean
+    // `promptEvaluator` field. Older servers (pre-#3185) omit the field
+    // entirely — surfacing a non-functional control would be misleading.
+    it('does not render when promptEvaluator is undefined (older server)', () => {
+      renderDropdown({ promptEvaluator: undefined, onPromptEvaluatorChange: vi.fn() })
+      expect(screen.queryByTestId('prompt-evaluator-toggle')).toBeNull()
+    })
+
+    it('renders the toggle when handler + boolean value are both present', () => {
+      renderDropdown({ promptEvaluator: false, onPromptEvaluatorChange: vi.fn() })
+      expect(screen.getByTestId('prompt-evaluator-toggle')).toBeInTheDocument()
+    })
+
+    it('reflects promptEvaluator=true as a checked checkbox', () => {
+      renderDropdown({ promptEvaluator: true, onPromptEvaluatorChange: vi.fn() })
+      const cb = screen.getByTestId('prompt-evaluator-checkbox') as HTMLInputElement
+      expect(cb.checked).toBe(true)
+    })
+
+    it('reflects promptEvaluator=false as an unchecked checkbox', () => {
+      renderDropdown({ promptEvaluator: false, onPromptEvaluatorChange: vi.fn() })
+      const cb = screen.getByTestId('prompt-evaluator-checkbox') as HTMLInputElement
+      expect(cb.checked).toBe(false)
+    })
+
+    it('emits the new boolean value on click', () => {
+      const onChange = vi.fn()
+      renderDropdown({ promptEvaluator: false, onPromptEvaluatorChange: onChange })
+      fireEvent.click(screen.getByTestId('prompt-evaluator-checkbox'))
+      expect(onChange).toHaveBeenCalledWith(true)
+    })
+
+    it('emits false when toggling off', () => {
+      const onChange = vi.fn()
+      renderDropdown({ promptEvaluator: true, onPromptEvaluatorChange: onChange })
+      fireEvent.click(screen.getByTestId('prompt-evaluator-checkbox'))
+      expect(onChange).toHaveBeenCalledWith(false)
+    })
+  })
+
   it('shows Default option for model when defaultModelId is set', () => {
     renderDropdown({ defaultModelId: 'sonnet' })
     const modelSelect = screen.getByTestId('chat-settings-trigger')

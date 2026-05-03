@@ -89,6 +89,70 @@ describe('BaseSession', () => {
     })
   })
 
+  // #3185: per-session promptEvaluator toggle. Default is `false` so the
+  // auto-evaluator chain (sub-tasks of #3068) is opt-in per session — the
+  // manual `evaluate_draft` flow (PR #3089) is the existing behaviour and
+  // continues to work regardless of this flag. Tests cover construction,
+  // setter behaviour, and rejection of non-boolean inputs.
+  describe('promptEvaluator (#3185)', () => {
+    it('defaults to false when omitted from constructor opts', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.promptEvaluator, false)
+    })
+
+    it('coerces truthy / falsy constructor values to a strict boolean', () => {
+      const a = new BaseSession({ promptEvaluator: true, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const b = new BaseSession({ promptEvaluator: false, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const c = new BaseSession({ promptEvaluator: 1, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const d = new BaseSession({ promptEvaluator: undefined, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(a.promptEvaluator, true)
+      assert.equal(b.promptEvaluator, false)
+      // Strict boolean — truthy non-bools coerce, but the field is always
+      // typeof 'boolean' so dashboard code can rely on JSON.stringify
+      // emitting `true`/`false` rather than `1`/`null`.
+      assert.equal(c.promptEvaluator, true)
+      assert.equal(typeof c.promptEvaluator, 'boolean')
+      assert.equal(d.promptEvaluator, false)
+    })
+
+    describe('setPromptEvaluator', () => {
+      it('accepts boolean true and updates state', () => {
+        assert.equal(session.promptEvaluator, false)
+        const result = session.setPromptEvaluator(true)
+        assert.equal(result, true)
+        assert.equal(session.promptEvaluator, true)
+      })
+
+      it('accepts boolean false and updates state', () => {
+        session.promptEvaluator = true
+        const result = session.setPromptEvaluator(false)
+        assert.equal(result, true)
+        assert.equal(session.promptEvaluator, false)
+      })
+
+      it('returns false when value is unchanged (idempotent no-op)', () => {
+        assert.equal(session.promptEvaluator, false)
+        // Already false — setter reports "no change" so the session manager
+        // can skip a state-file write on a redundant toggle.
+        assert.equal(session.setPromptEvaluator(false), false)
+      })
+
+      it('rejects non-boolean inputs without mutating state', () => {
+        // Strings, numbers, objects all fail-closed — defends against a
+        // malformed WS payload that would otherwise flip the flag to a
+        // truthy value the server can't reason about.
+        for (const bad of ['true', 1, 0, null, undefined, {}, []]) {
+          assert.equal(session.setPromptEvaluator(bad), false, `expected setPromptEvaluator(${JSON.stringify(bad)}) to return false`)
+          assert.equal(session.promptEvaluator, false)
+        }
+      })
+    })
+  })
+
   describe('setPermissionMode', () => {
     it('returns false for invalid modes', () => {
       assert.equal(session.setPermissionMode('invalid'), false)

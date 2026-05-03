@@ -206,10 +206,19 @@ export function createMockSession(overrides = {}) {
   session.isReady = true
   session.model = 'claude-sonnet-4-6'
   session.permissionMode = 'approve'
+  // #3185: BaseSession surfaces this default; mocks track the same
+  // shape so handler tests can assert toggle behaviour without
+  // standing up the full session.
+  session.promptEvaluator = false
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
   session.setModel = createSpy()
   session.setPermissionMode = createSpy()
+  session.setPromptEvaluator = createSpy((value) => {
+    if (typeof value !== 'boolean' || value === session.promptEvaluator) return false
+    session.promptEvaluator = value
+    return true
+  })
   session.respondToQuestion = createSpy()
   session.respondToPermission = createSpy()
   Object.assign(session, overrides)

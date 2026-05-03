@@ -211,6 +211,36 @@ describe('SessionManager.serializeState', () => {
     assert.equal(state.sessions.length, 0)
     assert.ok(existsSync(nestedFile), 'State file should be created')
   })
+
+  // #3185: persisted promptEvaluator survives the round-trip so a
+  // restart restores the toggle state.
+  it('serializes promptEvaluator on each session entry', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionOn = new EventEmitter()
+    sessionOn.model = 'sonnet'
+    sessionOn.permissionMode = 'approve'
+    sessionOn.promptEvaluator = true
+    Object.defineProperty(sessionOn, 'resumeSessionId', { get: () => null })
+    sessionOn.destroy = () => {}
+    mgr._sessions.set('s-on', { session: sessionOn, name: 'On', cwd: '/tmp' })
+
+    const sessionOff = new EventEmitter()
+    sessionOff.model = 'sonnet'
+    sessionOff.permissionMode = 'approve'
+    sessionOff.promptEvaluator = false
+    Object.defineProperty(sessionOff, 'resumeSessionId', { get: () => null })
+    sessionOff.destroy = () => {}
+    mgr._sessions.set('s-off', { session: sessionOff, name: 'Off', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions.length, 2)
+    const onEntry = state.sessions.find(s => s.name === 'On')
+    const offEntry = state.sessions.find(s => s.name === 'Off')
+    assert.equal(onEntry.promptEvaluator, true)
+    assert.equal(offEntry.promptEvaluator, false)
+    assert.equal(typeof onEntry.promptEvaluator, 'boolean')
+  })
 })
 
 describe('SessionManager.restoreState', () => {
@@ -295,6 +325,35 @@ describe('SessionManager.restoreState', () => {
 
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 2, 'Should have 2 restored sessions')
+
+    mgr.destroyAll()
+  })
+
+  // #3185: promptEvaluator round-trips. A state file written with the
+  // toggle on must restore with the toggle still on; pre-#3185 state
+  // files (no field) restore as `false` so older state files don't
+  // break.
+  it('restores promptEvaluator across the state cycle (#3185)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'Has Evaluator', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, promptEvaluator: true },
+        { name: 'No Field', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    const withEval = sessions.find(s => s.name === 'Has Evaluator')
+    const withoutEval = sessions.find(s => s.name === 'No Field')
+    assert.equal(withEval.promptEvaluator, true)
+    // Older state file without the field defaults to `false` —
+    // BaseSession's coerce-to-bool ensures listSessions never emits
+    // `undefined` on the wire.
+    assert.equal(withoutEval.promptEvaluator, false)
+    assert.equal(typeof withoutEval.promptEvaluator, 'boolean')
 
     mgr.destroyAll()
   })
