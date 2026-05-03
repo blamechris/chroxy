@@ -206,6 +206,35 @@ export const ServerSkillsListSchema = z.object({
         source: z.enum(['global', 'repo']).optional(),
     })),
 });
+/**
+ * Skill content-hash mismatch event (#3234).
+ *
+ * Emitted when the loader detects that a skill's body has changed since the
+ * SkillsTrustStore (#3204) recorded its first-seen hash. Carries only 8-char
+ * hash prefixes on the wire — the full SHA-256 never leaves the server,
+ * matching the sanitised warn-log format from #3215.
+ *
+ * `mode` mirrors the active trust mode at detection time:
+ *   - `'warn'`  — the skill still loaded; the dashboard should surface a
+ *                 banner / prompt so the operator can `acceptHash` or roll
+ *                 the change back.
+ *   - `'block'` — the skill was filtered out of the active set; stronger UX
+ *                 (modal / red badge) is appropriate.
+ *
+ * `sessionId` is the session this skill was being loaded for, or `null` for
+ * legacy single-CLI mode where there is no per-session scoping. Transient —
+ * not replayed on reconnect, since the loader re-checks hashes every time
+ * skills are scanned.
+ */
+export const ServerSkillChangedSchema = z.object({
+    type: z.literal('skill_changed'),
+    skillName: z.string(),
+    sessionId: z.string().nullable(),
+    // 8-char prefixes of the recorded vs. new SHA-256 (lower-case hex).
+    oldHashPrefix: z.string().length(8).regex(/^[0-9a-f]{8}$/),
+    newHashPrefix: z.string().length(8).regex(/^[0-9a-f]{8}$/),
+    mode: z.enum(['warn', 'block']),
+});
 export const ServerErrorSchema = z.object({
     type: z.literal('server_error'),
     category: z.string().optional(),

@@ -74,7 +74,7 @@
 import { readFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
 import { dirname, join, basename } from 'path'
 import { homedir } from 'os'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { createLogger } from './logger.js'
 
 const log = createLogger('skills-trust')
@@ -276,7 +276,15 @@ export class SkillsTrustStore {
    */
   flush() {
     if (!this._dirty) return
-    const tmpPath = `${this._filePath}.tmp`
+    // Per-writer unique temp path. BaseSession constructs one
+    // SkillsTrustStore per session, all pointing at the same default
+    // ledger path, so flush() must tolerate concurrent writers. The
+    // pid+random suffix prevents two writers from racing on the same
+    // .tmp file (where one's unlinkSync would invalidate the other's
+    // open fd, breaking the wx exclusive-create guarantee). Each
+    // writer renames its own unique temp to the target — rename is
+    // atomic so last-writer-wins.
+    const tmpPath = `${this._filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
     let fd = null
     try {
       mkdirSync(dirname(this._filePath), { recursive: true })
@@ -289,26 +297,9 @@ export class SkillsTrustStore {
       }
       const payload = JSON.stringify(out, null, 2) + '\n'
 
-      // Pre-clean any stale temp from a previous crashed flush. `wx`
-      // would otherwise EEXIST and we'd lose the chance to atomically
-      // replace the target. The unlink is best-effort: if it fails
-      // because the file just disappeared, the next openSync will
-      // succeed; if it fails because of EACCES we'll let the openSync
-      // surface the same error to the outer catch.
-      try {
-        unlinkSync(tmpPath)
-      } catch (err) {
-        if (err && err.code !== 'ENOENT') {
-          // Surface to outer catch — the rename strategy can't proceed
-          // safely if the temp can't be cleaned.
-          throw err
-        }
-      }
-
-      // Open with exclusive-create + 0600. `wx` ensures we don't race
-      // with another writer — there shouldn't be one, but a defensive
-      // EEXIST is preferable to clobbering an in-flight flush from a
-      // sibling process.
+      // Open with exclusive-create + 0600. The unique temp path makes
+      // EEXIST effectively impossible (would require pid+random
+      // collision); `wx` is kept as a defence-in-depth guard.
       fd = openSync(tmpPath, 'wx', 0o600)
       writeSync(fd, payload, 0, 'utf8')
       fsyncSync(fd)
@@ -318,8 +309,9 @@ export class SkillsTrustStore {
       renameSync(tmpPath, this._filePath)
       this._dirty = false
     } catch (err) {
-      // Best-effort cleanup of an open fd / orphan temp so a future
-      // flush isn't pre-blocked by a leaked descriptor.
+      // Best-effort cleanup of an open fd / our own orphan temp so a
+      // future flush isn't pre-blocked. We never touch other writers'
+      // temps — the unique suffix means our cleanup can't affect them.
       if (fd !== null) {
         try { closeSync(fd) } catch { /* ignore */ }
       }

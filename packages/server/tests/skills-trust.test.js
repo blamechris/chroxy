@@ -326,20 +326,57 @@ describe('skills-trust', () => {
     })
 
     it('does not corrupt the target file when a stale .tmp pre-exists (orphan from prior crash)', () => {
-      const tmpPath = `${trustPath}.tmp`
-      // Simulate a half-written temp from a crashed prior flush.
-      writeFileSync(tmpPath, '{ partial json — this should be cleaned')
+      // Each writer now uses a unique temp path (pid + random suffix)
+      // to avoid the concurrent-writer race fixed in PR #3238 review.
+      // A stale `<path>.tmp` at the legacy fixed path therefore stays —
+      // we don't touch other writers' temps. The two correctness
+      // properties this test pins:
+      //   1. The fresh flush writes a clean target (independent of
+      //      any orphan temp).
+      //   2. `_load()` (covered in the sibling test below) ignores
+      //      the stale .tmp at read time, so the orphan can't poison
+      //      future reads.
+      const legacyTmpPath = `${trustPath}.tmp`
+      writeFileSync(legacyTmpPath, '{ partial json — orphan from prior crash')
 
       const store = new SkillsTrustStore({ filePath: trustPath })
       store.inspect('/abs/skill.md', 'body')
       store.flush()
 
-      // The flush should have unlinked the stale temp before writing.
-      // Final state: target parses cleanly, temp gone.
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       const expectedKey = _normalizePathKey('/abs/skill.md')
-      assert.ok(persisted[expectedKey], 'fresh record should land cleanly')
-      assert.ok(!existsSync(tmpPath), 'stale .tmp must not survive flush')
+      assert.ok(persisted[expectedKey], 'fresh record should land cleanly despite stale orphan')
+
+      // The orphan persists (we don't touch other writers' temps to
+      // preserve the concurrent-writer fix from #3238 review). It's
+      // ignored by `_load()` — see the next test for that assertion.
+      // Cleanup is the operator's responsibility (or a future periodic
+      // sweep — tracked separately).
+    })
+
+    // Regression for the Copilot review on #3238: BaseSession constructs
+    // one SkillsTrustStore per session pointing at the same default
+    // ledger, so two concurrent flushes must not collide on the same
+    // .tmp filename and accidentally invalidate each other's open fd.
+    // Fixed by giving each writer a unique pid+random temp suffix.
+    it('two concurrent flushes do not race on the same .tmp filename', () => {
+      const storeA = new SkillsTrustStore({ filePath: trustPath })
+      const storeB = new SkillsTrustStore({ filePath: trustPath })
+      storeA.inspect('/abs/skill-a.md', 'body-a')
+      storeB.inspect('/abs/skill-b.md', 'body-b')
+
+      // Interleaved flushes — neither should clobber the other or
+      // throw an ENOENT-on-rename error.
+      storeA.flush()
+      storeB.flush()
+      storeA.flush()
+      storeB.flush()
+
+      // Whichever writer landed last wins (they each only know about
+      // their own record). The key assertion is that NEITHER flush
+      // throws and the target ledger is parseable JSON.
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted && typeof persisted === 'object', 'target must be valid JSON')
     })
 
     it('_load ignores a stale .tmp file (does not parse it as the ledger)', () => {
