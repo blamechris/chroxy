@@ -819,10 +819,16 @@ function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   }
 }
 
-function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, () => sharedAgentIdle());
+  } else {
+    // Legacy/pre-bootstrap path: no session-state yet. The dashboard UI reads
+    // the flat `streamingMessageId` directly (App.tsx isStreaming check), and
+    // sendInput writes flat 'pending' here too. Without this fallback, an
+    // abnormal agent_idle in this state would leave the stop button stuck.
+    set(sharedAgentIdle());
   }
 }
 

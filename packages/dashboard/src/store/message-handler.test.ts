@@ -839,6 +839,28 @@ describe('dashboard message-handler dispatch', () => {
       const ss = (store.getState() as any).sessionStates.s1
       expect(ss.streamingMessageId).toBeNull()
     })
+
+    // Legacy/pre-bootstrap path: when the session isn't registered in
+    // sessionStates yet, sendInput writes flat 'pending' and the dashboard UI
+    // reads flat streamingMessageId directly. agent_idle must clear flat state
+    // here too — without this, abnormal idle in legacy/PTY mode leaves the
+    // stop button stuck. (Copilot review feedback on initial PR.)
+    it('clears flat streamingMessageId when no sessionState is registered (legacy/pre-bootstrap)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: null,
+          sessions: [],
+          sessionStates: {},
+          streamingMessageId: 'pending',
+          isIdle: false,
+        } as any),
+      )
+      setStore(store)
+      handleMessage({ type: 'agent_idle' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.streamingMessageId).toBeNull()
+      expect(state.isIdle).toBe(true)
+    })
   })
 
   describe('pairing_refreshed dispatch (#2916)', () => {
