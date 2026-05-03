@@ -394,6 +394,32 @@ describe('setupCliForwarding', () => {
 
     assert.equal(ctx.broadcast.mock.calls.length, 0)
   })
+
+  // #3240: skill_changed must reach legacy single-CLI users so the trust
+  // mismatch UX (#3205) is consistent regardless of session mode. The
+  // normaliser fills in `sessionId: null` from the legacy-cli context.
+  it('forwards a skill_changed event through the normalizer with null sessionId', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('skill_changed', {
+      name: 'coding-style',
+      source: '/abs/path/to/coding-style.md',
+      oldHash: 'a'.repeat(64),
+      newHash: 'b'.repeat(64),
+      blocked: false,
+      mode: 'warn',
+    })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const skillMsg = calls.find(m => m.type === 'skill_changed')
+    assert.ok(skillMsg, 'expected skill_changed broadcast')
+    assert.equal(skillMsg.skillName, 'coding-style')
+    assert.equal(skillMsg.sessionId, null)
+    assert.equal(skillMsg.oldHashPrefix, 'a'.repeat(8))
+    assert.equal(skillMsg.newHashPrefix, 'b'.repeat(8))
+    assert.equal(skillMsg.mode, 'warn')
+  })
 })
 
 describe('executeSideEffects (via setupCliForwarding)', () => {

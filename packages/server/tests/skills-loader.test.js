@@ -1519,6 +1519,10 @@ describe('skills-loader', () => {
       assert.ok(typeof mismatches[0].newHash === 'string')
       assert.notEqual(mismatches[0].oldHash, mismatches[0].newHash)
       assert.equal(mismatches[0].blocked, false)
+      // #3241: callback projects the trust store's mode directly so the
+      // wire signal stays aligned with operator config rather than being
+      // re-derived from `blocked`.
+      assert.equal(mismatches[0].mode, 'warn')
     })
 
     it('second activation with changed content (block mode): callback fires AND skill is filtered', () => {
@@ -1536,6 +1540,7 @@ describe('skills-loader', () => {
       assert.equal(skills.length, 0, 'block mode must filter the changed skill out')
       assert.equal(mismatches.length, 1)
       assert.equal(mismatches[0].blocked, true)
+      assert.equal(mismatches[0].mode, 'block')
     })
 
     it('does not crash if onTrustMismatch is omitted (mismatch in warn mode)', () => {

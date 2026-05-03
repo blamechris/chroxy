@@ -657,6 +657,13 @@ export function loadActiveSkills(dir, opts = {}) {
               oldHash: inspectResult.oldHash,
               newHash: inspectResult.newHash,
               blocked: !!inspectResult.blocked,
+              // #3241: project the active trust mode directly from the store
+              // rather than letting the normaliser reverse-engineer it from
+              // `blocked`. Today the two coincide (only `block` mode sets
+              // `blocked: true`); future modes (e.g. `block-once`,
+              // `soft-block`) may filter the skill while still wanting their
+              // own UX label on the wire.
+              mode: trustStore.mode,
             })
           } catch (err) {
             // Callback errors are swallowed — they shouldn't change the

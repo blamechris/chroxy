@@ -132,9 +132,17 @@ Object.assign(EVENT_MAP, {
   // already filtered out so a stronger prompt is appropriate). The event
   // is transient — not replayed on reconnect, since the loader re-checks
   // hashes every time it scans skills.
+  //
+  // #3241: prefer the explicit `mode` carried by the loader payload over
+  // deriving from `blocked`. The loader projects `trustStore.mode`
+  // directly so the wire signal matches the operator-facing config rather
+  // than a downstream consequence. Falls back to deriving from `blocked`
+  // for older callers and stays defensive against unknown values.
   skill_changed: (data, ctx) => {
     const oldHash = typeof data?.oldHash === 'string' ? data.oldHash : ''
     const newHash = typeof data?.newHash === 'string' ? data.newHash : ''
+    const explicitMode = data?.mode === 'block' || data?.mode === 'warn' ? data.mode : null
+    const mode = explicitMode || (data?.blocked ? 'block' : 'warn')
     return {
       messages: [{
         msg: {
@@ -143,7 +151,7 @@ Object.assign(EVENT_MAP, {
           sessionId: ctx.sessionId || null,
           oldHashPrefix: oldHash.slice(0, 8),
           newHashPrefix: newHash.slice(0, 8),
-          mode: data?.blocked ? 'block' : 'warn',
+          mode,
         },
       }],
     }
