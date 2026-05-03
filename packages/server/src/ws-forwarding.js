@@ -142,9 +142,10 @@ function setupCliForwarding(normalizer, ctx) {
 
   // #3240: `skill_changed` is forwarded so legacy single-CLI users get the
   // same trust-mismatch broadcast as multi-session mode. The normaliser
-  // emits `sessionId: null` here (see makeCtx below) which the schema
-  // explicitly allows for this path; #3205's dashboard prompt treats null
-  // as "applies to whatever CLI is connected".
+  // emits `sessionId: null` here — see the `normCtx` built in the
+  // forwarding loop below — which the schema explicitly allows for this
+  // path; #3205's dashboard prompt treats null as "applies to whatever
+  // CLI is connected".
   const FORWARDED_EVENTS = [
     'ready', 'stream_start', 'stream_delta', 'stream_end',
     'message', 'tool_start', 'tool_result', 'result', 'error',
