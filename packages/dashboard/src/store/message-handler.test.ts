@@ -1229,13 +1229,22 @@ describe('dashboard message-handler dispatch', () => {
         expect(skills.find((s: any) => s.name === 'y').active).toBe(false)
       })
 
-      it('skill_activated is a no-op when no cached skills (next list_skills is authoritative)', () => {
+      // Lock in current behaviour when no skills are cached: the handler
+      // calls `updateSession` with `(state.skills || []).map(...)`, which
+      // writes an empty array (initialising the field from undefined).
+      // Future contract: the next `list_skills` response is authoritative
+      // and will overwrite this with the real skill set. The empty array
+      // is a transient placeholder, not a final state.
+      it('skill_activated initialises skills to [] when none were cached (next list_skills is authoritative)', () => {
         store = createMockStore(withSession('s1'))
         setStore(store)
         expect(() =>
           handleMessage({ type: 'skill_activated', skillName: 'x' }, ctx() as any),
         ).not.toThrow()
-        // updateSession runs and writes skills: [] (state.skills was undefined)
+        // Sanity: starts undefined.
+        // (createEmptySessionState doesn't set `skills`.)
+        // After dispatch: empty array (no entries to flip; placeholder
+        // until list_skills arrives).
         const skills = (store.getState() as any).sessionStates.s1.skills
         expect(skills).toEqual([])
       })
