@@ -414,10 +414,16 @@ function flushPendingDeltas(): void {
     if (sessionId && newSessionStates[sessionId]) {
       const sessionState = newSessionStates[sessionId];
       const matched = new Set<string>();
+      // Type guard: never apply deltas to non-response messages, even if id
+      // matches. Defense against future server regressions or races where a
+      // collision slips past handleStreamDelta's defensive remap.
       const updatedMessages = sessionState.messages.map((m) => {
         const d = deltas.get(m.id);
-        if (d) matched.add(m.id);
-        return d ? { ...m, content: m.content + d } : m;
+        if (d && m.type === 'response') {
+          matched.add(m.id);
+          return { ...m, content: m.content + d };
+        }
+        return m;
       });
       // Safety net: create response messages for orphaned deltas (#2611)
       const finalMessages = updatedMessages;
@@ -439,8 +445,11 @@ function flushPendingDeltas(): void {
         const matched2 = new Set<string>();
         const updated = s.messages.map((m) => {
           const d = deltas.get(m.id);
-          if (d) matched2.add(m.id);
-          return d ? { ...m, content: m.content + d } : m;
+          if (d && m.type === 'response') {
+            matched2.add(m.id);
+            return { ...m, content: m.content + d };
+          }
+          return m;
         });
         // Safety net: create response messages for orphaned deltas (#2611)
         for (const [msgId, delta] of deltas) {
