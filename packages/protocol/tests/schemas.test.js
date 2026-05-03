@@ -374,4 +374,87 @@ describe('@chroxy/protocol schemas', () => {
     })
     assert.ok(!result.success, 'Should reject web_task_error code longer than 64 chars')
   })
+
+  // #3234: skill_changed event schema (server-broadcast trust mismatch).
+  it('validates ServerSkillChangedSchema with warn mode + 8-char hash prefixes', async () => {
+    const { ServerSkillChangedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillChangedSchema.safeParse({
+      type: 'skill_changed',
+      skillName: 'coding-style',
+      sessionId: 'sess-42',
+      oldHashPrefix: 'abcdef01',
+      newHashPrefix: '01234567',
+      mode: 'warn',
+    })
+    assert.ok(result.success, 'Should validate well-formed warn-mode skill_changed')
+    assert.equal(result.data.skillName, 'coding-style')
+    assert.equal(result.data.mode, 'warn')
+  })
+
+  it('validates ServerSkillChangedSchema with block mode + null sessionId (legacy single-CLI)', async () => {
+    const { ServerSkillChangedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillChangedSchema.safeParse({
+      type: 'skill_changed',
+      skillName: 'coding-style',
+      sessionId: null,
+      oldHashPrefix: 'aaaaaaaa',
+      newHashPrefix: 'bbbbbbbb',
+      mode: 'block',
+    })
+    assert.ok(result.success, 'Should accept null sessionId for legacy single-CLI mode')
+    assert.equal(result.data.sessionId, null)
+    assert.equal(result.data.mode, 'block')
+  })
+
+  it('rejects ServerSkillChangedSchema with hash prefix shorter than 8 chars', async () => {
+    const { ServerSkillChangedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillChangedSchema.safeParse({
+      type: 'skill_changed',
+      skillName: 'x',
+      sessionId: null,
+      oldHashPrefix: 'short',
+      newHashPrefix: 'bbbbbbbb',
+      mode: 'warn',
+    })
+    assert.ok(!result.success, 'Should reject hash prefix shorter than 8 chars')
+  })
+
+  it('rejects ServerSkillChangedSchema with non-hex hash prefix', async () => {
+    const { ServerSkillChangedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillChangedSchema.safeParse({
+      type: 'skill_changed',
+      skillName: 'x',
+      sessionId: null,
+      oldHashPrefix: 'XYZGHIJK', // not lowercase hex
+      newHashPrefix: 'bbbbbbbb',
+      mode: 'warn',
+    })
+    assert.ok(!result.success, 'Should reject non-hex hash prefix')
+  })
+
+  it('rejects ServerSkillChangedSchema with unknown mode', async () => {
+    const { ServerSkillChangedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillChangedSchema.safeParse({
+      type: 'skill_changed',
+      skillName: 'x',
+      sessionId: null,
+      oldHashPrefix: 'aaaaaaaa',
+      newHashPrefix: 'bbbbbbbb',
+      mode: 'banana',
+    })
+    assert.ok(!result.success, 'Should reject mode that is not warn or block')
+  })
+
+  it('rejects ServerSkillChangedSchema with wrong type literal', async () => {
+    const { ServerSkillChangedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSkillChangedSchema.safeParse({
+      type: 'skill_change', // missing 'd'
+      skillName: 'x',
+      sessionId: null,
+      oldHashPrefix: 'aaaaaaaa',
+      newHashPrefix: 'bbbbbbbb',
+      mode: 'warn',
+    })
+    assert.ok(!result.success, 'Should reject when type is not "skill_changed"')
+  })
 })

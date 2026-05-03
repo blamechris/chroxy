@@ -47,6 +47,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'skills_list',        // MVP (#2957) — no client UI yet; client-side display planned for v2 (#2958)
+  'skill_changed',      // #3234: protocol schema added; client UI (dashboard prompt) tracked in #3205
 ])
 
 // ---------------------------------------------------------------------------

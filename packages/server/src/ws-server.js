@@ -314,6 +314,7 @@ function _isSecureRequest(req) {
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
  *   { type: 'provider_list', providers }                — available providers
  *   { type: 'skills_list', skills }                     — active skills (name, description per entry)
+ *   { type: 'skill_changed', skillName, sessionId, oldHashPrefix, newHashPrefix, mode } — skill content-hash mismatch (#3234, transient)
  *   { type: 'push_token_error', message }               — push token registration error
  *   { type: 'cost_update', sessionId, cost }            — session cost update
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit

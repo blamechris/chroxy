@@ -319,6 +319,44 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: skill_changed (#3234) ----
+
+  describe('skill_changed event', () => {
+    it('maps loader payload to wire shape with 8-char hash prefixes', () => {
+      const data = {
+        name: 'coding-style',
+        oldHash: 'abcdef0123456789' + '0'.repeat(48),
+        newHash: '0123456789abcdef' + '0'.repeat(48),
+        blocked: false,
+      }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: 'sess-42' }))
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'skill_changed')
+      assert.equal(msg.skillName, 'coding-style')
+      assert.equal(msg.sessionId, 'sess-42')
+      assert.equal(msg.oldHashPrefix, 'abcdef01')
+      assert.equal(msg.newHashPrefix, '01234567')
+      assert.equal(msg.mode, 'warn')
+    })
+
+    it('reports mode = "block" when blocked = true', () => {
+      const data = {
+        name: 'coding-style',
+        oldHash: 'a'.repeat(64),
+        newHash: 'b'.repeat(64),
+        blocked: true,
+      }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: 's1' }))
+      assert.equal(result.messages[0].msg.mode, 'block')
+    })
+
+    it('emits null sessionId for legacy single-CLI mode', () => {
+      const data = { name: 'x', oldHash: 'a'.repeat(64), newHash: 'b'.repeat(64), blocked: false }
+      const result = normalizer.normalize('skill_changed', data, makeCtx({ sessionId: null }))
+      assert.equal(result.messages[0].msg.sessionId, null)
+    })
+  })
+
   // ---- EVENT_MAP: error ----
 
   describe('error event', () => {
@@ -476,7 +514,7 @@ describe('EVENT_MAP', () => {
       'ready', 'conversation_id', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
       'mcp_servers', 'plan_started', 'plan_ready', 'result',
-      'user_question', 'permission_request', 'error',
+      'user_question', 'permission_request', 'error', 'skill_changed',
     ]
     for (const event of expectedEvents) {
       assert.ok(EVENT_MAP[event], `EVENT_MAP missing handler for '${event}'`)
@@ -504,6 +542,7 @@ describe('EVENT_MAP', () => {
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
       error: { message: 'err' },
+      skill_changed: { name: 'coding-style', oldHash: 'a'.repeat(64), newHash: 'b'.repeat(64), blocked: false },
     }
     for (const [event, data] of Object.entries(testData)) {
       const result = EVENT_MAP[event](data, ctx)

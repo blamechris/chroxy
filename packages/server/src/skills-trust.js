@@ -27,7 +27,14 @@
  * (`cat ~/.chroxy/skills-trust.json`) without having to filter session
  * payloads.
  *
- * Mode (`'warn' | 'block'`, default `'warn'`):
+ * Mode (`'warn' | 'block'`):
+ *   - omitted / unknown value: trust checking is disabled. The store
+ *     coerces unknown modes to `warn` for the constructor's mode getter,
+ *     but the higher-level `trustMismatchMode` config gate (BaseSession
+ *     and SessionManager) only wires a default-pathed store when the
+ *     operator explicitly sets `'warn'` or `'block'`. Operators who do
+ *     nothing get the legacy no-op behaviour — no hashes computed, no
+ *     ledger written.
  *   - `warn`: hash mismatch logs a sanitised warning (basename + 8-char
  *     hash prefixes; same anti-leak pattern as #3215) and emits a
  *     `skill_changed` event. The skill is still loaded so the user
@@ -45,11 +52,29 @@
  * treated as empty so a single bad write can't lock every skill out of
  * every session. The recovery path is to delete the trust file and
  * re-trust on next load.
+ *
+ * Persistence safety (#3232):
+ *   - Writes go through a `<path>.tmp` sibling and `fs.renameSync` so a
+ *     mid-write crash leaves either the previous good file or a stale
+ *     `.tmp` (which `_load` ignores). The target file is never observed
+ *     in a half-written state.
+ *   - The temp file is created with mode `0600` (owner read/write only)
+ *     so the ledger isn't world-readable on POSIX. `rename` preserves
+ *     mode so the post-rename target keeps `0600`.
+ *
+ * Case-insensitive ledger keys (#3233):
+ *   - On case-insensitive filesystems (macOS APFS default, Windows NTFS
+ *     by default), the same skill can resolve to different casings of
+ *     the same path, which previously caused silent re-records. The
+ *     ledger key is lowercased on those platforms via
+ *     `_normalizePathKey`. The actual filesystem path used by callers
+ *     stays verbatim — only the ledger lookup key is normalised, so
+ *     case-sensitive Linux behaviour is unchanged.
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
 import { dirname, join, basename } from 'path'
 import { homedir } from 'os'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { createLogger } from './logger.js'
 
 const log = createLogger('skills-trust')
@@ -59,6 +84,41 @@ export const DEFAULT_TRUST_FILE = join(homedir(), '.chroxy', 'skills-trust.json'
 export const TRUST_MODE_WARN = 'warn'
 export const TRUST_MODE_BLOCK = 'block'
 const VALID_TRUST_MODES = new Set([TRUST_MODE_WARN, TRUST_MODE_BLOCK])
+
+/**
+ * Filesystems that fold case (case-insensitive lookup) by default. We treat
+ * macOS (APFS / HFS+) and Windows (NTFS) as case-insensitive for ledger key
+ * normalisation. Linux ext4 / btrfs / xfs are case-sensitive and keep keys
+ * verbatim.
+ *
+ * This intentionally does NOT probe the actual mount — APFS can be created
+ * case-sensitive and ext4 can be mounted case-insensitive, but those
+ * configurations are rare and the platform-default heuristic matches the
+ * common case while keeping the helper synchronous and dependency-free.
+ *
+ * @returns {boolean}
+ */
+function _isCaseInsensitiveFs() {
+  return process.platform === 'darwin' || process.platform === 'win32'
+}
+
+/**
+ * Normalise a ledger key for storage / lookup.
+ *
+ * On case-insensitive platforms (#3233) keys are lowercased so the same
+ * skill is found regardless of the casing the realpath resolved to. On
+ * case-sensitive platforms the key is returned verbatim so we don't break
+ * Linux setups that legitimately have `Foo.md` and `foo.md` side-by-side.
+ *
+ * Exported (`_` prefix) for tests; not part of the public API.
+ *
+ * @param {string} absPath
+ * @returns {string}
+ */
+export function _normalizePathKey(absPath) {
+  if (typeof absPath !== 'string') return ''
+  return _isCaseInsensitiveFs() ? absPath.toLowerCase() : absPath
+}
 
 // `lastVerified` is informational ("when did I last successfully verify
 // this skill?") so a millisecond-fresh value carries no operational
@@ -83,6 +143,14 @@ export function sha256Hex(body) {
 /**
  * In-memory + on-disk trust store. One instance is created per session at
  * BaseSession construction; callers can supply a custom path for tests.
+ *
+ * Note on mode defaults (#3237): the constructor's `mode` parameter
+ * coerces unknown / omitted values to `'warn'` for direct callers (tests
+ * and ad-hoc instantiation). The user-facing `trustMismatchMode` config
+ * key behaves differently: missing or invalid values disable trust
+ * checking entirely (no store is constructed at all by BaseSession /
+ * SessionManager). Operators who explicitly set `'warn'` or `'block'`
+ * get those modes; everyone else gets the legacy no-op behaviour.
  */
 export class SkillsTrustStore {
   /**
@@ -113,6 +181,19 @@ export class SkillsTrustStore {
    * Read + JSON-parse the trust file. Returns an empty object on any
    * failure (missing file, malformed JSON, non-object root, etc.) so a
    * corrupted record can never block the loader.
+   *
+   * #3232: a stale `<path>.tmp` from a prior crash is intentionally
+   * ignored — only the canonical target path is consulted. The next
+   * successful flush atomically replaces the target via rename, which
+   * also overwrites any stale temp file via the writer's pre-clean. So
+   * this read path doesn't need to inspect or clean up `.tmp`.
+   *
+   * #3233: keys read from disk are normalised through `_normalizePathKey`
+   * so a ledger written under one casing on a case-insensitive FS is
+   * still found when realpath resolves to a different casing later.
+   * Older ledgers keyed verbatim are upgraded transparently — the first
+   * `inspect` that hits a normalised key still finds the existing
+   * record.
    *
    * @returns {Record<string, { sha256: string, firstSeen: string, lastVerified: string }>}
    */
@@ -151,7 +232,13 @@ export class SkillsTrustStore {
         && typeof value.sha256 === 'string' && /^[0-9a-f]{64}$/.test(value.sha256)
         && typeof value.firstSeen === 'string'
       ) {
-        out[key] = {
+        const normKey = _normalizePathKey(key)
+        // Last-writer-wins on collisions — if two entries normalise to
+        // the same key (only possible on case-insensitive FS with mixed
+        // historical casings), keep the most recently iterated one.
+        // `Object.entries` iteration order is insertion-order so this
+        // matches the file's last write.
+        out[normKey] = {
           sha256: value.sha256,
           firstSeen: value.firstSeen,
           lastVerified: typeof value.lastVerified === 'string' ? value.lastVerified : value.firstSeen,
@@ -165,9 +252,40 @@ export class SkillsTrustStore {
    * Persist the in-memory ledger to disk. Skipped when no change has
    * been recorded since the last write to avoid pointless rewrites in
    * the steady state.
+   *
+   * #3232: writes are atomic-via-rename and chmod 0600.
+   *
+   *   1. The temp file `<path>.tmp` is created with `openSync(..., 'wx',
+   *      0o600)` so a partial / leaked temp from a prior crash is
+   *      cleaned first (`unlinkSync` on EEXIST). `wx` is exclusive-
+   *      create; combined with the unlink that means we never write
+   *      into a partially-populated temp.
+   *   2. After `writeSync` we `fsyncSync` the temp before rename so the
+   *      bytes are on disk before the directory entry flips. A crash
+   *      between writeSync and fsync would leave a stale temp (ignored
+   *      by `_load`); a crash between fsync and rename also leaves a
+   *      stale temp; only a successful rename advances the canonical
+   *      target.
+   *   3. `renameSync` is atomic on the same filesystem — readers see
+   *      either the old file or the new file, never a partial.
+   *
+   * Failure is non-fatal: the loader keeps the in-memory ledger and
+   * will retry on the next first-seen / mismatch. Don't throw — a
+   * read-only $HOME (containerised dev env) shouldn't break skill
+   * loading.
    */
   flush() {
     if (!this._dirty) return
+    // Per-writer unique temp path. BaseSession constructs one
+    // SkillsTrustStore per session, all pointing at the same default
+    // ledger path, so flush() must tolerate concurrent writers. The
+    // pid+random suffix prevents two writers from racing on the same
+    // .tmp file (where one's unlinkSync would invalidate the other's
+    // open fd, breaking the wx exclusive-create guarantee). Each
+    // writer renames its own unique temp to the target — rename is
+    // atomic so last-writer-wins.
+    const tmpPath = `${this._filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+    let fd = null
     try {
       mkdirSync(dirname(this._filePath), { recursive: true })
       // Convert the null-prototype object to a plain object before
@@ -177,13 +295,27 @@ export class SkillsTrustStore {
       for (const [k, v] of Object.entries(this._records)) {
         out[k] = v
       }
-      writeFileSync(this._filePath, JSON.stringify(out, null, 2) + '\n', 'utf8')
+      const payload = JSON.stringify(out, null, 2) + '\n'
+
+      // Open with exclusive-create + 0600. The unique temp path makes
+      // EEXIST effectively impossible (would require pid+random
+      // collision); `wx` is kept as a defence-in-depth guard.
+      fd = openSync(tmpPath, 'wx', 0o600)
+      writeSync(fd, payload, 0, 'utf8')
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = null
+
+      renameSync(tmpPath, this._filePath)
       this._dirty = false
     } catch (err) {
-      // Persist failure is non-fatal — the loader keeps using the
-      // in-memory ledger for the rest of the session and will retry on
-      // the next first-seen / mismatch. Don't throw: a read-only $HOME
-      // (containerised dev env) shouldn't break skill loading.
+      // Best-effort cleanup of an open fd / our own orphan temp so a
+      // future flush isn't pre-blocked. We never touch other writers'
+      // temps — the unique suffix means our cleanup can't affect them.
+      if (fd !== null) {
+        try { closeSync(fd) } catch { /* ignore */ }
+      }
+      try { unlinkSync(tmpPath) } catch { /* ignore */ }
       log.warn(`Could not persist trust file (${err && err.code ? err.code : err.message || err})`)
     }
   }
@@ -219,10 +351,15 @@ export class SkillsTrustStore {
   inspect(absPath, body) {
     const newHash = sha256Hex(body)
     const now = new Date().toISOString()
-    const existing = this._records[absPath]
+    // #3233: ledger lookups go through the normaliser so case-only
+    // differences on macOS / NTFS resolve to the same record. The
+    // verbatim `absPath` is kept around for the basename() warn
+    // (operator-facing path doesn't change shape).
+    const key = _normalizePathKey(absPath)
+    const existing = this._records[key]
 
     if (!existing) {
-      this._records[absPath] = { sha256: newHash, firstSeen: now, lastVerified: now }
+      this._records[key] = { sha256: newHash, firstSeen: now, lastVerified: now }
       this._dirty = true
       log.info(`Trust hash recorded for ${basename(absPath)}#${newHash.slice(0, 8)}`)
       return { status: 'recorded', hash: newHash }
@@ -278,12 +415,13 @@ export class SkillsTrustStore {
   acceptHash(absPath, body) {
     const newHash = sha256Hex(body)
     const now = new Date().toISOString()
-    const existing = this._records[absPath]
+    const key = _normalizePathKey(absPath)
+    const existing = this._records[key]
     if (existing) {
       existing.sha256 = newHash
       existing.lastVerified = now
     } else {
-      this._records[absPath] = { sha256: newHash, firstSeen: now, lastVerified: now }
+      this._records[key] = { sha256: newHash, firstSeen: now, lastVerified: now }
     }
     this._dirty = true
   }
