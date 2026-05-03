@@ -278,6 +278,70 @@ describe('BaseSession', () => {
     })
   })
 
+  // #3252 — public getters for trust store + active manual skills set.
+  // The settings handler used to reach into `_trustStore` /
+  // `_activeManualSkills` directly. If those internals ever move (e.g.
+  // wrapped in a layered manager, hoisted into SessionManager) the
+  // direct reach turns into a silent no-op without a type error.
+  describe('public getters (#3252)', () => {
+    it('getTrustStore returns the wired trust store instance', () => {
+      const trustDir = mkdtempSync(join(tmpdir(), 'chroxy-3252-trust-'))
+      try {
+        const trustStore = new SkillsTrustStore({
+          filePath: join(trustDir, 'trust.json'),
+          mode: 'warn',
+        })
+        const s = new BaseSession({
+          cwd: '/tmp',
+          skillsDir: emptySkillsDir,
+          repoSkillsDir: null,
+          trustStore,
+        })
+        assert.equal(s.getTrustStore(), trustStore,
+          'getTrustStore should return the same instance passed at construction')
+      } finally {
+        rmSync(trustDir, { recursive: true, force: true })
+      }
+    })
+
+    it('getTrustStore returns null when no trust store is wired', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.getTrustStore(), null,
+        'getTrustStore returns null (not undefined) when trust is disabled')
+    })
+
+    it('getActiveManualSkillsRaw returns the underlying Set (not a copy)', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        activeManualSkills: ['preset-a'],
+      })
+      const raw = s.getActiveManualSkillsRaw()
+      assert.ok(raw instanceof Set, 'getActiveManualSkillsRaw must return a Set')
+      assert.ok(raw.has('preset-a'))
+      // Same identity contract as the issue describes — callers can use
+      // `.has()` cheaply without rebuilding from the array form.
+      assert.equal(raw, s._activeManualSkills,
+        'returns the same Set instance (read-only contract — mutate via activate/deactivateSkill)')
+    })
+
+    it('getActiveManualSkillsRaw stays empty Set when no preset skills', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      const raw = s.getActiveManualSkillsRaw()
+      assert.ok(raw instanceof Set)
+      assert.equal(raw.size, 0)
+    })
+  })
+
   describe('setPermissionMode', () => {
     it('returns false for invalid modes', () => {
       assert.equal(session.setPermissionMode('invalid'), false)

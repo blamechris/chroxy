@@ -934,6 +934,10 @@ describe('settings-handlers', () => {
         const session = createMockSession()
         session.cwd = repoRoot
         session._trustStore = fakeTrustStore
+        // #3252: handler now reads via getters with optional-chaining
+        // fallback. Mocks need both forms because the merged-main HEAD
+        // includes the public-getters refactor.
+        session.getTrustStore = () => fakeTrustStore
         sessions.set('s1', { session, name: 'S', cwd: repoRoot })
         const ctx = makeCtx(sessions)
         const client = makeClient({ activeSessionId: 's1' })
@@ -984,6 +988,10 @@ describe('settings-handlers', () => {
         const session = createMockSession()
         session.cwd = repoRoot
         session._trustStore = fakeTrustStore
+        // #3252: handler now reads via getters with optional-chaining
+        // fallback. Mocks need both forms because the merged-main HEAD
+        // includes the public-getters refactor.
+        session.getTrustStore = () => fakeTrustStore
         sessions.set('s1', { session, name: 'S', cwd: repoRoot })
         const ctx = makeCtx(sessions)
         const client = makeClient({ activeSessionId: 's1' })
