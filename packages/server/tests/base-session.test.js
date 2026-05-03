@@ -153,6 +153,131 @@ describe('BaseSession', () => {
     })
   })
 
+  // #3209: runtime activate/deactivate of manual skills. The WS layer
+  // (skill_activate / skill_deactivate handlers) calls these and uses
+  // the boolean return to decide whether to broadcast.
+  describe('activateSkill / deactivateSkill (#3209)', () => {
+    let dir
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'chroxy-base-session-3209-'))
+      // One auto skill (always loaded), two manual ones (off by default).
+      writeFileSync(join(dir, 'auto-skill.md'), '# Auto\n\nalways on\n')
+      writeFileSync(join(dir, 'manual-a.md'), '---\nactivation: manual\n---\n\nmanual A body\n')
+      writeFileSync(join(dir, 'manual-b.md'), '---\nactivation: manual\n---\n\nmanual B body\n')
+    })
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('only auto skills load by default; manual ones stay off', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: dir,
+        repoSkillsDir: null,
+      })
+      const names = s._getSkills().map((sk) => sk.name).sort()
+      assert.deepEqual(names, ['auto-skill'])
+    })
+
+    it('activateSkill flips a manual skill on and reloads the prompt context', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: dir,
+        repoSkillsDir: null,
+      })
+      const before = s._buildSystemPrompt()
+      assert.ok(!before.includes('manual A body'), 'manual skill must not be in prompt before activation')
+
+      const changed = s.activateSkill('manual-a')
+      assert.equal(changed, true)
+      assert.deepEqual(s.getActiveManualSkills(), ['manual-a'])
+      const after = s._buildSystemPrompt()
+      assert.ok(after.includes('manual A body'), 'manual skill must be in prompt after activation')
+    })
+
+    it('activateSkill is idempotent — second call returns false, no reload churn', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.activateSkill('manual-a'), true)
+      assert.equal(s.activateSkill('manual-a'), false, 'second call returns false')
+      assert.deepEqual(s.getActiveManualSkills(), ['manual-a'])
+    })
+
+    it('deactivateSkill flips a manual skill off and reloads', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: dir,
+        repoSkillsDir: null,
+        activeManualSkills: ['manual-a'],
+      })
+      assert.ok(s._buildSystemPrompt().includes('manual A body'))
+
+      const changed = s.deactivateSkill('manual-a')
+      assert.equal(changed, true)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+      assert.ok(!s._buildSystemPrompt().includes('manual A body'),
+        'manual skill must be removed from prompt after deactivation')
+    })
+
+    it('deactivateSkill is idempotent on a not-currently-active name', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.deactivateSkill('manual-a'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+    })
+
+    it('rejects empty / non-string names without mutating state', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      for (const bad of ['', null, undefined, 42, {}, []]) {
+        assert.equal(s.activateSkill(bad), false)
+        assert.equal(s.deactivateSkill(bad), false)
+      }
+      assert.deepEqual(s.getActiveManualSkills(), [])
+    })
+
+    // #3246: activateSkill must verify the name corresponds to a real
+    // `activation: manual` skill on disk. Without this guard, typos
+    // would land in `_activeManualSkills` permanently, the loader
+    // would silently drop them, and the dashboard checkbox would
+    // falsely report success while the model never sees the change.
+    it('rejects unknown skill names without mutating state', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.activateSkill('does-not-exist'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+    })
+
+    it('rejects auto-skill names (only manual ones can be toggled)', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      // 'auto-skill' exists but is not `activation: manual` — toggling
+      // it makes no sense (it's always loaded).
+      assert.equal(s.activateSkill('auto-skill'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+    })
+
+    // #3209/#3246: the runtime-toggle capability defaults to false at
+    // BaseSession; only providers that rebuild the system prompt each
+    // turn (SdkSession) override to true. Other providers' WS
+    // handlers reject the toggle with `SKILL_TOGGLE_UNSUPPORTED`.
+    it('supportsRuntimeSkillToggle defaults to false on BaseSession', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.supportsRuntimeSkillToggle(), false)
+    })
+
+    it('multiple toggles compose — A, then B, then A off — all reflected in prompt', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      s.activateSkill('manual-a')
+      s.activateSkill('manual-b')
+      let prompt = s._buildSystemPrompt()
+      assert.ok(prompt.includes('manual A body'))
+      assert.ok(prompt.includes('manual B body'))
+
+      s.deactivateSkill('manual-a')
+      prompt = s._buildSystemPrompt()
+      assert.ok(!prompt.includes('manual A body'))
+      assert.ok(prompt.includes('manual B body'))
+
+      assert.deepEqual(s.getActiveManualSkills(), ['manual-b'])
+    })
+  })
+
   describe('setPermissionMode', () => {
     it('returns false for invalid modes', () => {
       assert.equal(session.setPermissionMode('invalid'), false)

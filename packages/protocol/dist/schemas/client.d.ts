@@ -106,6 +106,16 @@ export declare const SetPromptEvaluatorSchema: z.ZodObject<{
     value: z.ZodBoolean;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SkillActivateSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_activate">;
+    skillName: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SkillDeactivateSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_deactivate">;
+    skillName: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const PermissionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_response">;
     requestId: z.ZodString;
@@ -431,6 +441,14 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"skill_activate">;
+    skillName: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"skill_deactivate">;
+    skillName: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"permission_response">;

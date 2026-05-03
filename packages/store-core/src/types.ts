@@ -89,6 +89,12 @@ export interface SessionInfo {
   // older servers that don't include the field don't break the parser.
   // Renderers should treat `undefined` as `false` (toggle off).
   promptEvaluator?: boolean;
+  // #3209: per-session provider capability flags surfaced via
+  // session_list. The dashboard reads these to gate UI affordances
+  // (e.g. SkillsPanel disables checkboxes when `skillToggle` is
+  // false). Loosely typed because future providers may add fields
+  // the type definition doesn't yet enumerate.
+  capabilities?: Record<string, boolean>;
 }
 
 export interface AgentInfo {

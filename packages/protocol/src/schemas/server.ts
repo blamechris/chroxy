@@ -243,6 +243,11 @@ export const ServerSkillsListSchema = z.object({
     // #3067: 'global' for ~/.chroxy/skills, 'repo' for <cwd>/.chroxy/skills.
     // Optional so v1 clients keep parsing pre-#3067 payloads cleanly.
     source: z.enum(['global', 'repo']).optional(),
+    // #3209: activation mode + per-session active state. Optional so
+    // older servers (pre-#3209) without these fields still parse —
+    // the dashboard treats absence as `auto`/`active=true`.
+    activation: z.enum(['auto', 'manual']).optional(),
+    active: z.boolean().optional(),
   })),
 })
 
@@ -274,6 +279,22 @@ export const ServerSkillChangedSchema = z.object({
   oldHashPrefix: z.string().length(8).regex(/^[0-9a-f]{8}$/),
   newHashPrefix: z.string().length(8).regex(/^[0-9a-f]{8}$/),
   mode: z.enum(['warn', 'block']),
+})
+
+// #3209: runtime manual-skill toggle broadcast. Sent to every client
+// bound to `sessionId` whenever a `skill_activate` / `skill_deactivate`
+// flips the session's active set. Idempotent — only emitted on actual
+// state change (the handler returns early on no-op).
+export const ServerSkillActivatedSchema = z.object({
+  type: z.literal('skill_activated'),
+  sessionId: z.string(),
+  skillName: z.string(),
+})
+
+export const ServerSkillDeactivatedSchema = z.object({
+  type: z.literal('skill_deactivated'),
+  sessionId: z.string(),
+  skillName: z.string(),
 })
 
 export const ServerErrorSchema = z.object({

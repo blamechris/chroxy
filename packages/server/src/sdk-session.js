@@ -73,7 +73,23 @@ export class SdkSession extends BaseSession {
       resume: true,
       terminal: false,
       thinkingLevel: true,
+      // #3209/#3246: SDK rebuilds systemPrompt.append on every turn
+      // (see sdk-session.js#_callQuery), so a runtime toggle of
+      // _activeManualSkills + _loadSkills() takes effect on the next
+      // user message. Subprocess providers don't get this for free —
+      // they snapshot the skills text at session start.
+      skillToggle: true,
     }
+  }
+
+  /**
+   * #3209: SDK is the only provider that rebuilds the system prompt
+   * each turn, so manual-skill toggles propagate to the wire here.
+   * Subprocess providers (CliSession, CodexSession, GeminiSession)
+   * inherit the BaseSession default of `false`.
+   */
+  supportsRuntimeSkillToggle() {
+    return true
   }
 
   /**

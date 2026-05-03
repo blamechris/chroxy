@@ -385,33 +385,136 @@ function handleListProviders(ws, client, msg, ctx) {
 function handleListSkills(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
 
-  let skills
-  if (entry?.session && typeof entry.session._getSkills === 'function') {
-    const sessionSkills = entry.session._getSkills()
-    if (Array.isArray(sessionSkills)) {
-      skills = sessionSkills.map((s) => ({
-        name: s.name,
-        description: s.description,
-        // Skills loaded via the v2 layered loader always carry source; the
-        // `|| 'global'` fallback handles any v1-shape entries that slip in.
-        source: s.source || 'global',
-      }))
-    }
-  }
+  // #3209: emit the full activation context so the dashboard can
+  // render manual-skill toggles. For a bound session, run a fresh
+  // layered scan with `includeInactive: true` against that session's
+  // active set — the session's cached `_skills` only contains active
+  // entries (manual ones are filtered at construction).
+  const activeSet = entry?.session?._activeManualSkills instanceof Set
+    ? entry.session._activeManualSkills
+    : new Set()
+  const cwd = entry?.session?.cwd || null
+  const repoDir = cwd ? findRepoSkillsDir(cwd) : null
+  const provider = entry?.provider || null
 
-  if (!skills) {
-    const repoDir = entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null
-    skills = loadActiveSkillsLayered({
-      globalDir: DEFAULT_SKILLS_DIR,
-      repoDir,
-    }).map((s) => ({
+  const skills = loadActiveSkillsLayered({
+    globalDir: DEFAULT_SKILLS_DIR,
+    repoDir,
+    provider,
+    activeManualSkills: activeSet,
+    includeInactive: true,
+  }).map((s) => {
+    // `metadata.activation` is the authoritative source — keep
+    // anything else as `auto` to match the loader's defaults.
+    const rawActivation = typeof s.metadata?.activation === 'string'
+      ? s.metadata.activation.trim().toLowerCase()
+      : null
+    const activation = rawActivation === 'manual' ? 'manual' : 'auto'
+    return {
       name: s.name,
       description: s.description,
-      source: s.source,
-    }))
-  }
+      source: s.source || 'global',
+      activation,
+      // For `auto` skills, `active` is always true (they always load).
+      // For `manual` skills, reflect the loader's per-skill flag —
+      // already set from the activeManualSkills membership.
+      active: activation === 'auto' ? true : !!s.active,
+    }
+  })
 
   ctx.send(ws, { type: 'skills_list', skills })
+}
+
+/**
+ * #3209: activate a manual skill at runtime. The dashboard sends this
+ * when a user checks a manual-skill toggle. The session's active set
+ * is mutated, the skills list is reloaded so the next prompt picks
+ * up the new skill, and a `skill_activated` broadcast lets other
+ * clients on the same session refresh their UI.
+ */
+function handleSkillActivate(ws, client, msg, ctx) {
+  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
+    ctx.send(ws, { type: 'session_error', message: 'skill_activate requires a non-empty `skillName`' })
+    return
+  }
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+  if (typeof entry.session.activateSkill !== 'function') {
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+    return
+  }
+  // #3246: subprocess providers (CliSession, CodexSession,
+  // GeminiSession) snapshot the skills text at session start —
+  // mutating in-memory state mid-session does not propagate to the
+  // running model. Refuse the toggle with a distinct error code so
+  // the dashboard can surface "this provider doesn't support runtime
+  // toggle" UX instead of silently flipping a checkbox that does
+  // nothing on the wire.
+  if (typeof entry.session.supportsRuntimeSkillToggle === 'function'
+    && !entry.session.supportsRuntimeSkillToggle()) {
+    sendError(
+      ws,
+      msg?.requestId,
+      'SKILL_TOGGLE_UNSUPPORTED',
+      `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session with the skill in 'activeManualSkills' instead.`,
+    )
+    return
+  }
+
+  const changed = entry.session.activateSkill(msg.skillName)
+  if (!changed) return // already active or invalid name — no-op, no broadcast
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'skill_activated',
+    sessionId,
+    skillName: msg.skillName,
+  })
+}
+
+/**
+ * #3209: deactivate a manual skill at runtime. Mirror of
+ * `handleSkillActivate`.
+ */
+function handleSkillDeactivate(ws, client, msg, ctx) {
+  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
+    ctx.send(ws, { type: 'session_error', message: 'skill_deactivate requires a non-empty `skillName`' })
+    return
+  }
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+  if (typeof entry.session.deactivateSkill !== 'function') {
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+    return
+  }
+  // #3246: same capability gate as activate — subprocess providers
+  // can't honour a mid-session deactivate either.
+  if (typeof entry.session.supportsRuntimeSkillToggle === 'function'
+    && !entry.session.supportsRuntimeSkillToggle()) {
+    sendError(
+      ws,
+      msg?.requestId,
+      'SKILL_TOGGLE_UNSUPPORTED',
+      `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session without the skill in 'activeManualSkills' instead.`,
+    )
+    return
+  }
+
+  const changed = entry.session.deactivateSkill(msg.skillName)
+  if (!changed) return // wasn't active — no-op, no broadcast
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'skill_deactivated',
+    sessionId,
+    skillName: msg.skillName,
+  })
 }
 
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
@@ -579,6 +682,8 @@ export const settingsHandlers = {
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
   set_prompt_evaluator: handleSetPromptEvaluator,
+  skill_activate: handleSkillActivate,
+  skill_deactivate: handleSkillDeactivate,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }

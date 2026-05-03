@@ -229,6 +229,17 @@ export interface ServerEntry {
   lastConnectedAt: number | null;
 }
 
+// #3209: per-session skill metadata. Loaded via list_skills, mutated
+// in-place by skill_activated / skill_deactivated broadcasts. The
+// dashboard uses this to render manual-skill toggles.
+export interface SessionSkillInfo {
+  name: string;
+  description?: string;
+  source?: 'global' | 'repo';
+  activation?: 'auto' | 'manual';
+  active?: boolean;
+}
+
 export interface SessionState extends BaseSessionState {
   terminalRawBuffer: string;
   // Files tab: selected file path (persists across tab switches)
@@ -239,6 +250,11 @@ export interface SessionState extends BaseSessionState {
   // append new rules without losing existing ones. Optional: undefined until
   // the server confirms rules for this session.
   sessionRules?: PermissionRule[];
+  // #3209: cached skills list for the active session. Populated by
+  // list_skills response, mutated in-place by skill_activated /
+  // skill_deactivated broadcasts. Optional — undefined until the
+  // first list_skills is requested.
+  skills?: SessionSkillInfo[];
 }
 
 export interface ConnectionState {
@@ -448,6 +464,14 @@ export interface ConnectionState {
   // `prompt_evaluator_changed` event back which updates the session
   // entry — no optimistic update here.
   setPromptEvaluator: (value: boolean) => void;
+  // #3209: skills runtime API. `requestListSkills` fetches the current
+  // skills list (auto + manual + active state) for the bound session.
+  // `activateSkill`/`deactivateSkill` toggle a manual skill — the
+  // server broadcasts `skill_activated` / `skill_deactivated` back so
+  // multi-client UIs stay in sync; no optimistic update.
+  requestListSkills: () => void;
+  activateSkill: (skillName: string) => void;
+  deactivateSkill: (skillName: string) => void;
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
   resize: (cols: number, rows: number) => void;

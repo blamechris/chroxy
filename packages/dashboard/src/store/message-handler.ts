@@ -723,6 +723,59 @@ function handlePromptEvaluatorChanged(msg: Record<string, unknown>, get: MsgGet,
   _set({ sessions });
 }
 
+// #3209: full skills list response. Replaces the cached list on the
+// active (or message-targeted) session. Each entry carries `name`,
+// `description`, `source`, `activation`, `active`. The dashboard
+// SkillsPanel renders manual-skill toggles from this.
+function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  if (!Array.isArray(msg.skills)) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  // Strip to the SessionSkillInfo shape — the server validates the
+  // wire schema upstream, but a defensive copy keeps the store free
+  // of any extra fields a future server might add.
+  const skills = (msg.skills as Array<Record<string, unknown>>).map(s => {
+    const source = s.source === 'global' || s.source === 'repo' ? s.source : undefined;
+    const activation = s.activation === 'auto' || s.activation === 'manual' ? s.activation : undefined;
+    return {
+      name: typeof s.name === 'string' ? s.name : '',
+      description: typeof s.description === 'string' ? s.description : undefined,
+      source: source as 'global' | 'repo' | undefined,
+      activation: activation as 'auto' | 'manual' | undefined,
+      active: typeof s.active === 'boolean' ? s.active : undefined,
+    };
+  }).filter(s => s.name);
+  updateSession(targetId, () => ({ skills }));
+}
+
+// #3209: runtime manual-skill toggle broadcasts. Update the cached
+// skills list for the affected session so the toggle UI re-renders.
+// If we don't have a cached list yet (rare — list_skills hasn't been
+// requested), the next list_skills response will be authoritative.
+function handleSkillActivated(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
+  if (!skillName) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => ({
+    skills: (state.skills || []).map(s =>
+      s.name === skillName ? { ...s, active: true } : s,
+    ),
+  }));
+}
+
+function handleSkillDeactivated(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
+  if (!skillName) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => ({
+    skills: (state.skills || []).map(s =>
+      s.name === skillName ? { ...s, active: false } : s,
+    ),
+  }));
+}
+
 function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const { mode } = sharedPermissionModeChanged(msg);
   const targetId = resolveSessionId(msg, get().activeSessionId);
@@ -1283,6 +1336,9 @@ const HANDLERS: Record<string, Handler> = {
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
+  skills_list: handleSkillsList,
+  skill_activated: handleSkillActivated,
+  skill_deactivated: handleSkillDeactivated,
   permission_mode_changed: handlePermissionModeChanged,
   available_permission_modes: handleAvailablePermissionModes,
   session_updated: handleSessionUpdated,

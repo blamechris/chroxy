@@ -680,6 +680,151 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #3209: runtime activate/deactivate of manual skills. The handler
+  // validates the skillName payload, forwards to session.activateSkill /
+  // deactivateSkill, and broadcasts on actual change. No-op toggles
+  // (already in the requested state) stay silent so multi-client UIs
+  // aren't spammed.
+  describe('skill_activate / skill_deactivate (#3209)', () => {
+    it('skill_activate: rejects missing or empty skillName', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_activate(makeWs(), client, { skillName: '' }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /skillName/)
+    })
+
+    it('skill_activate: rejects when no active session', () => {
+      const ctx = makeCtx()
+      settingsHandlers.skill_activate(makeWs(), makeClient(), { skillName: 'foo' }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('skill_activate: forwards to session.activateSkill and broadcasts on change', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.activateSkill = createSpy(() => true)
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_activate(makeWs(), client, { skillName: 'foo' }, ctx)
+
+      assert.equal(session.activateSkill.callCount, 1)
+      assert.equal(session.activateSkill.lastCall[0], 'foo')
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'skill_activated')
+      assert.equal(ctx._sessionBroadcasts[0].msg.skillName, 'foo')
+    })
+
+    it('skill_activate: silent no-op when activateSkill returns false', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.activateSkill = createSpy(() => false)
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_activate(makeWs(), client, { skillName: 'already-on' }, ctx)
+
+      assert.equal(session.activateSkill.callCount, 1)
+      assert.equal(ctx._sessionBroadcasts.length, 0,
+        'no broadcast on no-op so other clients aren\'t spammed')
+    })
+
+    // #3246: subprocess providers (CliSession, CodexSession,
+    // GeminiSession) snapshot the skills text at session start, so
+    // mid-session toggles never reach the model. The handler refuses
+    // with SKILL_TOGGLE_UNSUPPORTED so the dashboard can surface
+    // distinct UX rather than silently flipping a non-functional
+    // checkbox.
+    it('skill_activate: refuses with SKILL_TOGGLE_UNSUPPORTED when provider can\'t honour runtime toggles', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.activateSkill = createSpy(() => true)
+      session.supportsRuntimeSkillToggle = () => false
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'codex' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      // sendError() writes directly to ws.send() rather than going via
+      // ctx.send(). The mock captures the JSON-parsed payload on
+      // ws._messages so we can assert on the wire shape.
+      const ws = makeWs()
+
+      settingsHandlers.skill_activate(ws, client, { skillName: 'foo' }, ctx)
+
+      assert.equal(session.activateSkill.callCount, 0,
+        'activateSkill must not be called when capability is unsupported')
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      const errorMsg = ws._messages.find(m => m.code === 'SKILL_TOGGLE_UNSUPPORTED')
+      assert.ok(errorMsg, 'expected SKILL_TOGGLE_UNSUPPORTED error to be sent')
+      assert.equal(errorMsg.type, 'error')
+    })
+
+    it('skill_deactivate: refuses with SKILL_TOGGLE_UNSUPPORTED for subprocess providers', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.deactivateSkill = createSpy(() => true)
+      session.supportsRuntimeSkillToggle = () => false
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'gemini' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.skill_deactivate(ws, client, { skillName: 'foo' }, ctx)
+
+      assert.equal(session.deactivateSkill.callCount, 0)
+      const errorMsg = ws._messages.find(m => m.code === 'SKILL_TOGGLE_UNSUPPORTED')
+      assert.ok(errorMsg, 'expected SKILL_TOGGLE_UNSUPPORTED error')
+      assert.equal(errorMsg.type, 'error')
+    })
+
+    it('skill_activate: rejects providers without the setter (back-compat guard)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      delete session.activateSkill
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_activate(makeWs(), client, { skillName: 'foo' }, ctx)
+      assert.match(ctx._sent[0].message, /does not support skill activation/)
+    })
+
+    it('skill_deactivate: forwards to session.deactivateSkill and broadcasts on change', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.deactivateSkill = createSpy(() => true)
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_deactivate(makeWs(), client, { skillName: 'foo' }, ctx)
+
+      assert.equal(session.deactivateSkill.callCount, 1)
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'skill_deactivated')
+      assert.equal(ctx._sessionBroadcasts[0].msg.skillName, 'foo')
+    })
+
+    it('skill_deactivate: silent no-op when deactivateSkill returns false', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.deactivateSkill = createSpy(() => false)
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_deactivate(makeWs(), client, { skillName: 'never-was-on' }, ctx)
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+    })
+  })
+
   // #3067: list_skills should walk up from the active session's cwd to pick up
   // the per-repo .chroxy/skills/ overlay and tag each entry with its source.
   // We can't stub the global ~/.chroxy/skills tier here — that's the user's
