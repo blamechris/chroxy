@@ -33,6 +33,13 @@ import { CliSession } from '../src/cli-session.js'
  * (network/API truncation upstream of the server), (b) an unaccounted SIGINT
  * path, (c) a server-fork or branch where stream_start fires twice for the
  * same messageId (covered by the regression-sentinel test below).
+ *
+ * Already ruled out by code-read (no test needed):
+ *  - ws-broadcaster.js — broadcasts WS messages to clients, never touches
+ *    _pendingStreams or history. Can't truncate.
+ *  - WS message routing / handler dispatch — handleInput records the
+ *    user_input via SessionMessageHistory and calls sendMessage; nothing
+ *    in between touches the in-flight stream's accumulator.
  */
 describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
   let history
@@ -264,8 +271,12 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
         toolInputOverflow: false,
       }
 
-      // Mirror SessionManager wiring: pipe the session's stream_* events into
-      // history.recordHistory.
+      // Mirror the SessionManager → SessionMessageHistory wiring (see
+      // session-manager.js _wireSessionEvents). This integration is
+      // intentionally minimal: the production proxy path also touches
+      // _timeoutManager.touchActivity and re-emits `session_event`, but
+      // neither side-effect touches `_pendingStreams` so they can't
+      // contribute to the truncation symptom.
       session.on('stream_start', (data) => history.recordHistory(sessionId, 'stream_start', data))
       session.on('stream_delta', (data) => history.recordHistory(sessionId, 'stream_delta', data))
       session.on('stream_end', (data) => history.recordHistory(sessionId, 'stream_end', data))
