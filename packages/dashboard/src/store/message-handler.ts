@@ -87,6 +87,7 @@ import {
   handleWebFeatureStatus as sharedWebFeatureStatus,
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
+  applyOrphanDeltas,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -107,11 +108,9 @@ import type {
   ConnectionContext,
   ConnectionState,
   CustomAgent,
-  DiffFile,
   DirectoryEntry,
   EnvironmentInfo,
   FileEntry,
-  GitStatusEntry,
   McpServer,
   QueuedMessage,
   SessionInfo,
@@ -121,7 +120,6 @@ import type {
   FilePickerItem,
   ConversationSummary,
   ProviderInfo,
-  SearchResult,
   WebTask,
 } from './types';
 import { createEmptySessionState } from './utils';
@@ -425,26 +423,10 @@ function flushPendingDeltas(): void {
         }
         return m;
       });
-      // Safety net: create response messages for orphaned deltas (#2611).
-      // If a non-response message already occupies the colliding id, use a
-      // suffixed response id and register a remap so we don't introduce
-      // duplicate ids in the messages array. Mirrors handleStreamDelta's
-      // defensive remap, applied here as a final guard for collisions that
-      // slipped past it (e.g. tool_use was added after the delta was queued).
+      // Safety net: create response messages for orphaned deltas (#2611,
+      // canonical helper extracted in #3176).
       const finalMessages = updatedMessages;
-      for (const [msgId, delta] of deltas) {
-        if (matched.has(msgId)) continue;
-        const colliding = finalMessages.some((m) => m.id === msgId && m.type !== 'response');
-        const targetId = colliding ? `${msgId}-response` : msgId;
-        const existing = finalMessages.find((m) => m.id === targetId);
-        if (existing) {
-          const idx = finalMessages.indexOf(existing);
-          finalMessages[idx] = { ...existing, content: existing.content + delta };
-        } else {
-          finalMessages.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
-        }
-        if (colliding) _deltaIdRemaps.set(msgId, targetId);
-      }
+      applyOrphanDeltas(finalMessages, deltas, matched, _deltaIdRemaps);
       newSessionStates = {
         ...newSessionStates,
         [sessionId]: { ...sessionState, messages: finalMessages },
@@ -464,22 +446,9 @@ function flushPendingDeltas(): void {
           }
           return m;
         });
-        // Safety net: create response messages for orphaned deltas (#2611).
-        // Suffix on collision to avoid duplicate ids — mirrors the
-        // sessionStates branch above.
-        for (const [msgId, delta] of deltas) {
-          if (matched2.has(msgId)) continue;
-          const colliding = updated.some((m) => m.id === msgId && m.type !== 'response');
-          const targetId = colliding ? `${msgId}-response` : msgId;
-          const existing = updated.find((m) => m.id === targetId);
-          if (existing) {
-            const idx = updated.indexOf(existing);
-            updated[idx] = { ...existing, content: existing.content + delta };
-          } else {
-            updated.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
-          }
-          if (colliding) _deltaIdRemaps.set(msgId, targetId);
-        }
+        // Safety net: create response messages for orphaned deltas (#2611,
+        // canonical helper extracted in #3176).
+        applyOrphanDeltas(updated, deltas, matched2, _deltaIdRemaps);
         return { messages: updated };
       });
       flatUpdated = true;
@@ -1127,10 +1096,19 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     const permMsg: ChatMessage = {
       id: nextMessageId('perm'),
       type: 'prompt',
-      content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
+      // Render only the tool name when description is missing; otherwise
+      // combine `"<tool>: <description>"`. Fallback to a generic label when
+      // neither is available. Fixes the "Tool: undefined" string that the
+      // prior `${tool}: ${description}` template produced (#3122).
+      content: msg.tool
+        ? (msg.description
+            ? `${msg.tool as string}: ${msg.description as string}`
+            : (msg.tool as string))
+        : ((msg.description as string) || 'Permission required'),
       tool: msg.tool as string | undefined,
       requestId: permRequestId,
-      toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
+      // Reject arrays — match the tightened guard in handlePermissionRequest (#3123)
+      toolInput: msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input) ? msg.input as Record<string, unknown> : undefined,
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),
@@ -1714,7 +1692,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const cached = targetState ? targetState.messages : get().messages;
       const result = sharedMessageHandler(msg, get().activeSessionId, _receivingHistoryReplay, cached);
       if (!result.shouldDispatch) break;
-      const newMsg = result.chatMessage!;
+      const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, (ss) => ({
           messages: [
@@ -2065,8 +2043,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const diffCb = get()._diffCallback;
       if (diffCb) {
         const payload = sharedDiffResult(msg);
+        // payload.files is now typed as DiffFile[] from store-core (#3132).
         diffCb({
-          files: payload.files as DiffFile[],
+          files: payload.files,
           error: payload.error,
         });
       }
@@ -2077,11 +2056,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const gitStatusCb = get()._gitStatusCallback;
       if (gitStatusCb) {
         const payload = sharedGitStatusResult(msg);
+        // payload arrays are now strongly typed from store-core (#3132).
         gitStatusCb({
           branch: payload.branch,
-          staged: payload.staged as GitStatusEntry[],
-          unstaged: payload.unstaged as GitStatusEntry[],
-          untracked: payload.untracked as string[],
+          staged: payload.staged,
+          unstaged: payload.unstaged,
+          untracked: payload.untracked,
           error: payload.error,
         });
       }
@@ -2226,7 +2206,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const currentQuery = (get() as ConnectionState).searchQuery;
       const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
       if (!shouldApply) break; // Stale response for an older query — ignore
-      set({ searchResults: results as SearchResult[], searchLoading: false });
+      set({ searchResults: results, searchLoading: false });
       break;
     }
 

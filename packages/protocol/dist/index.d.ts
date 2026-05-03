@@ -30,3 +30,4 @@ export declare const CLIENT_CAPABILITIES: {
  */
 export declare const MIN_PROTOCOL_VERSION = 1;
 export * from './schemas/index.ts';
+export * from './error-categories.ts';

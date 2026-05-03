@@ -102,6 +102,7 @@ import {
   handleWebFeatureStatus as sharedWebFeatureStatus,
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
+  applyOrphanDeltas,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -112,7 +113,6 @@ import type {
   ConnectionContext,
   ConnectionState,
   CustomAgent,
-  DiffFile,
   DirectoryEntry,
   FileEntry,
   McpServer,
@@ -124,10 +124,7 @@ import type {
   SlashCommand,
   ProviderInfo,
   ConversationSummary,
-  SearchResult,
   WebTask,
-  GitFileStatus,
-  GitBranch,
   PermissionRule,
 } from './types';
 import { createEmptySessionState } from './utils';
@@ -561,26 +558,9 @@ function flushPendingDeltas(): void {
         return m;
       });
       // Safety net: create response messages for orphaned deltas (#2611,
-      // ported to app in #3168). If a non-response message already occupies
-      // the colliding id, use a suffixed response id and register a remap so
-      // we don't introduce duplicate ids in the messages array. Mirrors the
-      // defensive remap in handleStreamDelta, applied here as a final guard
-      // for collisions that slipped past it (e.g. tool_use was added after
-      // the delta was queued).
+      // ported to app in #3168, extracted to canonical helper in #3176).
       const finalMessages = updatedMessages;
-      for (const [msgId, delta] of deltas) {
-        if (matched.has(msgId)) continue;
-        const colliding = finalMessages.some((m) => m.id === msgId && m.type !== 'response');
-        const targetId = colliding ? `${msgId}-response` : msgId;
-        const existing = finalMessages.find((m) => m.id === targetId);
-        if (existing) {
-          const idx = finalMessages.indexOf(existing);
-          finalMessages[idx] = { ...existing, content: existing.content + delta };
-        } else {
-          finalMessages.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
-        }
-        if (colliding) _ctx.deltaIdRemaps.set(msgId, targetId);
-      }
+      applyOrphanDeltas(finalMessages, deltas, matched, _ctx.deltaIdRemaps);
       newSessionStates = {
         ...newSessionStates,
         [sessionId]: { ...sessionState, messages: finalMessages },
@@ -603,21 +583,10 @@ function flushPendingDeltas(): void {
           }
           return m;
         });
-        // Same orphan-create safety net as the sessionStates branch above.
+        // Same orphan-create safety net as the sessionStates branch above
+        // (canonical helper extracted in #3176).
         const finalMessages = updatedMessages;
-        for (const [msgId, delta] of deltas) {
-          if (matched.has(msgId)) continue;
-          const colliding = finalMessages.some((m) => m.id === msgId && m.type !== 'response');
-          const targetId = colliding ? `${msgId}-response` : msgId;
-          const existing = finalMessages.find((m) => m.id === targetId);
-          if (existing) {
-            const idx = finalMessages.indexOf(existing);
-            finalMessages[idx] = { ...existing, content: existing.content + delta };
-          } else {
-            finalMessages.push({ id: targetId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
-          }
-          if (colliding) _ctx.deltaIdRemaps.set(msgId, targetId);
-        }
+        applyOrphanDeltas(finalMessages, deltas, matched, _ctx.deltaIdRemaps);
         newSessionStates = {
           ...newSessionStates,
           [activeId]: { ...ss, messages: finalMessages },
@@ -1191,14 +1160,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'session_switched': {
       const switched = sharedSessionSwitched(msg);
-      if (!switched) break;
-      const { newSessionId: sessionId, conversationId: switchConvId } = switched;
-      // Only treat as session-switch replay if the user explicitly initiated it
-      // (auth-triggered session_switched on reconnect should use reconnect dedup)
-      if (_ctx.pendingSwitchSessionId && _ctx.pendingSwitchSessionId === sessionId) {
+      // Defensive: clear the pending hint regardless of validity (#3121).
+      // A malformed `session_switched` arriving between a user-initiated
+      // switch and the real follow-up could otherwise leave a stale
+      // `pendingSwitchSessionId` and falsely flip the replay-dedup flag on
+      // the next valid switch. Run the replay-dedup check before clearing.
+      if (
+        switched &&
+        _ctx.pendingSwitchSessionId &&
+        _ctx.pendingSwitchSessionId === switched.newSessionId
+      ) {
         _ctx.isSessionSwitchReplay = true;
       }
       _ctx.pendingSwitchSessionId = null;
+      if (!switched) break;
+      const { newSessionId: sessionId, conversationId: switchConvId } = switched;
       set((state: ConnectionState) => {
         // Initialize session state if it doesn't exist
         const sessionStates = { ...state.sessionStates };
@@ -1330,7 +1306,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const cached = getSessionMessages(targetId);
       const result = sharedMessageHandler(msg, get().activeSessionId, _ctx.receivingHistoryReplay, cached);
       if (!result.shouldDispatch) break;
-      const newMsg = result.chatMessage!;
+      const newMsg = result.chatMessage;
       const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
       if (effectiveId && get().sessionStates[effectiveId]) {
         updateSession(effectiveId, (ss) => ({
@@ -1768,11 +1744,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const permMsg: ChatMessage = {
           id: nextMessageId('perm'),
           type: 'prompt',
-          // Fall back to `undefined` interpolation when description is missing
-          // to match the prior `${msg.tool}: ${msg.description}` cast (avoids a
-          // visible "null" appearing in the prompt content).
+          // Render only the tool name when description is missing; otherwise
+          // combine `"<tool>: <description>"`. Falls back to a generic label
+          // when neither is available. Fixes the "Tool: undefined" string
+          // that the prior `${tool}: ${description}` template produced (#3122).
           content: permPayload.tool
-            ? `${permPayload.tool}: ${permPayload.description ?? undefined}`
+            ? (permPayload.description
+                ? `${permPayload.tool}: ${permPayload.description}`
+                : permPayload.tool)
             : (permPayload.description || 'Permission required'),
           tool: permPayload.tool ?? undefined,
           requestId: permRequestId,
@@ -2079,8 +2058,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const diffCb = getCallback('diff');
       if (diffCb) {
         const payload = sharedDiffResult(msg);
+        // payload arrays are now strongly typed from store-core (#3132).
         diffCb({
-          files: payload.files as DiffFile[],
+          files: payload.files,
           error: payload.error,
         });
       }
@@ -2093,9 +2073,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const payload = sharedGitStatusResult(msg);
         cb({
           branch: payload.branch,
-          staged: payload.staged as GitFileStatus[],
-          unstaged: payload.unstaged as GitFileStatus[],
-          untracked: payload.untracked as string[],
+          staged: payload.staged,
+          unstaged: payload.unstaged,
+          untracked: payload.untracked,
           error: payload.error,
         });
       }
@@ -2107,7 +2087,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (cb) {
         const payload = sharedGitBranchesResult(msg);
         cb({
-          branches: payload.branches as GitBranch[],
+          branches: payload.branches,
           currentBranch: payload.currentBranch,
           error: payload.error,
         });
@@ -2401,9 +2381,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const currentQuery = (get() as ConnectionState).searchQuery;
       const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
       if (!shouldApply) break; // Stale response for an older query — ignore
-      const typedResults = results as SearchResult[];
-      set({ searchResults: typedResults, searchLoading: false, searchError: null });
-      useConversationStore.getState().setSearchResults(typedResults, currentQuery);
+      // results is already typed as SearchResult[] from store-core (#3146).
+      set({ searchResults: results, searchLoading: false, searchError: null });
+      useConversationStore.getState().setSearchResults(results, currentQuery);
       break;
     }
 
@@ -2413,10 +2393,28 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         serverErrors: [...state.serverErrors, serverError].slice(-10),
       }));
       useNotificationStore.getState().addServerError(serverError);
-      updateActiveSession((ss) => ({
-        messages: filterThinking([...ss.messages, errorMsg]),
-        streamingMessageId: null,
-      }));
+      // #3141: scoped routing for session-tagged server errors. Mirrors the
+      // dashboard's handler. Order: explicit `serverError.sessionId` →
+      // active session → notification-only fallback.
+      const errSessionId = serverError.sessionId;
+      if (errSessionId && get().sessionStates[errSessionId]) {
+        updateSession(errSessionId, (ss) => ({
+          messages: filterThinking([...ss.messages, errorMsg]),
+          streamingMessageId: null,
+        }));
+      } else {
+        const activeErrId = get().activeSessionId;
+        if (activeErrId && get().sessionStates[activeErrId]) {
+          updateActiveSession((ss) => ({
+            messages: filterThinking([...ss.messages, errorMsg]),
+            streamingMessageId: null,
+          }));
+        }
+        // No session context on app — the error is already surfaced via
+        // `useNotificationStore.addServerError` and the unrecoverable Alert
+        // below. App's ConnectionState has no top-level `messages` array
+        // to fall back to (unlike the dashboard).
+      }
       if (!serverError.recoverable) {
         Alert.alert('Server Error', serverError.message);
       }

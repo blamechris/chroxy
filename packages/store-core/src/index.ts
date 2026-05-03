@@ -38,6 +38,12 @@ export type {
   QueuedMessage,
   Checkpoint,
   BaseSessionState,
+  // Git result element types (#3132)
+  GitFileStatus,
+  GitBranch,
+  DiffHunkLine,
+  DiffHunk,
+  DiffFile,
 } from './types'
 
 export type {
@@ -125,6 +131,10 @@ export type {
 export {
   resolveStreamId,
 } from './stream-id'
+
+export {
+  applyOrphanDeltas,
+} from './orphan-deltas'
 
 export {
   PROVIDER_LABELS,

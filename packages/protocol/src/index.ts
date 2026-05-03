@@ -35,3 +35,6 @@ export const MIN_PROTOCOL_VERSION = 1
 
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from './schemas/index.ts'
+
+// Re-export client-side error-category detection (#3151)
+export * from './error-categories.ts'
