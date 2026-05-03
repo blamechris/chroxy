@@ -51,17 +51,18 @@ export function applyOrphanDeltas(
       (m) => m.id === msgId && m.type !== 'response',
     )
     const targetId = colliding ? `${msgId}-response` : msgId
-    const existing = messages.find((m) => m.id === targetId)
-    if (existing) {
-      const idx = messages.indexOf(existing)
-      messages[idx] = { ...existing, content: existing.content + delta }
+    const existingIdx = messages.findIndex((m) => m.id === targetId)
+    if (existingIdx !== -1) {
+      const existing = messages[existingIdx]!
+      messages[existingIdx] = { ...existing, content: existing.content + delta }
     } else {
-      messages.push({
+      const orphan: ChatMessage = {
         id: targetId,
-        type: 'response' as const,
+        type: 'response',
         content: delta,
         timestamp: Date.now(),
-      } as ChatMessage)
+      }
+      messages.push(orphan)
     }
     if (colliding) remapsRef.set(msgId, targetId)
   }

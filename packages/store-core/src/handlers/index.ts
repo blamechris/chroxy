@@ -1878,8 +1878,10 @@ function isDiffFile(v: unknown): v is DiffFile {
 
 /**
  * Drop malformed elements from `arr` using the supplied type guard. Logs a
- * `console.debug` message identifying the rejected element + handler name
- * so server-side regressions are visible without throwing.
+ * `console.debug` message identifying the handler name and the rejected
+ * element's index so server-side regressions are visible without throwing.
+ * The element value itself is intentionally NOT logged to keep the debug
+ * output narrow and avoid leaking large/sensitive payloads in production.
  */
 function validateGitElements<T>(
   arr: unknown[],

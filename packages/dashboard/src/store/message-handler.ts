@@ -1093,6 +1093,11 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       set({ messages: updater({ messages: get().messages }).messages });
     }
   } else {
+    // Validate string fields up front so the prompt content and tool slot
+    // are guaranteed strings — non-string `msg.tool`/`msg.description` could
+    // otherwise leak through `as string` casts and violate ChatMessage.content.
+    const tool = typeof msg.tool === 'string' ? msg.tool : null;
+    const description = typeof msg.description === 'string' ? msg.description : null;
     const permMsg: ChatMessage = {
       id: nextMessageId('perm'),
       type: 'prompt',
@@ -1100,12 +1105,10 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       // combine `"<tool>: <description>"`. Fallback to a generic label when
       // neither is available. Fixes the "Tool: undefined" string that the
       // prior `${tool}: ${description}` template produced (#3122).
-      content: msg.tool
-        ? (msg.description
-            ? `${msg.tool as string}: ${msg.description as string}`
-            : (msg.tool as string))
-        : ((msg.description as string) || 'Permission required'),
-      tool: msg.tool as string | undefined,
+      content: tool
+        ? (description ? `${tool}: ${description}` : tool)
+        : (description || 'Permission required'),
+      tool: tool ?? undefined,
       requestId: permRequestId,
       // Reject arrays — match the tightened guard in handlePermissionRequest (#3123)
       toolInput: msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input) ? msg.input as Record<string, unknown> : undefined,
