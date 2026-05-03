@@ -920,9 +920,22 @@ export function loadActiveSkillsLayered({
 
   // Repo overrides global on filename conflict — Map iteration order means the
   // second `set` for a given name wins, and that's exactly what we want.
+  //
+  // #3205 nuance: when `includeInactive` is enabled, an inactive repo entry
+  // must NOT override an active global entry of the same name. The actual
+  // prompt-build path runs with `includeInactive: false` and would skip the
+  // inactive repo skill (filtered out at the per-tier loader), then pick up
+  // the active global skill via the same merge — so `list_skills` would
+  // misreport the skill as inactive when the prompt is actually using the
+  // global active version. Prefer `active: true` over `active: false` on
+  // collision; otherwise repo-wins-last continues to apply.
   const byName = new Map()
   for (const s of globals) byName.set(s.name, s)
-  for (const s of repos) byName.set(s.name, s)
+  for (const s of repos) {
+    const existing = byName.get(s.name)
+    if (existing && existing.active === true && s.active === false) continue
+    byName.set(s.name, s)
+  }
 
   const merged = Array.from(byName.values()).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),

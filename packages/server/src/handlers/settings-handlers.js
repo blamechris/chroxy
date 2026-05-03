@@ -393,8 +393,19 @@ function handleListSkills(ws, client, msg, ctx) {
   const activeSet = entry?.session?._activeManualSkills instanceof Set
     ? entry.session._activeManualSkills
     : new Set()
-  const cwd = entry?.session?.cwd || null
-  const repoDir = cwd ? findRepoSkillsDir(cwd) : null
+  // #3205: prefer the session's resolved skill dirs when available so
+  // the response matches what the session is actually injecting. This
+  // matters when the session was constructed with `skillsDir` /
+  // `repoSkillsDir` overrides (tests pin temp dirs; future wiring may
+  // override per-session). Fall back to the defaults / cwd-walk only
+  // when the session doesn't expose these — typically because no
+  // session is bound (the no-session path scans the global tier).
+  const sessionSkillsDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+  const sessionRepoDir = entry?.session
+    ? (entry.session._repoSkillsDir !== undefined
+      ? entry.session._repoSkillsDir
+      : (entry.session.cwd ? findRepoSkillsDir(entry.session.cwd) : null))
+    : null
   const provider = entry?.provider || null
   // #3205: trust store powers the hash + last-activated metadata in
   // the response. When the session has no trust store wired (operator
@@ -404,8 +415,8 @@ function handleListSkills(ws, client, msg, ctx) {
   const trustStore = entry?.session?._trustStore || null
 
   const skills = loadActiveSkillsLayered({
-    globalDir: DEFAULT_SKILLS_DIR,
-    repoDir,
+    globalDir: sessionSkillsDir,
+    repoDir: sessionRepoDir,
     provider,
     activeManualSkills: activeSet,
     includeInactive: true,
@@ -520,7 +531,7 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
     return
   }
   if (typeof entry.session.deactivateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill toggling' })
     return
   }
   // #3246: same capability gate as activate — subprocess providers
