@@ -207,6 +207,43 @@ describe('dashboard message-handler dispatch', () => {
       const state = store.getState() as any
       expect(state._terminalWrites).toContain('hello ')
     })
+
+    // #3071 — when stream_start is dropped (e.g., session not yet in store at
+    // the time it arrived), the next stream_delta with the same messageId must
+    // NOT concatenate onto the existing tool_use bubble. The delta handler
+    // defends by detecting the type collision and lazy-creating a suffixed
+    // response. Mirrors the equivalent fix in the mobile app handler.
+    it('lazy-creates response bubble when stream_delta lands on a tool_use id', async () => {
+      const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 }
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState(), messages: [toolMsg] },
+        },
+      }))
+      setStore(store)
+
+      // Skip stream_start — simulate the dropped/raced case
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'After tool ' },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'response' },
+        ctx() as any,
+      )
+      // Flush the 100ms delta batcher
+      await new Promise((r) => setTimeout(r, 150))
+
+      const ss = (store.getState() as any).sessionStates.s1
+      const responseMsg = ss.messages.find((m: any) => m.id === 'msg-1-response')
+      expect(responseMsg).toBeDefined()
+      expect(responseMsg?.type).toBe('response')
+      expect(responseMsg?.content).toBe('After tool response')
+      // tool_use bubble must remain pristine — no concatenated assistant text
+      const toolUseMsg = ss.messages.find((m: any) => m.id === 'msg-1')
+      expect(toolUseMsg?.content).toBe('ls')
+    })
   })
 
   describe('malformed input', () => {
