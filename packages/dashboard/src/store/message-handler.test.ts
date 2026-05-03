@@ -197,6 +197,16 @@ describe('dashboard message-handler dispatch', () => {
   })
 
   describe('stream_delta dispatch', () => {
+    // Fake timers for the 100ms delta batcher — runAllTimers() flushes
+    // synchronously instead of waiting on real wall-clock setTimeout(150).
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
     it('forwards delta text to appendTerminalData', () => {
       handleMessage(
         {
@@ -216,7 +226,7 @@ describe('dashboard message-handler dispatch', () => {
     // NOT concatenate onto the existing tool_use bubble. The delta handler
     // defends by detecting the type collision and lazy-creating a suffixed
     // response. Mirrors the equivalent fix in the mobile app handler.
-    it('lazy-creates response bubble when stream_delta lands on a tool_use id', async () => {
+    it('lazy-creates response bubble when stream_delta lands on a tool_use id', () => {
       const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 }
       store = createMockStore(baseState({
         activeSessionId: 's1',
@@ -236,7 +246,7 @@ describe('dashboard message-handler dispatch', () => {
         ctx() as any,
       )
       // Flush the 100ms delta batcher
-      await new Promise((r) => setTimeout(r, 150))
+      vi.runAllTimers()
 
       const ss = (store.getState() as any).sessionStates.s1
       const responseMsg = ss.messages.find((m: any) => m.id === 'msg-1-response')
@@ -252,7 +262,7 @@ describe('dashboard message-handler dispatch', () => {
     // session isn't registered in sessionStates yet (pre-session bootstrap or
     // server hasn't echoed session_switched). The collision must still route to
     // a suffixed response id without polluting the tool_use bubble.
-    it('lazy-creates response bubble in flat-messages mode when collision hits a tool_use', async () => {
+    it('lazy-creates response bubble in flat-messages mode when collision hits a tool_use', () => {
       const toolMsg = { id: 'msg-flat', type: 'tool_use' as const, content: 'ls', timestamp: 1 }
       store = createMockStore(baseState({
         activeSessionId: null,
@@ -269,7 +279,7 @@ describe('dashboard message-handler dispatch', () => {
         { type: 'stream_delta', messageId: 'msg-flat', delta: 'response' },
         ctx() as any,
       )
-      await new Promise((r) => setTimeout(r, 150))
+      vi.runAllTimers()
 
       const flat = (store.getState() as any).messages
       const responseMsg = flat.find((m: any) => m.id === 'msg-flat-response')
@@ -284,7 +294,7 @@ describe('dashboard message-handler dispatch', () => {
     // remap in handleStreamDelta (e.g. the colliding tool_use is added to
     // state AFTER the delta is queued), flushPendingDeltas itself must never
     // apply delta text onto a non-response message.
-    it('flushPendingDeltas type-filter prevents tool_use corruption when collision slips past defensive remap', async () => {
+    it('flushPendingDeltas type-filter prevents tool_use corruption when collision slips past defensive remap', () => {
       store = createMockStore(baseState({
         activeSessionId: 's1',
         sessionStates: {
@@ -313,7 +323,7 @@ describe('dashboard message-handler dispatch', () => {
       }))
 
       // Step 3: flush
-      await new Promise((r) => setTimeout(r, 150))
+      vi.runAllTimers()
 
       const ss = (store.getState() as any).sessionStates.s1
       const toolUse = ss.messages.find((m: any) => m.id === 'msg-race' && m.type === 'tool_use')
