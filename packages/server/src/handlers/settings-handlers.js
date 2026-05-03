@@ -447,6 +447,23 @@ function handleSkillActivate(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
     return
   }
+  // #3246: subprocess providers (CliSession, CodexSession,
+  // GeminiSession) snapshot the skills text at session start —
+  // mutating in-memory state mid-session does not propagate to the
+  // running model. Refuse the toggle with a distinct error code so
+  // the dashboard can surface "this provider doesn't support runtime
+  // toggle" UX instead of silently flipping a checkbox that does
+  // nothing on the wire.
+  if (typeof entry.session.supportsRuntimeSkillToggle === 'function'
+    && !entry.session.supportsRuntimeSkillToggle()) {
+    sendError(
+      ws,
+      msg?.requestId,
+      'SKILL_TOGGLE_UNSUPPORTED',
+      `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session with the skill in 'activeManualSkills' instead.`,
+    )
+    return
+  }
 
   const changed = entry.session.activateSkill(msg.skillName)
   if (!changed) return // already active or invalid name — no-op, no broadcast
@@ -475,6 +492,18 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
   }
   if (typeof entry.session.deactivateSkill !== 'function') {
     ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+    return
+  }
+  // #3246: same capability gate as activate — subprocess providers
+  // can't honour a mid-session deactivate either.
+  if (typeof entry.session.supportsRuntimeSkillToggle === 'function'
+    && !entry.session.supportsRuntimeSkillToggle()) {
+    sendError(
+      ws,
+      msg?.requestId,
+      'SKILL_TOGGLE_UNSUPPORTED',
+      `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session without the skill in 'activeManualSkills' instead.`,
+    )
     return
   }
 

@@ -233,6 +233,34 @@ describe('BaseSession', () => {
       assert.deepEqual(s.getActiveManualSkills(), [])
     })
 
+    // #3246: activateSkill must verify the name corresponds to a real
+    // `activation: manual` skill on disk. Without this guard, typos
+    // would land in `_activeManualSkills` permanently, the loader
+    // would silently drop them, and the dashboard checkbox would
+    // falsely report success while the model never sees the change.
+    it('rejects unknown skill names without mutating state', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.activateSkill('does-not-exist'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+    })
+
+    it('rejects auto-skill names (only manual ones can be toggled)', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      // 'auto-skill' exists but is not `activation: manual` — toggling
+      // it makes no sense (it's always loaded).
+      assert.equal(s.activateSkill('auto-skill'), false)
+      assert.deepEqual(s.getActiveManualSkills(), [])
+    })
+
+    // #3209/#3246: the runtime-toggle capability defaults to false at
+    // BaseSession; only providers that rebuild the system prompt each
+    // turn (SdkSession) override to true. Other providers' WS
+    // handlers reject the toggle with `SKILL_TOGGLE_UNSUPPORTED`.
+    it('supportsRuntimeSkillToggle defaults to false on BaseSession', () => {
+      const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
+      assert.equal(s.supportsRuntimeSkillToggle(), false)
+    })
+
     it('multiple toggles compose — A, then B, then A off — all reflected in prompt', () => {
       const s = new BaseSession({ cwd: '/tmp', skillsDir: dir, repoSkillsDir: null })
       s.activateSkill('manual-a')

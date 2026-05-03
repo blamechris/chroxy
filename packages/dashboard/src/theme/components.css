@@ -179,6 +179,15 @@
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
+/* #3246: shown when the active provider can't honour runtime
+   toggles (subprocess providers). Italic + secondary colour to
+   visually distinguish from regular labels. */
+.skills-panel-note {
+  margin: 4px 0 8px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-style: italic;
+}
 .skills-panel section {
   margin-top: 8px;
 }

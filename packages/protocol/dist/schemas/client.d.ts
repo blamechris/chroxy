@@ -101,6 +101,11 @@ export declare const SetPermissionRulesSchema: z.ZodObject<{
     }, z.core.$strip>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SetPromptEvaluatorSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_prompt_evaluator">;
+    value: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const SkillActivateSchema: z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;
     skillName: z.ZodString;
@@ -432,6 +437,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
             deny: "deny";
         }>;
     }, z.core.$strip>>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_prompt_evaluator">;
+    value: z.ZodBoolean;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;

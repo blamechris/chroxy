@@ -202,14 +202,76 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * Activate a manual skill at runtime (#3209). The skill must declare
-   * `activation: manual` in its frontmatter — calling this for a
-   * non-manual skill is a no-op return false (the loader has the
-   * authoritative metadata; we don't duplicate it here).
+   * Indicates whether runtime skill toggles take effect on the wire
+   * for this provider (#3209 / #3246). The default is `false` — only
+   * SdkSession overrides to `true` because the SDK rebuilds
+   * `systemPrompt.append` on every turn from `_buildSystemPrompt()`.
+   *
+   * Subprocess providers (CliSession, CodexSession, GeminiSession)
+   * embed the skills text into the persistent subprocess at start
+   * (claude `--append-system-prompt`) or onto the first user message
+   * (Codex / Gemini's `_skillsPrepended` flag). Mutating in-memory
+   * state mid-session does NOT propagate to the running model, so the
+   * WS handler refuses the toggle with `SKILL_TOGGLE_UNSUPPORTED` for
+   * those providers and the dashboard hides / disables the checkbox.
+   *
+   * @returns {boolean}
+   */
+  supportsRuntimeSkillToggle() {
+    return false
+  }
+
+  /**
+   * Enumerate the names of every `activation: manual` skill visible
+   * to this session. Walks the layered loader with `includeInactive:
+   * true` so both currently-active and inactive manual skills are
+   * surfaced. Used to validate `activateSkill` / `deactivateSkill`
+   * inputs against real skill files (#3209) so a typo or an
+   * `activation: auto` skill name is rejected before we mutate the
+   * active set.
+   *
+   * @returns {Set<string>}
+   * @private
+   */
+  _listManualSkillNames() {
+    const layerOpts = {
+      globalDir: this._skillsDir,
+      repoDir: this._repoSkillsDir,
+      provider: this._provider,
+      activeManualSkills: this._activeManualSkills,
+      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
+      includeInactive: true,
+    }
+    if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
+    if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
+    if (this._providerSkillAllowlist) layerOpts.providerSkillAllowlist = this._providerSkillAllowlist
+    // Trust store omitted intentionally — discovery only, no inspect()
+    // calls. Trust handling stays attached to the active prompt path.
+
+    const all = loadActiveSkillsLayered(layerOpts)
+    const names = new Set()
+    for (const s of all) {
+      const activation = typeof s.metadata?.activation === 'string'
+        ? s.metadata.activation.trim().toLowerCase()
+        : null
+      if (activation === 'manual') names.add(s.name)
+    }
+    return names
+  }
+
+  /**
+   * Activate a manual skill at runtime (#3209). The skill must
+   * actually exist on disk AND declare `activation: manual` —
+   * arbitrary strings, typos, and `activation: auto` skill names
+   * are rejected (return `false`). Without the existence check, a
+   * stale entry would sit in `_activeManualSkills` forever, the
+   * loader would silently drop it on every `_loadSkills()` call,
+   * and the dashboard checkbox would falsely report success.
    *
    * Returns `true` when the active set actually changed (caller can
    * broadcast `skill_activated` and re-emit). `false` when already
-   * active or when the input isn't a valid skill name.
+   * active, when the name doesn't correspond to a real manual
+   * skill, or when the input shape is invalid.
    *
    * @param {string} skillName
    * @returns {boolean}
@@ -217,6 +279,7 @@ export class BaseSession extends EventEmitter {
   activateSkill(skillName) {
     if (typeof skillName !== 'string' || skillName === '') return false
     if (this._activeManualSkills.has(skillName)) return false
+    if (!this._listManualSkillNames().has(skillName)) return false
     this._activeManualSkills.add(skillName)
     this._loadSkills()
     return true
@@ -224,7 +287,11 @@ export class BaseSession extends EventEmitter {
 
   /**
    * Deactivate a manual skill at runtime (#3209). Returns true when
-   * the active set actually changed; false otherwise.
+   * the active set actually changed; false otherwise. The
+   * `_listManualSkillNames` validation isn't strictly needed here
+   * (deactivating a name that isn't currently active is already a
+   * no-op via the `has()` check), but mirroring `activateSkill`
+   * keeps the contract symmetric.
    *
    * @param {string} skillName
    * @returns {boolean}

@@ -14,6 +14,13 @@ import type { SessionSkillInfo } from '../store/types'
 
 export interface SkillsPanelProps {
   skills: SessionSkillInfo[] | undefined
+  // #3209/#3246: only providers that rebuild the system prompt each
+  // turn (Claude SDK) can honour mid-session toggles. Subprocess
+  // providers (Codex, Gemini, Claude CLI) snapshot the prompt at
+  // session start. Default `false` so the panel is read-only on
+  // unknown / older servers — operators see the skill list but the
+  // checkboxes are disabled with an explanatory note.
+  canToggle?: boolean
   onActivate: (skillName: string) => void
   onDeactivate: (skillName: string) => void
   onClose: () => void
@@ -21,6 +28,7 @@ export interface SkillsPanelProps {
 
 export function SkillsPanel({
   skills,
+  canToggle = false,
   onActivate,
   onDeactivate,
   onClose,
@@ -66,6 +74,13 @@ export function SkillsPanel({
       {manualSkills.length > 0 && (
         <section>
           <h4>Manual (toggle on/off)</h4>
+          {!canToggle && (
+            <p className="skills-panel-note" data-testid="skills-panel-no-toggle-note">
+              Runtime toggle is not supported by this provider. Restart the
+              session with the desired skills to change which manual skills
+              are active.
+            </p>
+          )}
           <ul className="skills-panel-list">
             {manualSkills.map(s => (
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
@@ -73,6 +88,7 @@ export function SkillsPanel({
                   <input
                     type="checkbox"
                     checked={!!s.active}
+                    disabled={!canToggle}
                     onChange={e => {
                       if (e.target.checked) onActivate(s.name)
                       else onDeactivate(s.name)

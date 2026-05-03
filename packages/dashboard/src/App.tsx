@@ -1414,6 +1414,7 @@ export function App() {
       {skillsPanelOpen && (
         <SkillsPanel
           skills={activeSkills}
+          canToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
           onActivate={activateSkill}
           onDeactivate={deactivateSkill}
           onClose={() => setSkillsPanelOpen(false)}

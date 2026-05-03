@@ -738,6 +738,53 @@ describe('settings-handlers', () => {
         'no broadcast on no-op so other clients aren\'t spammed')
     })
 
+    // #3246: subprocess providers (CliSession, CodexSession,
+    // GeminiSession) snapshot the skills text at session start, so
+    // mid-session toggles never reach the model. The handler refuses
+    // with SKILL_TOGGLE_UNSUPPORTED so the dashboard can surface
+    // distinct UX rather than silently flipping a non-functional
+    // checkbox.
+    it('skill_activate: refuses with SKILL_TOGGLE_UNSUPPORTED when provider can\'t honour runtime toggles', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.activateSkill = createSpy(() => true)
+      session.supportsRuntimeSkillToggle = () => false
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'codex' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      // sendError() writes directly to ws.send() rather than going via
+      // ctx.send(). The mock captures the JSON-parsed payload on
+      // ws._messages so we can assert on the wire shape.
+      const ws = makeWs()
+
+      settingsHandlers.skill_activate(ws, client, { skillName: 'foo' }, ctx)
+
+      assert.equal(session.activateSkill.callCount, 0,
+        'activateSkill must not be called when capability is unsupported')
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      const errorMsg = ws._messages.find(m => m.code === 'SKILL_TOGGLE_UNSUPPORTED')
+      assert.ok(errorMsg, 'expected SKILL_TOGGLE_UNSUPPORTED error to be sent')
+      assert.equal(errorMsg.type, 'error')
+    })
+
+    it('skill_deactivate: refuses with SKILL_TOGGLE_UNSUPPORTED for subprocess providers', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.deactivateSkill = createSpy(() => true)
+      session.supportsRuntimeSkillToggle = () => false
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'gemini' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.skill_deactivate(ws, client, { skillName: 'foo' }, ctx)
+
+      assert.equal(session.deactivateSkill.callCount, 0)
+      const errorMsg = ws._messages.find(m => m.code === 'SKILL_TOGGLE_UNSUPPORTED')
+      assert.ok(errorMsg, 'expected SKILL_TOGGLE_UNSUPPORTED error')
+      assert.equal(errorMsg.type, 'error')
+    })
+
     it('skill_activate: rejects providers without the setter (back-compat guard)', () => {
       const sessions = new Map()
       const session = createMockSession()

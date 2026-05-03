@@ -12,6 +12,7 @@ const NOOP = () => {}
 function renderPanel(overrides: Partial<SkillsPanelProps> = {}) {
   const props: SkillsPanelProps = {
     skills: undefined,
+    canToggle: true,
     onActivate: vi.fn(),
     onDeactivate: vi.fn(),
     onClose: NOOP,
@@ -96,5 +97,58 @@ describe('SkillsPanel (#3209)', () => {
     })
     expect(screen.queryByTestId('skill-toggle-legacy')).toBeNull()
     expect(screen.getByTestId('skill-item-legacy')).toBeInTheDocument()
+  })
+
+  // #3246: subprocess providers (Codex, Gemini, Claude CLI) don't
+  // honour mid-session toggles — the SkillsPanel must surface this
+  // as a disabled checkbox + explanatory note rather than silently
+  // letting the user click a non-functional control.
+  describe('canToggle gate (#3246)', () => {
+    it('disables manual-skill checkboxes when canToggle is false', () => {
+      renderPanel({
+        canToggle: false,
+        skills: [{ name: 'manual-1', activation: 'manual', active: false }],
+      })
+      const cb = screen.getByTestId('skill-toggle-manual-1') as HTMLInputElement
+      expect(cb.disabled).toBe(true)
+    })
+
+    it('shows the no-toggle note when canToggle is false and manual skills exist', () => {
+      renderPanel({
+        canToggle: false,
+        skills: [{ name: 'manual-1', activation: 'manual', active: false }],
+      })
+      expect(screen.getByTestId('skills-panel-no-toggle-note')).toBeInTheDocument()
+    })
+
+    it('does not show the no-toggle note when there are no manual skills', () => {
+      renderPanel({
+        canToggle: false,
+        skills: [{ name: 'auto-1', activation: 'auto', active: true }],
+      })
+      expect(screen.queryByTestId('skills-panel-no-toggle-note')).toBeNull()
+    })
+
+    it('does not show the no-toggle note when canToggle is true', () => {
+      renderPanel({
+        canToggle: true,
+        skills: [{ name: 'manual-1', activation: 'manual', active: false }],
+      })
+      expect(screen.queryByTestId('skills-panel-no-toggle-note')).toBeNull()
+    })
+
+    it('defaults canToggle to false (read-only) when prop is omitted', () => {
+      // Render without the prop — older callers / future providers
+      // that haven't enumerated their capability shouldn't get a
+      // functional toggle by default.
+      const props: Partial<SkillsPanelProps> = {
+        skills: [{ name: 'manual-1', activation: 'manual', active: false }],
+      }
+      delete (props as Record<string, unknown>).canToggle
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      render(<SkillsPanel {...(props as any)} onActivate={vi.fn()} onDeactivate={vi.fn()} onClose={NOOP} />)
+      const cb = screen.getByTestId('skill-toggle-manual-1') as HTMLInputElement
+      expect(cb.disabled).toBe(true)
+    })
   })
 })

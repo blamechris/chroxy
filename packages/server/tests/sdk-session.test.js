@@ -61,6 +61,18 @@ describe('SdkSession', () => {
     it('defaults sandbox to null when not provided', () => {
       assert.equal(session._sandbox, null)
     })
+
+    // #3209/#3246: SDK is the only provider that rebuilds the system
+    // prompt each turn (see _callQuery), so manual-skill toggles
+    // propagate to the wire. Subprocess providers inherit
+    // BaseSession's `false` default.
+    it('supportsRuntimeSkillToggle returns true (override of BaseSession default)', () => {
+      assert.equal(session.supportsRuntimeSkillToggle(), true)
+    })
+
+    it('exposes skillToggle: true via static capabilities', () => {
+      assert.equal(SdkSession.capabilities.skillToggle, true)
+    })
   })
 
   // -- start() --
