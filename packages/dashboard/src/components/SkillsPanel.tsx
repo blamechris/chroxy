@@ -147,8 +147,13 @@ export function SkillsPanel({
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
                 <div className="skill-row">
                   <span className="skill-name">{s.name}</span>
-                  <MismatchFlag name={s.name} />
                   {s.description && <span className="skill-desc">{s.description}</span>}
+                  {/* #3251: auto skills have no <label>, so label-
+                      association doesn't apply here — keep the flag
+                      inside the existing flex row so it renders
+                      inline next to the skill name (matches v1
+                      visual layout). */}
+                  <MismatchFlag name={s.name} />
                 </div>
                 <SkillMeta skill={s} />
               </li>
@@ -170,21 +175,29 @@ export function SkillsPanel({
           <ul className="skills-panel-list">
             {manualSkills.map(s => (
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={!!s.active}
-                    disabled={!canToggle}
-                    onChange={e => {
-                      if (e.target.checked) onActivate(s.name)
-                      else onDeactivate(s.name)
-                    }}
-                    data-testid={`skill-toggle-${s.name}`}
-                  />
-                  <span className="skill-name">{s.name}</span>
+                {/* #3251: wrap <label> + <MismatchFlag /> in a flex
+                    row so they render inline. The flag sits OUTSIDE
+                    the <label>, so clicking it does not trigger
+                    label-association and toggle the checkbox — but
+                    the visual placement (inline, after the name)
+                    matches the auto-skills section. */}
+                <div className="skill-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={!!s.active}
+                      disabled={!canToggle}
+                      onChange={e => {
+                        if (e.target.checked) onActivate(s.name)
+                        else onDeactivate(s.name)
+                      }}
+                      data-testid={`skill-toggle-${s.name}`}
+                    />
+                    <span className="skill-name">{s.name}</span>
+                    {s.description && <span className="skill-desc">{s.description}</span>}
+                  </label>
                   <MismatchFlag name={s.name} />
-                  {s.description && <span className="skill-desc">{s.description}</span>}
-                </label>
+                </div>
                 <SkillMeta skill={s} />
               </li>
             ))}

@@ -1019,6 +1019,307 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #3247 — direct unit coverage for the three skill message handlers.
+  // The defensive normalization in handleSkillsList (#3209/#3205) is
+  // forward-compat code: a future server adding fields shouldn't break
+  // older dashboards. Without direct tests, a refactor could silently
+  // drop the normalization and the next protocol bump breaks pre-existing
+  // clients.
+  describe('skill message handlers (#3247)', () => {
+    function withSession(sessionId: string, overrides: Partial<ConnectionState> = {}) {
+      const empty = createEmptySessionState()
+      return baseState({
+        activeSessionId: sessionId,
+        sessionStates: { [sessionId]: empty },
+        ...overrides,
+      })
+    }
+
+    describe('skills_list', () => {
+      it('stores normalized skills array on the active session', () => {
+        store = createMockStore(withSession('s1'))
+        setStore(store)
+        handleMessage({
+          type: 'skills_list',
+          skills: [
+            { name: 'review', description: 'Review PRs', source: 'global', activation: 'auto', active: true },
+            { name: 'commit', source: 'repo', activation: 'manual', active: false },
+          ],
+        }, ctx() as any)
+
+        const skills = (store.getState() as any).sessionStates.s1.skills
+        expect(skills).toHaveLength(2)
+        expect(skills[0]).toMatchObject({ name: 'review', source: 'global', activation: 'auto', active: true })
+        expect(skills[1]).toMatchObject({ name: 'commit', source: 'repo', activation: 'manual', active: false })
+      })
+
+      it('routes to the explicit sessionId when provided (not just active)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: empty, s2: empty },
+        }))
+        setStore(store)
+        handleMessage({
+          type: 'skills_list',
+          sessionId: 's2',
+          skills: [{ name: 'fmt' }],
+        }, ctx() as any)
+
+        const states = (store.getState() as any).sessionStates
+        expect(states.s2.skills).toHaveLength(1)
+        expect(states.s1.skills).toBeUndefined()
+      })
+
+      it('falls back to activeSessionId when sessionId is absent', () => {
+        store = createMockStore(withSession('sFallback'))
+        setStore(store)
+        handleMessage({ type: 'skills_list', skills: [{ name: 'one' }] }, ctx() as any)
+
+        const skills = (store.getState() as any).sessionStates.sFallback.skills
+        expect(skills).toHaveLength(1)
+        expect(skills[0].name).toBe('one')
+      })
+
+      it('ignores non-array skills payload (no throw, no mutation)', () => {
+        store = createMockStore(withSession('s1'))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skills_list', skills: 'not-an-array' }, ctx() as any),
+        ).not.toThrow()
+        expect((store.getState() as any).sessionStates.s1.skills).toBeUndefined()
+      })
+
+      it('filters out entries with non-string name', () => {
+        store = createMockStore(withSession('s1'))
+        setStore(store)
+        handleMessage({
+          type: 'skills_list',
+          skills: [
+            { name: 'good' },
+            { name: 42 },
+            { name: null },
+            {},
+            { name: 'also-good' },
+          ],
+        }, ctx() as any)
+
+        const skills = (store.getState() as any).sessionStates.s1.skills
+        expect(skills.map((s: any) => s.name)).toEqual(['good', 'also-good'])
+      })
+
+      it('coerces unknown source / activation values to undefined', () => {
+        store = createMockStore(withSession('s1'))
+        setStore(store)
+        handleMessage({
+          type: 'skills_list',
+          skills: [
+            { name: 'a', source: 'something-new', activation: 'experimental', active: 'yes' },
+          ],
+        }, ctx() as any)
+
+        const skill = (store.getState() as any).sessionStates.s1.skills[0]
+        expect(skill.source).toBeUndefined()
+        expect(skill.activation).toBeUndefined()
+        // active normalised: only `boolean` types pass through
+        expect(skill.active).toBeUndefined()
+      })
+
+      it('preserves audit metadata when present, drops non-string types', () => {
+        store = createMockStore(withSession('s1'))
+        setStore(store)
+        handleMessage({
+          type: 'skills_list',
+          skills: [
+            {
+              name: 'auditable',
+              version: '1.2.3',
+              hashPrefix: 'deadbeef',
+              firstSeen: '2026-01-01T00:00:00.000Z',
+              lastVerified: '2026-05-03T00:00:00.000Z',
+            },
+            {
+              name: 'malformed-meta',
+              version: 42,
+              hashPrefix: null,
+              firstSeen: 12345,
+              lastVerified: { iso: '2026-05-03' },
+            },
+          ],
+        }, ctx() as any)
+
+        const skills = (store.getState() as any).sessionStates.s1.skills
+        expect(skills[0].version).toBe('1.2.3')
+        expect(skills[0].hashPrefix).toBe('deadbeef')
+        expect(skills[0].firstSeen).toBe('2026-01-01T00:00:00.000Z')
+        expect(skills[0].lastVerified).toBe('2026-05-03T00:00:00.000Z')
+        expect(skills[1].version).toBeUndefined()
+        expect(skills[1].hashPrefix).toBeUndefined()
+        expect(skills[1].firstSeen).toBeUndefined()
+        expect(skills[1].lastVerified).toBeUndefined()
+      })
+
+      it('no-op when no active session and no sessionId on message', () => {
+        store = createMockStore(baseState({ activeSessionId: null, sessionStates: {} }))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skills_list', skills: [{ name: 'a' }] }, ctx() as any),
+        ).not.toThrow()
+      })
+
+      it('no-op when targetId resolves but no sessionStates entry exists', () => {
+        store = createMockStore(baseState({
+          activeSessionId: 'ghost',
+          sessionStates: {},
+        }))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skills_list', skills: [{ name: 'a' }] }, ctx() as any),
+        ).not.toThrow()
+      })
+    })
+
+    describe('skill_activated / skill_deactivated', () => {
+      it('skill_activated flips active=true on the matching cached skill', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, skills: [{ name: 'x', activation: 'manual', active: false }] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_activated', skillName: 'x' }, ctx() as any)
+
+        const skill = (store.getState() as any).sessionStates.s1.skills.find((s: any) => s.name === 'x')
+        expect(skill.active).toBe(true)
+      })
+
+      it('skill_deactivated flips active=false on the matching cached skill', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, skills: [{ name: 'x', activation: 'manual', active: true }] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_deactivated', skillName: 'x' }, ctx() as any)
+
+        const skill = (store.getState() as any).sessionStates.s1.skills.find((s: any) => s.name === 'x')
+        expect(skill.active).toBe(false)
+      })
+
+      it('skill_activated leaves non-matching skills untouched', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, skills: [
+              { name: 'x', activation: 'manual', active: false },
+              { name: 'y', activation: 'manual', active: false },
+            ] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_activated', skillName: 'x' }, ctx() as any)
+
+        const skills = (store.getState() as any).sessionStates.s1.skills
+        expect(skills.find((s: any) => s.name === 'x').active).toBe(true)
+        expect(skills.find((s: any) => s.name === 'y').active).toBe(false)
+      })
+
+      // Lock in current behaviour when no skills are cached: the handler
+      // calls `updateSession` with `(state.skills || []).map(...)`, which
+      // writes an empty array (initialising the field from undefined).
+      // Future contract: the next `list_skills` response is authoritative
+      // and will overwrite this with the real skill set. The empty array
+      // is a transient placeholder, not a final state.
+      it('skill_activated initialises skills to [] when none were cached (next list_skills is authoritative)', () => {
+        store = createMockStore(withSession('s1'))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skill_activated', skillName: 'x' }, ctx() as any),
+        ).not.toThrow()
+        // Sanity: starts undefined.
+        // (createEmptySessionState doesn't set `skills`.)
+        // After dispatch: empty array (no entries to flip; placeholder
+        // until list_skills arrives).
+        const skills = (store.getState() as any).sessionStates.s1.skills
+        expect(skills).toEqual([])
+      })
+
+      it('skill_activated routes to explicit sessionId rather than active', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, skills: [{ name: 'x', activation: 'manual', active: false }] },
+            s2: { ...empty, skills: [{ name: 'x', activation: 'manual', active: false }] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_activated', sessionId: 's2', skillName: 'x' }, ctx() as any)
+
+        const states = (store.getState() as any).sessionStates
+        expect(states.s1.skills[0].active).toBe(false)
+        expect(states.s2.skills[0].active).toBe(true)
+      })
+
+      it('skill_activated no-ops when sessionId targets a session not in store', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, skills: [{ name: 'x', activation: 'manual', active: false }] },
+          },
+        }))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skill_activated', sessionId: 'ghost', skillName: 'x' }, ctx() as any),
+        ).not.toThrow()
+        // s1 untouched
+        expect((store.getState() as any).sessionStates.s1.skills[0].active).toBe(false)
+      })
+
+      it('skill_activated ignores non-string skillName', () => {
+        const empty = createEmptySessionState()
+        const initial = [{ name: 'x', activation: 'manual' as const, active: false }]
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty, skills: initial } },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_activated', skillName: 42 }, ctx() as any)
+        handleMessage({ type: 'skill_activated', skillName: null }, ctx() as any)
+        handleMessage({ type: 'skill_activated' }, ctx() as any)
+
+        expect((store.getState() as any).sessionStates.s1.skills[0].active).toBe(false)
+      })
+
+      it('two sequential skill_activated broadcasts for different skills both apply', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, skills: [
+              { name: 'a', activation: 'manual', active: false },
+              { name: 'b', activation: 'manual', active: false },
+            ] },
+          },
+        }))
+        setStore(store)
+
+        handleMessage({ type: 'skill_activated', skillName: 'a' }, ctx() as any)
+        handleMessage({ type: 'skill_activated', skillName: 'b' }, ctx() as any)
+
+        const skills = (store.getState() as any).sessionStates.s1.skills
+        expect(skills.find((s: any) => s.name === 'a').active).toBe(true)
+        expect(skills.find((s: any) => s.name === 'b').active).toBe(true)
+      })
+    })
+  })
+
   describe('unknown message types', () => {
     it('does not throw on unknown types', () => {
       expect(() =>
