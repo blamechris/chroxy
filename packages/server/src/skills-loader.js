@@ -430,6 +430,13 @@ function _stripUnquotedTrailingComment(s) {
  *   - Rejection warnings include only `basename#hash` (#3215); the full
  *     absolute path is logged once at debug level.
  *
+ * Trust hashing (#3204): when a `trustStore` is supplied, each skill's
+ * post-frontmatter body is hashed with SHA-256 and compared against the
+ * stored value. First-seen content is recorded; mismatches log a
+ * sanitised warn and (in `block` mode) cause the skill to be filtered.
+ * `onTrustMismatch(info)` is invoked for every mismatch so callers can
+ * fan a `skill_changed` WS event downstream.
+ *
  * @param {string} dir - Directory to scan (e.g. ~/.chroxy/skills)
  * @param {{
  *   source?: 'global' | 'repo',
@@ -439,6 +446,8 @@ function _stripUnquotedTrailingComment(s) {
  *   provider?: string|null,
  *   activeManualSkills?: Set<string>|string[]|null,
  *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
+ *   trustStore?: object|null,
+ *   onTrustMismatch?: (info: object) => void,
  * }} [opts]
  *   - `provider`: the session's provider id (e.g. `claude-sdk`, `codex`).
  *     When set, skills whose frontmatter declares a `providers:` list are
@@ -450,6 +459,13 @@ function _stripUnquotedTrailingComment(s) {
  *     a skill doesn't pin a `metadata.injection` value (#3200). Defaults
  *     to `'append'` to match the Claude SDK's existing systemPrompt.append
  *     channel; subprocess providers should pass `'prepend'`.
+ *   - `trustStore`: a `SkillsTrustStore` instance (or any object exposing
+ *     `inspect(absPath, body)` and `mode`). When provided, the loader
+ *     records / verifies a SHA-256 hash for each skill (#3204).
+ *   - `onTrustMismatch`: optional callback invoked with the mismatch
+ *     info `{ name, source, path, oldHash, newHash, blocked }` for every
+ *     skill whose stored hash differs. Loader callers (BaseSession)
+ *     fan this into a `skill_changed` WS event for #3205.
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -457,6 +473,8 @@ export function loadActiveSkills(dir, opts = {}) {
   const provider = _normalizeProviderName(opts.provider)
   const activeManualSkills = _coerceManualSet(opts.activeManualSkills)
   const defaultInjectionMode = _normalizeInjectionMode(opts.defaultInjectionMode) || 'append'
+  const trustStore = opts.trustStore || null
+  const onTrustMismatch = typeof opts.onTrustMismatch === 'function' ? opts.onTrustMismatch : null
   let entries
   try {
     entries = readdirSync(dir)
@@ -611,6 +629,48 @@ export function loadActiveSkills(dir, opts = {}) {
     // recognise — typo tolerance.
     const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
 
+    // Trust hashing (#3204). The hash covers the post-frontmatter body —
+    // changes to the body are what actually mutate the skill's runtime
+    // behaviour, so frontmatter-only edits (renaming, switching activation
+    // mode) don't trigger a mismatch every time. The trust-store inspect
+    // call records a first-seen hash transparently; mismatches return a
+    // mode-aware `blocked` flag that we honour here.
+    if (trustStore && typeof trustStore.inspect === 'function') {
+      let inspectResult
+      try {
+        inspectResult = trustStore.inspect(realPath, finalBody)
+      } catch (err) {
+        // Trust failures must never block legitimate skill loads — log
+        // and fall through. The `inspect` implementation owns logging
+        // for normal cases; this branch only fires if the implementor
+        // throws unexpectedly.
+        log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+        inspectResult = null
+      }
+      if (inspectResult && inspectResult.status === 'mismatch') {
+        if (onTrustMismatch) {
+          try {
+            onTrustMismatch({
+              name,
+              source: source || null,
+              path: realPath,
+              oldHash: inspectResult.oldHash,
+              newHash: inspectResult.newHash,
+              blocked: !!inspectResult.blocked,
+            })
+          } catch (err) {
+            // Callback errors are swallowed — they shouldn't change the
+            // load outcome. Pure observer concern.
+            log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+          }
+        }
+        if (inspectResult.blocked) {
+          log.warn(`Skipping skill ${label}: trust mismatch in block mode`)
+          continue
+        }
+      }
+    }
+
     const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
     if (source) skill.source = source
     skills.push(skill)
@@ -751,6 +811,13 @@ export function findRepoSkillsDir(cwd) {
  * before we trim, which keeps the trimming behaviour consistent with what
  * the user actually has on disk.
  *
+ * Per-provider allowlist (#3207): when `providerSkillAllowlist` is supplied,
+ * Claude-family providers stay permissive (unchanged behaviour); non-Claude
+ * providers (codex, gemini, …) only keep skills whose name appears in the
+ * allowlist for that provider. A missing key OR an empty array filters out
+ * ALL skills for that provider (fail-secure). Passing `null` / omitting
+ * the key entirely leaves the v1 permissive behaviour intact.
+ *
  * @param {{
  *   globalDir?: string|null,
  *   repoDir?: string|null,
@@ -761,10 +828,13 @@ export function findRepoSkillsDir(cwd) {
  *   provider?: string|null,
  *   activeManualSkills?: Set<string>|string[]|null,
  *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
+ *   providerSkillAllowlist?: Record<string, string[]>|null,
  * }} [opts]
  *   - `provider`, `activeManualSkills`, `defaultInjectionMode`: forwarded
  *     to `loadActiveSkills` for #3198 (provider gating), #3199 (manual
  *     activation), and #3200 (per-skill injection mode).
+ *   - `providerSkillAllowlist`: per-provider allowlist (#3207). See
+ *     `_filterByProviderAllowlist` for semantics.
  * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo', metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkillsLayered({
@@ -777,6 +847,9 @@ export function loadActiveSkillsLayered({
   provider,
   activeManualSkills,
   defaultInjectionMode,
+  providerSkillAllowlist,
+  trustStore,
+  onTrustMismatch,
 } = {}) {
   const sameDir = globalDir && repoDir && _sameAbsolutePath(globalDir, repoDir)
 
@@ -787,6 +860,8 @@ export function loadActiveSkillsLayered({
   if (provider != null) loaderOpts.provider = provider
   if (activeManualSkills != null) loaderOpts.activeManualSkills = activeManualSkills
   if (defaultInjectionMode != null) loaderOpts.defaultInjectionMode = defaultInjectionMode
+  if (trustStore != null) loaderOpts.trustStore = trustStore
+  if (typeof onTrustMismatch === 'function') loaderOpts.onTrustMismatch = onTrustMismatch
 
   const globals = (globalDir && !sameDir)
     ? loadActiveSkills(globalDir, { ...loaderOpts, source: 'global' })
@@ -805,11 +880,17 @@ export function loadActiveSkillsLayered({
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
   )
 
+  // Apply the per-provider allowlist (#3207) AFTER the merge but BEFORE the
+  // total-budget pass — a skill the operator deny-listed should not be
+  // counted toward the cumulative budget, even if pruning would have
+  // dropped it anyway.
+  const filtered = _filterByProviderAllowlist(merged, provider, providerSkillAllowlist)
+
   const totalCap = Number.isFinite(maxTotalSkillBytes) && maxTotalSkillBytes > 0
     ? Math.floor(maxTotalSkillBytes)
     : DEFAULT_MAX_TOTAL_SKILL_BYTES
 
-  return _enforceTotalBudget(merged, totalCap)
+  return _enforceTotalBudget(filtered, totalCap)
 }
 
 // macOS (HFS+/APFS) and Windows (NTFS) are case-insensitive by default. A
@@ -834,6 +915,25 @@ function _sameAbsolutePath(a, b) {
   }
 }
 
+// Header text emitted at the top of the formatted skills payload. Exposed as
+// a constant so callers that build a multi-bucket payload (e.g. the subprocess
+// providers, which concat the prepend + append buckets into one user-message
+// prefix — #3228) can render the header exactly once at the concat boundary
+// instead of producing two `# User skills` sections.
+//
+// The header terminates with a literal blank line (`\n\n`) so callers can
+// concatenate it directly with the first `## Skill: …` section without
+// losing the visual separator. Without the trailing blank line the
+// preamble runs straight into the first heading (`Apply them...\n## Skill:`)
+// — caught by PR #3231 review (Copilot #3 / #4).
+export const SKILLS_PROMPT_HEADER = [
+  '# User skills',
+  '',
+  'The following skills have been shared from the user\'s skills directory. Apply them when relevant to the task at hand.',
+  '',
+  '',
+].join('\n')
+
 /**
  * Format a list of skills as a single string suitable for appending to a
  * system prompt or prepending to a user message.
@@ -841,24 +941,27 @@ function _sameAbsolutePath(a, b) {
  * Returns an empty string for empty/missing input so callers can branch on
  * truthiness without null-checking.
  *
+ * Pass `opts.includeHeader = false` to omit the leading `# User skills`
+ * preamble — this lets a caller building a payload from multiple buckets
+ * render the header exactly once at the concat boundary (#3228) instead of
+ * stamping it on each bucket and producing two headers in the final string.
+ *
  * @param {Array<{ name: string, body: string }>|null|undefined} skills
+ * @param {{ includeHeader?: boolean }} [opts]
  * @returns {string}
  */
-export function formatSkillsForPrompt(skills) {
+export function formatSkillsForPrompt(skills, opts = {}) {
   if (!Array.isArray(skills) || skills.length === 0) return ''
+
+  const includeHeader = opts && opts.includeHeader === false ? false : true
 
   const sections = skills.map((s) => {
     const body = typeof s.body === 'string' ? s.body.trim() : ''
     return `## Skill: ${s.name}\n\n${body}`
   })
 
-  return [
-    '# User skills',
-    '',
-    'The following skills have been shared from the user\'s skills directory. Apply them when relevant to the task at hand.',
-    '',
-    sections.join('\n\n---\n\n'),
-  ].join('\n')
+  const sectionText = sections.join('\n\n---\n\n')
+  return includeHeader ? `${SKILLS_PROMPT_HEADER}${sectionText}` : sectionText
 }
 
 function _firstNonEmptyLine(s) {
@@ -929,6 +1032,31 @@ function _normalizeProviderName(p) {
   if (typeof p !== 'string') return null
   const v = p.trim().toLowerCase()
   return v.length === 0 ? null : v
+}
+
+/**
+ * Decide whether a normalised provider id belongs to the Claude family.
+ *
+ * Members:
+ *   - bare alias `claude`
+ *   - `claude-*` (e.g. `claude-sdk`, `claude-cli`)
+ *   - `docker` alias and `docker-*` variants (`docker-cli`, `docker-sdk`)
+ *     both wrap Claude sessions in a container — they share Claude's
+ *     built-in tool gating, so for trust / allowlist purposes they are
+ *     part of the family.
+ *
+ * The `-` boundary on `claude-` / `docker-` keeps unrelated names such as
+ * `claudette` or `dockerize` from matching.
+ *
+ * @param {string|null|undefined} provider  raw or pre-normalised id
+ * @returns {boolean}
+ */
+function _isClaudeFamilyProvider(provider) {
+  const norm = _normalizeProviderName(provider)
+  if (!norm) return false
+  if (norm === 'claude' || norm.startsWith('claude-')) return true
+  if (norm === 'docker' || norm.startsWith('docker-')) return true
+  return false
 }
 
 /**
@@ -1003,6 +1131,80 @@ function _skillMatchesProvider(frontmatter, provider) {
     if (target === 'claude' && v.startsWith('claude-')) return true
   }
   return false
+}
+
+/**
+ * Apply the per-provider skill allowlist (#3207).
+ *
+ * Semantics:
+ *   - `allowlist` is null / undefined / not an object → no allowlist
+ *     configured: legacy permissive behaviour, every skill passes through
+ *     unchanged. This keeps existing setups working without forcing
+ *     operators to opt every skill into a list before upgrading.
+ *   - `provider` starts with `claude` (the family alias used by
+ *     `_skillMatchesProvider`) → permissive. Claude has built-in tool
+ *     gating so skills there are lower risk; the allowlist is meant to
+ *     harden providers (Codex, Gemini, …) that don't enforce tool scopes
+ *     the same way.
+ *   - For any other (non-Claude) provider: only skills whose `name` is
+ *     present in `allowlist[provider]` are kept. A missing key OR an
+ *     empty array filters out ALL skills (fail-secure default — an
+ *     operator who configures the allowlist but forgets to add an entry
+ *     for `gemini` should NOT be silently permissive).
+ *   - `provider` is null / unknown when an allowlist is configured →
+ *     fail-secure: drop everything. The operator opted in to scoping;
+ *     unknown contexts shouldn't bypass it.
+ *
+ * @param {Array<object>} skills
+ * @param {string|null} provider
+ * @param {Record<string, string[]>|null|undefined} allowlist
+ * @returns {Array<object>}
+ */
+function _filterByProviderAllowlist(skills, provider, allowlist) {
+  if (!Array.isArray(skills) || skills.length === 0) return skills
+  if (allowlist == null || typeof allowlist !== 'object' || Array.isArray(allowlist)) {
+    return skills // no allowlist configured → permissive (back-compat)
+  }
+
+  const norm = _normalizeProviderName(provider)
+  // Claude-family providers stay permissive even when an allowlist is
+  // configured. Membership covers the bare alias `claude`, the
+  // `claude-*` variants (`claude-sdk`, `claude-cli`), and the Docker
+  // wrappers (`docker`, `docker-cli`, `docker-sdk`) which inherit
+  // Claude's built-in tool gating. The shared
+  // `_isClaudeFamilyProvider` helper keeps the membership rule in one
+  // place so the trust / allowlist / family-alias paths can't drift.
+  if (_isClaudeFamilyProvider(norm)) return skills
+
+  // No provider id at all — fail-secure: the operator scoped the
+  // allowlist but we can't tell which bucket this session belongs to.
+  if (!norm) return []
+
+  // Look up the per-provider entry. Missing key OR empty array →
+  // fail-secure (drop everything for this provider). Anything other
+  // than an array of strings is treated as missing.
+  const raw = Object.prototype.hasOwnProperty.call(allowlist, norm) ? allowlist[norm] : undefined
+  if (!Array.isArray(raw) || raw.length === 0) {
+    if (skills.length > 0) {
+      log.warn(`Per-provider skill allowlist: no entry for provider '${norm}' — dropping all ${skills.length} skill(s)`)
+    }
+    return []
+  }
+
+  const allowedNames = new Set()
+  for (const v of raw) {
+    if (typeof v === 'string' && v) allowedNames.add(v)
+  }
+
+  const kept = []
+  for (const s of skills) {
+    if (s && typeof s.name === 'string' && allowedNames.has(s.name)) {
+      kept.push(s)
+    } else if (s && typeof s.name === 'string') {
+      log.warn(`Per-provider skill allowlist: skill '${s.name}' not in allowlist for provider '${norm}' — filtered`)
+    }
+  }
+  return kept
 }
 
 /**

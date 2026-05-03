@@ -29,6 +29,8 @@ Configuration values are resolved in the following order (highest priority first
 | `promptEvaluatorSkipPattern` | string | - | - | Per-session regex source (case-insensitive) extending the default skip list used by the prompt evaluator's trivial-message heuristic. See [Prompt evaluator skip heuristic](#prompt-evaluator-skip-heuristic) below. |
 | `maxSkillBytes` | number | - | - | Per-skill byte cap. Skills exceeding this size are rejected with a sanitised log warning. Default `32768` (32KB). Set to `0` to disable the per-skill cap. |
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
+| `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
+| `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
 
 ### Prompt evaluator skip heuristic
 
@@ -53,6 +55,86 @@ warning and falls back to the default pattern only.
 This config is consumed by the auto-evaluator hook (see `shouldSkipEvaluator`
 in `packages/server/src/prompt-evaluator.js`); the on-demand "Evaluate"
 button in the dashboard always evaluates, regardless of this setting.
+
+### Per-provider skill allowlist
+
+`providerSkillAllowlist` lets operators restrict which skills are eligible to
+load for non-Claude providers (Codex, Gemini, etc.). Claude has its own
+tool-gating layer; Codex and Gemini do not, so a malicious or buggy skill that
+asks them to run a destructive shell command is harder to contain. The
+allowlist scopes the per-session skill set to a known-good list per provider.
+
+Shape: an object keyed by provider id (the same string used in the
+`provider` config key); each value is an array of skill names (the file's
+basename without the `.md` / `.markdown` extension).
+
+```jsonc
+{
+  "providerSkillAllowlist": {
+    "codex": ["coding-style", "git-workflow"],
+    "gemini": ["coding-style"]
+  }
+}
+```
+
+Behaviour:
+
+- **Allowlist omitted entirely** — legacy permissive: every loaded skill is
+  eligible for every provider. Existing setups keep working without change.
+- **Claude-family providers** (`claude-sdk`, `claude-cli`, `docker-sdk`,
+  `docker-cli`, bare alias `claude`) — always permissive, even when the
+  allowlist is configured. Claude's tool gating is the primary defense.
+- **Non-Claude providers with an entry in the allowlist** — only skills
+  whose basename appears in `allowlist[provider]` load. Other skills are
+  silently filtered (a sanitised warn is logged for each drop).
+- **Non-Claude providers with no entry, or an empty array** — fail-secure:
+  ALL skills are filtered for that provider. An operator who configures
+  the allowlist but forgets to add a key for `gemini` should NOT be
+  silently permissive.
+
+The filter runs after the global+repo merge and before the global byte
+budget, so a deny-listed skill never counts against the budget.
+
+### Skill content-hash trust
+
+`trustMismatchMode` opts the server into a per-skill SHA-256 ledger so silent
+post-review tampering is detected. On first activation the loader records each
+skill's body hash to `~/.chroxy/skills-trust.json`; on every subsequent load
+the recorded hash is compared against the current body.
+
+Modes:
+
+- **omitted (default)** — trust check disabled. No hashes are computed or
+  written. Behaviour is identical to the pre-#3204 server.
+- **`warn`** — mismatch logs a sanitised warning (basename + 8-char hash
+  prefixes; same anti-leak pattern as the rejection warnings) and emits a
+  `skill_changed` WS event so a paired dashboard can surface a prompt. The
+  skill still loads — operator review is the gate.
+- **`block`** — same warn + event, but the skill is filtered out of the active
+  set so a tampered skill stops influencing prompts until the operator
+  explicitly re-trusts it.
+
+Hash scope: only the body AFTER frontmatter parsing is hashed, so cosmetic
+frontmatter edits (renaming, switching activation mode, adjusting priority)
+don't trigger a mismatch every time. Body edits, deletions, or replacements
+do.
+
+The trust file lives at `~/.chroxy/skills-trust.json` and is intentionally a
+sidecar (not folded into `session-state.json`) so it can be inspected
+directly. Format:
+
+```jsonc
+{
+  "/Users/me/.chroxy/skills/coding-style.md": {
+    "sha256": "abc123...",
+    "firstSeen": "2026-05-03T12:34:56.000Z",
+    "lastVerified": "2026-05-03T12:34:56.000Z"
+  }
+}
+```
+
+A corrupted or missing trust file is treated as empty (fail-open) so a single
+bad write can't lock every skill out of every session.
 
 ### Provider selection
 

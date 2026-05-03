@@ -14,7 +14,9 @@ import {
   groupSkillsByInjectionMode,
   findRepoSkillsDir,
   DEFAULT_SKILLS_DIR,
+  SKILLS_PROMPT_HEADER,
 } from './skills-loader.js'
+import { SkillsTrustStore } from './skills-trust.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
@@ -60,6 +62,9 @@ export class BaseSession extends EventEmitter {
     maxTotalSkillBytes,
     provider,
     activeManualSkills,
+    providerSkillAllowlist,
+    trustStore,
+    trustMismatchMode,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -113,7 +118,57 @@ export class BaseSession extends EventEmitter {
     }
     if (Number.isFinite(maxSkillBytes)) layerOpts.maxSkillBytes = maxSkillBytes
     if (Number.isFinite(maxTotalSkillBytes)) layerOpts.maxTotalSkillBytes = maxTotalSkillBytes
+    // Per-provider skill allowlist (#3207). When omitted, the loader is
+    // permissive (legacy behaviour). When supplied, non-Claude providers
+    // are filtered to the named subset and a missing entry filters all
+    // skills for that provider (fail-secure). Plumbed by SessionManager
+    // from the server config.
+    if (providerSkillAllowlist != null && typeof providerSkillAllowlist === 'object'
+      && !Array.isArray(providerSkillAllowlist)) {
+      layerOpts.providerSkillAllowlist = providerSkillAllowlist
+    }
+
+    // Trust store (#3204). Two activation paths:
+    //   - `trustStore: <SkillsTrustStore-like>` — caller-supplied store
+    //     (tests pin a temp file path here so the real
+    //     ~/.chroxy/skills-trust.json is never touched).
+    //   - `trustMismatchMode: 'warn' | 'block'` — opt into the default
+    //     store at ~/.chroxy/skills-trust.json with the chosen mode.
+    //     SessionManager always passes one of these strings through;
+    //     direct BaseSession construction without it (existing tests,
+    //     ad-hoc instantiation) keeps the legacy no-op behaviour.
+    // Mismatch events are collected during the synchronous loader call
+    // and re-emitted on `process.nextTick` because SessionManager wires
+    // event listeners AFTER the constructor returns — a synchronous
+    // emit here would land on an empty listener set.
+    let resolvedTrustStore = null
+    if (trustStore) {
+      resolvedTrustStore = trustStore
+    } else if (trustMismatchMode === 'warn' || trustMismatchMode === 'block') {
+      resolvedTrustStore = new SkillsTrustStore({ mode: trustMismatchMode })
+    }
+    this._trustStore = resolvedTrustStore
+    const pendingTrustEvents = []
+    if (resolvedTrustStore) {
+      layerOpts.trustStore = resolvedTrustStore
+      layerOpts.onTrustMismatch = (info) => { pendingTrustEvents.push(info) }
+    }
     this._skills = loadActiveSkillsLayered(layerOpts)
+    // Persist any newly-recorded hashes / lastVerified bumps. Failure to
+    // write is non-fatal — the SkillsTrustStore swallows errors.
+    if (resolvedTrustStore && typeof resolvedTrustStore.flush === 'function') {
+      try { resolvedTrustStore.flush() } catch { /* ignore */ }
+    }
+    if (pendingTrustEvents.length > 0) {
+      // `process.nextTick` runs before any pending I/O / setImmediate
+      // but after the current call stack unwinds, so SessionManager has
+      // had a chance to attach event listeners by the time we fire.
+      process.nextTick(() => {
+        for (const ev of pendingTrustEvents) {
+          this.emit('skill_changed', ev)
+        }
+      })
+    }
     // Split skills by injection mode (#3200). Each provider implementation
     // calls _buildSystemPrompt() (back-compat alias for the append/system
     // bucket) and _buildPrependPrompt() (the prepend bucket); subprocess
@@ -242,6 +297,46 @@ export class BaseSession extends EventEmitter {
    */
   _buildPrependPrompt() {
     return typeof this._prependSkillsText === 'string' ? this._prependSkillsText : ''
+  }
+
+  /**
+   * Return a single skills payload that concatenates BOTH the prepend bucket
+   * and the append/system bucket with the `# User skills` header rendered
+   * exactly once at the top (#3228). Used by subprocess providers (Codex,
+   * Gemini) that have no system-prompt channel and must inline every loaded
+   * skill into the first user message.
+   *
+   * Why this exists: `_buildSystemPrompt()` and `_buildPrependPrompt()` each
+   * carry their own `# User skills` header so they're complete payloads when
+   * routed to their natural channel. Concatenating their string outputs
+   * directly produced two headers in the final user-message prefix — caught
+   * in PR #3224 review. Building from the two skill lists with a single
+   * call to `formatSkillsForPrompt({ includeHeader: false })` per bucket
+   * sidesteps that.
+   *
+   * Returns an empty string when both buckets are empty so the caller can
+   * branch on truthiness without null-checking.
+   *
+   * @returns {string}
+   */
+  _buildCombinedSkillsPrefix() {
+    const prependList = this._skillsByMode && Array.isArray(this._skillsByMode.prepend)
+      ? this._skillsByMode.prepend
+      : []
+    const appendList = this._skillsByMode && Array.isArray(this._skillsByMode.append)
+      ? this._skillsByMode.append
+      : []
+
+    if (prependList.length === 0 && appendList.length === 0) return ''
+
+    const parts = []
+    const prependText = formatSkillsForPrompt(prependList, { includeHeader: false })
+    if (prependText) parts.push(prependText)
+    const appendText = formatSkillsForPrompt(appendList, { includeHeader: false })
+    if (appendText) parts.push(appendText)
+    if (parts.length === 0) return ''
+
+    return `${SKILLS_PROMPT_HEADER}${parts.join('\n\n---\n\n')}`
   }
 
   _clearMessageState() {

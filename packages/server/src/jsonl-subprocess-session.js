@@ -92,6 +92,9 @@ export class JsonlSubprocessSession extends BaseSession {
     maxTotalSkillBytes,
     provider,
     activeManualSkills,
+    providerSkillAllowlist,
+    trustStore,
+    trustMismatchMode,
   } = {}) {
     super({
       cwd,
@@ -103,6 +106,9 @@ export class JsonlSubprocessSession extends BaseSession {
       maxTotalSkillBytes,
       provider,
       activeManualSkills,
+      providerSkillAllowlist,
+      trustStore,
+      trustMismatchMode,
     })
     this.resumeSessionId = null
     this._process = null
@@ -228,6 +234,13 @@ export class JsonlSubprocessSession extends BaseSession {
     // system-prompt bucket is empty; the concat is defensive against
     // user-authored frontmatter that pins `injection: append` explicitly.
     //
+    // Header dedupe (#3228): build the combined payload via
+    // `_buildCombinedSkillsPrefix()` so the `# User skills` header is
+    // rendered exactly once at the top. The previous implementation
+    // concatenated the string outputs of `_buildPrependPrompt()` and
+    // `_buildSystemPrompt()` directly; each carries its own header and
+    // the join produced two headers in the user-message prefix.
+    //
     // The `_skillsPrepended` flag is flipped AFTER the spawn succeeds (#3225).
     // If spawn throws synchronously, leaving the flag false ensures the next
     // sendMessage() retry still includes the skills text — otherwise a
@@ -235,11 +248,9 @@ export class JsonlSubprocessSession extends BaseSession {
     let effectiveText = text
     let willPrependSkills = false
     if (!this._skillsPrepended) {
-      const prependText = typeof this._buildPrependPrompt === 'function'
-        ? this._buildPrependPrompt()
+      const combined = typeof this._buildCombinedSkillsPrefix === 'function'
+        ? this._buildCombinedSkillsPrefix()
         : ''
-      const appendText = this._buildSystemPrompt()
-      const combined = [prependText, appendText].filter((s) => typeof s === 'string' && s.length > 0).join('\n\n---\n\n')
       if (combined) {
         effectiveText = `${combined}\n\n---\n\n${text}`
       }
