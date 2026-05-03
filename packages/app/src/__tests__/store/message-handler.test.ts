@@ -1817,6 +1817,94 @@ describe('tool_start handler', () => {
     });
     expect(ss.messages[0].content).toContain('ls');
   });
+
+  // Regression for #3163: when a turn opens with a tool (no preamble text →
+  // no stream_start), streamingMessageId is still 'pending' from sendInput.
+  // The 5-second safety timer in sendInput would otherwise clear it, hiding
+  // the stop button for the rest of the tool execution. tool_start must bump
+  // streamingMessageId out of 'pending' so the safety timer no-ops.
+  it('bumps streamingMessageId out of "pending" when the turn opens with a tool (#3163)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_first',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_first',
+      input: { command: 'ls' },
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    // streamingMessageId is bumped to the tool bubble's id, which matches the
+    // wire messageId when one is provided.
+    expect(ss.streamingMessageId).toBe(ss.messages[0].id);
+    expect(ss.streamingMessageId).toBe('toolu_first');
+    expect(ss.streamingMessageId).not.toBe('pending');
+  });
+
+  it('does NOT overwrite streamingMessageId when stream_start has already fired', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'msg-real' },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_after_text',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_after_text',
+      input: { command: 'ls' },
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.streamingMessageId).toBe('msg-real');
+  });
+
+  it('bumps off "pending" using the synthesized tool bubble id when tool_start has no messageId', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      // messageId omitted (defensive — Anthropic API always provides it, but
+      // the wire schema treats it as required without runtime enforcement)
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_no_msgid',
+      input: { command: 'ls' },
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    // sharedToolStart synthesizes a 'tool-N-<ts>' id when msg.messageId is
+    // missing, and we bump streamingMessageId to that exact id so it always
+    // matches a real message in state. No separate sentinel needed.
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.streamingMessageId).toBe(ss.messages[0].id);
+    expect(ss.streamingMessageId).not.toBe('pending');
+    expect(ss.streamingMessageId).toMatch(/^tool-\d+-\d+$/);
+  });
 });
 
 describe('tool_result handler', () => {

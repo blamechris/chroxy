@@ -668,6 +668,137 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // Regression for #3163: when a turn opens with a tool (no preamble text →
+  // no stream_start), streamingMessageId is still 'pending' from sendInput.
+  // The 5-second safety timer in sendInput would otherwise clear it, hiding
+  // the stop button for the rest of the tool execution. tool_start must bump
+  // streamingMessageId out of 'pending' so the safety timer no-ops.
+  describe('tool_start streamingMessageId bump (#3163)', () => {
+    it('bumps streamingMessageId out of "pending" when the turn opens with a tool', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'toolu_first',
+          tool: 'Bash',
+          toolUseId: 'toolu_first',
+          input: { command: 'ls' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      // streamingMessageId is bumped to the tool bubble's id, which matches
+      // the wire messageId when one is provided.
+      expect(ss.streamingMessageId).toBe(ss.messages[0].id)
+      expect(ss.streamingMessageId).toBe('toolu_first')
+      expect(ss.streamingMessageId).not.toBe('pending')
+    })
+
+    it('does NOT overwrite streamingMessageId when stream_start has already fired', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'msg-real' },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'toolu_after_text',
+          tool: 'Bash',
+          toolUseId: 'toolu_after_text',
+          input: { command: 'ls' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.streamingMessageId).toBe('msg-real')
+    })
+
+    it('bumps off "pending" using the synthesized tool bubble id when tool_start has no messageId', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [], streamingMessageId: 'pending' },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          // messageId omitted — defensive against schema-violating input
+          tool: 'Bash',
+          toolUseId: 'toolu_no_msgid',
+          input: { command: 'ls' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      // sharedToolStart synthesizes a 'tool-N-<ts>' id when msg.messageId is
+      // missing, and we bump streamingMessageId to that exact id so it always
+      // matches a real message in state. No separate sentinel needed.
+      expect(ss.messages).toHaveLength(1)
+      expect(ss.streamingMessageId).toBe(ss.messages[0].id)
+      expect(ss.streamingMessageId).not.toBe('pending')
+      expect(ss.streamingMessageId).toMatch(/^tool-\d+-\d+$/)
+    })
+
+    // Flat-state branch (legacy / pre-session bootstrap): when the target
+    // session isn't in sessionStates, sendInput writes 'pending' to flat state
+    // and tool_start should bump it off 'pending' there too.
+    it('bumps off "pending" in the flat-state branch when sessionStates is empty', () => {
+      const flatBase = baseState({
+        activeSessionId: null,
+        sessions: [],
+        sessionStates: {},
+        messages: [],
+        streamingMessageId: 'pending',
+      }) as Record<string, unknown>
+      // The dashboard's tool_start handler calls get().addMessage in the
+      // flat-state path; provide a minimal mock that pushes to messages.
+      flatBase.addMessage = (m: unknown) => {
+        const s = store.getState() as { messages: unknown[] }
+        ;(store as { setState: (p: Record<string, unknown>) => void }).setState({ messages: [...s.messages, m] })
+      }
+      store = createMockStore(flatBase)
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'toolu_flat',
+          tool: 'Bash',
+          toolUseId: 'toolu_flat',
+          input: { command: 'ls' },
+          // No sessionId — flat-state path
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.streamingMessageId).toBe('toolu_flat')
+      expect(state.streamingMessageId).not.toBe('pending')
+      expect(state.messages.some((m: any) => m.id === 'toolu_flat' && m.type === 'tool_use')).toBe(true)
+    })
+  })
+
   describe('pairing_refreshed dispatch (#2916)', () => {
     it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
       store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))
