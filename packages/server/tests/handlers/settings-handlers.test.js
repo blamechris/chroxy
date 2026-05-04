@@ -945,6 +945,99 @@ describe('settings-handlers', () => {
 
       assert.equal(trustStore.accepts[0].body, 'POST-FRONTMATTER body')
     })
+
+    // #3235 review: block-mode recovery is the WHOLE POINT of this handler.
+    // In `block` mode, a hash-mismatched skill is filtered out at load
+    // time, so `_getSkills()` won't return it. The handler must fall
+    // back to a direct filesystem lookup (`findSkillForRetrust`) to
+    // resolve the path + body for the very skill the operator is
+    // trying to re-trust.
+    it('finds blocked skills via filesystem fallback when _getSkills() filters them out', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-trust-accept-block-'))
+      try {
+        // Set up the skill on disk — block mode means _getSkills() is empty.
+        writeFileSync(join(skillsDir, 'audited.md'), '---\nname: audited\n---\nactual body\n')
+
+        const trustStore = makeFakeTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        // _getSkills returns empty (block mode filtered out the
+        // mismatched skill) — handler must fall back to the filesystem.
+        session._getSkills = () => []
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        session.getTrustStore = () => trustStore
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.skill_trust_accept(makeWs(), client, { skillName: 'audited' }, ctx)
+
+        assert.equal(trustStore.accepts.length, 1,
+          'handler must find blocked skills via filesystem fallback so block-mode recovery works')
+        assert.equal(trustStore.accepts[0].body, 'actual body\n',
+          'fallback uses post-frontmatter body, matching what the loader would have hashed')
+        assert.equal(ctx._sessionBroadcasts.length, 1)
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('returns SKILL_NOT_FOUND when neither _getSkills nor filesystem fallback resolves', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-trust-accept-empty-'))
+      try {
+        const trustStore = makeFakeTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session._getSkills = () => []
+        session._skillsDir = skillsDir // empty dir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        session.getTrustStore = () => trustStore
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.skill_trust_accept(ws, client, { skillName: 'nonexistent', requestId: 'r1' }, ctx)
+
+        const errorMsg = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.ok(errorMsg, 'expected SKILL_NOT_FOUND when no loader entry and no file on disk')
+        assert.equal(trustStore.accepts.length, 0, 'no acceptHash call on miss')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3235 review: flush errors must NOT silently broadcast a successful
+    // accept. The dashboard would clear the mismatch indicator on an
+    // in-memory-only update, and the next restart would re-flag the
+    // skill. Send TRUST_FLUSH_FAILED instead and skip the broadcast.
+    it('does not broadcast skill_trust_accepted when flush() throws', () => {
+      const trustStore = makeFakeTrustStore()
+      trustStore.flush = () => { throw new Error('disk full') }
+      const sessions = new Map()
+      const session = createMockSession()
+      session._getSkills = () => [
+        { name: 's', body: 'body', path: '/abs/s.md' },
+      ]
+      session.getTrustStore = () => trustStore
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.skill_trust_accept(ws, client, { skillName: 's', requestId: 'r1' }, ctx)
+
+      // acceptHash still ran (in-memory), but the broadcast must be
+      // suppressed and the operator gets an error.
+      assert.equal(trustStore.accepts.length, 1)
+      assert.equal(ctx._sessionBroadcasts.length, 0,
+        'must NOT broadcast a successful accept when persist failed')
+      const errorMsg = ws._messages.find(m => m.code === 'TRUST_FLUSH_FAILED')
+      assert.ok(errorMsg, 'expected TRUST_FLUSH_FAILED error when flush throws')
+    })
   })
 
   // #3067: list_skills should walk up from the active session's cwd to pick up

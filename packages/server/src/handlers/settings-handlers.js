@@ -7,7 +7,7 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
-import { loadActiveSkillsLayered, findRepoSkillsDir, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
+import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -641,37 +641,73 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
     return
   }
 
-  // Find the skill on the session — same source the dashboard sees in
-  // `list_skills`. Using the session's loaded entry (rather than re-reading
-  // disk) means the recorded hash matches exactly the body that would
-  // have been ingested if the loader hadn't blocked it.
-  const skills = typeof entry.session._getSkills === 'function'
+  // Find the skill. We CAN'T use `_getSkills()` here: in `block` mode,
+  // a hash-mismatched skill is filtered out at load time, which means
+  // the very skills the operator is trying to re-trust are absent from
+  // the loaded list. Fall back to a direct filesystem lookup that
+  // bypasses the trust gate (#3235 review).
+  let resolvedPath = null
+  let resolvedBody = null
+
+  // First try the session's already-loaded list — covers the warn-mode
+  // case where the skill stays in `_skills` even after a mismatch.
+  // Using the loaded entry's body+path is preferable when available
+  // because the body has already been validated by the same loader pass
+  // that recorded the trust hash.
+  const loadedSkills = typeof entry.session._getSkills === 'function'
     ? entry.session._getSkills()
     : []
-  const skill = Array.isArray(skills)
-    ? skills.find((s) => s && s.name === msg.skillName)
+  const loaded = Array.isArray(loadedSkills)
+    ? loadedSkills.find((s) => s && s.name === msg.skillName)
     : null
+  if (loaded && typeof loaded.path === 'string' && typeof loaded.body === 'string') {
+    resolvedPath = loaded.path
+    resolvedBody = loaded.body
+  } else {
+    // Block-mode recovery path: scan the session's skill dirs directly.
+    const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+    const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
+      ? entry.session._repoSkillsDir
+      : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)
+    const found = findSkillForRetrust({
+      skillName: msg.skillName,
+      globalDir: sessionGlobalDir,
+      repoDir: sessionRepoDir,
+    })
+    if (found) {
+      resolvedPath = found.realPath
+      resolvedBody = found.body
+    }
+  }
 
-  if (!skill || typeof skill.path !== 'string' || typeof skill.body !== 'string') {
+  if (resolvedPath === null || resolvedBody === null) {
     sendError(
       ws,
       msg?.requestId,
       'SKILL_NOT_FOUND',
-      `No loaded skill named '${msg.skillName}' on this session.`,
+      `No skill named '${msg.skillName}' found in the session's skill directories.`,
     )
     return
   }
 
-  trustStore.acceptHash(skill.path, skill.body)
+  trustStore.acceptHash(resolvedPath, resolvedBody)
+
+  // #3235 review: persist BEFORE broadcasting. If flush fails, the
+  // dashboard mustn't clear the mismatch indicator on a hash that
+  // never reached disk — the next restart would re-flag the skill.
+  // Surface the error to the caller so they can retry.
   if (typeof trustStore.flush === 'function') {
     try {
       trustStore.flush()
     } catch (err) {
-      // Don't swallow silently — the operator needs to know if the new
-      // hash didn't make it to disk. The accept stayed in-memory, so
-      // log + continue is the right shape (the broadcast still fires
-      // since the runtime state matches what the operator requested).
       log.warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
+      sendError(
+        ws,
+        msg?.requestId,
+        'TRUST_FLUSH_FAILED',
+        'Accepted in memory but the trust ledger could not be persisted. Retry; the next restart may re-flag this skill.',
+      )
+      return
     }
   }
 

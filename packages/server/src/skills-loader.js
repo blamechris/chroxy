@@ -1062,6 +1062,92 @@ export const SKILLS_PROMPT_HEADER = [
  * @param {{ includeHeader?: boolean }} [opts]
  * @returns {string}
  */
+/**
+ * #3235: resolve a skill name to its on-disk realpath + post-frontmatter
+ * body, scanning the same directories `loadActiveSkillsLayered` walks.
+ *
+ * The trust-accept handler can't use `_getSkills()` because the loader
+ * filters out skills whose hash mismatches in `block` mode — those are
+ * exactly the skills the operator is trying to re-trust. This helper
+ * does a minimal scan that ignores the trust gate so the handler can
+ * locate the file, hash its current content, and call `acceptHash`.
+ *
+ * Symlink defense + extension allowlist are still applied (an operator
+ * re-trusting a skill should not be a vector to ingest content from
+ * outside the skills tree). Returns null if the skill name doesn't
+ * resolve to anything in the configured directories.
+ *
+ * @param {object} args
+ * @param {string} args.skillName - The skill's display name (no extension).
+ * @param {string} [args.globalDir] - Defaults to DEFAULT_SKILLS_DIR.
+ * @param {string|null} [args.repoDir] - Optional repo overlay dir.
+ * @param {string[]} [args.allowedExtensions] - Defaults to DEFAULT_ALLOWED_EXTENSIONS.
+ * @returns {{ realPath: string, body: string } | null}
+ */
+export function findSkillForRetrust({
+  skillName,
+  globalDir,
+  repoDir,
+  allowedExtensions,
+} = {}) {
+  if (typeof skillName !== 'string' || skillName === '') return null
+  const exts = (Array.isArray(allowedExtensions) && allowedExtensions.length > 0
+    ? allowedExtensions.map(_normalizeExtension).filter(Boolean)
+    : DEFAULT_ALLOWED_EXTENSIONS)
+
+  // Repo overlay searched first (mirrors loader precedence: repo wins).
+  const dirs = []
+  if (repoDir) dirs.push({ dir: repoDir, source: 'repo' })
+  if (globalDir) dirs.push({ dir: globalDir, source: 'global' })
+  if (dirs.length === 0) {
+    dirs.push({ dir: DEFAULT_SKILLS_DIR, source: 'global' })
+  }
+
+  for (const { dir } of dirs) {
+    let dirReal
+    try {
+      dirReal = realpathSync(dir)
+    } catch {
+      continue
+    }
+    const allowedRoots = _resolveRoots([dirReal])
+
+    for (const ext of exts) {
+      const candidate = join(dir, `${skillName}.${ext}`)
+      let st
+      try {
+        st = statSync(candidate)
+      } catch {
+        continue
+      }
+      if (!st.isFile()) continue
+
+      let realPath
+      try {
+        realPath = realpathSync(candidate)
+      } catch {
+        continue
+      }
+      const inAllowedRoot = allowedRoots.some((root) => _pathContains(root, realPath))
+      if (!inAllowedRoot) continue
+
+      let buf
+      try {
+        buf = readFileSync(realPath)
+      } catch {
+        continue
+      }
+      if (!_bufferLooksLikeText(buf)) continue
+      const body = buf.toString('utf8')
+      const parsed = parseFrontmatter(body)
+      const finalBody = parsed.frontmatter !== null ? parsed.body : body
+      return { realPath, body: finalBody }
+    }
+  }
+
+  return null
+}
+
 export function formatSkillsForPrompt(skills, opts = {}) {
   if (!Array.isArray(skills) || skills.length === 0) return ''
 
