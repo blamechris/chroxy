@@ -1152,6 +1152,132 @@ describe('skills-loader', () => {
   })
 
   // -----------------------------------------------------------------------
+  // #3230: combined regression test that mixes all three v2 frontmatter
+  // features (#3198 providers, #3199 activation, #3200 injection). Each
+  // gate has its own focused tests above; this section locks in the AND
+  // ordering so a future refactor can't quietly let a manually-activated
+  // skill scoped to the wrong provider through, or route a correctly-
+  // gated skill into the wrong injection bucket.
+  // -----------------------------------------------------------------------
+
+  describe('combined frontmatter features (#3230)', () => {
+    function writeCombinedSkill({ providers, activation, injection }) {
+      const lines = ['---', 'name: combined']
+      if (providers) lines.push(`providers: [${providers.join(', ')}]`)
+      if (activation) lines.push(`activation: ${activation}`)
+      if (injection) lines.push(`injection: ${injection}`)
+      lines.push('---', 'combined-body', '')
+      writeFileSync(join(dir, 'combined.md'), lines.join('\n'))
+    }
+
+    it('all three gates pass: scoped + manual + injection routes correctly', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'claude-sdk',
+        activeManualSkills: ['combined'],
+        defaultInjectionMode: 'prepend',
+      })
+      assert.equal(skills.length, 1, 'all three gates should pass for claude-sdk + manual-active + append')
+      assert.equal(skills[0].name, 'combined')
+      assert.equal(skills[0].injectionMode, 'append',
+        'explicit `injection: append` must override the prepend default')
+    })
+
+    it('providers gate fails: wrong provider, manually activated → still filtered', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'codex',
+        activeManualSkills: ['combined'],
+      })
+      assert.equal(skills.length, 0,
+        'providers gate must fire BEFORE activation — manual opt-in does not bypass scoping')
+    })
+
+    it('activation gate fails: right provider, NOT manually activated → filtered', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'claude-sdk',
+        // No activeManualSkills — manual skill is not opted-in.
+      })
+      assert.equal(skills.length, 0,
+        'manual activation requires explicit opt-in even when provider scope passes')
+    })
+
+    it('injection mode is preserved across the gate chain (not just the default fallback)', () => {
+      // Three skills, all auto-activated, all unscoped — verify each
+      // injection: variant survives the providers + activation gates and
+      // ends up routed correctly.
+      writeFileSync(join(dir, 'a-prepend.md'),
+        '---\nname: a-prepend\nproviders: [claude]\ninjection: prepend\n---\nA\n')
+      writeFileSync(join(dir, 'b-append.md'),
+        '---\nname: b-append\nproviders: [claude-sdk]\ninjection: append\n---\nB\n')
+      writeFileSync(join(dir, 'c-system.md'),
+        '---\nname: c-system\nproviders: [claude]\ninjection: system\n---\nC\n')
+      const skills = loadActiveSkills(dir, {
+        provider: 'claude-sdk',
+        defaultInjectionMode: 'append',
+      })
+      const byName = Object.fromEntries(skills.map((s) => [s.name, s]))
+      assert.equal(byName['a-prepend']?.injectionMode, 'prepend')
+      assert.equal(byName['b-append']?.injectionMode, 'append')
+      assert.equal(byName['c-system']?.injectionMode, 'system')
+    })
+
+    it('mixed: scoped + auto-activation + injection routes correctly (no manual opt-in needed)', () => {
+      // Sanity: the combined-features test above exercises the manual
+      // path; auto-activation should also work end-to-end without an
+      // activeManualSkills set.
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'auto',
+        injection: 'system',
+      })
+      const skills = loadActiveSkills(dir, { provider: 'claude-sdk' })
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].injectionMode, 'system')
+    })
+
+    it('layered loader: combined skill loads through global tier with all gates active', () => {
+      // The layered path (loadActiveSkillsLayered) is what actually runs
+      // in production. Verify the combined-features contract survives
+      // global → repo merge.
+      const globalDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-3230-global-'))
+      const repoDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-3230-repo-'))
+      try {
+        writeFileSync(join(globalDir, 'g.md'),
+          '---\nname: g\nproviders: [claude]\nactivation: manual\ninjection: append\n---\nG body\n')
+        // Empty repo dir — global skill must come through unchanged.
+        const skills = loadActiveSkillsLayered({
+          globalDir,
+          repoDir,
+          provider: 'claude-sdk',
+          activeManualSkills: new Set(['g']),
+          defaultInjectionMode: 'prepend',
+        })
+        assert.equal(skills.length, 1)
+        assert.equal(skills[0].name, 'g')
+        assert.equal(skills[0].source, 'global')
+        assert.equal(skills[0].injectionMode, 'append')
+      } finally {
+        rmSync(globalDir, { recursive: true, force: true })
+        rmSync(repoDir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  // -----------------------------------------------------------------------
   // #3227: claude family alias must use the `-` boundary, not a bare prefix.
   // The old startsWith('claude') match incorrectly pulled in unrelated names
   // like `claudette`.
