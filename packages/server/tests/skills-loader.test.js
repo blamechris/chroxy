@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, openSync, closeSync, fstatSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, openSync, closeSync, fstatSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -804,14 +804,13 @@ describe('skills-loader', () => {
         assert.equal(skills.length, 3)
       })
 
-      // #3274 review (#3222 follow-up): the per-tier guardrail cuts
-      // off in alphabetical order, NOT priority order. A high-priority
-      // skill whose name sorts later than a low-priority skill can be
-      // crowded out under tight tier budgets. Document the trade-off
-      // so a future "approach 1" implementation (parse-frontmatter-
-      // first, sort-by-priority, then read) doesn't accidentally
-      // re-introduce alphabetical-only cutoff. Tracked at #3275.
-      it('per-tier cutoff is alphabetical, not priority-aware (known trade-off)', () => {
+      // #3279 (fixes #3275): the two-pass priority-aware budget introduced
+      // in #3279 means the per-tier cutoff is now priority-aware, not
+      // alphabetical. 'a-low.md' (priority 1) sorts first alphabetically,
+      // but pass-1 reads frontmatter only, sorts candidates by priority desc,
+      // and pass-2 reads bodies in priority order — so 'z-high' (priority 1000)
+      // wins the budget even though its filename sorts last.
+      it('per-tier cutoff is priority-aware: high-priority skill kept under tight budget despite later alphabetical sort', () => {
         const body = 'X'.repeat(900)
         // 'a-low.md' has priority 1 but sorts FIRST alphabetically.
         // 'z-high.md' has priority 1000 but sorts LAST.
@@ -825,17 +824,17 @@ describe('skills-loader', () => {
         )
 
         // Tier budget = 1500 bytes — fits one skill, not both.
-        // Alphabetical order means 'a-low.md' is read first, fills the
-        // tier total, and 'z-high.md' is skipped despite its higher
-        // priority. The post-merge `_enforceTotalBudget` only sees
-        // 'a-low.md' so priority can't help.
+        // The two-pass path (#3279) reads frontmatter first (pass 1),
+        // sorts by priority desc, then reads bodies in priority order
+        // (pass 2). 'z-high' (priority 1000) wins over 'a-low' (priority 1)
+        // despite sorting alphabetically last.
         const skills = loadActiveSkills(dir, {
           maxSkillBytes: 4 * 1024,
           maxTotalBytes: 1500,
         })
         assert.equal(skills.length, 1)
-        assert.equal(skills[0].name, 'a-low',
-          'alphabetical cutoff: low-priority skill kept, high-priority skill skipped — known trade-off (#3275)')
+        assert.equal(skills[0].name, 'z-high',
+          'priority-aware cutoff: high-priority skill wins despite sorting alphabetically last — fixed by #3279')
       })
 
       it('layered loader passes maxTotalSkillBytes to each tier as a guardrail', () => {
@@ -2186,6 +2185,207 @@ describe('skills-loader', () => {
         _compareByPriorityThenName(v1, v2low) < 0,
         'v1 skill (priority 100 default) must outrank v2 skill at priority 50',
       )
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3279: priority-aware two-pass tier budget.
+  // -----------------------------------------------------------------------
+
+  describe('priority-aware per-tier budget (#3279)', () => {
+    let p3279Dir
+
+    beforeEach(() => {
+      p3279Dir = mkdtempSync(join(tmpdir(), 'chroxy-3279-'))
+    })
+
+    afterEach(() => {
+      rmSync(p3279Dir, { recursive: true, force: true })
+    })
+
+    it('highest priority wins under tight budget', () => {
+      // Three skills with different priorities; budget fits exactly one.
+      // Priority 1000 must win regardless of alphabetical order.
+      const body = 'A'.repeat(400)
+      writeFileSync(join(p3279Dir, 'mid.md'), `---\npriority: 50\n---\n${body}`)
+      writeFileSync(join(p3279Dir, 'low.md'), `---\npriority: 1\n---\n${body}`)
+      writeFileSync(join(p3279Dir, 'high.md'), `---\npriority: 1000\n---\n${body}`)
+
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 4 * 1024,
+        maxTotalBytes: 500, // fits one skill body, not two
+      })
+      assert.equal(skills.length, 1, 'exactly one skill should fit under the budget')
+      assert.equal(skills[0].name, 'high', 'priority-1000 skill must win the budget slot')
+    })
+
+    it('equal priority: alphabetical name is the tiebreak', () => {
+      // Two skills with identical priority 100; budget fits only one.
+      // Alphabetical order (a < z) must be the tiebreak — 'a-skill' wins.
+      const body = 'B'.repeat(400)
+      writeFileSync(join(p3279Dir, 'z-skill.md'), `---\npriority: 100\n---\n${body}`)
+      writeFileSync(join(p3279Dir, 'a-skill.md'), `---\npriority: 100\n---\n${body}`)
+
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 4 * 1024,
+        maxTotalBytes: 500,
+      })
+      assert.equal(skills.length, 1, 'exactly one skill should fit')
+      assert.equal(skills[0].name, 'a-skill', 'alphabetical tiebreak: a-skill wins over z-skill at equal priority')
+    })
+
+    it('v1 skill (no frontmatter) defaults to DEFAULT_SKILL_PRIORITY (100)', () => {
+      // v1 skill has no frontmatter — treated as priority 100. A v2 skill
+      // with explicit priority 50 must lose to the v1 skill.
+      // This anchors DEFAULT_SKILL_PRIORITY = 100 from skills-budget.js.
+      const body = 'C'.repeat(400)
+      writeFileSync(join(p3279Dir, 'b-v1.md'), body) // no frontmatter → priority 100
+      writeFileSync(join(p3279Dir, 'a-v2.md'), `---\npriority: 50\n---\n${body}`)
+
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 4 * 1024,
+        maxTotalBytes: 500,
+      })
+      assert.equal(skills.length, 1, 'exactly one skill should fit')
+      assert.equal(skills[0].name, 'b-v1', 'v1 skill (default priority 100) must beat explicit priority 50')
+    })
+
+    it('priority field past 4KB read window falls back to DEFAULT_SKILL_PRIORITY', () => {
+      // When the closing frontmatter fence is beyond the 4KB read window
+      // used by pass 1, parseFrontmatter returns null — the loader treats
+      // the skill as having the default priority (100). This is the
+      // intentional design tradeoff inherited from _readFrontmatterOnly:
+      // skills with >4KB of frontmatter are extremely rare and not worth
+      // a full-file pre-read.
+      const bigPreamble = ('# ' + 'x'.repeat(78) + '\n').repeat(60) // ~4800 bytes
+      const frontmatterPastCap = '---\n' + bigPreamble + 'priority: 999\n---\nbody\n'
+      const normalBody = '---\npriority: 50\n---\nnormal body\n'
+
+      writeFileSync(join(p3279Dir, 'big-fm.md'), frontmatterPastCap)
+      writeFileSync(join(p3279Dir, 'normal.md'), normalBody)
+
+      // big-fm is ~4887 bytes, normal is ~33 bytes — combined ~4920 bytes.
+      // Budget must be >= big-fm alone but < big-fm + normal so that only
+      // one skill fits and the assertion actually exercises the priority path.
+      // (Previously maxTotalBytes=5100 let both load, so the test passed even
+      // with a buggy loader that ignored priority ordering entirely.)
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 8 * 1024,
+        // 4900 > 4887 (big-fm fits alone) but < 4920 (both combined don't fit).
+        maxTotalBytes: 4900,
+      })
+      // big-fm.md has its priority parsed as null (fence past 4KB) → default 100.
+      // normal.md has priority 50. Budget forces a single-slot cutoff.
+      // big-fm (priority 100) must win over normal (priority 50) despite sorting
+      // later alphabetically ('big-fm' < 'normal', so sort order already favours
+      // big-fm — the key assertion is that the loader does NOT load normal first
+      // and exhaust the budget before reaching big-fm).
+      assert.equal(skills.length, 1, 'budget forces exactly one skill to load')
+      // big-fm has priority 100 (default, because frontmatter is past 4KB),
+      // normal has priority 50 — big-fm should rank first.
+      assert.equal(skills[0].name, 'big-fm',
+        'skill with priority past 4KB window falls back to default (100) — still outranks priority 50')
+    })
+
+    it('continue-not-break: smaller lower-priority skills can fill remaining budget', () => {
+      // This test validates the most important correctness property:
+      // when a large high-priority skill does NOT fit the budget, we must
+      // `continue` (not `break`) so smaller skills can still fill the gap.
+      //
+      // Setup:
+      //   - priority 1000, body 4KB  → too large to fit, but highest priority
+      //   - priority 50, body 1KB    → fits
+      //   - priority 10, body 1KB    → also fits (alongside priority 50)
+      // Budget: 2KB — large enough for the two 1KB skills but not the 4KB one.
+      //
+      // If the loop broke on the first skill that doesn't fit, we'd get 0
+      // skills loaded. With `continue`, we skip the 4KB skill and keep both
+      // 1KB skills.
+      const bigBody = 'E'.repeat(4000)
+      const smallBody = 'F'.repeat(900)
+      writeFileSync(join(p3279Dir, 'vip.md'), `---\npriority: 1000\n---\n${bigBody}`)
+      writeFileSync(join(p3279Dir, 'med.md'), `---\npriority: 50\n---\n${smallBody}`)
+      writeFileSync(join(p3279Dir, 'low.md'), `---\npriority: 10\n---\n${smallBody}`)
+
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 8 * 1024,
+        maxTotalBytes: 2048, // fits 2×900-byte bodies, not the 4000-byte one
+      })
+      assert.equal(skills.length, 2, 'both smaller skills must fit (continue, not break on first overflow)')
+      const names = skills.map((s) => s.name).sort()
+      assert.deepEqual(names, ['low', 'med'], 'lower-priority smaller skills must be kept when large high-priority one overflows')
+    })
+
+    it('parseCache hit in pass 1 uses cached priority and body in pass 2', () => {
+      // Prime the parseCache with a frontmatter that has priority 999.
+      // With a warm cache (mtime+size still match the cached entry), pass 1
+      // must use the cached priority (999). A low-priority competitor (priority 1)
+      // must lose the single-slot budget.
+      const skillBody = 'x'.repeat(400)
+      const filePath = join(p3279Dir, 'cached.md')
+      const original = `---\npriority: 999\n---\n${skillBody}\n`
+      writeFileSync(filePath, original)
+
+      // Pre-warm the parseCache with a manual entry matching the file's
+      // current mtime+size so the freshness check passes.
+      const st = statSync(filePath)
+      const parseCache = new Map()
+      parseCache.set(filePath, {
+        mtimeMs: st.mtimeMs,
+        size: st.size,
+        body: original,
+        frontmatter: { priority: 999 },
+        finalBody: `${skillBody}\n`,
+        description: skillBody.slice(0, 60),
+      })
+
+      // low-competitor is also ~400 bytes; budget fits one skill, not two.
+      const bodyLow = `---\npriority: 1\n---\n${'y'.repeat(400)}\n`
+      writeFileSync(join(p3279Dir, 'low-competitor.md'), bodyLow)
+
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 4 * 1024,
+        maxTotalBytes: 500, // fits one ~400-byte skill, not two
+        parseCache,
+      })
+      // cached.md has cached priority 999; low-competitor has priority 1.
+      // Budget fits one skill — 999 wins.
+      assert.equal(skills.length, 1, 'exactly one skill fits under the budget')
+      assert.equal(skills[0].name, 'cached', 'cache-hit priority 999 must win over on-disk priority 1')
+    })
+
+    it('parseCache miss when mtime drifts falls through to partial read', () => {
+      // Write a file with priority 999. Prime cache with a STALE entry
+      // (different mtimeMs) so the cache check fails. Pass 1 must then do
+      // a partial read and discover the real priority from disk (which is
+      // 999 in this test). A competitor with priority 500 must lose.
+      const skillBody = 'z'.repeat(400)
+      const filePath = join(p3279Dir, 'fresh.md')
+      writeFileSync(filePath, `---\npriority: 999\n---\n${skillBody}\n`)
+
+      // Stale cache entry — wrong mtimeMs so freshness check fails.
+      const parseCache = new Map()
+      parseCache.set(filePath, {
+        mtimeMs: 1, // stale — will not match current file
+        size: 9999,
+        body: 'stale',
+        frontmatter: { priority: 1 }, // stale priority — must NOT be used
+        finalBody: 'stale',
+        description: 'stale',
+      })
+
+      writeFileSync(join(p3279Dir, 'competitor.md'), `---\npriority: 500\n---\n${'w'.repeat(400)}\n`)
+
+      const skills = loadActiveSkills(p3279Dir, {
+        maxSkillBytes: 4 * 1024,
+        maxTotalBytes: 500, // fits one ~400-byte skill, not two
+        parseCache,
+      })
+      // fresh.md real priority (from disk via partial read) = 999 > 500.
+      // Budget fits one skill — fresh.md must win.
+      assert.equal(skills.length, 1, 'exactly one skill should fit')
+      assert.equal(skills[0].name, 'fresh',
+        'stale cache miss falls through to partial read; real on-disk priority 999 wins')
     })
   })
 })

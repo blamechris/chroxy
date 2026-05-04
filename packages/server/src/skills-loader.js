@@ -89,6 +89,8 @@ import {
   DEFAULT_MAX_TOTAL_SKILL_BYTES,
   _enforceTotalBudget,
   _filterByProviderAllowlist,
+  _compareByPriorityThenName,
+  DEFAULT_SKILL_PRIORITY,
 } from './skills-budget.js'
 
 // #3223: frontmatter parser + frontmatter-driven gating helpers extracted
@@ -103,6 +105,7 @@ import {
   _normalizeInjectionMode,
   _resolveInjectionMode,
   _skillIsActive,
+  _readFrontmatterOnly,
 } from './skills-frontmatter.js'
 
 // Re-export for callers that historically imported from skills-loader.js.
@@ -226,16 +229,17 @@ function _resolveRoots(roots) {
  *     runtime prompt-build callers keep provider scoping enforced.
  *   - `parseCache`: optional `Map` of mtime-keyed parse results to skip
  *     re-reading and re-parsing unchanged files (#3248).
- *   - `maxTotalBytes`: per-tier byte budget that bounds peak memory by
- *     stopping the read loop once cumulative bytes for THIS load would
- *     exceed it (#3222). Skills are scanned in alphabetical order, so
- *     the cutoff is deterministic across platforms but NOT priority-
- *     aware — callers that need priority-aware pruning rely on the
- *     post-merge `_enforceTotalBudget` step in `loadActiveSkillsLayered`.
- *     Default = unbounded (back-compat). Layered loader sets this to
- *     `maxTotalSkillBytes` so a single tier can never exhaust more than
- *     the global cap, capping peak memory at 2× the global cap across
- *     both tier loads.
+ *   - `maxTotalBytes`: per-tier byte budget that bounds peak memory (#3222).
+ *     When set, the loader uses a two-pass approach (#3279): pass 1
+ *     (`_collectCandidates`) does a bounded ~4KB frontmatter-only read for
+ *     every candidate to extract priority, then pass 2 walks candidates in
+ *     priority-descending order (name-ascending tiebreak) reading full bodies
+ *     until the budget is exhausted. Skills that don't fit are skipped with
+ *     `continue` (not `break`) so a later smaller skill can still fit.
+ *     When unset, the original single-pass alphabetical loop runs unchanged
+ *     (back-compat). Layered loader sets this to `maxTotalSkillBytes` so a
+ *     single tier can never exhaust more than the global cap, capping peak
+ *     memory at 2× the global cap across both tier loads.
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -316,17 +320,319 @@ export function loadActiveSkills(dir, opts = {}) {
   const tierBudget = Number.isFinite(opts.maxTotalBytes) && opts.maxTotalBytes > 0
     ? Math.floor(opts.maxTotalBytes)
     : null
-  let tierTotalBytes = 0
 
-  // #3222: process entries in deterministic order so the per-tier
-  // budget cuts off the same skills across runs (filesystem readdir
-  // order is platform-dependent). Sort alphabetically by basename —
-  // matches the post-merge sort and gives operators a predictable
-  // tiebreaker when budget eviction kicks in.
+  // Process entries in deterministic order so the budget cuts off the same
+  // skills across runs (filesystem readdir order is platform-dependent). Sort
+  // alphabetically by basename — this is the tiebreaker within each priority
+  // bucket for the two-pass path, and the full cutoff order for the
+  // single-pass path.
   entries = Array.isArray(entries)
     ? entries.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
     : []
 
+  // ── Two-pass priority-aware path (#3279) ──
+  // When a tier budget is set, run _collectCandidates (pass 1) to gather a
+  // lightweight descriptor for every validated candidate, then sort by
+  // priority and walk in priority order (pass 2) to read full bodies. Skills
+  // that don't fit the budget are skipped with `continue` (not `break`) so a
+  // smaller later-priority skill can still slip in — preserving the existing
+  // "smaller-later-fits" semantic from the alphabetical path.
+  if (tierBudget !== null) {
+    const candidates = _collectCandidates(
+      entries, dir, dirReal, allowedRoots, allowedExtensions, maxSkillBytes, parseCache,
+    )
+
+    // Sort by priority desc, name asc for deterministic tiebreaking.
+    // _compareByPriorityThenName expects { name, metadata: { priority } };
+    // we construct an adapter object from the candidate descriptor — the
+    // comparator only reads `name` and `metadata.priority`, so wrapping
+    // the descriptor's raw priority value is sufficient and avoids having
+    // to thread a full frontmatter object through _collectCandidates.
+    candidates.sort((a, b) => {
+      // Strip the extension from the candidate's filename so the
+      // alphabetical tiebreak uses the same extension-free name that every
+      // downstream code path (and _compareByPriorityThenName's callers on
+      // the single-pass path) operates on. Without this, "a-b.md" would
+      // sort before "a.md" because '-' (0x2D) < '.' (0x2E), diverging from
+      // how skills are sorted everywhere else.
+      const extA = a.entry.slice(a.entry.lastIndexOf('.') + 1).toLowerCase()
+      const extB = b.entry.slice(b.entry.lastIndexOf('.') + 1).toLowerCase()
+      const nameA = a.entry.slice(0, -(extA.length + 1))
+      const nameB = b.entry.slice(0, -(extB.length + 1))
+      return _compareByPriorityThenName(
+        { name: nameA, metadata: { priority: a.priority } },
+        { name: nameB, metadata: { priority: b.priority } },
+      )
+    })
+
+    const skills = []
+    let tierTotalBytes = 0
+
+    for (const candidate of candidates) {
+      const { entry, fullPath, label, realPath, fstat: fstatSnap, cachedFrontmatter } = candidate
+      const ext = entry.slice(entry.lastIndexOf('.') + 1).toLowerCase()
+
+      // Pre-read tier budget check. `continue` (not `break`) so smaller
+      // lower-priority skills can still fit if they come after a large one.
+      if (typeof fstatSnap.size === 'number' && tierTotalBytes + fstatSnap.size > tierBudget) {
+        log.warn(`Skipping skill ${label}: tier budget reached (${tierTotalBytes + fstatSnap.size} > ${tierBudget})`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
+      // Cache fast path: if pass 1 recorded a fresh cache hit, we can skip
+      // re-opening the file entirely and use all cached parse fields.
+      if (cachedFrontmatter) {
+        const name = entry.slice(0, -(ext.length + 1))
+        const { frontmatter, finalBody, description } = cachedFrontmatter
+
+        if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
+
+        const isActive = _skillIsActive(frontmatter, name, activeManualSkills)
+        if (!isActive && !includeInactive) continue
+
+        // Account for the cached body in the tier total — mirroring the
+        // cache-miss path which also counts bytes only after the provider and
+        // activation gates pass. Counting before the gates would let a warm
+        // cache shrink the effective budget for subsequent skills even when
+        // a skill is ultimately skipped due to provider mismatch or inactivity.
+        tierTotalBytes += fstatSnap.size
+
+        if (!isActive) {
+          const inactive = { name, description, metadata: frontmatter, active: false, path: realPath }
+          if (source) inactive.source = source
+          skills.push(inactive)
+          continue
+        }
+
+        const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
+
+        if (trustStore && typeof trustStore.inspect === 'function') {
+          let inspectResult
+          try {
+            inspectResult = trustStore.inspect(realPath, finalBody)
+          } catch (err) {
+            log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+            inspectResult = null
+          }
+          if (inspectResult && inspectResult.status === 'mismatch') {
+            if (onTrustMismatch) {
+              try {
+                onTrustMismatch({
+                  name, source: source || null, path: realPath,
+                  oldHash: inspectResult.oldHash, newHash: inspectResult.newHash,
+                  blocked: !!inspectResult.blocked, mode: trustStore.mode,
+                })
+              } catch (err) {
+                log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+              }
+            }
+            if (inspectResult.blocked) {
+              log.warn(`Skipping skill ${label}: trust mismatch in block mode`)
+              continue
+            }
+          }
+        }
+
+        const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
+        if (source) skill.source = source
+        skill.active = isActive
+        skill.path = realPath
+        skills.push(skill)
+        continue
+      }
+
+      // Cache miss: re-open, re-validate (TOCTOU defense), read full body.
+      // Re-opening here is intentional — holding an fd open across pass 1's
+      // full scan would risk exhausting the fd limit on large directories.
+      // The TOCTOU window between passes is detected by comparing dev+ino
+      // from the fresh fstatSync against the values recorded in pass 1.
+      let fd2
+      try {
+        fd2 = openSync(fullPath, 'r')
+      } catch (err) {
+        const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+        log.warn(`Skipping skill ${label}: open failed (${code})`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
+      try {
+        let fstat2
+        try {
+          fstat2 = fstatSync(fd2)
+        } catch {
+          continue
+        }
+        if (!fstat2.isFile()) continue
+
+        if (typeof fstat2.size === 'number' && fstat2.size > maxSkillBytes) {
+          log.warn(`Skipping skill ${label}: size ${fstat2.size} exceeds per-skill cap ${maxSkillBytes}`)
+          log.debug(`skill ${label} full path: ${fullPath}`)
+          continue
+        }
+
+        // Re-validate realpath in case a symlink was swapped between passes.
+        let realPath2
+        try {
+          realPath2 = realpathSync(fullPath)
+        } catch (err) {
+          const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+          log.warn(`Skipping skill ${label}: realpath failed (${code})`)
+          log.debug(`skill ${label} full path: ${fullPath}`)
+          continue
+        }
+
+        // Symlink swap detection: if the resolved path drifted since pass 1,
+        // skip this candidate — we validated a different path.
+        if (realPath2 !== realPath) {
+          log.warn(`Skipping skill ${label}: realPath drifted between passes (possible symlink swap)`)
+          log.debug(`skill ${label} pass-1 realPath: ${realPath}, pass-2 realPath: ${realPath2}`)
+          continue
+        }
+
+        // #3218: dev+ino re-check with the fresh fd — catches any swap
+        // that occurred after pass 1 closed its fd.
+        let realStat2
+        try {
+          realStat2 = statSync(realPath2)
+        } catch {
+          continue
+        }
+        if (fstat2.dev !== realStat2.dev || fstat2.ino !== realStat2.ino) {
+          log.warn(`Skipping skill ${label}: fd inode does not match validated real path (TOCTOU swap detected)`)
+          log.debug(`skill ${label} full path: ${fullPath} fd ino=${fstat2.ino} realPath ino=${realStat2.ino}`)
+          continue
+        }
+
+        // Also verify the pass-1 inode snapshot matches the pass-2 fstat.
+        // If the file was replaced between passes, this catches it even when
+        // the dev+ino re-check above passes (e.g. same device, recycled inode).
+        if (fstat2.dev !== fstatSnap.dev || fstat2.ino !== fstatSnap.ino) {
+          log.warn(`Skipping skill ${label}: inode changed between pass 1 and pass 2 (file replaced)`)
+          log.debug(`skill ${label} full path: ${fullPath} pass1 ino=${fstatSnap.ino} pass2 ino=${fstat2.ino}`)
+          continue
+        }
+
+        const name = entry.slice(0, -(ext.length + 1))
+
+        let body
+        let frontmatter
+        let finalBody
+        let description
+
+        // Check cache again with the fresh fstat — the file may have been
+        // cached between pass 1 and pass 2 by another call site (edge case).
+        const cached2 = parseCache?.get(realPath2)
+        const cacheHit2 = cached2
+          && typeof fstat2.mtimeMs === 'number'
+          && cached2.mtimeMs === fstat2.mtimeMs
+          && cached2.size === fstat2.size
+
+        if (cacheHit2) {
+          body = cached2.body
+          frontmatter = cached2.frontmatter
+          finalBody = cached2.finalBody
+          description = cached2.description
+          tierTotalBytes += fstat2.size
+        } else {
+          let buf
+          try {
+            buf = readFileSync(fd2)
+          } catch {
+            continue
+          }
+
+          if (buf.length > maxSkillBytes) {
+            log.warn(`Skipping skill ${label}: size ${buf.length} exceeds per-skill cap ${maxSkillBytes}`)
+            log.debug(`skill ${label} full path: ${fullPath}`)
+            continue
+          }
+
+          tierTotalBytes += buf.length
+
+          if (!_bufferLooksLikeText(buf)) {
+            log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
+            log.debug(`skill ${label} full path: ${fullPath}`)
+            continue
+          }
+
+          body = buf.toString('utf8')
+          const parsed = parseFrontmatter(body)
+          frontmatter = parsed.frontmatter
+          finalBody = parsed.frontmatter !== null ? parsed.body : body
+          description = _firstNonEmptyLine(finalBody) || name
+
+          if (parseCache && typeof fstat2.mtimeMs === 'number') {
+            parseCache.set(realPath2, {
+              mtimeMs: fstat2.mtimeMs,
+              size: fstat2.size,
+              body,
+              frontmatter,
+              finalBody,
+              description,
+            })
+          }
+        }
+
+        if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
+
+        const isActive = _skillIsActive(frontmatter, name, activeManualSkills)
+        if (!isActive && !includeInactive) continue
+        if (!isActive) {
+          const inactive = { name, description, metadata: frontmatter, active: false, path: realPath2 }
+          if (source) inactive.source = source
+          skills.push(inactive)
+          continue
+        }
+
+        const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
+
+        if (trustStore && typeof trustStore.inspect === 'function') {
+          let inspectResult
+          try {
+            inspectResult = trustStore.inspect(realPath2, finalBody)
+          } catch (err) {
+            log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+            inspectResult = null
+          }
+          if (inspectResult && inspectResult.status === 'mismatch') {
+            if (onTrustMismatch) {
+              try {
+                onTrustMismatch({
+                  name, source: source || null, path: realPath2,
+                  oldHash: inspectResult.oldHash, newHash: inspectResult.newHash,
+                  blocked: !!inspectResult.blocked, mode: trustStore.mode,
+                })
+              } catch (err) {
+                log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+              }
+            }
+            if (inspectResult.blocked) {
+              log.warn(`Skipping skill ${label}: trust mismatch in block mode`)
+              continue
+            }
+          }
+        }
+
+        const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
+        if (source) skill.source = source
+        skill.active = isActive
+        skill.path = realPath2
+        skills.push(skill)
+      } finally {
+        try { closeSync(fd2) } catch { /* non-fatal */ }
+      }
+    }
+
+    skills.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return skills
+  }
+
+  // ── Single-pass alphabetical loop (back-compat when tierBudget === null) ──
+  // This path is unchanged from the pre-#3279 implementation. Callers that
+  // do not pass `maxTotalBytes` continue to get exactly the prior behaviour
+  // (no priority awareness, no frontmatter pre-read, alphabetical order).
   const skills = []
   for (const entry of entries) {
     if (typeof entry !== 'string' || !entry) continue
@@ -464,22 +770,6 @@ export function loadActiveSkills(dir, opts = {}) {
       // same number of chars (+1 for the dot).
       const name = entry.slice(0, -(ext.length + 1))
 
-      // #3222 (review): tier-budget pre-read check. Use fstat.size (which
-      // we already have) so we don't pay the I/O / allocation cost of
-      // readFileSync for skills that can never fit. `continue` (not
-      // `break`) so a later smaller skill still has a chance to fit
-      // when the offending skill is bigger than the remaining headroom
-      // — the alphabetical scan order makes the cutoff deterministic
-      // regardless. Applied here BEFORE the parseCache hit branch so
-      // the budget governs the cache path too.
-      if (tierBudget !== null
-          && typeof fstat.size === 'number'
-          && tierTotalBytes + fstat.size > tierBudget) {
-        log.warn(`Skipping skill ${label}: tier budget reached (${tierTotalBytes + fstat.size} > ${tierBudget})`)
-        log.debug(`skill ${label} full path: ${fullPath}`)
-        continue
-      }
-
       // #3248: parse-cache fast path. fstatSync above gave us the
       // post-open file's mtime+size; if the cache entry's mtimeMs+size
       // match, skip readFileSync / text-validation / parseFrontmatter
@@ -503,10 +793,6 @@ export function loadActiveSkills(dir, opts = {}) {
         frontmatter = cached.frontmatter
         finalBody = cached.finalBody
         description = cached.description
-        // #3222: account for the cached body in the tier total so the
-        // post-cache-hit path doesn't accidentally exceed the budget
-        // by skipping the byte counter.
-        if (tierBudget !== null) tierTotalBytes += fstat.size
       } else {
         // #3218: read from the open fd, not from the path. The fd is
         // pinned to the inode we already validated above.
@@ -522,11 +808,6 @@ export function loadActiveSkills(dir, opts = {}) {
           log.debug(`skill ${label} full path: ${fullPath}`)
           continue
         }
-
-        // #3222: pre-read check above already enforced the tier budget
-        // using `fstat.size`; account for the actual buf.length here so
-        // `_enforceTotalBudget`'s expectations stay aligned.
-        if (tierBudget !== null) tierTotalBytes += buf.length
 
         if (!_bufferLooksLikeText(buf)) {
           log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
@@ -669,6 +950,177 @@ export function loadActiveSkills(dir, opts = {}) {
 
   skills.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   return skills
+}
+
+/**
+ * Pass 1 for the two-pass priority-aware tier budget (#3279).
+ *
+ * Iterates every directory entry and runs the full TOCTOU-safe validation
+ * cluster (extension check, statSync, openSync, fstatSync, realpathSync,
+ * allowedRoots containment, dev+ino re-check). For each candidate that
+ * passes all gates, performs a bounded ~4KB read via `_readFrontmatterOnly`
+ * to extract the `priority` field without pulling the full skill body into
+ * memory. Closes the fd in a `finally` block before moving to the next
+ * entry so pass 1 never holds more than one fd open at a time.
+ *
+ * Returns an array of lightweight candidate descriptors:
+ *   { entry, fullPath, label, realPath, fstat: { size, mtimeMs, dev, ino },
+ *     priority, cachedFrontmatter }
+ *
+ * `cachedFrontmatter` is set when a parseCache hit matched on mtimeMs+size —
+ * pass 2 can skip the partial read and use the cached frontmatter directly,
+ * and also skip re-parsing after the full read (just reuse the cached parse).
+ *
+ * @param {string[]} entries           alphabetically sorted basenames from readdirSync
+ * @param {string}   dir               the skills directory (pre-resolved)
+ * @param {string}   dirReal           realpathSync(dir)
+ * @param {string[]} allowedRoots      resolved allowed root paths
+ * @param {Set<string>} allowedExtensions  normalised extension set
+ * @param {number}   maxSkillBytes     per-skill byte cap
+ * @param {Map|null} parseCache        optional mtime-keyed parse cache
+ * @returns {Array<object>}
+ */
+function _collectCandidates(entries, dir, dirReal, allowedRoots, allowedExtensions, maxSkillBytes, parseCache) {
+  const candidates = []
+
+  for (const entry of entries) {
+    if (typeof entry !== 'string' || !entry) continue
+    if (SKIP_DIRECTORY_NAMES.has(entry)) continue
+
+    const dotIdx = entry.lastIndexOf('.')
+    if (dotIdx <= 0) continue
+    const ext = entry.slice(dotIdx + 1).toLowerCase()
+    if (!allowedExtensions.has(ext)) continue
+    if (entry.endsWith(`.disabled.${ext}`)) continue
+
+    const fullPath = join(dir, entry)
+    const label = _pathLabel(fullPath)
+
+    let st
+    try {
+      st = statSync(fullPath)
+    } catch {
+      continue
+    }
+    if (!st.isFile()) continue
+
+    if (typeof st.size === 'number' && st.size > maxSkillBytes) {
+      log.warn(`Skipping skill ${label}: size ${st.size} exceeds per-skill cap ${maxSkillBytes}`)
+      log.debug(`skill ${label} full path: ${fullPath}`)
+      continue
+    }
+
+    let fd
+    try {
+      fd = openSync(fullPath, 'r')
+    } catch (err) {
+      const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+      log.warn(`Skipping skill ${label}: open failed (${code})`)
+      log.debug(`skill ${label} full path: ${fullPath}`)
+      continue
+    }
+
+    try {
+      let fstat
+      try {
+        fstat = fstatSync(fd)
+      } catch {
+        continue
+      }
+      if (!fstat.isFile()) continue
+
+      if (typeof fstat.size === 'number' && fstat.size > maxSkillBytes) {
+        log.warn(`Skipping skill ${label}: size ${fstat.size} exceeds per-skill cap ${maxSkillBytes}`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
+      let realPath
+      try {
+        realPath = realpathSync(fullPath)
+      } catch (err) {
+        const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+        log.warn(`Skipping skill ${label}: realpath failed (${code})`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
+      const inAllowedRoot = allowedRoots.some((root) => _pathContains(root, realPath))
+      if (!inAllowedRoot) {
+        log.warn(`Skipping skill ${label}: real path escapes skills root`)
+        log.debug(`skill ${label} full path: ${fullPath} resolved to ${realPath}, root ${dirReal}`)
+        continue
+      }
+
+      // #3218: dev+ino re-check — same as the single-pass path.
+      let realStat
+      try {
+        realStat = statSync(realPath)
+      } catch {
+        continue
+      }
+      if (fstat.dev !== realStat.dev || fstat.ino !== realStat.ino) {
+        log.warn(`Skipping skill ${label}: fd inode does not match validated real path (TOCTOU swap detected)`)
+        log.debug(`skill ${label} full path: ${fullPath} fd ino=${fstat.ino} realPath ino=${realStat.ino}`)
+        continue
+      }
+
+      // Extract priority with minimal I/O. Check parseCache first — if the
+      // cache entry is fresh (mtimeMs+size match), use the cached priority
+      // directly and record the entry so pass 2 can skip re-parsing. On a
+      // cache miss, call _readFrontmatterOnly for a bounded ~4KB read.
+      let priority = DEFAULT_SKILL_PRIORITY
+      let cachedFrontmatter = null
+
+      const cached = parseCache?.get(realPath)
+      const cacheHit = cached
+        && typeof fstat.mtimeMs === 'number'
+        && cached.mtimeMs === fstat.mtimeMs
+        && cached.size === fstat.size
+
+      if (cacheHit) {
+        // Cache is fresh: reuse cached frontmatter for priority extraction.
+        // Pass 2 can use the full cached parse (body, finalBody, description)
+        // without re-reading the file at all.
+        cachedFrontmatter = cached
+        if (cached.frontmatter && Number.isFinite(cached.frontmatter.priority)) {
+          priority = cached.frontmatter.priority
+        }
+      } else {
+        // Cache miss (or no cache): bounded read for frontmatter only.
+        // _readFrontmatterOnly uses an explicit position=0 so the fd cursor
+        // is not advanced — important for correctness even though pass 1
+        // always closes the fd before pass 2 re-opens.
+        try {
+          const partial = _readFrontmatterOnly(fd, fstat.size, { maxBytes: 4096 })
+          if (partial.frontmatter && Number.isFinite(partial.frontmatter.priority)) {
+            priority = partial.frontmatter.priority
+          }
+        } catch {
+          // _readFrontmatterOnly only throws on bad opts — won't happen
+          // here because we pass a valid literal. If it does throw for
+          // any reason, default priority is safe.
+        }
+      }
+
+      candidates.push({
+        entry,
+        fullPath,
+        label,
+        realPath,
+        fstat: { size: fstat.size, mtimeMs: fstat.mtimeMs, dev: fstat.dev, ino: fstat.ino },
+        priority,
+        cachedFrontmatter,
+      })
+    } finally {
+      // Always release the fd before moving to the next entry. Pass 2
+      // re-opens the file — holding fds open across all candidates would
+      // risk exhausting the process fd limit on large skill directories.
+      try { closeSync(fd) } catch { /* non-fatal */ }
+    }
+  }
+
+  return candidates
 }
 
 /**
