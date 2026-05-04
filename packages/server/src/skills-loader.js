@@ -487,6 +487,16 @@ function _stripUnquotedTrailingComment(s) {
  *     runtime prompt-build callers keep provider scoping enforced.
  *   - `parseCache`: optional `Map` of mtime-keyed parse results to skip
  *     re-reading and re-parsing unchanged files (#3248).
+ *   - `maxTotalBytes`: per-tier byte budget that bounds peak memory by
+ *     stopping the read loop once cumulative bytes for THIS load would
+ *     exceed it (#3222). Skills are scanned in alphabetical order, so
+ *     the cutoff is deterministic across platforms but NOT priority-
+ *     aware — callers that need priority-aware pruning rely on the
+ *     post-merge `_enforceTotalBudget` step in `loadActiveSkillsLayered`.
+ *     Default = unbounded (back-compat). Layered loader sets this to
+ *     `maxTotalSkillBytes` so a single tier can never exhaust more than
+ *     the global cap, capping peak memory at 2× the global cap across
+ *     both tier loads.
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -715,6 +725,22 @@ export function loadActiveSkills(dir, opts = {}) {
       // same number of chars (+1 for the dot).
       const name = entry.slice(0, -(ext.length + 1))
 
+      // #3222 (review): tier-budget pre-read check. Use fstat.size (which
+      // we already have) so we don't pay the I/O / allocation cost of
+      // readFileSync for skills that can never fit. `continue` (not
+      // `break`) so a later smaller skill still has a chance to fit
+      // when the offending skill is bigger than the remaining headroom
+      // — the alphabetical scan order makes the cutoff deterministic
+      // regardless. Applied here BEFORE the parseCache hit branch so
+      // the budget governs the cache path too.
+      if (tierBudget !== null
+          && typeof fstat.size === 'number'
+          && tierTotalBytes + fstat.size > tierBudget) {
+        log.warn(`Skipping skill ${label}: tier budget reached (${tierTotalBytes + fstat.size} > ${tierBudget})`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
       // #3248: parse-cache fast path. fstatSync above gave us the
       // post-open file's mtime+size; if the cache entry's mtimeMs+size
       // match, skip readFileSync / text-validation / parseFrontmatter
@@ -738,6 +764,10 @@ export function loadActiveSkills(dir, opts = {}) {
         frontmatter = cached.frontmatter
         finalBody = cached.finalBody
         description = cached.description
+        // #3222: account for the cached body in the tier total so the
+        // post-cache-hit path doesn't accidentally exceed the budget
+        // by skipping the byte counter.
+        if (tierBudget !== null) tierTotalBytes += fstat.size
       } else {
         // #3218: read from the open fd, not from the path. The fd is
         // pinned to the inode we already validated above.
@@ -754,19 +784,10 @@ export function loadActiveSkills(dir, opts = {}) {
           continue
         }
 
-        // #3222: per-tier budget guardrail. If reading this skill would
-        // push the tier's cumulative byte total over the budget, skip
-        // it (and every subsequent skill in this tier). The per-skill
-        // cap above already filters giants; this catches "many small
-        // skills". Cross-tier priority pruning still runs after merge,
-        // so an over-budget tier load won't accidentally evict a
-        // higher-priority skill from the OTHER tier.
-        if (tierBudget !== null && tierTotalBytes + buf.length > tierBudget) {
-          log.warn(`Skipping skill ${label}: tier budget reached (${tierTotalBytes + buf.length} > ${tierBudget})`)
-          log.debug(`skill ${label} full path: ${fullPath}`)
-          continue
-        }
-        tierTotalBytes += buf.length
+        // #3222: pre-read check above already enforced the tier budget
+        // using `fstat.size`; account for the actual buf.length here so
+        // `_enforceTotalBudget`'s expectations stay aligned.
+        if (tierBudget !== null) tierTotalBytes += buf.length
 
         if (!_bufferLooksLikeText(buf)) {
           log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)

@@ -802,6 +802,40 @@ describe('skills-loader', () => {
         assert.equal(skills.length, 3)
       })
 
+      // #3274 review (#3222 follow-up): the per-tier guardrail cuts
+      // off in alphabetical order, NOT priority order. A high-priority
+      // skill whose name sorts later than a low-priority skill can be
+      // crowded out under tight tier budgets. Document the trade-off
+      // so a future "approach 1" implementation (parse-frontmatter-
+      // first, sort-by-priority, then read) doesn't accidentally
+      // re-introduce alphabetical-only cutoff. Tracked at #3275.
+      it('per-tier cutoff is alphabetical, not priority-aware (known trade-off)', () => {
+        const body = 'X'.repeat(900)
+        // 'a-low.md' has priority 1 but sorts FIRST alphabetically.
+        // 'z-high.md' has priority 1000 but sorts LAST.
+        writeFileSync(
+          join(dir, 'a-low.md'),
+          `---\npriority: 1\n---\n${body}\n`,
+        )
+        writeFileSync(
+          join(dir, 'z-high.md'),
+          `---\npriority: 1000\n---\n${body}\n`,
+        )
+
+        // Tier budget = 1500 bytes — fits one skill, not both.
+        // Alphabetical order means 'a-low.md' is read first, fills the
+        // tier total, and 'z-high.md' is skipped despite its higher
+        // priority. The post-merge `_enforceTotalBudget` only sees
+        // 'a-low.md' so priority can't help.
+        const skills = loadActiveSkills(dir, {
+          maxSkillBytes: 4 * 1024,
+          maxTotalBytes: 1500,
+        })
+        assert.equal(skills.length, 1)
+        assert.equal(skills[0].name, 'a-low',
+          'alphabetical cutoff: low-priority skill kept, high-priority skill skipped — known trade-off (#3275)')
+      })
+
       it('layered loader passes maxTotalSkillBytes to each tier as a guardrail', () => {
         // Set up: 4 oversized skills in global, 4 in repo. Without per-
         // tier enforcement, the layered loader would read all 8 (8 *
