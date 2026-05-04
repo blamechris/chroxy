@@ -504,9 +504,11 @@ export interface ConnectionState {
   // #3270/#3235: re-trust a skill after a content-hash mismatch.
   // Sends `skill_trust_accept`; the server broadcasts
   // `skill_trust_accepted` which the message-handler uses to clear
-  // the SkillsPanel red-flag indicator. Errors (TRUST_FLUSH_FAILED,
-  // SKILL_NOT_FOUND) come back via the existing `error` envelope and
-  // surface through `serverErrors`.
+  // the SkillsPanel red-flag indicator. Errors come back via the
+  // existing `error` envelope and surface through `serverErrors`:
+  //   - `TRUST_NOT_ENABLED` — bound session has no trust store wired
+  //   - `SKILL_NOT_FOUND` — name doesn't match any loaded skill
+  //   - `TRUST_FLUSH_FAILED` — accepted in memory but persist failed
   acceptSkillTrust: (skillName: string) => void;
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
