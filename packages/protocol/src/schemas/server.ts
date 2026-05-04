@@ -26,6 +26,14 @@ export const ServerAuthOkSchema = z.object({
   protocolVersion: z.number().int().min(1),
   minProtocolVersion: z.number().int().min(1),
   maxProtocolVersion: z.number().int().min(1),
+  // #3272: server-advertised capability map. Keyed by feature name,
+  // value=boolean. Lets the dashboard gate UI affordances on the
+  // server actually supporting the matching WS message — e.g.
+  // `skillTrustAccept` was added in #3269 and is needed by the
+  // SkillsPanel Accept button (#3270). Older servers that don't
+  // emit this field are treated as "no advertised capabilities" by
+  // the dashboard, so feature-gated UI hides itself fail-closed.
+  capabilities: z.record(z.string(), z.boolean()).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

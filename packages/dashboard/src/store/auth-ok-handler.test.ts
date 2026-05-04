@@ -363,6 +363,76 @@ describe('auth_ok handler', () => {
     })
   })
 
+  // #3272: server-advertised capability map. Dashboard gates UI
+  // affordances on these flags so older servers don't render dead
+  // buttons against unimplemented WS handlers. Missing flag = false
+  // (fail-closed) so unmapped capabilities never accidentally enable.
+  describe('serverCapabilities parsing (#3272)', () => {
+    it('parses capabilities when provided', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({
+        capabilities: { skillTrustAccept: true, futureFeature: false },
+      }), ctx as any)
+
+      expect(store.getState().serverCapabilities).toEqual({
+        skillTrustAccept: true,
+        futureFeature: false,
+      })
+    })
+
+    it('defaults serverCapabilities to {} when omitted (older server)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any)
+
+      expect(store.getState().serverCapabilities).toEqual({})
+    })
+
+    it('coerces non-true values to false (malformed entries cannot enable a gate)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({
+        capabilities: {
+          legitFlag: true,
+          stringTrue: 'true',  // not a real boolean
+          numberOne: 1,         // truthy but not boolean true
+          nullVal: null,
+        },
+      }), ctx as any)
+
+      const caps = store.getState().serverCapabilities
+      expect(caps.legitFlag).toBe(true)
+      expect(caps.stringTrue).toBe(false)
+      expect(caps.numberOne).toBe(false)
+      expect(caps.nullVal).toBe(false)
+    })
+
+    it('treats array `capabilities` as missing (not an object)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({
+        capabilities: ['not', 'an', 'object'] as unknown,
+      }), ctx as any)
+
+      expect(store.getState().serverCapabilities).toEqual({})
+    })
+
+    // #3272 review: stale capabilities from a previous connection must
+    // be overwritten on fresh auth_ok. Otherwise UI gates from the old
+    // server stay enabled against a new (older) server that doesn't
+    // advertise the same flags.
+    it('overwrites stale capabilities from a previous connection on fresh auth_ok', () => {
+      store = createMockStore({
+        connectionPhase: 'reconnecting',
+        socket: null,
+        serverCapabilities: { skillTrustAccept: true, otherFlag: true },
+      } as unknown as ConnectionState)
+      setStore(store)
+
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any) // no capabilities in payload
+
+      expect(store.getState().serverCapabilities).toEqual({})
+    })
+  })
+
   describe('reconnection', () => {
     it('preserves messages, terminal, and session state on reconnect', () => {
       store = createMockStore({
