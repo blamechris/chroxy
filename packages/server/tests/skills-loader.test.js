@@ -1201,6 +1201,29 @@ describe('skills-loader', () => {
         'providers gate must fire BEFORE activation — manual opt-in does not bypass scoping')
     })
 
+    // #3230 review: prove the ORDERING by running with includeInactive.
+    // If activation were evaluated before providers, a wrong-provider
+    // manual skill would still appear as `active: false` in the listing
+    // payload (because includeInactive keeps inactive-manual entries).
+    // The providers gate must fire first, so the skill stays absent.
+    it('providers gate fires BEFORE activation (proven via includeInactive)', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'codex',
+        // No activeManualSkills — combined with includeInactive, an
+        // activation-first implementation would emit the skill tagged
+        // `active: false`. Provider-first implementation drops it
+        // entirely. Asserting absent locks the order.
+        includeInactive: true,
+      })
+      assert.equal(skills.length, 0,
+        'providers gate must fire BEFORE activation — wrong-provider manual skill must NOT leak as inactive entry')
+    })
+
     it('activation gate fails: right provider, NOT manually activated → filtered', () => {
       writeCombinedSkill({
         providers: ['claude'],
@@ -1216,9 +1239,13 @@ describe('skills-loader', () => {
     })
 
     it('injection mode is preserved across the gate chain (not just the default fallback)', () => {
-      // Three skills, all auto-activated, all unscoped — verify each
-      // injection: variant survives the providers + activation gates and
-      // ends up routed correctly.
+      // Three skills, all auto-activated, all scoped to the claude family —
+      // verify each injection: variant survives the providers + activation
+      // gates and ends up routed correctly. The provider scope here is
+      // intentional: we want the gates active so the test catches a
+      // regression where the injection field gets reset by gate-passing
+      // logic (vs. the default-fallback path covered by the focused
+      // #3200 tests).
       writeFileSync(join(dir, 'a-prepend.md'),
         '---\nname: a-prepend\nproviders: [claude]\ninjection: prepend\n---\nA\n')
       writeFileSync(join(dir, 'b-append.md'),
