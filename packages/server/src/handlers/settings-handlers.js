@@ -435,6 +435,13 @@ function handleListSkills(ws, client, msg, ctx) {
     provider,
     activeManualSkills: activeSet,
     includeInactive: true,
+    // #3226: when no provider is bound (no session, or a session
+    // that doesn't expose one), bypass the provider-scoping gate
+    // and the per-provider allowlist so the dashboard's "browse
+    // all installed skills" listing doesn't silently drop scoped
+    // entries. Per-session listings keep `provider` set, so the
+    // current session's filtered view is unchanged.
+    includeAllProviders: provider == null,
   }).map((s) => {
     // `metadata.activation` is the authoritative source — keep
     // anything else as `auto` to match the loader's defaults.

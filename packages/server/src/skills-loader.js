@@ -492,6 +492,14 @@ export function loadActiveSkills(dir, opts = {}) {
   // manual skills. Runtime prompt-build callers keep the default (false)
   // so an inactive manual skill never lands in the system prompt.
   const includeInactive = !!opts.includeInactive
+  // #3226: when true, the provider-scoping gate (#3198) is bypassed.
+  // Used by the dashboard `list_skills` fallback path so the "browse
+  // all installed skills" view shows provider-scoped skills even when
+  // no provider is bound (or the bound session can't report one).
+  // The runtime prompt-build path keeps the default (false) so a skill
+  // scoped to `providers: [claude-sdk]` never lands in a non-Claude
+  // session's prompt.
+  const includeAllProviders = !!opts.includeAllProviders
   // #3248: optional caller-supplied parse cache. Keyed by realpath,
   // value is `{ mtimeMs, size, body, frontmatter, finalBody, description }`.
   // When the cache holds an entry whose mtimeMs+size match the
@@ -747,7 +755,10 @@ export function loadActiveSkills(dir, opts = {}) {
       // Provider gating (#3198): if frontmatter declares a `providers:` list,
       // include the skill only when the session's provider is in it. Missing
       // / empty list means apply-to-all, preserving v1 back-compat.
-      if (!_skillMatchesProvider(frontmatter, provider)) continue
+      // #3226: `includeAllProviders` (set by the dashboard's `list_skills`
+      // fallback) bypasses this gate so the operator's "browse all
+      // installed skills" view doesn't silently drop scoped entries.
+      if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
 
       // Manual activation (#3199): skills with `activation: manual` are off
       // by default and require explicit opt-in via `activeManualSkills`.
@@ -1025,6 +1036,12 @@ export function loadActiveSkillsLayered({
   trustStore,
   onTrustMismatch,
   includeInactive,
+  // #3226: bypass the provider-scoping gate so the dashboard's
+  // `list_skills` fallback shows ALL installed skills (including
+  // those with `providers:` frontmatter) when no provider is bound.
+  // Default false — the runtime prompt-build path still respects
+  // provider scoping for the active session.
+  includeAllProviders,
   // #3248: per-session parse cache. Forwarded as-is to both tier
   // loaders so they share the same Map (skill name collisions
   // resolve at the realpath level — global/repo overlay can both
@@ -1046,6 +1063,8 @@ export function loadActiveSkillsLayered({
   // skill marking; the merge step below treats them like any other
   // entry (repo overrides global on conflict, etc.).
   if (includeInactive) loaderOpts.includeInactive = true
+  // #3226: pass-through for the listing-path provider-scope bypass.
+  if (includeAllProviders) loaderOpts.includeAllProviders = true
   if (parseCache instanceof Map) loaderOpts.parseCache = parseCache
 
   const globals = (globalDir && !sameDir)
@@ -1082,7 +1101,14 @@ export function loadActiveSkillsLayered({
   // total-budget pass — a skill the operator deny-listed should not be
   // counted toward the cumulative budget, even if pruning would have
   // dropped it anyway.
-  const filtered = _filterByProviderAllowlist(merged, provider, providerSkillAllowlist)
+  // #3226: the listing fallback path bypasses the allowlist for the
+  // same reason it bypasses provider scoping — the dashboard's "browse
+  // all installed skills" view shouldn't lose entries that an operator
+  // restricted on a per-provider basis. The runtime prompt-build path
+  // keeps the allowlist active.
+  const filtered = includeAllProviders
+    ? merged
+    : _filterByProviderAllowlist(merged, provider, providerSkillAllowlist)
 
   const totalCap = Number.isFinite(maxTotalSkillBytes) && maxTotalSkillBytes > 0
     ? Math.floor(maxTotalSkillBytes)
