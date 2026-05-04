@@ -915,4 +915,78 @@ describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
     // role="alert" implies aria-live="assertive"; we don't set it explicitly.
     expect(panel).not.toHaveAttribute('aria-live', 'polite')
   })
+
+  // #3100: dashboard branches on error.status to give a specific recovery
+  // hint (auth vs rate-limit vs 5xx) instead of forcing the user to parse
+  // the generic message.
+  describe('#3100 evaluator error status recovery hint', () => {
+    async function renderAndEvaluateError(payload: EvaluatorResultPayload) {
+      const onEvaluate = vi.fn().mockResolvedValue(payload)
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onEvaluate={onEvaluate} />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'draft' } })
+      fireEvent.click(screen.getByTestId('evaluate-button'))
+      // Pin to the resolved-error panel: pending uses role="status", error
+      // uses role="alert". `findByRole` waits for it to appear, so the
+      // negative-case `queryByTestId('evaluator-hint')` assertions below
+      // can't run against the still-pending panel.
+      return screen.findByRole('alert')
+    }
+
+    it('renders an API-key hint for status 401', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator authentication failed', status: 401 },
+      })
+      const hint = await screen.findByTestId('evaluator-hint')
+      expect(hint).toHaveTextContent(/ANTHROPIC_API_KEY/i)
+    })
+
+    it('renders an API-key hint for status 403', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator authentication failed', status: 403 },
+      })
+      const hint = await screen.findByTestId('evaluator-hint')
+      expect(hint).toHaveTextContent(/ANTHROPIC_API_KEY/i)
+    })
+
+    it('renders a "try again" hint for status 429', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator rate limited', status: 429 },
+      })
+      const hint = await screen.findByTestId('evaluator-hint')
+      expect(hint).toHaveTextContent(/try again/i)
+    })
+
+    it('renders an upstream-unavailable hint for 5xx statuses', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator service unavailable', status: 503 },
+      })
+      const hint = await screen.findByTestId('evaluator-hint')
+      expect(hint).toHaveTextContent(/upstream/i)
+    })
+
+    it('omits the hint when no status is present (generic / network error)', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator network error' },
+      })
+      // renderAndEvaluateError already returned only after the resolved
+      // error panel rendered (findByRole('alert')), so a stray hint would
+      // be visible by now if regressed.
+      expect(screen.queryByTestId('evaluator-hint')).toBeNull()
+    })
+
+    it('omits the hint for non-API errors that happen to lack status (NO_API_KEY)', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_NO_API_KEY', message: 'ANTHROPIC_API_KEY is not set' },
+      })
+      expect(screen.queryByTestId('evaluator-hint')).toBeNull()
+    })
+
+    it('omits the hint for unmapped statuses (e.g. 400 client error)', async () => {
+      await renderAndEvaluateError({
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator API call failed', status: 400 },
+      })
+      expect(screen.queryByTestId('evaluator-hint')).toBeNull()
+    })
+  })
 })

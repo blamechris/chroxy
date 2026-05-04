@@ -200,7 +200,10 @@ export interface EvaluatorResultPayload {
   rewritten?: string | null;
   clarification?: string | null;
   reasoning?: string;
-  error?: { code: string; message: string };
+  // #3100: optional numeric upstream HTTP status (401/403/429/5xx) so the UI
+  // can pick a recovery hint without parsing the message string. Omitted for
+  // non-API errors (NO_API_KEY, BAD_RESPONSE) and network failures.
+  error?: { code: string; message: string; status?: number };
 }
 
 export interface SessionNotification {

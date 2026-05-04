@@ -63,10 +63,18 @@ async function handleEvaluateDraft(ws, client, msg, ctx) {
     result = await evaluator({ draft, cwd })
   } catch (err) {
     log.warn(`evaluate_draft failed (${err.code || 'UNKNOWN'}): ${err.message}`)
+    // #3100: forward numeric upstream status when present so the dashboard
+    // can pick a recovery hint (auth vs rate-limit vs 5xx). Only attach
+    // the field when it's a real number — clients shouldn't see status
+    // for non-API errors (NO_API_KEY, BAD_RESPONSE) or network failures.
+    const errEnvelope = { code: err.code || 'EVALUATOR_ERROR', message: err.message }
+    if (typeof err.status === 'number') {
+      errEnvelope.status = err.status
+    }
     ctx.send(ws, {
       type: 'evaluate_draft_result',
       requestId,
-      error: { code: err.code || 'EVALUATOR_ERROR', message: err.message },
+      error: errEnvelope,
     })
     return
   }
