@@ -547,6 +547,22 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   )
 }
 
+// #3100: map upstream HTTP status to an actionable recovery hint. Returns
+// null when there's no specific guidance to add — the generic error message
+// is enough on its own.
+function evaluatorRecoveryHint(status: number | undefined): string | null {
+  if (status === 401 || status === 403) {
+    return 'Check your ANTHROPIC_API_KEY.'
+  }
+  if (status === 429) {
+    return 'Try again in a moment.'
+  }
+  if (typeof status === 'number' && status >= 500 && status < 600) {
+    return 'Anthropic upstream is unavailable — try again shortly.'
+  }
+  return null
+}
+
 /**
  * Inline evaluator result panel (#3068). Renders one of:
  *   - pending spinner
@@ -595,6 +611,17 @@ function EvaluatorPanel({
       <div className="evaluator-panel evaluator-panel--error" data-testid="evaluator-panel" role="alert">
         <span className="evaluator-label">Evaluator error ({result.error.code}):</span>
         <span className="evaluator-text">{result.error.message}</span>
+        {(() => {
+          // #3100: surface a specific recovery hint when the upstream API
+          // returned a known status. The server passes the numeric status
+          // through `error.status` so we can branch without parsing the
+          // sanitized `message` string.
+          const hint = evaluatorRecoveryHint(result.error.status)
+          if (!hint) return null
+          return (
+            <span className="evaluator-hint" data-testid="evaluator-hint">{hint}</span>
+          )
+        })()}
         <button type="button" className="evaluator-dismiss" onClick={onDismiss} aria-label="Dismiss">×</button>
       </div>
     )
