@@ -67,6 +67,17 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     environments: providers.some(p => p.capabilities?.containerized),
   }
 
+  // #3272: server-advertised capability map. Dashboard / app gate UI
+  // affordances on these flags so older servers don't silently no-op
+  // a click against an unknown WS message type. Add new flags here
+  // when shipping a dashboard-facing feature whose handler depends on
+  // a specific server build and could run against mixed versions.
+  const capabilities = {
+    // #3235/#3269 — `skill_trust_accept` handler + `skill_trust_accepted`
+    // broadcast. Gates the SkillsPanel 'Accept new content' button (#3270).
+    skillTrustAccept: true,
+  }
+
   send(ws, {
     type: 'auth_ok',
     clientId: client.id,
@@ -83,6 +94,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     maxProtocolVersion: protocolVersion,
     webFeatures: webTaskManager.getFeatureStatus(),
     features,
+    capabilities,
     ...extra,
   })
 

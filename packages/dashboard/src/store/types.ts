@@ -385,6 +385,13 @@ export interface ConnectionState {
   webFeatures: WebFeatureStatus;
   webTasks: WebTask[];
 
+  // #3272: server-advertised capability map keyed by feature name. Lets
+  // the dashboard gate UI affordances on the server actually supporting
+  // the matching WS message — e.g. `skillTrustAccept` (#3270 Accept
+  // button) requires the #3269 handler. Older servers don't emit the
+  // field, so missing keys are treated as `false` (fail-closed).
+  serverCapabilities: Record<string, boolean>;
+
   // Server startup phase (from server_status events)
   // #2836: 'tunnel_warming' is the current name for the DNS-propagation
   // window; 'tunnel_verifying' is retained as a legacy alias that

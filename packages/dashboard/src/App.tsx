@@ -311,6 +311,10 @@ export function App() {
   // #3270: 'Accept new content' affordance — pairs with skill_trust_accept
   // server handler (#3235/#3269).
   const acceptSkillTrust = useConnectionStore(s => s.acceptSkillTrust)
+  // #3272: gate the Accept button on the server's advertised capability so
+  // older servers (which silently drop unknown WS messages) don't render a
+  // dead button. Treat missing flag as false — fail-closed.
+  const skillTrustAcceptSupported = useConnectionStore(s => !!s.serverCapabilities?.skillTrustAccept)
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
@@ -1430,7 +1434,7 @@ export function App() {
           mismatchedSkillNames={mismatchedSet}
           onActivate={activateSkill}
           onDeactivate={deactivateSkill}
-          onAcceptTrust={acceptSkillTrust}
+          onAcceptTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
           onClose={() => setSkillsPanelOpen(false)}
         />
       )}

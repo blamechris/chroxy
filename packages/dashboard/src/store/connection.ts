@@ -345,6 +345,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   webFeatures: { available: false, remote: false, teleport: false },
   webTasks: [],
 
+  // #3272: capability map populated from auth_ok. Empty until connected.
+  serverCapabilities: {},
+
   launchWebTask: (prompt: string, cwd?: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

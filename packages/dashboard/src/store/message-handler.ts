@@ -1471,6 +1471,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         teleport: !!webFeaturesRaw.teleport,
       } : { available: false, remote: false, teleport: false };
 
+      // #3272: parse server-advertised capability map. Older servers
+      // omit the field; treat absence as "no advertised capabilities"
+      // so feature-gated UI hides itself fail-closed (rather than
+      // silently no-oping clicks against unimplemented WS handlers).
+      // Coerce values to boolean so a malformed entry can't accidentally
+      // enable a gate.
+      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
+      const serverCapabilities: Record<string, boolean> = {};
+      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
+        for (const [k, v] of Object.entries(capabilitiesRaw)) {
+          serverCapabilities[k] = v === true;
+        }
+      }
+
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
@@ -1498,6 +1512,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         restartEtaMs: null,
         restartingSince: null,
         webFeatures,
+        serverCapabilities,
       };
       if (ctx.isReconnect) {
         set(connectedState);
