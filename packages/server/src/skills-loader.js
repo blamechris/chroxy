@@ -98,7 +98,6 @@ import {
 import {
   parseFrontmatter,
   _normalizeProviderName,
-  _isClaudeFamilyProvider,
   _coerceManualSet,
   _skillMatchesProvider,
   _normalizeInjectionMode,
