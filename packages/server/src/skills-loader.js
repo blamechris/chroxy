@@ -477,6 +477,16 @@ function _stripUnquotedTrailingComment(s) {
  *     mode-specific UX without re-deriving it from `blocked`. Loader
  *     callers (BaseSession) fan this into a `skill_changed` WS event for
  *     #3205.
+ *   - `includeInactive`: when true, manual skills that aren't in
+ *     `activeManualSkills` are still returned but tagged with
+ *     `active: false`. Used by `list_skills` for the toggle UX (#3209).
+ *   - `includeAllProviders`: when true, the per-skill provider gate
+ *     (#3198) is bypassed so scoped skills appear in the result
+ *     regardless of the session's provider. Used by `list_skills` for
+ *     the "browse all installed skills" view (#3226). Default false —
+ *     runtime prompt-build callers keep provider scoping enforced.
+ *   - `parseCache`: optional `Map` of mtime-keyed parse results to skip
+ *     re-reading and re-parsing unchanged files (#3248).
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -1014,12 +1024,27 @@ export function findRepoSkillsDir(cwd) {
  *   activeManualSkills?: Set<string>|string[]|null,
  *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
  *   providerSkillAllowlist?: Record<string, string[]>|null,
+ *   trustStore?: object|null,
+ *   onTrustMismatch?: (info: object) => void,
+ *   includeInactive?: boolean,
+ *   includeAllProviders?: boolean,
+ *   parseCache?: Map<string, object>,
  * }} [opts]
  *   - `provider`, `activeManualSkills`, `defaultInjectionMode`: forwarded
  *     to `loadActiveSkills` for #3198 (provider gating), #3199 (manual
  *     activation), and #3200 (per-skill injection mode).
  *   - `providerSkillAllowlist`: per-provider allowlist (#3207). See
  *     `_filterByProviderAllowlist` for semantics.
+ *   - `includeInactive`: when true, inactive manual skills are returned
+ *     tagged `active: false` so the dashboard can render toggles (#3209).
+ *   - `includeAllProviders`: when true, both the per-skill provider
+ *     gate (#3198) AND the per-provider allowlist (#3207) are bypassed
+ *     so the dashboard's `list_skills` fallback shows ALL installed
+ *     skills (#3226). Runtime prompt-build callers keep the default
+ *     (false) so scoped skills never reach the wrong provider's prompt.
+ *   - `parseCache`: optional `Map` of mtime-keyed parse results, shared
+ *     across both tier loads so a global+repo merge skips redundant
+ *     re-parses on a warm cache (#3248).
  * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo', metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkillsLayered({

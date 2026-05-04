@@ -429,11 +429,20 @@ function handleListSkills(ws, client, msg, ctx) {
   // working without forcing every test to add the method.
   const trustStore = entry?.session?.getTrustStore?.() ?? null
 
+  // #3226 (review): forward the bound session's `providerSkillAllowlist`
+  // (if any) so the per-session listing reflects what the prompt builder
+  // would actually inject. Without this, on Codex/Gemini sessions with
+  // an allowlist configured, the dashboard would still show toggles for
+  // skills the runtime drops at prompt-build time. Skipped entirely
+  // when `includeAllProviders` is true (#3226's no-session path).
+  const sessionAllowlist = entry?.session?._providerSkillAllowlist || null
+
   const skills = loadActiveSkillsLayered({
     globalDir: sessionSkillsDir,
     repoDir: sessionRepoDir,
     provider,
     activeManualSkills: activeSet,
+    providerSkillAllowlist: sessionAllowlist,
     includeInactive: true,
     // #3226: when no provider is bound (no session, or a session
     // that doesn't expose one), bypass the provider-scoping gate

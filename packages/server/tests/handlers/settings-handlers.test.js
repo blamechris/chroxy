@@ -943,6 +943,41 @@ describe('settings-handlers', () => {
           `expected provider-scoped skill in listing (browse-all UX), got: ${JSON.stringify(names)}`)
       })
 
+      it('bypasses providerSkillAllowlist on the no-provider listing path', () => {
+        // Regression: with includeAllProviders, the per-provider
+        // allowlist (#3207) must also be bypassed. Otherwise an
+        // operator who configured an allowlist for Codex would see an
+        // empty listing when browsing pre-pair (no session bound).
+        repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-allowlist-'))
+        mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'a.md'),
+          'Skill A.\n',
+        )
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'b.md'),
+          'Skill B.\n',
+        )
+
+        // Session with an allowlist for codex, but no provider on the
+        // session entry — simulates the "operator hasn't paired yet"
+        // case. With includeAllProviders, both skills should appear.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.cwd = repoRoot
+        session._providerSkillAllowlist = { codex: ['a'] } // would normally drop 'b'
+        sessions.set('s1', { session, name: 'S', cwd: repoRoot, provider: null })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+        const msg = ctx._sent[0]
+        const names = msg.skills.map((s) => s.name).sort()
+        assert.ok(names.includes('a') && names.includes('b'),
+          `allowlist should be bypassed on no-provider path; got: ${JSON.stringify(names)}`)
+      })
+
       it('shows manual-activation skills in the listing as inactive (no session bound)', () => {
         repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-manual-'))
         mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
