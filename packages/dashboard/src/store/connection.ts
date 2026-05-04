@@ -1230,6 +1230,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #3270/#3235: re-trust a skill whose hash mismatched the trust store.
+  // Server resolves the skill via the bound session's loaded list (or
+  // filesystem fallback for block-mode-filtered skills), calls
+  // SkillsTrustStore.acceptHash + flush, and broadcasts
+  // `skill_trust_accepted` which the message-handler uses to clear
+  // `mismatchedSkillNames`. Errors come back via the standard `error`
+  // envelope (TRUST_NOT_ENABLED / TRUST_FLUSH_FAILED / SKILL_NOT_FOUND).
+  // `requestId` lets a future UX correlate a specific click to the
+  // resulting broadcast or error.
+  acceptSkillTrust: (skillName: string) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const requestId = `accept-trust-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const payload: Record<string, unknown> = { type: 'skill_trust_accept', skillName, requestId };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    }
+  },
+
   confirmPermissionMode: (mode: string) => {
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

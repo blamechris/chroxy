@@ -308,6 +308,9 @@ export function App() {
   const requestListSkills = useConnectionStore(s => s.requestListSkills)
   const activateSkill = useConnectionStore(s => s.activateSkill)
   const deactivateSkill = useConnectionStore(s => s.deactivateSkill)
+  // #3270: 'Accept new content' affordance — pairs with skill_trust_accept
+  // server handler (#3235/#3269).
+  const acceptSkillTrust = useConnectionStore(s => s.acceptSkillTrust)
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
@@ -1427,6 +1430,7 @@ export function App() {
           mismatchedSkillNames={mismatchedSet}
           onActivate={activateSkill}
           onDeactivate={deactivateSkill}
+          onAcceptTrust={acceptSkillTrust}
           onClose={() => setSkillsPanelOpen(false)}
         />
       )}
