@@ -184,5 +184,43 @@ describe('evaluator-handlers', () => {
       }, ctx)
       assert.equal(ctx._sent[0].requestId, 'req-err')
     })
+
+    // #3100: include numeric err.status in the error envelope so the dashboard
+    // can branch on auth (401/403) vs rate-limit (429) vs 5xx without parsing
+    // the sanitized message string.
+    it('includes status in the error envelope when wrapped error carries it', async () => {
+      const err = Object.assign(new Error('Evaluator rate limited'), {
+        code: 'EVALUATOR_API_ERROR',
+        status: 429,
+      })
+      const evaluator = async () => { throw err }
+      const ctx = makeCtx({ evaluator })
+
+      await evaluatorHandlers.evaluate_draft(makeWs(), makeClient(), { draft: 'x' }, ctx)
+      assert.equal(ctx._sent[0].error.status, 429)
+    })
+
+    it('omits status when the wrapped error has no numeric status (network error)', async () => {
+      const err = Object.assign(new Error('Evaluator network error'), {
+        code: 'EVALUATOR_API_ERROR',
+      })
+      const evaluator = async () => { throw err }
+      const ctx = makeCtx({ evaluator })
+
+      await evaluatorHandlers.evaluate_draft(makeWs(), makeClient(), { draft: 'x' }, ctx)
+      assert.equal(ctx._sent[0].error.status, undefined)
+      assert.equal(Object.prototype.hasOwnProperty.call(ctx._sent[0].error, 'status'), false)
+    })
+
+    it('omits status for non-API error codes (e.g. EVALUATOR_NO_API_KEY)', async () => {
+      const err = Object.assign(new Error('ANTHROPIC_API_KEY is not set'), {
+        code: 'EVALUATOR_NO_API_KEY',
+      })
+      const evaluator = async () => { throw err }
+      const ctx = makeCtx({ evaluator })
+
+      await evaluatorHandlers.evaluate_draft(makeWs(), makeClient(), { draft: 'x' }, ctx)
+      assert.equal(Object.prototype.hasOwnProperty.call(ctx._sent[0].error, 'status'), false)
+    })
   })
 })
