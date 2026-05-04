@@ -487,6 +487,16 @@ function _stripUnquotedTrailingComment(s) {
  *     runtime prompt-build callers keep provider scoping enforced.
  *   - `parseCache`: optional `Map` of mtime-keyed parse results to skip
  *     re-reading and re-parsing unchanged files (#3248).
+ *   - `maxTotalBytes`: per-tier byte budget that bounds peak memory by
+ *     stopping the read loop once cumulative bytes for THIS load would
+ *     exceed it (#3222). Skills are scanned in alphabetical order, so
+ *     the cutoff is deterministic across platforms but NOT priority-
+ *     aware — callers that need priority-aware pruning rely on the
+ *     post-merge `_enforceTotalBudget` step in `loadActiveSkillsLayered`.
+ *     Default = unbounded (back-compat). Layered loader sets this to
+ *     `maxTotalSkillBytes` so a single tier can never exhaust more than
+ *     the global cap, capping peak memory at 2× the global cap across
+ *     both tier loads.
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -555,6 +565,28 @@ export function loadActiveSkills(dir, opts = {}) {
   const maxSkillBytes = Number.isFinite(opts.maxSkillBytes) && opts.maxSkillBytes > 0
     ? Math.floor(opts.maxSkillBytes)
     : DEFAULT_MAX_SKILL_BYTES
+
+  // #3222: per-tier byte budget. Bounds peak memory before the layered
+  // loader's post-merge prune by stopping the read loop once cumulative
+  // bytes for THIS tier would exceed the budget. Default = unbounded
+  // (back-compat — prior behaviour was post-merge-only). Layered loader
+  // sets this to `maxTotalSkillBytes` so a single tier can never exhaust
+  // more than the global cap, capping peak memory at 2× the global cap
+  // across both tier loads. Final cross-tier pruning still runs in
+  // `_enforceTotalBudget` after the merge.
+  const tierBudget = Number.isFinite(opts.maxTotalBytes) && opts.maxTotalBytes > 0
+    ? Math.floor(opts.maxTotalBytes)
+    : null
+  let tierTotalBytes = 0
+
+  // #3222: process entries in deterministic order so the per-tier
+  // budget cuts off the same skills across runs (filesystem readdir
+  // order is platform-dependent). Sort alphabetically by basename —
+  // matches the post-merge sort and gives operators a predictable
+  // tiebreaker when budget eviction kicks in.
+  entries = Array.isArray(entries)
+    ? entries.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    : []
 
   const skills = []
   for (const entry of entries) {
@@ -693,6 +725,22 @@ export function loadActiveSkills(dir, opts = {}) {
       // same number of chars (+1 for the dot).
       const name = entry.slice(0, -(ext.length + 1))
 
+      // #3222 (review): tier-budget pre-read check. Use fstat.size (which
+      // we already have) so we don't pay the I/O / allocation cost of
+      // readFileSync for skills that can never fit. `continue` (not
+      // `break`) so a later smaller skill still has a chance to fit
+      // when the offending skill is bigger than the remaining headroom
+      // — the alphabetical scan order makes the cutoff deterministic
+      // regardless. Applied here BEFORE the parseCache hit branch so
+      // the budget governs the cache path too.
+      if (tierBudget !== null
+          && typeof fstat.size === 'number'
+          && tierTotalBytes + fstat.size > tierBudget) {
+        log.warn(`Skipping skill ${label}: tier budget reached (${tierTotalBytes + fstat.size} > ${tierBudget})`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
+      }
+
       // #3248: parse-cache fast path. fstatSync above gave us the
       // post-open file's mtime+size; if the cache entry's mtimeMs+size
       // match, skip readFileSync / text-validation / parseFrontmatter
@@ -716,6 +764,10 @@ export function loadActiveSkills(dir, opts = {}) {
         frontmatter = cached.frontmatter
         finalBody = cached.finalBody
         description = cached.description
+        // #3222: account for the cached body in the tier total so the
+        // post-cache-hit path doesn't accidentally exceed the budget
+        // by skipping the byte counter.
+        if (tierBudget !== null) tierTotalBytes += fstat.size
       } else {
         // #3218: read from the open fd, not from the path. The fd is
         // pinned to the inode we already validated above.
@@ -731,6 +783,11 @@ export function loadActiveSkills(dir, opts = {}) {
           log.debug(`skill ${label} full path: ${fullPath}`)
           continue
         }
+
+        // #3222: pre-read check above already enforced the tier budget
+        // using `fstat.size`; account for the actual buf.length here so
+        // `_enforceTotalBudget`'s expectations stay aligned.
+        if (tierBudget !== null) tierTotalBytes += buf.length
 
         if (!_bufferLooksLikeText(buf)) {
           log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
@@ -1079,6 +1136,15 @@ export function loadActiveSkillsLayered({
   if (Array.isArray(allowedRoots)) loaderOpts.allowedRoots = allowedRoots
   if (Array.isArray(allowedExtensions)) loaderOpts.allowedExtensions = allowedExtensions
   if (Number.isFinite(maxSkillBytes) && maxSkillBytes > 0) loaderOpts.maxSkillBytes = maxSkillBytes
+  // #3222: pass the global byte cap to each tier as the per-tier budget
+  // so peak memory across both loads is bounded. The post-merge prune
+  // still runs to apply priority-aware cuts down to one full budget,
+  // but each tier on its own can never read more than the global cap.
+  if (Number.isFinite(maxTotalSkillBytes) && maxTotalSkillBytes > 0) {
+    loaderOpts.maxTotalBytes = Math.floor(maxTotalSkillBytes)
+  } else {
+    loaderOpts.maxTotalBytes = DEFAULT_MAX_TOTAL_SKILL_BYTES
+  }
   if (provider != null) loaderOpts.provider = provider
   if (activeManualSkills != null) loaderOpts.activeManualSkills = activeManualSkills
   if (defaultInjectionMode != null) loaderOpts.defaultInjectionMode = defaultInjectionMode
