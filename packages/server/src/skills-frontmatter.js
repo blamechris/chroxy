@@ -19,6 +19,7 @@
  * The loader re-exports `parseFrontmatter` so external callers
  * (including tests) keep working without changing import paths.
  */
+import { readSync } from 'node:fs'
 import { createLogger } from './logger.js'
 
 const log = createLogger('skills-loader')
@@ -100,6 +101,55 @@ export function parseFrontmatter(text) {
   }
 
   return { frontmatter, body }
+}
+
+/**
+ * Bounded read of an already-open fd, used for pass-1 priority extraction
+ * without reading the full skill body (#3278).
+ *
+ * Reads at most `opts.maxBytes` (default 4096) bytes from the fd starting at
+ * offset 0, then runs the existing `parseFrontmatter` over that partial
+ * string. The caller owns the fd lifecycle — open and close it externally.
+ *
+ * Does NOT advance the fd's file position: uses an explicit `position=0`
+ * argument to `readSync`, so subsequent reads on the same fd still start from
+ * byte 0.
+ *
+ * Returns `{ frontmatter, exhausted }` where:
+ *   - `frontmatter` is the parsed metadata object, or `null` when the file
+ *     has no frontmatter or the frontmatter was malformed.
+ *   - `exhausted` is `true` when the entire file fit within the read window
+ *     (i.e. `bytesRead === fstatSize`), meaning the result is definitive.
+ *
+ * Truncation design tradeoff: if the closing `---` fence falls past the
+ * `maxBytes` cap, `parseFrontmatter` returns `frontmatter: null` because the
+ * closing fence is missing from the partial buffer. The caller should treat
+ * `null` as "no frontmatter / default priority". This is intentional — a
+ * skill with more than 4KB of frontmatter is vanishingly rare and paying a
+ * full file read for pass-1 to handle that edge case is not worth the cost.
+ * The priority-aware two-pass loader (#3279) will fall back to the default
+ * priority for any skill whose frontmatter doesn't fit in the window.
+ *
+ * @param {number} fd         open file descriptor (caller owns lifecycle)
+ * @param {number} fstatSize  file size in bytes from `fs.fstatSync(fd).size`
+ * @param {object} [opts]     options
+ * @param {number} [opts.maxBytes=4096]  maximum bytes to read
+ * @returns {{ frontmatter: object|null, exhausted: boolean }}
+ */
+export function _readFrontmatterOnly(fd, fstatSize, opts = {}) {
+  const rawMax = opts.maxBytes ?? 4096
+  if (!Number.isFinite(rawMax) || rawMax < 0) {
+    throw new TypeError(
+      `_readFrontmatterOnly: opts.maxBytes must be a non-negative finite number, got ${rawMax}`
+    )
+  }
+  const maxBytes = Math.floor(rawMax)
+  const toRead = Math.min(fstatSize, maxBytes)
+  const buf = Buffer.allocUnsafe(toRead)
+  const bytesRead = toRead === 0 ? 0 : readSync(fd, buf, 0, toRead, 0)
+  const text = buf.toString('utf8', 0, bytesRead)
+  const parsed = parseFrontmatter(text)
+  return { frontmatter: parsed.frontmatter, exhausted: bytesRead === fstatSize }
 }
 
 /**

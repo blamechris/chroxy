@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, openSync, closeSync, fstatSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -13,6 +13,7 @@ import {
   parseFrontmatter,
 } from '../src/skills-loader.js'
 import { _compareByPriorityThenName } from '../src/skills-budget.js'
+import { _readFrontmatterOnly } from '../src/skills-frontmatter.js'
 
 describe('skills-loader', () => {
   let dir
@@ -1922,6 +1923,198 @@ describe('skills-loader', () => {
       const sample = skills.find((s) => s.name === 's25')
       assert.ok(sample, 's25 skill must be present')
       assert.equal(sample.body, 'body-25\n')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3278: _readFrontmatterOnly bounded-read helper
+  // -----------------------------------------------------------------------
+
+  describe('_readFrontmatterOnly (#3278)', () => {
+    let fmDir
+
+    beforeEach(() => {
+      fmDir = mkdtempSync(join(tmpdir(), 'chroxy-frontmatter-only-'))
+    })
+
+    afterEach(() => {
+      rmSync(fmDir, { recursive: true, force: true })
+    })
+
+    it('parses valid frontmatter that fits in 4KB', () => {
+      const path = join(fmDir, 'small.md')
+      writeFileSync(path, '---\npriority: 50\nname: foo\n---\nbody\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        const result = _readFrontmatterOnly(fd, size)
+        assert.deepEqual(result.frontmatter, { priority: 50, name: 'foo' })
+        assert.equal(result.exhausted, true)
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('parses frontmatter on a file larger than 4KB (exhausted: false)', () => {
+      // Write a small frontmatter block followed by more than 4KB of body.
+      const fm = '---\npriority: 100\nname: big-skill\n---\n'
+      const body = 'x'.repeat(5000)
+      const path = join(fmDir, 'big.md')
+      writeFileSync(path, fm + body)
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        const result = _readFrontmatterOnly(fd, size)
+        assert.deepEqual(result.frontmatter, { priority: 100, name: 'big-skill' })
+        assert.equal(result.exhausted, false)
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('returns frontmatter: null for a file with no frontmatter', () => {
+      const path = join(fmDir, 'no-fm.md')
+      writeFileSync(path, '# Just a heading\n\nSome content\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        const result = _readFrontmatterOnly(fd, size)
+        assert.equal(result.frontmatter, null)
+        assert.equal(result.exhausted, true)
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('returns frontmatter: null when closing fence falls past the 4KB cap', () => {
+      // Pad the interior of the frontmatter block with YAML comments so the
+      // closing --- fence lands well beyond 4096 bytes.
+      const padding = ('# ' + 'a'.repeat(78) + '\n').repeat(60) // ~4800 bytes
+      const text = '---\n' + padding + 'priority: 999\n---\nbody\n'
+      const path = join(fmDir, 'long-fm.md')
+      writeFileSync(path, text)
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        const result = _readFrontmatterOnly(fd, size)
+        // The closing fence is past the 4KB read window — parseFrontmatter
+        // treats the missing fence as "no frontmatter". This is the
+        // intentional design tradeoff for the rare >4KB frontmatter case.
+        assert.equal(result.frontmatter, null)
+        assert.equal(result.exhausted, false)
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('does not throw on binary content in the first 4KB', () => {
+      const path = join(fmDir, 'binary.md')
+      // Write a file starting with NUL bytes followed by some text.
+      const buf = Buffer.concat([Buffer.alloc(16, 0), Buffer.from('not frontmatter\n')])
+      writeFileSync(path, buf)
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        let result
+        assert.doesNotThrow(() => { result = _readFrontmatterOnly(fd, size) })
+        assert.equal(result.frontmatter, null)
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('does not advance the fd position', async () => {
+      const { readSync: fsReadSync } = await import('node:fs')
+      const path = join(fmDir, 'idempotent.md')
+      writeFileSync(path, '---\npriority: 77\nname: stable\n---\nbody\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        // Call the helper — must NOT advance the fd cursor.
+        _readFrontmatterOnly(fd, size)
+        // Pass null as position so readSync reads from the current fd offset.
+        // If _readFrontmatterOnly advanced the cursor, this reads from wherever
+        // it left off (past byte 0) and will NOT see '---\n' at position 0.
+        const again = Buffer.allocUnsafe(100)
+        const bytesRead = fsReadSync(fd, again, 0, 100, null)
+        assert.ok(bytesRead > 0)
+        // The file starts with '---\n' — verify the fd cursor was not advanced.
+        assert.equal(again.toString('utf8', 0, 4), '---\n')
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('throws TypeError for negative maxBytes', () => {
+      const path = join(fmDir, 'neg.md')
+      writeFileSync(path, '---\npriority: 1\n---\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        assert.throws(
+          () => _readFrontmatterOnly(fd, size, { maxBytes: -1 }),
+          (err) => err instanceof TypeError && /non-negative finite/.test(err.message)
+        )
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('throws TypeError for NaN maxBytes', () => {
+      const path = join(fmDir, 'nan.md')
+      writeFileSync(path, '---\npriority: 1\n---\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        assert.throws(
+          () => _readFrontmatterOnly(fd, size, { maxBytes: NaN }),
+          (err) => err instanceof TypeError && /non-negative finite/.test(err.message)
+        )
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('returns frontmatter: null and exhausted: false when maxBytes is 0 and file is non-empty', () => {
+      const path = join(fmDir, 'zero.md')
+      writeFileSync(path, '---\npriority: 5\n---\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        const result = _readFrontmatterOnly(fd, size, { maxBytes: 0 })
+        assert.equal(result.frontmatter, null)
+        assert.equal(result.exhausted, false)
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('contract equivalence: partial-read priority matches full-read priority', async () => {
+      // Define a representative v2 frontmatter sample well within 4KB.
+      const text = [
+        '---',
+        'name: example-skill',
+        'description: Test skill',
+        'priority: 250',
+        'providers: [claude, claude-sdk]',
+        'activation: auto',
+        'injection: append',
+        '---',
+        'body content here',
+        '',
+      ].join('\n')
+
+      // Anchor the assumption that pass-1 partial-read priority equals pass-2
+      // full-read priority for typical inputs. If this ever breaks, the parser
+      // changed in a way that could de-sync the two-pass loader (#3279).
+      const { parseFrontmatter: pf } = await import('../src/skills-frontmatter.js')
+      const partial = pf(text.slice(0, 4096)).frontmatter
+      const full = pf(text).frontmatter
+      assert.equal(
+        partial.priority,
+        full.priority,
+        'pass-1 partial-read priority must equal pass-2 full-read priority for typical inputs',
+      )
     })
   })
 
