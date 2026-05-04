@@ -8,7 +8,7 @@ import { isRateLimitMessage, RATE_LIMIT_KEYWORDS } from '../src/error-categories
  * was fragile — only one call site existed and a future caller could forget.
  *
  * The keyword list itself stays lowercase (it's the canonical form);
- * lowercasing inside the helper keeps the include() check correct regardless
+ * lowercasing inside the helper keeps the .includes() check correct regardless
  * of caller-side capitalisation.
  */
 

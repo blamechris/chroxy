@@ -30,7 +30,8 @@ export const RATE_LIMIT_KEYWORDS: readonly string[] = [
  *
  * #3183: lowercases internally so callers don't need to remember the
  * pre-lowercase contract that previously lived only in the param name. The
- * additional `toLowerCase()` is a no-op for already-lowercased input.
+ * additional `toLowerCase()` is semantically idempotent for already-
+ * lowercased input (it allocates a new string but does not change content).
  */
 export function isRateLimitMessage(content: unknown): boolean {
   if (typeof content !== 'string') return false
