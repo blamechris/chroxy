@@ -265,6 +265,11 @@ export declare const ServerSkillDeactivatedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     skillName: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerSkillTrustAcceptedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_trust_accepted">;
+    sessionId: z.ZodString;
+    skillName: z.ZodString;
+}, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"server_error">;
     category: z.ZodOptional<z.ZodString>;

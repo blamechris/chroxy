@@ -801,6 +801,23 @@ function handleSkillDeactivated(msg: Record<string, unknown>, get: MsgGet, _set:
   }));
 }
 
+// #3235: operator re-trusted a skill after a content-hash mismatch. The
+// dashboard's job is to clear the SkillsPanel red-flag indicator (the
+// `mismatchedSkillNames` entry from #3205) so the skill no longer
+// appears as flagged. Pairs with `skill_changed` (the event that ADDED
+// the name to that list).
+function handleSkillTrustAccepted(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
+  if (!skillName) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => {
+    const prev = Array.isArray(state.mismatchedSkillNames) ? state.mismatchedSkillNames : [];
+    if (!prev.includes(skillName)) return {};
+    return { mismatchedSkillNames: prev.filter((n) => n !== skillName) };
+  });
+}
+
 function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const { mode } = sharedPermissionModeChanged(msg);
   const targetId = resolveSessionId(msg, get().activeSessionId);
@@ -1364,6 +1381,7 @@ const HANDLERS: Record<string, Handler> = {
   skills_list: handleSkillsList,
   skill_changed: handleSkillChanged,
   skill_activated: handleSkillActivated,
+  skill_trust_accepted: handleSkillTrustAccepted,
   skill_deactivated: handleSkillDeactivated,
   permission_mode_changed: handlePermissionModeChanged,
   available_permission_modes: handleAvailablePermissionModes,

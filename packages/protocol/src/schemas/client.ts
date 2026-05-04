@@ -113,6 +113,19 @@ export const SkillDeactivateSchema = z.object({
   sessionId: z.string().max(256).optional(),
 })
 
+// #3235: re-trust a skill after a content-hash mismatch (skill_changed
+// event). Operator confirms "yes, this is the new content I want" — the
+// server calls SkillsTrustStore.acceptHash with the loaded body and
+// flushes the ledger. `sessionId` is optional (falls back to the client's
+// active session); `requestId` lets the dashboard correlate the broadcast
+// `skill_trust_accepted` event to a specific user click.
+export const SkillTrustAcceptSchema = z.object({
+  type: z.literal('skill_trust_accept'),
+  skillName: z.string().min(1).max(256),
+  sessionId: z.string().max(256).optional(),
+  requestId: z.string().max(256).optional(),
+})
+
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
   requestId: z.string().min(1).max(256),
@@ -458,6 +471,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetPromptEvaluatorSchema,
   SkillActivateSchema,
   SkillDeactivateSchema,
+  SkillTrustAcceptSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,
