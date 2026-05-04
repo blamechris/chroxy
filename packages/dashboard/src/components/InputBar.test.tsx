@@ -926,8 +926,11 @@ describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
       const textarea = screen.getByRole('textbox')
       fireEvent.change(textarea, { target: { value: 'draft' } })
       fireEvent.click(screen.getByTestId('evaluate-button'))
-      await waitFor(() => expect(onEvaluate).toHaveBeenCalled())
-      return screen.findByTestId('evaluator-panel')
+      // Pin to the resolved-error panel: pending uses role="status", error
+      // uses role="alert". `findByRole` waits for it to appear, so the
+      // negative-case `queryByTestId('evaluator-hint')` assertions below
+      // can't run against the still-pending panel.
+      return screen.findByRole('alert')
     }
 
     it('renders an API-key hint for status 401', async () => {
@@ -966,8 +969,9 @@ describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
       await renderAndEvaluateError({
         error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator network error' },
       })
-      // The error panel must still render
-      await screen.findByTestId('evaluator-panel')
+      // renderAndEvaluateError already returned only after the resolved
+      // error panel rendered (findByRole('alert')), so a stray hint would
+      // be visible by now if regressed.
       expect(screen.queryByTestId('evaluator-hint')).toBeNull()
     })
 
@@ -975,7 +979,6 @@ describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
       await renderAndEvaluateError({
         error: { code: 'EVALUATOR_NO_API_KEY', message: 'ANTHROPIC_API_KEY is not set' },
       })
-      await screen.findByTestId('evaluator-panel')
       expect(screen.queryByTestId('evaluator-hint')).toBeNull()
     })
 
@@ -983,7 +986,6 @@ describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
       await renderAndEvaluateError({
         error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator API call failed', status: 400 },
       })
-      await screen.findByTestId('evaluator-panel')
       expect(screen.queryByTestId('evaluator-hint')).toBeNull()
     })
   })
