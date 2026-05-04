@@ -54,7 +54,15 @@
  *     injection point use `groupSkillsByInjectionMode()` and feed each
  *     group through `formatSkillsForPrompt()` separately.
  */
-import { readdirSync, readFileSync, statSync, realpathSync } from 'fs'
+import {
+  readdirSync,
+  readFileSync,
+  statSync,
+  fstatSync,
+  realpathSync,
+  openSync,
+  closeSync,
+} from 'fs'
 import { basename, dirname, join, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
@@ -469,6 +477,16 @@ function _stripUnquotedTrailingComment(s) {
  *     mode-specific UX without re-deriving it from `blocked`. Loader
  *     callers (BaseSession) fan this into a `skill_changed` WS event for
  *     #3205.
+ *   - `includeInactive`: when true, manual skills that aren't in
+ *     `activeManualSkills` are still returned but tagged with
+ *     `active: false`. Used by `list_skills` for the toggle UX (#3209).
+ *   - `includeAllProviders`: when true, the per-skill provider gate
+ *     (#3198) is bypassed so scoped skills appear in the result
+ *     regardless of the session's provider. Used by `list_skills` for
+ *     the "browse all installed skills" view (#3226). Default false —
+ *     runtime prompt-build callers keep provider scoping enforced.
+ *   - `parseCache`: optional `Map` of mtime-keyed parse results to skip
+ *     re-reading and re-parsing unchanged files (#3248).
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -484,6 +502,14 @@ export function loadActiveSkills(dir, opts = {}) {
   // manual skills. Runtime prompt-build callers keep the default (false)
   // so an inactive manual skill never lands in the system prompt.
   const includeInactive = !!opts.includeInactive
+  // #3226: when true, the provider-scoping gate (#3198) is bypassed.
+  // Used by the dashboard `list_skills` fallback path so the "browse
+  // all installed skills" view shows provider-scoped skills even when
+  // no provider is bound (or the bound session can't report one).
+  // The runtime prompt-build path keeps the default (false) so a skill
+  // scoped to `providers: [claude-sdk]` never lands in a non-Claude
+  // session's prompt.
+  const includeAllProviders = !!opts.includeAllProviders
   // #3248: optional caller-supplied parse cache. Keyed by realpath,
   // value is `{ mtimeMs, size, body, frontmatter, finalBody, description }`.
   // When the cache holds an entry whose mtimeMs+size match the
@@ -570,198 +596,279 @@ export function loadActiveSkills(dir, opts = {}) {
       continue
     }
 
-    // Symlink defense: resolve to the real path and confirm it lives inside
-    // an allowed root. realpathSync follows the chain, so a symlink that
-    // points outside the skills tree is caught here even though statSync
-    // already followed it.
-    let realPath
+    // #3218: open the file ONCE and read all subsequent bytes via the fd
+    // to close the TOCTOU window between realpathSync and the body read.
+    // Without this, a local attacker could swap the file at `fullPath`
+    // (or somewhere on its symlink chain) between the realpath check and
+    // the readFileSync, and the loader would happily ingest the swapped
+    // bytes despite the validated path. Opening once at check-time
+    // pins the inode for the lifetime of this iteration.
+    let fd
     try {
-      realPath = realpathSync(fullPath)
+      fd = openSync(fullPath, 'r')
     } catch (err) {
-      // Node's realpathSync errors interpolate the offending path into
-      // `err.message` (e.g. ENOENT 'no such file or directory, lstat ...').
-      // log.warn fans out via log_entry to paired WS clients — same leak
-      // channel addressed by #3215. Strip to the error code only; full
-      // path is logged separately at debug.
       const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
-      log.warn(`Skipping skill ${label}: realpath failed (${code})`)
+      log.warn(`Skipping skill ${label}: open failed (${code})`)
       log.debug(`skill ${label} full path: ${fullPath}`)
       continue
     }
 
-    const inAllowedRoot = allowedRoots.some((root) => _pathContains(root, realPath))
-    if (!inAllowedRoot) {
-      log.warn(`Skipping skill ${label}: real path escapes skills root`)
-      log.debug(`skill ${label} full path: ${fullPath} resolved to ${realPath}, root ${dirReal}`)
-      continue
-    }
-
-    // Strip the matching extension (case-preserving) when computing the
-    // display name. We checked the lower-cased suffix above, so trim the
-    // same number of chars (+1 for the dot).
-    const name = entry.slice(0, -(ext.length + 1))
-
-    // #3248: parse-cache fast path. statSync's mtimeMs already gave
-    // us the file's mtime above; if the cache entry's mtimeMs+size
-    // match, skip readFileSync / text-validation / parseFrontmatter
-    // and reuse the cached parse. Mismatch (or no entry) falls
-    // through to the full read+parse path below.
-    let body
-    let frontmatter
-    let finalBody
-    let description
-    const cached = parseCache?.get(realPath)
-    const cacheHit = cached
-      && typeof st.mtimeMs === 'number'
-      && cached.mtimeMs === st.mtimeMs
-      && cached.size === st.size
-
-    if (cacheHit) {
-      body = cached.body
-      frontmatter = cached.frontmatter
-      finalBody = cached.finalBody
-      description = cached.description
-    } else {
-      // Read the file once as raw bytes, validate the entire content,
-      // then decode as UTF-8. This avoids two reads (sniff + read) and
-      // ensures a binary tail past 512 bytes can't slip through (#3216).
-      let buf
+    try {
+      // Confirm the open fd refers to a regular file. statSync above used
+      // path-based stat which a swap could invalidate; fstatSync inspects
+      // the inode our fd has pinned.
+      let fstat
       try {
-        buf = readFileSync(realPath)
+        fstat = fstatSync(fd)
       } catch {
         continue
       }
+      if (!fstat.isFile()) continue
 
-      if (buf.length > maxSkillBytes) {
-        log.warn(`Skipping skill ${label}: size ${buf.length} exceeds per-skill cap ${maxSkillBytes}`)
+      // Re-check the per-skill size cap against the pinned inode. If the
+      // file grew between the path stat and our open, fstatSync sees the
+      // current size and we still reject anything over budget.
+      if (typeof fstat.size === 'number' && fstat.size > maxSkillBytes) {
+        log.warn(`Skipping skill ${label}: size ${fstat.size} exceeds per-skill cap ${maxSkillBytes}`)
         log.debug(`skill ${label} full path: ${fullPath}`)
         continue
       }
 
-      if (!_bufferLooksLikeText(buf)) {
-        log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
-        log.debug(`skill ${label} full path: ${fullPath}`)
-        continue
-      }
-
-      body = buf.toString('utf8')
-
-      // Parse YAML frontmatter (#3197). Failures are non-fatal — the body
-      // is returned unchanged and metadata is null. Every Skill carries a
-      // `metadata` field for forward compatibility, even when null.
-      const parsed = parseFrontmatter(body)
-      frontmatter = parsed.frontmatter
-      finalBody = parsed.frontmatter !== null ? parsed.body : body
-      description = _firstNonEmptyLine(finalBody) || name
-
-      // Populate the cache for next time. Stamp mtimeMs+size from the
-      // statSync above (already paid the syscall cost).
-      if (parseCache && typeof st.mtimeMs === 'number') {
-        parseCache.set(realPath, {
-          mtimeMs: st.mtimeMs,
-          size: st.size,
-          body,
-          frontmatter,
-          finalBody,
-          description,
-        })
-      }
-    }
-
-    // Provider gating (#3198): if frontmatter declares a `providers:` list,
-    // include the skill only when the session's provider is in it. Missing
-    // / empty list means apply-to-all, preserving v1 back-compat.
-    if (!_skillMatchesProvider(frontmatter, provider)) continue
-
-    // Manual activation (#3199): skills with `activation: manual` are off
-    // by default and require explicit opt-in via `activeManualSkills`.
-    // #3209: `includeInactive` keeps inactive manual skills in the
-    // result so the dashboard can render toggles for them; they are
-    // tagged with `active: false` and the trust-hash branch is
-    // skipped (the skill body never reaches the prompt, so a hash
-    // mismatch on an inactive skill is meaningless to the operator
-    // until they actually activate it).
-    const isActive = _skillIsActive(frontmatter, name, activeManualSkills)
-    if (!isActive && !includeInactive) continue
-    if (!isActive) {
-      // Minimal metadata-only entry. Don't include `body` because the
-      // dashboard only needs name + description + metadata to render
-      // the toggle, and shipping the body to the WS client when the
-      // skill is inactive wastes bandwidth.
-      const inactive = { name, description, metadata: frontmatter, active: false, path: realPath }
-      if (source) inactive.source = source
-      skills.push(inactive)
-      continue
-    }
-
-    // Resolve the per-skill injection mode (#3200). Fall through to the
-    // caller-supplied default (typically the provider's preferred channel)
-    // when the skill doesn't pin a mode itself or pins something we don't
-    // recognise — typo tolerance.
-    const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
-
-    // Trust hashing (#3204). The hash covers the post-frontmatter body —
-    // changes to the body are what actually mutate the skill's runtime
-    // behaviour, so frontmatter-only edits (renaming, switching activation
-    // mode) don't trigger a mismatch every time. The trust-store inspect
-    // call records a first-seen hash transparently; mismatches return a
-    // mode-aware `blocked` flag that we honour here.
-    if (trustStore && typeof trustStore.inspect === 'function') {
-      let inspectResult
+      // Symlink defense: resolve to the real path and confirm it lives
+      // inside an allowed root. realpathSync still operates on the path
+      // (the only inputs Node gives us), so a path-side swap could in
+      // theory return a different realPath than the inode we have open.
+      // The fd-based read below means an attacker who races would get
+      // their `realPath` validated against an `allowedRoots` containment
+      // check, but the bytes we read still come from the originally-opened
+      // inode — they don't get to substitute content.
+      let realPath
       try {
-        inspectResult = trustStore.inspect(realPath, finalBody)
+        realPath = realpathSync(fullPath)
       } catch (err) {
-        // Trust failures must never block legitimate skill loads — log
-        // and fall through. The `inspect` implementation owns logging
-        // for normal cases; this branch only fires if the implementor
-        // throws unexpectedly.
-        log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
-        inspectResult = null
+        // Node's realpathSync errors interpolate the offending path into
+        // `err.message` (e.g. ENOENT 'no such file or directory, lstat ...').
+        // log.warn fans out via log_entry to paired WS clients — same leak
+        // channel addressed by #3215. Strip to the error code only; full
+        // path is logged separately at debug.
+        const code = (err && typeof err.code === 'string') ? err.code : 'UNKNOWN'
+        log.warn(`Skipping skill ${label}: realpath failed (${code})`)
+        log.debug(`skill ${label} full path: ${fullPath}`)
+        continue
       }
-      if (inspectResult && inspectResult.status === 'mismatch') {
-        if (onTrustMismatch) {
-          try {
-            onTrustMismatch({
-              name,
-              source: source || null,
-              path: realPath,
-              oldHash: inspectResult.oldHash,
-              newHash: inspectResult.newHash,
-              blocked: !!inspectResult.blocked,
-              // #3241: project the active trust mode directly from the store
-              // rather than letting the normaliser reverse-engineer it from
-              // `blocked`. Today the two coincide (only `block` mode sets
-              // `blocked: true`); future modes (e.g. `block-once`,
-              // `soft-block`) may filter the skill while still wanting their
-              // own UX label on the wire.
-              mode: trustStore.mode,
-            })
-          } catch (err) {
-            // Callback errors are swallowed — they shouldn't change the
-            // load outcome. Pure observer concern.
-            log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
-          }
-        }
-        if (inspectResult.blocked) {
-          log.warn(`Skipping skill ${label}: trust mismatch in block mode`)
+
+      const inAllowedRoot = allowedRoots.some((root) => _pathContains(root, realPath))
+      if (!inAllowedRoot) {
+        log.warn(`Skipping skill ${label}: real path escapes skills root`)
+        log.debug(`skill ${label} full path: ${fullPath} resolved to ${realPath}, root ${dirReal}`)
+        continue
+      }
+
+      // #3218 (review): inode-bind the open fd to the validated realPath.
+      // Without this, a swap during the window
+      //   openSync(fullPath)   → fd pinned to attacker-chosen inode
+      //   realpathSync(fullPath) → resolves to a now-allowed path
+      // would let an attacker trick the loader into reading bytes from
+      // an out-of-tree inode while the path-side check approves an
+      // in-tree realPath. Comparing dev+ino between fstat (the inode
+      // we have open) and statSync(realPath) (the inode the validated
+      // path now resolves to) catches this exact case: if they don't
+      // match, the fd is pointing at something other than what we
+      // validated, and we skip.
+      let realStat
+      try {
+        realStat = statSync(realPath)
+      } catch {
+        // realPath disappeared between realpathSync and statSync — abort.
+        continue
+      }
+      if (fstat.dev !== realStat.dev || fstat.ino !== realStat.ino) {
+        log.warn(`Skipping skill ${label}: fd inode does not match validated real path (TOCTOU swap detected)`)
+        log.debug(`skill ${label} full path: ${fullPath} fd ino=${fstat.ino} realPath ino=${realStat.ino}`)
+        continue
+      }
+
+      // Strip the matching extension (case-preserving) when computing the
+      // display name. We checked the lower-cased suffix above, so trim the
+      // same number of chars (+1 for the dot).
+      const name = entry.slice(0, -(ext.length + 1))
+
+      // #3248: parse-cache fast path. fstatSync above gave us the
+      // post-open file's mtime+size; if the cache entry's mtimeMs+size
+      // match, skip readFileSync / text-validation / parseFrontmatter
+      // and reuse the cached parse. Mismatch (or no entry) falls
+      // through to the full read+parse path below. #3218: keying on
+      // fstat (not the path-side statSync done before openSync) means
+      // a swap-during-realpath can't yield a false cache-hit on the
+      // original mtimeMs.
+      let body
+      let frontmatter
+      let finalBody
+      let description
+      const cached = parseCache?.get(realPath)
+      const cacheHit = cached
+        && typeof fstat.mtimeMs === 'number'
+        && cached.mtimeMs === fstat.mtimeMs
+        && cached.size === fstat.size
+
+      if (cacheHit) {
+        body = cached.body
+        frontmatter = cached.frontmatter
+        finalBody = cached.finalBody
+        description = cached.description
+      } else {
+        // #3218: read from the open fd, not from the path. The fd is
+        // pinned to the inode we already validated above.
+        let buf
+        try {
+          buf = readFileSync(fd)
+        } catch {
           continue
         }
+
+        if (buf.length > maxSkillBytes) {
+          log.warn(`Skipping skill ${label}: size ${buf.length} exceeds per-skill cap ${maxSkillBytes}`)
+          log.debug(`skill ${label} full path: ${fullPath}`)
+          continue
+        }
+
+        if (!_bufferLooksLikeText(buf)) {
+          log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
+          log.debug(`skill ${label} full path: ${fullPath}`)
+          continue
+        }
+
+        body = buf.toString('utf8')
+
+        // Parse YAML frontmatter (#3197). Failures are non-fatal — the body
+        // is returned unchanged and metadata is null. Every Skill carries a
+        // `metadata` field for forward compatibility, even when null.
+        const parsed = parseFrontmatter(body)
+        frontmatter = parsed.frontmatter
+        finalBody = parsed.frontmatter !== null ? parsed.body : body
+        description = _firstNonEmptyLine(finalBody) || name
+
+        // Populate the cache for next time. Stamp from fstat (post-open)
+        // so the cached entry reflects the inode we actually read.
+        if (parseCache && typeof fstat.mtimeMs === 'number') {
+          parseCache.set(realPath, {
+            mtimeMs: fstat.mtimeMs,
+            size: fstat.size,
+            body,
+            frontmatter,
+            finalBody,
+            description,
+          })
+        }
+      }
+
+      // Provider gating (#3198): if frontmatter declares a `providers:` list,
+      // include the skill only when the session's provider is in it. Missing
+      // / empty list means apply-to-all, preserving v1 back-compat.
+      // #3226: `includeAllProviders` (set by the dashboard's `list_skills`
+      // fallback) bypasses this gate so the operator's "browse all
+      // installed skills" view doesn't silently drop scoped entries.
+      if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
+
+      // Manual activation (#3199): skills with `activation: manual` are off
+      // by default and require explicit opt-in via `activeManualSkills`.
+      // #3209: `includeInactive` keeps inactive manual skills in the
+      // result so the dashboard can render toggles for them; they are
+      // tagged with `active: false` and the trust-hash branch is
+      // skipped (the skill body never reaches the prompt, so a hash
+      // mismatch on an inactive skill is meaningless to the operator
+      // until they actually activate it).
+      const isActive = _skillIsActive(frontmatter, name, activeManualSkills)
+      if (!isActive && !includeInactive) continue
+      if (!isActive) {
+        // Minimal metadata-only entry. Don't include `body` because the
+        // dashboard only needs name + description + metadata to render
+        // the toggle, and shipping the body to the WS client when the
+        // skill is inactive wastes bandwidth.
+        const inactive = { name, description, metadata: frontmatter, active: false, path: realPath }
+        if (source) inactive.source = source
+        skills.push(inactive)
+        continue
+      }
+
+      // Resolve the per-skill injection mode (#3200). Fall through to the
+      // caller-supplied default (typically the provider's preferred channel)
+      // when the skill doesn't pin a mode itself or pins something we don't
+      // recognise — typo tolerance.
+      const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
+
+      // Trust hashing (#3204). The hash covers the post-frontmatter body —
+      // changes to the body are what actually mutate the skill's runtime
+      // behaviour, so frontmatter-only edits (renaming, switching activation
+      // mode) don't trigger a mismatch every time. The trust-store inspect
+      // call records a first-seen hash transparently; mismatches return a
+      // mode-aware `blocked` flag that we honour here.
+      if (trustStore && typeof trustStore.inspect === 'function') {
+        let inspectResult
+        try {
+          inspectResult = trustStore.inspect(realPath, finalBody)
+        } catch (err) {
+          // Trust failures must never block legitimate skill loads — log
+          // and fall through. The `inspect` implementation owns logging
+          // for normal cases; this branch only fires if the implementor
+          // throws unexpectedly.
+          log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+          inspectResult = null
+        }
+        if (inspectResult && inspectResult.status === 'mismatch') {
+          if (onTrustMismatch) {
+            try {
+              onTrustMismatch({
+                name,
+                source: source || null,
+                path: realPath,
+                oldHash: inspectResult.oldHash,
+                newHash: inspectResult.newHash,
+                blocked: !!inspectResult.blocked,
+                // #3241: project the active trust mode directly from the store
+                // rather than letting the normaliser reverse-engineer it from
+                // `blocked`. Today the two coincide (only `block` mode sets
+                // `blocked: true`); future modes (e.g. `block-once`,
+                // `soft-block`) may filter the skill while still wanting their
+                // own UX label on the wire.
+                mode: trustStore.mode,
+              })
+            } catch (err) {
+              // Callback errors are swallowed — they shouldn't change the
+              // load outcome. Pure observer concern.
+              log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+            }
+          }
+          if (inspectResult.blocked) {
+            log.warn(`Skipping skill ${label}: trust mismatch in block mode`)
+            continue
+          }
+        }
+      }
+
+      const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
+      if (source) skill.source = source
+      // #3209: tag the skill so the dashboard can render the right
+      // toggle state. `auto` skills are always active; `manual` ones
+      // reflect the live `activeManualSkills` membership at load time.
+      skill.active = isActive
+      // #3205: realpath is needed by `list_skills` to look up the
+      // trust-store record (recorded hash + lastVerified) without
+      // re-reading the file. Stripped before the WS payload — the
+      // absolute filesystem path never crosses the wire (operator-
+      // facing log lines use basename via `_pathLabel`).
+      skill.path = realPath
+      skills.push(skill)
+    } finally {
+      // #3218: always release the fd, even when `continue` short-circuits
+      // any of the validation branches above. Node runs `finally` before
+      // the `continue` takes effect, so this is leak-safe.
+      try {
+        closeSync(fd)
+      } catch {
+        // Already-closed fd or transient EBADF — non-fatal.
       }
     }
-
-    const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
-    if (source) skill.source = source
-    // #3209: tag the skill so the dashboard can render the right
-    // toggle state. `auto` skills are always active; `manual` ones
-    // reflect the live `activeManualSkills` membership at load time.
-    skill.active = isActive
-    // #3205: realpath is needed by `list_skills` to look up the
-    // trust-store record (recorded hash + lastVerified) without
-    // re-reading the file. Stripped before the WS payload — the
-    // absolute filesystem path never crosses the wire (operator-
-    // facing log lines use basename via `_pathLabel`).
-    skill.path = realPath
-    skills.push(skill)
   }
 
   skills.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
@@ -917,12 +1024,27 @@ export function findRepoSkillsDir(cwd) {
  *   activeManualSkills?: Set<string>|string[]|null,
  *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
  *   providerSkillAllowlist?: Record<string, string[]>|null,
+ *   trustStore?: object|null,
+ *   onTrustMismatch?: (info: object) => void,
+ *   includeInactive?: boolean,
+ *   includeAllProviders?: boolean,
+ *   parseCache?: Map<string, object>,
  * }} [opts]
  *   - `provider`, `activeManualSkills`, `defaultInjectionMode`: forwarded
  *     to `loadActiveSkills` for #3198 (provider gating), #3199 (manual
  *     activation), and #3200 (per-skill injection mode).
  *   - `providerSkillAllowlist`: per-provider allowlist (#3207). See
  *     `_filterByProviderAllowlist` for semantics.
+ *   - `includeInactive`: when true, inactive manual skills are returned
+ *     tagged `active: false` so the dashboard can render toggles (#3209).
+ *   - `includeAllProviders`: when true, both the per-skill provider
+ *     gate (#3198) AND the per-provider allowlist (#3207) are bypassed
+ *     so the dashboard's `list_skills` fallback shows ALL installed
+ *     skills (#3226). Runtime prompt-build callers keep the default
+ *     (false) so scoped skills never reach the wrong provider's prompt.
+ *   - `parseCache`: optional `Map` of mtime-keyed parse results, shared
+ *     across both tier loads so a global+repo merge skips redundant
+ *     re-parses on a warm cache (#3248).
  * @returns {Array<{ name: string, body: string, description: string, source: 'global' | 'repo', metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkillsLayered({
@@ -939,6 +1061,12 @@ export function loadActiveSkillsLayered({
   trustStore,
   onTrustMismatch,
   includeInactive,
+  // #3226: bypass the provider-scoping gate so the dashboard's
+  // `list_skills` fallback shows ALL installed skills (including
+  // those with `providers:` frontmatter) when no provider is bound.
+  // Default false — the runtime prompt-build path still respects
+  // provider scoping for the active session.
+  includeAllProviders,
   // #3248: per-session parse cache. Forwarded as-is to both tier
   // loaders so they share the same Map (skill name collisions
   // resolve at the realpath level — global/repo overlay can both
@@ -960,6 +1088,8 @@ export function loadActiveSkillsLayered({
   // skill marking; the merge step below treats them like any other
   // entry (repo overrides global on conflict, etc.).
   if (includeInactive) loaderOpts.includeInactive = true
+  // #3226: pass-through for the listing-path provider-scope bypass.
+  if (includeAllProviders) loaderOpts.includeAllProviders = true
   if (parseCache instanceof Map) loaderOpts.parseCache = parseCache
 
   const globals = (globalDir && !sameDir)
@@ -996,7 +1126,14 @@ export function loadActiveSkillsLayered({
   // total-budget pass — a skill the operator deny-listed should not be
   // counted toward the cumulative budget, even if pruning would have
   // dropped it anyway.
-  const filtered = _filterByProviderAllowlist(merged, provider, providerSkillAllowlist)
+  // #3226: the listing fallback path bypasses the allowlist for the
+  // same reason it bypasses provider scoping — the dashboard's "browse
+  // all installed skills" view shouldn't lose entries that an operator
+  // restricted on a per-provider basis. The runtime prompt-build path
+  // keeps the allowlist active.
+  const filtered = includeAllProviders
+    ? merged
+    : _filterByProviderAllowlist(merged, provider, providerSkillAllowlist)
 
   const totalCap = Number.isFinite(maxTotalSkillBytes) && maxTotalSkillBytes > 0
     ? Math.floor(maxTotalSkillBytes)

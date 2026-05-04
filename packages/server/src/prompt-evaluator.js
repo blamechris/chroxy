@@ -205,6 +205,13 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
     log.warn(`Anthropic API call failed: ${sanitized}`)
     const wrapped = new Error(sanitized)
     wrapped.code = 'EVALUATOR_API_ERROR'
+    // #3100: surface the upstream HTTP status so the WS handler (and
+    // dashboard) can branch on auth vs rate-limit vs 5xx without parsing
+    // the sanitized message string. Only set when the SDK gave us a real
+    // numeric status — network errors and timeouts leave it undefined.
+    if (typeof err?.status === 'number') {
+      wrapped.status = err.status
+    }
     wrapped.cause = err
     throw wrapped
   }

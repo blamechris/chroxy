@@ -488,4 +488,81 @@ describe('@chroxy/protocol schemas', () => {
     })
     assert.ok(!result.success, 'Should reject when type is not "skill_changed"')
   })
+
+  // #3100: ServerEvaluateDraftResultSchema gained an optional numeric `status`
+  // on the error branch. Lock the wire contract here so a future regression
+  // (e.g. someone widens the type to string, or drops the optional flag)
+  // can't slip through with only server/dashboard tests staying green.
+  describe('ServerEvaluateDraftResultSchema (#3100)', () => {
+    it('validates the success branch (forward verdict)', async () => {
+      const { ServerEvaluateDraftResultSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluateDraftResultSchema.safeParse({
+        type: 'evaluate_draft_result',
+        requestId: 'req-1',
+        verdict: 'forward',
+        rewritten: null,
+        clarification: null,
+        reasoning: 'Looks clear.',
+      })
+      assert.ok(result.success, 'Should validate forward verdict success payload')
+    })
+
+    it('validates the error branch with optional status (429)', async () => {
+      const { ServerEvaluateDraftResultSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluateDraftResultSchema.safeParse({
+        type: 'evaluate_draft_result',
+        requestId: 'req-2',
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator rate limited', status: 429 },
+      })
+      assert.ok(result.success, 'Should validate error payload carrying numeric status')
+      if (result.success && 'error' in result.data && result.data.error) {
+        assert.equal(result.data.error.status, 429)
+      }
+    })
+
+    it('validates the error branch when status is omitted (network error / NO_API_KEY)', async () => {
+      const { ServerEvaluateDraftResultSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluateDraftResultSchema.safeParse({
+        type: 'evaluate_draft_result',
+        requestId: 'req-3',
+        error: { code: 'EVALUATOR_NO_API_KEY', message: 'ANTHROPIC_API_KEY is not set' },
+      })
+      assert.ok(result.success, 'Should validate error payload without status')
+      if (result.success && 'error' in result.data && result.data.error) {
+        assert.equal(result.data.error.status, undefined)
+      }
+    })
+
+    it('rejects a non-numeric status on the error branch', async () => {
+      const { ServerEvaluateDraftResultSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluateDraftResultSchema.safeParse({
+        type: 'evaluate_draft_result',
+        requestId: 'req-4',
+        error: { code: 'EVALUATOR_API_ERROR', message: 'rate limited', status: '429' },
+      })
+      assert.ok(!result.success, 'Should reject string status — wire contract is z.number().int()')
+    })
+
+    it('rejects a non-integer status on the error branch', async () => {
+      const { ServerEvaluateDraftResultSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluateDraftResultSchema.safeParse({
+        type: 'evaluate_draft_result',
+        requestId: 'req-5',
+        error: { code: 'EVALUATOR_API_ERROR', message: 'x', status: 429.5 },
+      })
+      assert.ok(!result.success, 'Should reject non-integer status — wire contract is z.number().int()')
+    })
+
+    it('rejects mixed payload (verdict + error)', async () => {
+      const { ServerEvaluateDraftResultSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluateDraftResultSchema.safeParse({
+        type: 'evaluate_draft_result',
+        requestId: 'req-6',
+        verdict: 'forward',
+        reasoning: 'ok',
+        error: { code: 'EVALUATOR_API_ERROR', message: 'no' },
+      })
+      assert.ok(!result.success, 'Discriminated union should reject mixed success+error')
+    })
+  })
 })

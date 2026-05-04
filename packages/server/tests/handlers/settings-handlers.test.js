@@ -904,6 +904,109 @@ describe('settings-handlers', () => {
       }
     })
 
+    // #3226: when a session is bound to a repo but the provider is null
+    // (or the session is not bound at all), the listing must show ALL
+    // installed skills — including those scoped to specific providers
+    // and those marked `activation: manual`. Otherwise the dashboard's
+    // "what skills do I have installed" view silently loses entries.
+    describe('#3226 fallback path includes all provider scopes', () => {
+      it('shows provider-scoped skills in the listing even when no provider is bound', () => {
+        repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-scoped-'))
+        mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+        // Two skills: one unscoped, one scoped to claude-sdk only.
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'shared.md'),
+          'Unscoped skill — visible to every provider.\n',
+        )
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'claude-only.md'),
+          '---\nproviders: [claude-sdk]\n---\nClaude-only skill.\n',
+        )
+
+        // Bind a session with cwd but NO provider — simulates a mock
+        // session or a future provider that hasn't reported its name.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.cwd = repoRoot
+        sessions.set('s1', { session, name: 'S', cwd: repoRoot, provider: null })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+        const msg = ctx._sent[0]
+        assert.equal(msg.type, 'skills_list')
+        const names = msg.skills.map((s) => s.name)
+        assert.ok(names.includes('shared'),
+          `expected unscoped skill in listing, got: ${JSON.stringify(names)}`)
+        assert.ok(names.includes('claude-only'),
+          `expected provider-scoped skill in listing (browse-all UX), got: ${JSON.stringify(names)}`)
+      })
+
+      it('bypasses providerSkillAllowlist on the no-provider listing path', () => {
+        // Regression: with includeAllProviders, the per-provider
+        // allowlist (#3207) must also be bypassed. Otherwise an
+        // operator who configured an allowlist for Codex would see an
+        // empty listing when browsing pre-pair (no session bound).
+        repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-allowlist-'))
+        mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'a.md'),
+          'Skill A.\n',
+        )
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'b.md'),
+          'Skill B.\n',
+        )
+
+        // Session with an allowlist for codex, but no provider on the
+        // session entry — simulates the "operator hasn't paired yet"
+        // case. With includeAllProviders, both skills should appear.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.cwd = repoRoot
+        session._providerSkillAllowlist = { codex: ['a'] } // would normally drop 'b'
+        sessions.set('s1', { session, name: 'S', cwd: repoRoot, provider: null })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+        const msg = ctx._sent[0]
+        const names = msg.skills.map((s) => s.name).sort()
+        assert.ok(names.includes('a') && names.includes('b'),
+          `allowlist should be bypassed on no-provider path; got: ${JSON.stringify(names)}`)
+      })
+
+      it('shows manual-activation skills in the listing as inactive (no session bound)', () => {
+        repoRoot = mkdtempSync(join(tmpdir(), 'chroxy-listskills-manual-'))
+        mkdirSync(join(repoRoot, '.chroxy', 'skills'), { recursive: true })
+        writeFileSync(
+          join(repoRoot, '.chroxy', 'skills', 'opt-in.md'),
+          '---\nactivation: manual\n---\nManual-activation skill.\n',
+        )
+
+        // Bind a session without an activeManualSkills set — ensures the
+        // dashboard's "browse all installed skills" view still surfaces
+        // manual ones so the operator can toggle them on later.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.cwd = repoRoot
+        sessions.set('s1', { session, name: 'S', cwd: repoRoot })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.list_skills(makeWs(), client, {}, ctx)
+
+        const msg = ctx._sent[0]
+        const optIn = msg.skills.find((s) => s.name === 'opt-in')
+        assert.ok(optIn, 'manual-activation skill must appear in listing')
+        assert.equal(optIn.activation, 'manual')
+        assert.equal(optIn.active, false,
+          'manual skill not in activeManualSkills should appear as inactive')
+      })
+    })
+
     // #3250 producer-side guard: when the trust ledger is hand-edited
     // or corrupted, malformed `firstSeen`/`lastVerified` strings must
     // be dropped so the tightened ServerSkillsListSchema (which
