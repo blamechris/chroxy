@@ -348,10 +348,22 @@ export function loadActiveSkills(dir, opts = {}) {
     // comparator only reads `name` and `metadata.priority`, so wrapping
     // the descriptor's raw priority value is sufficient and avoids having
     // to thread a full frontmatter object through _collectCandidates.
-    candidates.sort((a, b) => _compareByPriorityThenName(
-      { name: a.entry, metadata: { priority: a.priority } },
-      { name: b.entry, metadata: { priority: b.priority } },
-    ))
+    candidates.sort((a, b) => {
+      // Strip the extension from the candidate's filename so the
+      // alphabetical tiebreak uses the same extension-free name that every
+      // downstream code path (and _compareByPriorityThenName's callers on
+      // the single-pass path) operates on. Without this, "a-b.md" would
+      // sort before "a.md" because '-' (0x2D) < '.' (0x2E), diverging from
+      // how skills are sorted everywhere else.
+      const extA = a.entry.slice(a.entry.lastIndexOf('.') + 1).toLowerCase()
+      const extB = b.entry.slice(b.entry.lastIndexOf('.') + 1).toLowerCase()
+      const nameA = a.entry.slice(0, -(extA.length + 1))
+      const nameB = b.entry.slice(0, -(extB.length + 1))
+      return _compareByPriorityThenName(
+        { name: nameA, metadata: { priority: a.priority } },
+        { name: nameB, metadata: { priority: b.priority } },
+      )
+    })
 
     const skills = []
     let tierTotalBytes = 0
@@ -379,7 +391,11 @@ export function loadActiveSkills(dir, opts = {}) {
         const isActive = _skillIsActive(frontmatter, name, activeManualSkills)
         if (!isActive && !includeInactive) continue
 
-        // Account for the cached body in the tier total.
+        // Account for the cached body in the tier total — mirroring the
+        // cache-miss path which also counts bytes only after the provider and
+        // activation gates pass. Counting before the gates would let a warm
+        // cache shrink the effective budget for subsequent skills even when
+        // a skill is ultimately skipped due to provider mismatch or inactivity.
         tierTotalBytes += fstatSnap.size
 
         if (!isActive) {
@@ -418,7 +434,7 @@ export function loadActiveSkills(dir, opts = {}) {
           }
         }
 
-        const skill = { name, body, description, metadata: frontmatter, injectionMode }
+        const skill = { name, body: finalBody, description, metadata: frontmatter, injectionMode }
         if (source) skill.source = source
         skill.active = isActive
         skill.path = realPath
@@ -1106,9 +1122,6 @@ function _collectCandidates(entries, dir, dirReal, allowedRoots, allowedExtensio
 
   return candidates
 }
-
-/**
- * Walk up from `cwd` looking for the nearest `.chroxy/skills/` directory (#3067).
 
 /**
  * Walk up from `cwd` looking for the nearest `.chroxy/skills/` directory (#3067).

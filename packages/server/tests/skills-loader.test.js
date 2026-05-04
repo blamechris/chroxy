@@ -810,7 +810,7 @@ describe('skills-loader', () => {
       // but pass-1 reads frontmatter only, sorts candidates by priority desc,
       // and pass-2 reads bodies in priority order — so 'z-high' (priority 1000)
       // wins the budget even though its filename sorts last.
-      it('per-tier cutoff is alphabetical, not priority-aware (known trade-off)', () => {
+      it('per-tier cutoff is priority-aware: high-priority skill kept under tight budget despite later alphabetical sort', () => {
         const body = 'X'.repeat(900)
         // 'a-low.md' has priority 1 but sorts FIRST alphabetically.
         // 'z-high.md' has priority 1000 but sorts LAST.
@@ -2264,23 +2264,23 @@ describe('skills-loader', () => {
       writeFileSync(join(p3279Dir, 'big-fm.md'), frontmatterPastCap)
       writeFileSync(join(p3279Dir, 'normal.md'), normalBody)
 
-      // Budget fits one skill. If big-fm treated its priority as 999 it
-      // would win; if it falls back to 100 (default) it beats priority-50
-      // normal — but 'big-fm.md' is >4KB and exceeds the per-skill cap.
-      // Use a large per-skill cap so big-fm is not rejected on size.
+      // big-fm is ~4887 bytes, normal is ~33 bytes — combined ~4920 bytes.
+      // Budget must be >= big-fm alone but < big-fm + normal so that only
+      // one skill fits and the assertion actually exercises the priority path.
+      // (Previously maxTotalBytes=5100 let both load, so the test passed even
+      // with a buggy loader that ignored priority ordering entirely.)
       const skills = loadActiveSkills(p3279Dir, {
         maxSkillBytes: 8 * 1024,
-        // Budget fits big-fm OR normal, but not both.
-        maxTotalBytes: 5100,
+        // 4900 > 4887 (big-fm fits alone) but < 4920 (both combined don't fit).
+        maxTotalBytes: 4900,
       })
       // big-fm.md has its priority parsed as null (fence past 4KB) → default 100.
-      // normal.md has priority 50. Both have priority <= 100, but big-fm gets
-      // the default (100) > normal (50) so big-fm wins IF it fits under the
-      // per-skill cap. With maxSkillBytes=8KB both fit individually; the budget
-      // (5100) is just enough for big-fm (~4800+ bytes) but not both.
-      // The key assertion is that normal.md (priority 50) does NOT win over
-      // big-fm.md (default priority 100 after truncated parse).
-      assert.ok(skills.length >= 1, 'at least one skill should load')
+      // normal.md has priority 50. Budget forces a single-slot cutoff.
+      // big-fm (priority 100) must win over normal (priority 50) despite sorting
+      // later alphabetically ('big-fm' < 'normal', so sort order already favours
+      // big-fm — the key assertion is that the loader does NOT load normal first
+      // and exhaust the budget before reaching big-fm).
+      assert.equal(skills.length, 1, 'budget forces exactly one skill to load')
       // big-fm has priority 100 (default, because frontmatter is past 4KB),
       // normal has priority 50 — big-fm should rank first.
       assert.equal(skills[0].name, 'big-fm',
