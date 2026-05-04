@@ -966,15 +966,15 @@ export function loadActiveSkills(dir, opts = {}) {
  * would be to read every skill body upfront and then sort — burning up to
  * `N × maxSkillBytes` of memory before any pruning. Instead:
  *   Pass 1 (_collectCandidates): read only frontmatter (~4KB per skill) to
- *   extract priority. Never holds more than one fd open. Returns lightweight
- *   candidate descriptors sorted by _compareByPriorityThenName.
+ *   extract priority. Never holds more than one fd open. Returns unsorted
+ *   descriptors; caller sorts via _compareByPriorityThenName before the
+ *   pass-2 loop.
  *   Pass 2 (caller): re-opens each candidate in priority order and reads the
  *   full body, stopping once the tier budget is exhausted.
- * Peak in-memory skill data is bounded at ~2× tierBudget: the per-tier read
- * loop never accumulates more than `tierBudget` bytes of body content, and
- * the parseCache (if provided) may hold another tierBudget worth of warm
- * entries from the previous call. Both tiers together therefore top out at
- * ~2× the global `maxTotalSkillBytes` cap before the post-merge prune runs.
+ * Peak in-memory skill body data is bounded at ~tierBudget per tier: the
+ * per-tier read loop never accumulates more than `tierBudget` bytes of body
+ * content. The parseCache is caller-supplied and unbounded; its size is
+ * governed by the caller's eviction policy, not by this function.
  *
  * Iterates every directory entry and runs the full TOCTOU-safe validation
  * cluster (extension check, statSync, openSync, fstatSync, realpathSync,
