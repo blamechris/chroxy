@@ -1589,4 +1589,65 @@ describe('skills-loader', () => {
         `frontmatter-only edits must NOT count as a trust mismatch; recorded ${recordedHash}`)
     })
   })
+
+  // #3218: TOCTOU defense. Verify the loader reads from a file descriptor
+  // pinned at open time, not by re-resolving the path. The behavioural
+  // signal: if a regression reverts to path-based reads, the loader would
+  // be racing the filesystem; here we just assert that legitimate skill
+  // content is returned correctly across the new fd-based path (the
+  // existing 127 tests already cover that, but this one anchors the
+  // intent in a single named test referencing the issue).
+  describe('TOCTOU defense (#3218)', () => {
+    it('loads skill content from an fd opened at validation time', () => {
+      // Sanity: the standard load path returns the file's content. The
+      // fd-based read introduced in #3218 must not break this — if the
+      // implementation regresses to a path-based read after the realpath
+      // check, this test still passes for the unraced case but the
+      // surrounding 127 existing tests would catch any wider breakage.
+      writeFileSync(join(dir, 'pinned.md'), 'pinned-body\n')
+      const [skill] = loadActiveSkills(dir)
+      assert.equal(skill.name, 'pinned')
+      assert.equal(skill.body, 'pinned-body\n')
+    })
+
+    it('still loads skill content correctly through a symlink (fd opens the resolved inode)', () => {
+      // Set up: real skill at /real/x.md; symlinked into /skills/x.md.
+      // The fd-based read opens the symlink target's inode and reads
+      // bytes from that fd, regardless of any path-side races.
+      const realDir = join(dir, 'real')
+      const skillsDir = join(dir, 'skills')
+      mkdirSync(realDir, { recursive: true })
+      mkdirSync(skillsDir, { recursive: true })
+      writeFileSync(join(realDir, 'x.md'), 'symlinked-body\n')
+      // Match the existing "symlink defense" tests: skip silently on
+      // platforms (Windows / restricted CI) where symlinkSync isn't
+      // permitted, rather than failing the suite.
+      try { symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md')) } catch { return }
+
+      const [skill] = loadActiveSkills(skillsDir, {
+        allowedRoots: [realDir, skillsDir],
+      })
+      assert.equal(skill.name, 'x')
+      assert.equal(skill.body, 'symlinked-body\n')
+    })
+
+    it('loads many skills successfully (smoke test for fd-based path)', () => {
+      // Smoke test: the fd-based read introduced in #3218 should handle
+      // many skills in one call. This is NOT a true fd-leak detector —
+      // 50 skills won't exhaust the OS limit even with a leak. The
+      // assertion is that all 50 skills load and their content is
+      // correct, exercising every iteration's open/read/close path.
+      // A genuine fd-leak detector would need /proc/self/fd inspection,
+      // which is platform-specific and out of scope for this PR.
+      for (let i = 0; i < 50; i++) {
+        writeFileSync(join(dir, `s${i}.md`), `body-${i}\n`)
+      }
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 50)
+      // Spot-check one: content matches what we wrote.
+      const sample = skills.find((s) => s.name === 's25')
+      assert.ok(sample, 's25 skill must be present')
+      assert.equal(sample.body, 'body-25\n')
+    })
+  })
 })
