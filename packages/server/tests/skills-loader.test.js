@@ -12,6 +12,7 @@ import {
   groupSkillsByInjectionMode,
   parseFrontmatter,
 } from '../src/skills-loader.js'
+import { _compareByPriorityThenName } from '../src/skills-budget.js'
 import { _readFrontmatterOnly } from '../src/skills-frontmatter.js'
 
 describe('skills-loader', () => {
@@ -2113,6 +2114,77 @@ describe('skills-loader', () => {
         partial.priority,
         full.priority,
         'pass-1 partial-read priority must equal pass-2 full-read priority for typical inputs',
+      )
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3277: shared priority comparator extracted from _enforceTotalBudget.
+  // -----------------------------------------------------------------------
+
+  describe('_compareByPriorityThenName (#3277)', () => {
+    it('higher priority comes first', () => {
+      const high = { name: 'z', metadata: { priority: 1000 } }
+      const low = { name: 'a', metadata: { priority: 1 } }
+      assert.ok(
+        _compareByPriorityThenName(high, low) < 0,
+        'higher-priority skill must sort before lower-priority skill',
+      )
+      assert.ok(
+        _compareByPriorityThenName(low, high) > 0,
+        'lower-priority skill must sort after higher-priority skill',
+      )
+    })
+
+    it('equal priority → name ascending tiebreak', () => {
+      const a = { name: 'a', metadata: { priority: 100 } }
+      const b = { name: 'b', metadata: { priority: 100 } }
+      assert.ok(
+        _compareByPriorityThenName(a, b) < 0,
+        '"a" must sort before "b" when priorities are equal',
+      )
+      assert.ok(
+        _compareByPriorityThenName(b, a) > 0,
+        '"b" must sort after "a" when priorities are equal',
+      )
+    })
+
+    it('equal priority and equal name → returns 0', () => {
+      const x = { name: 'same', metadata: { priority: 100 } }
+      const y = { name: 'same', metadata: { priority: 100 } }
+      assert.equal(_compareByPriorityThenName(x, y), 0)
+    })
+
+    it('falls back to DEFAULT_SKILL_PRIORITY (100) when metadata is absent', () => {
+      // v1 skill: no metadata field at all — treated as priority 100
+      const v1 = { name: 'v1' }
+      const explicit100 = { name: 'v1', metadata: { priority: 100 } }
+      assert.equal(
+        _compareByPriorityThenName(v1, explicit100),
+        0,
+        'v1 skill with no metadata must behave identically to explicit priority: 100',
+      )
+    })
+
+    it('falls back to DEFAULT_SKILL_PRIORITY (100) when metadata.priority is absent', () => {
+      // v2 skill with frontmatter but no priority field
+      const noPriority = { name: 'np', metadata: { name: 'np' } }
+      const explicit100 = { name: 'np', metadata: { priority: 100 } }
+      assert.equal(
+        _compareByPriorityThenName(noPriority, explicit100),
+        0,
+        'metadata without priority field must fall back to 100',
+      )
+    })
+
+    it('mixed v1 + v2: v1 skill (default 100) outranks v2 skill with priority 50', () => {
+      // v1 skill has no frontmatter — resolves to priority 100
+      const v1 = { name: 'b-v1' }
+      // v2 skill explicitly lower than the default
+      const v2low = { name: 'a-v2', metadata: { priority: 50 } }
+      assert.ok(
+        _compareByPriorityThenName(v1, v2low) < 0,
+        'v1 skill (priority 100 default) must outrank v2 skill at priority 50',
       )
     })
   })
