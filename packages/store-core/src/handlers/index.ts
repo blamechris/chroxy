@@ -2989,11 +2989,11 @@ export function handleMessage(
   }
 
   // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).
+  // #3183: isRateLimitMessage now lowercases internally — pass raw content.
   let isRateLimitError = false
   let errorContent: string | null = null
   if (msgType === 'error') {
-    const lower = msg.content.toLowerCase()
-    if (isRateLimitMessage(lower)) {
+    if (isRateLimitMessage(msg.content)) {
       isRateLimitError = true
       errorContent = msg.content
     }
