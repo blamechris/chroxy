@@ -79,6 +79,7 @@ const PLATFORM_SPECIFIC = {
   'skill_changed': 'dashboard',     // skill content-hash mismatch event (#3234/#3205) is dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_activated': 'dashboard',   // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
   'skill_deactivated': 'dashboard', // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
+  'skill_trust_accepted': 'dashboard', // operator-confirmed re-trust (#3235) is dashboard-only for v1 — pairs with skill_changed; mobile app exposure tracked under parent epic #2959
 }
 
 // ---------------------------------------------------------------------------

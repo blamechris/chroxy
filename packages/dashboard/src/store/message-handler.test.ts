@@ -1320,6 +1320,111 @@ describe('dashboard message-handler dispatch', () => {
         expect(skills.find((s: any) => s.name === 'b').active).toBe(true)
       })
     })
+
+    // #3235: operator re-trusted a skill after a content-hash mismatch.
+    // The dashboard handler removes the skill name from the session's
+    // `mismatchedSkillNames` array, clearing the SkillsPanel red-flag
+    // indicator that #3205's `skill_changed` handler added.
+    describe('skill_trust_accepted (#3235)', () => {
+      it('removes the skill name from mismatchedSkillNames on the active session', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, mismatchedSkillNames: ['x', 'y'] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_accepted', skillName: 'x' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.mismatchedSkillNames).toEqual(['y'])
+      })
+
+      it('routes to explicit sessionId rather than active', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, mismatchedSkillNames: ['x'] },
+            s2: { ...empty, mismatchedSkillNames: ['x', 'y'] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_accepted', sessionId: 's2', skillName: 'x' }, ctx() as any)
+
+        const states = (store.getState() as any).sessionStates
+        // s1 still has 'x' (broadcast was scoped to s2)
+        expect(states.s1.mismatchedSkillNames).toEqual(['x'])
+        // s2 has 'x' removed
+        expect(states.s2.mismatchedSkillNames).toEqual(['y'])
+      })
+
+      it('no-ops when the skill name is not in mismatchedSkillNames (idempotent)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, mismatchedSkillNames: ['y'] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_accepted', skillName: 'x' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        // Untouched — 'x' wasn't in the list, accepting it is a no-op.
+        expect(state.mismatchedSkillNames).toEqual(['y'])
+      })
+
+      it('no-ops when sessionId targets a session not in store', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, mismatchedSkillNames: ['x'] },
+          },
+        }))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skill_trust_accepted', sessionId: 'ghost', skillName: 'x' }, ctx() as any),
+        ).not.toThrow()
+        // s1 untouched
+        expect((store.getState() as any).sessionStates.s1.mismatchedSkillNames).toEqual(['x'])
+      })
+
+      it('ignores non-string skillName (no-op, no throw)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, mismatchedSkillNames: ['x'] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_accepted', skillName: 42 }, ctx() as any)
+        handleMessage({ type: 'skill_trust_accepted', skillName: null }, ctx() as any)
+        handleMessage({ type: 'skill_trust_accepted' }, ctx() as any)
+
+        expect((store.getState() as any).sessionStates.s1.mismatchedSkillNames).toEqual(['x'])
+      })
+
+      it('handles missing mismatchedSkillNames field (does not throw)', () => {
+        // Older sessions or fresh state where #3205 hasn't fired yet
+        // won't have the array initialized. The handler should still
+        // not throw.
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty },
+          },
+        }))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skill_trust_accepted', skillName: 'x' }, ctx() as any),
+        ).not.toThrow()
+      })
+    })
   })
 
   // #3100 / #3068: evaluator round-trip resolves the matching pending entry

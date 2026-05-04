@@ -825,6 +825,221 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #3235: operator-facing accept-hash surface. After SkillsTrustStore
+  // detects a content-hash mismatch, the operator needs a way to re-trust
+  // the new content without manually editing ~/.chroxy/skills-trust.json.
+  // The new `skill_trust_accept` WS message looks up the named skill on
+  // the bound session, calls `trustStore.acceptHash(realPath, body)`,
+  // flushes the ledger, and broadcasts `skill_trust_accepted` so any
+  // mismatch badge on the dashboard can clear.
+  describe('skill_trust_accept (#3235)', () => {
+    function makeFakeTrustStore() {
+      const store = {
+        accepts: [],
+        flushes: 0,
+        acceptHash(absPath, body) {
+          store.accepts.push({ path: absPath, body })
+          store._dirty = true
+        },
+        flush() {
+          store.flushes++
+          store._dirty = false
+        },
+        _dirty: false,
+      }
+      return store
+    }
+
+    it('rejects missing or empty skillName', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_trust_accept(makeWs(), client, { skillName: '' }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /skillName/)
+    })
+
+    it('rejects when no active session is bound', () => {
+      const ctx = makeCtx()
+      settingsHandlers.skill_trust_accept(makeWs(), makeClient(), { skillName: 'foo' }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('rejects when the session has no trust store wired', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.getTrustStore = () => null
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.skill_trust_accept(ws, client, { skillName: 'foo', requestId: 'r1' }, ctx)
+
+      const errorMsg = ws._messages.find(m => m.code === 'TRUST_NOT_ENABLED')
+      assert.ok(errorMsg, 'expected TRUST_NOT_ENABLED error when trust store is absent')
+    })
+
+    it('rejects when the named skill is not loaded on the session', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session._getSkills = () => [
+        { name: 'other', body: 'B', path: '/p/other.md' },
+      ]
+      session.getTrustStore = () => makeFakeTrustStore()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.skill_trust_accept(ws, client, { skillName: 'missing', requestId: 'r1' }, ctx)
+
+      const errorMsg = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+      assert.ok(errorMsg, 'expected SKILL_NOT_FOUND error when skill name doesn\'t match any loaded skill')
+    })
+
+    it('calls acceptHash + flush + broadcasts skill_trust_accepted on success', () => {
+      const trustStore = makeFakeTrustStore()
+      const sessions = new Map()
+      const session = createMockSession()
+      session._getSkills = () => [
+        { name: 'audited', body: 'final-body', path: '/repo/.chroxy/skills/audited.md' },
+      ]
+      session.getTrustStore = () => trustStore
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_trust_accept(makeWs(), client, { skillName: 'audited' }, ctx)
+
+      assert.equal(trustStore.accepts.length, 1)
+      assert.equal(trustStore.accepts[0].path, '/repo/.chroxy/skills/audited.md')
+      assert.equal(trustStore.accepts[0].body, 'final-body')
+      assert.equal(trustStore.flushes, 1, 'must flush so the new hash hits disk before the broadcast')
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'skill_trust_accepted')
+      assert.equal(ctx._sessionBroadcasts[0].msg.skillName, 'audited')
+    })
+
+    it('uses the path-on-skill (not a fresh disk read) so concurrent edits do not race', () => {
+      // The skill object carries its post-frontmatter `body` already;
+      // acceptHash should be called with that exact body so the recorded
+      // hash matches what the loader would have hashed had it succeeded.
+      const trustStore = makeFakeTrustStore()
+      const sessions = new Map()
+      const session = createMockSession()
+      session._getSkills = () => [
+        { name: 's', body: 'POST-FRONTMATTER body', path: '/abs/s.md' },
+      ]
+      session.getTrustStore = () => trustStore
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.skill_trust_accept(makeWs(), client, { skillName: 's' }, ctx)
+
+      assert.equal(trustStore.accepts[0].body, 'POST-FRONTMATTER body')
+    })
+
+    // #3235 review: block-mode recovery is the WHOLE POINT of this handler.
+    // In `block` mode, a hash-mismatched skill is filtered out at load
+    // time, so `_getSkills()` won't return it. The handler must fall
+    // back to a direct filesystem lookup (`findSkillForRetrust`) to
+    // resolve the path + body for the very skill the operator is
+    // trying to re-trust.
+    it('finds blocked skills via filesystem fallback when _getSkills() filters them out', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-trust-accept-block-'))
+      try {
+        // Set up the skill on disk — block mode means _getSkills() is empty.
+        writeFileSync(join(skillsDir, 'audited.md'), '---\nname: audited\n---\nactual body\n')
+
+        const trustStore = makeFakeTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        // _getSkills returns empty (block mode filtered out the
+        // mismatched skill) — handler must fall back to the filesystem.
+        session._getSkills = () => []
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        session.getTrustStore = () => trustStore
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.skill_trust_accept(makeWs(), client, { skillName: 'audited' }, ctx)
+
+        assert.equal(trustStore.accepts.length, 1,
+          'handler must find blocked skills via filesystem fallback so block-mode recovery works')
+        assert.equal(trustStore.accepts[0].body, 'actual body\n',
+          'fallback uses post-frontmatter body, matching what the loader would have hashed')
+        assert.equal(ctx._sessionBroadcasts.length, 1)
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('returns SKILL_NOT_FOUND when neither _getSkills nor filesystem fallback resolves', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-trust-accept-empty-'))
+      try {
+        const trustStore = makeFakeTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session._getSkills = () => []
+        session._skillsDir = skillsDir // empty dir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        session.getTrustStore = () => trustStore
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.skill_trust_accept(ws, client, { skillName: 'nonexistent', requestId: 'r1' }, ctx)
+
+        const errorMsg = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.ok(errorMsg, 'expected SKILL_NOT_FOUND when no loader entry and no file on disk')
+        assert.equal(trustStore.accepts.length, 0, 'no acceptHash call on miss')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3235 review: flush errors must NOT silently broadcast a successful
+    // accept. The dashboard would clear the mismatch indicator on an
+    // in-memory-only update, and the next restart would re-flag the
+    // skill. Send TRUST_FLUSH_FAILED instead and skip the broadcast.
+    it('does not broadcast skill_trust_accepted when flush() throws', () => {
+      const trustStore = makeFakeTrustStore()
+      trustStore.flush = () => { throw new Error('disk full') }
+      const sessions = new Map()
+      const session = createMockSession()
+      session._getSkills = () => [
+        { name: 's', body: 'body', path: '/abs/s.md' },
+      ]
+      session.getTrustStore = () => trustStore
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.skill_trust_accept(ws, client, { skillName: 's', requestId: 'r1' }, ctx)
+
+      // acceptHash still ran (in-memory), but the broadcast must be
+      // suppressed and the operator gets an error.
+      assert.equal(trustStore.accepts.length, 1)
+      assert.equal(ctx._sessionBroadcasts.length, 0,
+        'must NOT broadcast a successful accept when persist failed')
+      const errorMsg = ws._messages.find(m => m.code === 'TRUST_FLUSH_FAILED')
+      assert.ok(errorMsg, 'expected TRUST_FLUSH_FAILED error when flush throws')
+    })
+  })
+
   // #3067: list_skills should walk up from the active session's cwd to pick up
   // the per-repo .chroxy/skills/ overlay and tag each entry with its source.
   // We can't stub the global ~/.chroxy/skills tier here — that's the user's

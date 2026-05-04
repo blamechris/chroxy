@@ -323,6 +323,18 @@ export const ServerSkillDeactivatedSchema = z.object({
   skillName: z.string(),
 })
 
+// #3235: operator confirmed re-trust of a skill after a content-hash
+// mismatch. Broadcast to every client bound to `sessionId` so any
+// mismatch badge in the dashboard can clear in lock-step. Pairs with
+// the `skill_changed` event from #3234 — where `skill_changed` says
+// "the content drifted from the recorded hash", `skill_trust_accepted`
+// says "the operator accepted the new content as the source of truth".
+export const ServerSkillTrustAcceptedSchema = z.object({
+  type: z.literal('skill_trust_accepted'),
+  sessionId: z.string(),
+  skillName: z.string(),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),

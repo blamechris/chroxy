@@ -223,6 +223,7 @@ function _isSecureRequest(req) {
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'skill_activate', skillName, sessionId? }   — activate a manual skill at runtime (#3209)
  *   { type: 'skill_deactivate', skillName, sessionId? } — deactivate a manual skill at runtime (#3209)
+ *   { type: 'skill_trust_accept', skillName, sessionId?, requestId? } — re-trust a skill after a content-hash mismatch (#3235)
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *   { type: 'create_environment', name, cwd, image?, ... } — create persistent container environment
  *   { type: 'list_environments' }                       — list all persistent environments
@@ -320,6 +321,7 @@ function _isSecureRequest(req) {
  *   { type: 'skill_changed', skillName, sessionId, oldHashPrefix, newHashPrefix, mode } — skill content-hash mismatch (#3234, transient)
  *   { type: 'skill_activated', sessionId, skillName }   — manual skill toggled on at runtime (#3209)
  *   { type: 'skill_deactivated', sessionId, skillName } — manual skill toggled off at runtime (#3209)
+ *   { type: 'skill_trust_accepted', sessionId, skillName } — operator re-trusted a skill after hash mismatch (#3235)
  *   { type: 'push_token_error', message }               — push token registration error
  *   { type: 'cost_update', sessionId, cost }            — session cost update
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit

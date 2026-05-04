@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -255,6 +255,52 @@ describe('skills-trust', () => {
       store.flush()
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       assert.equal(persisted['/abs/never-seen.md'].sha256, sha256Hex('body'))
+    })
+
+    // #3235 acceptance criterion: round-trip through the loader. Mismatch
+    // in block mode → skill filtered → operator accepts → next load → skill
+    // loads. This is the exact recovery flow the new `skill_trust_accept`
+    // WS handler triggers.
+    it('block-mode round trip: mismatch filters → acceptHash → skill reloads (#3235)', async () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-trust-skills-'))
+      try {
+        const skillPath = join(skillsDir, 's.md')
+        const { loadActiveSkillsLayered } = await import('../src/skills-loader.js')
+
+        // Step 1: first load with body 'v1' records the hash.
+        writeFileSync(skillPath, 'v1 body\n')
+        const store = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
+        const initial = loadActiveSkillsLayered({ globalDir: skillsDir, trustStore: store })
+        assert.equal(initial.length, 1, 'first load records the hash and emits the skill')
+        store.flush()
+
+        // Step 2: modify the skill body. Block mode now filters it.
+        writeFileSync(skillPath, 'v2 body\n')
+        const blocked = loadActiveSkillsLayered({ globalDir: skillsDir, trustStore: store })
+        assert.equal(blocked.length, 0, 'block mode filters the changed skill')
+
+        // Step 3: operator accepts the new content. The handler reads the
+        // skill body via `_getSkills()` — for the round-trip test we just
+        // call the store directly with what the handler would have read
+        // (the realpath + the in-memory body it was about to load).
+        const realPath = realpathSync(skillPath)
+        store.acceptHash(realPath, 'v2 body\n')
+        store.flush()
+
+        // Step 4: next load — skill is back, hash matches new content.
+        const reloaded = loadActiveSkillsLayered({ globalDir: skillsDir, trustStore: store })
+        assert.equal(reloaded.length, 1,
+          'after acceptHash + flush, the next load must include the previously-filtered skill')
+        assert.equal(reloaded[0].name, 's')
+
+        // And the persisted ledger reflects the new hash.
+        const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+        const records = persisted.records || persisted
+        const recordedHash = records[realPath]?.sha256 || records[_normalizePathKey(realPath)]?.sha256
+        assert.equal(recordedHash, sha256Hex('v2 body\n'))
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
     })
   })
 

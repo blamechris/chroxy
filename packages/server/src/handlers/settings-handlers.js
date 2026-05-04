@@ -7,7 +7,7 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
-import { loadActiveSkillsLayered, findRepoSkillsDir, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
+import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -605,6 +605,135 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
   })
 }
 
+/**
+ * #3235: operator-facing accept-hash surface for SkillsTrustStore. After
+ * a content-hash mismatch fires (`skill_changed` event), the operator
+ * needs a way to re-trust the new content without manually editing
+ * `~/.chroxy/skills-trust.json`. This handler:
+ *
+ *   1. Validates the inbound `skillName`.
+ *   2. Looks up the skill on the bound session (via `_getSkills()`) so
+ *      we use the exact post-frontmatter `body` and `path` the loader
+ *      already validated.
+ *   3. Calls `trustStore.acceptHash(realPath, body)` to overwrite the
+ *      stored hash with the current content's digest.
+ *   4. Flushes the ledger so the new hash survives a crash.
+ *   5. Broadcasts `skill_trust_accepted` so the dashboard can clear any
+ *      mismatch badge — pairs with the `skill_changed` event from #3234.
+ *
+ * Error envelope:
+ *   - `INVALID_SKILL_NAME` (session_error envelope) — missing/empty.
+ *   - `No active session` (session_error envelope) — no bound session.
+ *   - `TRUST_NOT_ENABLED` — bound session has no trust store wired.
+ *   - `SKILL_NOT_FOUND` — name doesn't match any currently-loaded skill.
+ *
+ * The handler does NOT trigger a session reload — the new hash takes
+ * effect on the NEXT load. In `block` mode, that's exactly what the
+ * operator wants: re-trust now, the skill loads on next session start.
+ */
+function handleSkillTrustAccept(ws, client, msg, ctx) {
+  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
+    ctx.send(ws, { type: 'session_error', message: 'skill_trust_accept requires a non-empty `skillName`' })
+    return
+  }
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  // #3252: getter-with-optional-chaining keeps mock sessions (which
+  // don't define the method) compatible while still surfacing TRUST_NOT_ENABLED
+  // for legitimate trust-disabled sessions.
+  const trustStore = entry?.session?.getTrustStore?.() ?? null
+  if (!trustStore || typeof trustStore.acceptHash !== 'function') {
+    sendError(
+      ws,
+      msg?.requestId,
+      'TRUST_NOT_ENABLED',
+      'This session has no skills trust store wired (operator did not opt into warn/block mode).',
+    )
+    return
+  }
+
+  // Find the skill. We CAN'T use `_getSkills()` here: in `block` mode,
+  // a hash-mismatched skill is filtered out at load time, which means
+  // the very skills the operator is trying to re-trust are absent from
+  // the loaded list. Fall back to a direct filesystem lookup that
+  // bypasses the trust gate (#3235 review).
+  let resolvedPath = null
+  let resolvedBody = null
+
+  // First try the session's already-loaded list — covers the warn-mode
+  // case where the skill stays in `_skills` even after a mismatch.
+  // Using the loaded entry's body+path is preferable when available
+  // because the body has already been validated by the same loader pass
+  // that recorded the trust hash.
+  const loadedSkills = typeof entry.session._getSkills === 'function'
+    ? entry.session._getSkills()
+    : []
+  const loaded = Array.isArray(loadedSkills)
+    ? loadedSkills.find((s) => s && s.name === msg.skillName)
+    : null
+  if (loaded && typeof loaded.path === 'string' && typeof loaded.body === 'string') {
+    resolvedPath = loaded.path
+    resolvedBody = loaded.body
+  } else {
+    // Block-mode recovery path: scan the session's skill dirs directly.
+    const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+    const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
+      ? entry.session._repoSkillsDir
+      : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)
+    const found = findSkillForRetrust({
+      skillName: msg.skillName,
+      globalDir: sessionGlobalDir,
+      repoDir: sessionRepoDir,
+    })
+    if (found) {
+      resolvedPath = found.realPath
+      resolvedBody = found.body
+    }
+  }
+
+  if (resolvedPath === null || resolvedBody === null) {
+    sendError(
+      ws,
+      msg?.requestId,
+      'SKILL_NOT_FOUND',
+      `No skill named '${msg.skillName}' found in the session's skill directories.`,
+    )
+    return
+  }
+
+  trustStore.acceptHash(resolvedPath, resolvedBody)
+
+  // #3235 review: persist BEFORE broadcasting. If flush fails, the
+  // dashboard mustn't clear the mismatch indicator on a hash that
+  // never reached disk — the next restart would re-flag the skill.
+  // Surface the error to the caller so they can retry.
+  if (typeof trustStore.flush === 'function') {
+    try {
+      trustStore.flush()
+    } catch (err) {
+      log.warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
+      sendError(
+        ws,
+        msg?.requestId,
+        'TRUST_FLUSH_FAILED',
+        'Accepted in memory but the trust ledger could not be persisted. Retry; the next restart may re-flag this skill.',
+      )
+      return
+    }
+  }
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'skill_trust_accepted',
+    sessionId,
+    skillName: msg.skillName,
+  })
+}
+
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
@@ -772,6 +901,7 @@ export const settingsHandlers = {
   set_prompt_evaluator: handleSetPromptEvaluator,
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
+  skill_trust_accept: handleSkillTrustAccept,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }
