@@ -31,6 +31,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     protocolVersion: z.ZodNumber;
     minProtocolVersion: z.ZodNumber;
     maxProtocolVersion: z.ZodNumber;
+    capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;
