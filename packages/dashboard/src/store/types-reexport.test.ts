@@ -2,9 +2,9 @@
  * Type re-export regression tests.
  *
  * Pure compile-time assertions: TypeScript erases types at runtime, so these
- * tests use `satisfies` and explicit type annotations to enforce the shape
- * locks. If any of the re-exports below disappear or drift, `tsc --noEmit`
- * will fail in CI before the tests ever run.
+ * tests use explicit type annotations on local declarations to enforce the
+ * shape locks. If any of the re-exports below disappear or drift, `tsc
+ * --noEmit` will fail in CI before the tests ever run.
  *
  * Why this file exists: the dashboard's `store/types.ts` re-exports a number
  * of canonical shapes from `@chroxy/store-core` (LogEntry, DiffFile,
