@@ -62,6 +62,7 @@ export function _priorityOf(skill) {
  * @param {{ name: string, metadata?: { priority?: number } | null }} b
  * @returns {number}
  */
+// Load-bearing for _collectCandidates pass-1 sort (#3279) AND _enforceTotalBudget — must never drift.
 export function _compareByPriorityThenName(a, b) {
   const pa = _priorityOf(a)
   const pb = _priorityOf(b)

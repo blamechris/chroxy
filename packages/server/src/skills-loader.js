@@ -364,6 +364,11 @@ export function loadActiveSkills(dir, opts = {}) {
         { name: nameB, metadata: { priority: b.priority } },
       )
     })
+    // Micro-optimization (deferred): when sum(fstat.size) <= tierBudget we
+    // know all candidates fit and the priority sort above is wasted work.
+    // Worth ~5ms cold-start on a 50-skill directory. Deferred until
+    // benchmarks justify it; parseCache absorbs the per-skill partial-read
+    // cost on every subsequent session anyway.
 
     const skills = []
     let tierTotalBytes = 0
@@ -955,6 +960,22 @@ export function loadActiveSkills(dir, opts = {}) {
 /**
  * Pass 1 for the two-pass priority-aware tier budget (#3279).
  *
+ * Two-pass design rationale
+ * ─────────────────────────
+ * Without a pre-pass, the only way to do a priority-aware per-tier cutoff
+ * would be to read every skill body upfront and then sort — burning up to
+ * `N × maxSkillBytes` of memory before any pruning. Instead:
+ *   Pass 1 (_collectCandidates): read only frontmatter (~4KB per skill) to
+ *   extract priority. Never holds more than one fd open. Returns unsorted
+ *   descriptors; caller sorts via _compareByPriorityThenName before the
+ *   pass-2 loop.
+ *   Pass 2 (caller): re-opens each candidate in priority order and reads the
+ *   full body, stopping once the tier budget is exhausted.
+ * Peak in-memory skill body data is bounded at ~tierBudget per tier: the
+ * per-tier read loop never accumulates more than `tierBudget` bytes of body
+ * content. The parseCache is caller-supplied and unbounded; its size is
+ * governed by the caller's eviction policy, not by this function.
+ *
  * Iterates every directory entry and runs the full TOCTOU-safe validation
  * cluster (extension check, statSync, openSync, fstatSync, realpathSync,
  * allowedRoots containment, dev+ino re-check). For each candidate that
@@ -1193,10 +1214,15 @@ export function findRepoSkillsDir(cwd) {
  * paths resolve to the same absolute directory, the global load is skipped to
  * avoid double-counting the same files under conflicting source tags.
  *
- * Size budgets (#3202): per-skill cap is enforced inside `loadActiveSkills`;
- * the global budget is applied here, AFTER the merge — repo overrides win
- * before we trim, which keeps the trimming behaviour consistent with what
- * the user actually has on disk.
+ * Size budgets (#3202 / #3279): per-skill cap is enforced inside
+ * `loadActiveSkills`; the total budget is applied twice — once per tier
+ * (priority-aware, via the two-pass `_collectCandidates` path) and once
+ * post-merge here via `_enforceTotalBudget`. Both passes use
+ * `_compareByPriorityThenName` (priority desc, name asc) as the eviction
+ * order so a high-priority skill in any tier is never crowded out by
+ * lower-priority fillers that happen to sort earlier alphabetically.
+ * The post-merge pass is the cross-tier safety net: repo overrides win
+ * before we trim, and the final set is bounded by `maxTotalSkillBytes`.
  *
  * Per-provider allowlist (#3207): when `providerSkillAllowlist` is supplied,
  * Claude-family providers stay permissive (unchanged behaviour); non-Claude

@@ -380,6 +380,82 @@ describe('skills-loader', () => {
       assert.equal(skills.length, 1)
       assert.equal(skills[0].source, 'repo')
     })
+
+    it('priority-aware per-tier prune carries through layered merge: high-priority repo skill kept even under tight global filler (#3275)', () => {
+      // Setup
+      // -----
+      // Global tier: 3 filler skills (no frontmatter = default priority 100)
+      // named aa-, bb-, cc- so they sort alphabetically BEFORE the high-
+      // priority global skill. Plus one high-priority global skill named
+      // zzz-high (priority 200) that sorts alphabetically LAST. Each file
+      // is sized so that under the OLD alphabetical cutoff the budget is
+      // exhausted by the fillers before zzz-high is ever considered.
+      //
+      // Repo tier: one skill `high` with priority 1000 — the cross-tier
+      // assertion checks that the highest-priority skill from any tier
+      // survives the post-merge _enforceTotalBudget pass.
+      //
+      // maxTotalSkillBytes = 110 bytes
+      // Per-tier budget (passed as maxTotalBytes): also 110 bytes
+      //
+      // File sizes:
+      //   aa-filler.md: 50 bytes  (priority 100 default)
+      //   bb-filler.md: 50 bytes  (priority 100 default)
+      //   cc-filler.md: 50 bytes  (priority 100 default)
+      //   zzz-high.md:  51 bytes  (22B frontmatter + 29B body, priority 200)
+      //   high.md:      50 bytes  (23B frontmatter + 27B body, priority 1000)
+      //
+      // OLD alphabetical cutoff (global tier, budget=110):
+      //   aa-filler(50) → 50, bb-filler(50) → 100, cc-filler(50) → 150>110 SKIP,
+      //   zzz-high never reached → NOT in result (test would fail here)
+      //
+      // NEW priority-aware (global tier, budget=110):
+      //   zzz-high(51) → 51, aa-filler(50) → 101, bb-filler(50) → 151>110 SKIP,
+      //   cc-filler → skipped → zzz-high survives
+      //
+      // After merge + _enforceTotalBudget (budget=110, bodies only):
+      //   high(repo, 27B body) → 27, zzz-high(29B body) → 56,
+      //   aa-filler(50B body) → 106, bb-filler(50B body) → 156>110 SKIP
+      //   All three fit within 110B; _enforceTotalBudget keeps them.
+
+      const fillerBody = 'x'.repeat(49) + '\n'                          // 50 bytes
+      writeFileSync(join(globalDir, 'aa-filler.md'), fillerBody)
+      writeFileSync(join(globalDir, 'bb-filler.md'), fillerBody)
+      writeFileSync(join(globalDir, 'cc-filler.md'), fillerBody)
+
+      // 22B frontmatter + 29B body = 51 bytes total
+      writeFileSync(join(globalDir, 'zzz-high.md'), '---\npriority: 200\n---\n' + 'z'.repeat(29))
+
+      // 23B frontmatter + 27B body = 50 bytes total
+      writeFileSync(join(repoDir, 'high.md'), '---\npriority: 1000\n---\n' + 'y'.repeat(27))
+
+      const maxTotalSkillBytes = 110
+      const result = loadActiveSkillsLayered({ globalDir, repoDir, maxTotalSkillBytes })
+
+      // Cross-tier assertion: highest-priority repo skill survives.
+      const names = result.map((s) => s.name)
+      assert.ok(names.includes('high'), `expected 'high' (repo, priority 1000) in result, got: ${JSON.stringify(names)}`)
+
+      // Per-tier priority assertion: zzz-high (priority 200, alphabetically
+      // LAST in global tier) must survive even though the fillers would have
+      // crowded it out under the old alphabetical cutoff.
+      assert.ok(names.includes('zzz-high'), `expected 'zzz-high' (global, priority 200) in result, got: ${JSON.stringify(names)}`)
+
+      // Source tags are correct.
+      const byName = Object.fromEntries(result.map((s) => [s.name, s]))
+      assert.equal(byName['high'].source, 'repo')
+      assert.equal(byName['zzz-high'].source, 'global')
+
+      // Cross-tier safety net: merged result is within maxTotalSkillBytes.
+      const totalBodyBytes = result.reduce(
+        (sum, s) => sum + (typeof s.body === 'string' ? Buffer.byteLength(s.body, 'utf8') : 0),
+        0,
+      )
+      assert.ok(
+        totalBodyBytes <= maxTotalSkillBytes,
+        `merged body bytes ${totalBodyBytes} exceeds maxTotalSkillBytes ${maxTotalSkillBytes}`,
+      )
+    })
   })
 
   // -----------------------------------------------------------------------
