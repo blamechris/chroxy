@@ -1705,7 +1705,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             rewritten: typeof msg.rewritten === 'string' ? msg.rewritten : null,
             clarification: typeof msg.clarification === 'string' ? msg.clarification : null,
             reasoning: typeof msg.reasoning === 'string' ? msg.reasoning : '',
-            error: msg.error as { code: string; message: string } | undefined,
+            // #3100: forward optional `status` so the InputBar can branch on
+            // 401 (auth) / 429 (rate-limit) / 5xx (service down) for the
+            // recovery hint without parsing message text.
+            error: msg.error as { code: string; message: string; status?: number } | undefined,
           });
         }
       }

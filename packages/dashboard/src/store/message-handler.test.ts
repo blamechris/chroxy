@@ -30,6 +30,8 @@ import {
   clearPermissionSplits,
   stopHeartbeat,
   resetReplayFlags,
+  registerEvaluatorRequest,
+  cancelEvaluatorRequest,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
@@ -1422,6 +1424,115 @@ describe('dashboard message-handler dispatch', () => {
           handleMessage({ type: 'skill_trust_accepted', skillName: 'x' }, ctx() as any),
         ).not.toThrow()
       })
+    })
+  })
+
+  // #3100 / #3068: evaluator round-trip resolves the matching pending entry
+  // when the `evaluate_draft_result` arrives. Verify the wire-parsing path —
+  // the InputBar component tests stub onEvaluate directly, so a regression
+  // in the message-handler's parsing of error.status would slip through if
+  // not covered here.
+  describe('evaluate_draft_result dispatch', () => {
+    it('resolves pending entry with the parsed payload (success/forward verdict)', async () => {
+      const resolve = vi.fn()
+      const reject = vi.fn()
+      registerEvaluatorRequest('req-1', {
+        resolve,
+        reject,
+        timeoutId: window.setTimeout(() => {}, 60_000) as unknown as number,
+      })
+
+      handleMessage({
+        type: 'evaluate_draft_result',
+        requestId: 'req-1',
+        verdict: 'forward',
+        rewritten: null,
+        clarification: null,
+        reasoning: 'looks fine',
+      }, ctx() as any)
+
+      expect(resolve).toHaveBeenCalledTimes(1)
+      const payload = resolve.mock.calls[0]?.[0] as any
+      expect(payload.verdict).toBe('forward')
+      expect(payload.reasoning).toBe('looks fine')
+      expect(payload.error).toBeUndefined()
+      expect(reject).not.toHaveBeenCalled()
+    })
+
+    it('forwards error.status from the wire to the resolved payload', async () => {
+      const resolve = vi.fn()
+      const reject = vi.fn()
+      registerEvaluatorRequest('req-2', {
+        resolve,
+        reject,
+        timeoutId: window.setTimeout(() => {}, 60_000) as unknown as number,
+      })
+
+      handleMessage({
+        type: 'evaluate_draft_result',
+        requestId: 'req-2',
+        error: { code: 'EVALUATOR_API_ERROR', message: 'Evaluator rate limited', status: 429 },
+      }, ctx() as any)
+
+      expect(resolve).toHaveBeenCalledTimes(1)
+      const payload = resolve.mock.calls[0]?.[0] as any
+      expect(payload.error).toEqual({
+        code: 'EVALUATOR_API_ERROR',
+        message: 'Evaluator rate limited',
+        status: 429,
+      })
+    })
+
+    it('leaves error.status undefined when the wire payload omits it', async () => {
+      const resolve = vi.fn()
+      registerEvaluatorRequest('req-3', {
+        resolve,
+        reject: vi.fn(),
+        timeoutId: window.setTimeout(() => {}, 60_000) as unknown as number,
+      })
+
+      handleMessage({
+        type: 'evaluate_draft_result',
+        requestId: 'req-3',
+        error: { code: 'EVALUATOR_NO_API_KEY', message: 'ANTHROPIC_API_KEY is not set' },
+      }, ctx() as any)
+
+      const payload = resolve.mock.calls[0]?.[0] as any
+      expect(payload.error?.status).toBeUndefined()
+      expect(payload.error?.code).toBe('EVALUATOR_NO_API_KEY')
+    })
+
+    it('drops late-arriving results with no matching pending entry (no throw)', () => {
+      // Cancelled or already-timed-out requests should silently drop on the
+      // floor — the resolver/reject pair is gone by the time the late result
+      // arrives. Just ensure dispatch doesn't throw.
+      expect(() => {
+        handleMessage({
+          type: 'evaluate_draft_result',
+          requestId: 'req-gone',
+          verdict: 'forward',
+          reasoning: 'late',
+        }, ctx() as any)
+      }).not.toThrow()
+    })
+
+    it('drops results with no requestId (no throw, no pending lookup)', () => {
+      const resolve = vi.fn()
+      registerEvaluatorRequest('req-other', {
+        resolve,
+        reject: vi.fn(),
+        timeoutId: window.setTimeout(() => {}, 60_000) as unknown as number,
+      })
+
+      handleMessage({
+        type: 'evaluate_draft_result',
+        requestId: null,
+        verdict: 'forward',
+        reasoning: 'no id',
+      }, ctx() as any)
+
+      expect(resolve).not.toHaveBeenCalled()
+      cancelEvaluatorRequest('req-other')
     })
   })
 

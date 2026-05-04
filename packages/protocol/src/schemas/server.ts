@@ -507,6 +507,10 @@ const ServerEvaluateDraftErrorSchema = z.object({
   error: z.object({
     code: z.string(),
     message: z.string(),
+    // #3100: numeric upstream HTTP status, present only for API errors
+    // where the Anthropic SDK exposed a status (401/403/429/5xx etc.).
+    // Omitted for network errors, NO_API_KEY, BAD_RESPONSE, etc.
+    status: z.number().int().optional(),
   }),
   verdict: z.never().optional(),
   rewritten: z.never().optional(),

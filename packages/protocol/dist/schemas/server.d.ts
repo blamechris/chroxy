@@ -424,6 +424,7 @@ export declare const ServerEvaluateDraftResultSchema: z.ZodUnion<readonly [z.Zod
     error: z.ZodObject<{
         code: z.ZodString;
         message: z.ZodString;
+        status: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strip>;
     verdict: z.ZodOptional<z.ZodNever>;
     rewritten: z.ZodOptional<z.ZodNever>;

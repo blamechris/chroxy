@@ -1152,6 +1152,159 @@ describe('skills-loader', () => {
   })
 
   // -----------------------------------------------------------------------
+  // #3230: combined regression test that mixes all three v2 frontmatter
+  // features (#3198 providers, #3199 activation, #3200 injection). Each
+  // gate has its own focused tests above; this section locks in the AND
+  // ordering so a future refactor can't quietly let a manually-activated
+  // skill scoped to the wrong provider through, or route a correctly-
+  // gated skill into the wrong injection bucket.
+  // -----------------------------------------------------------------------
+
+  describe('combined frontmatter features (#3230)', () => {
+    function writeCombinedSkill({ providers, activation, injection }) {
+      const lines = ['---', 'name: combined']
+      if (providers) lines.push(`providers: [${providers.join(', ')}]`)
+      if (activation) lines.push(`activation: ${activation}`)
+      if (injection) lines.push(`injection: ${injection}`)
+      lines.push('---', 'combined-body', '')
+      writeFileSync(join(dir, 'combined.md'), lines.join('\n'))
+    }
+
+    it('all three gates pass: scoped + manual + injection routes correctly', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'claude-sdk',
+        activeManualSkills: ['combined'],
+        defaultInjectionMode: 'prepend',
+      })
+      assert.equal(skills.length, 1, 'all three gates should pass for claude-sdk + manual-active + append')
+      assert.equal(skills[0].name, 'combined')
+      assert.equal(skills[0].injectionMode, 'append',
+        'explicit `injection: append` must override the prepend default')
+    })
+
+    it('providers gate fails: wrong provider, manually activated → still filtered', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'codex',
+        activeManualSkills: ['combined'],
+      })
+      assert.equal(skills.length, 0,
+        'providers gate must fire BEFORE activation — manual opt-in does not bypass scoping')
+    })
+
+    // #3230 review: prove the ORDERING by running with includeInactive.
+    // If activation were evaluated before providers, a wrong-provider
+    // manual skill would still appear as `active: false` in the listing
+    // payload (because includeInactive keeps inactive-manual entries).
+    // The providers gate must fire first, so the skill stays absent.
+    it('providers gate fires BEFORE activation (proven via includeInactive)', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'codex',
+        // No activeManualSkills — combined with includeInactive, an
+        // activation-first implementation would emit the skill tagged
+        // `active: false`. Provider-first implementation drops it
+        // entirely. Asserting absent locks the order.
+        includeInactive: true,
+      })
+      assert.equal(skills.length, 0,
+        'providers gate must fire BEFORE activation — wrong-provider manual skill must NOT leak as inactive entry')
+    })
+
+    it('activation gate fails: right provider, NOT manually activated → filtered', () => {
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'manual',
+        injection: 'append',
+      })
+      const skills = loadActiveSkills(dir, {
+        provider: 'claude-sdk',
+        // No activeManualSkills — manual skill is not opted-in.
+      })
+      assert.equal(skills.length, 0,
+        'manual activation requires explicit opt-in even when provider scope passes')
+    })
+
+    it('injection mode is preserved across the gate chain (not just the default fallback)', () => {
+      // Three skills, all auto-activated, all scoped to the claude family —
+      // verify each injection: variant survives the providers + activation
+      // gates and ends up routed correctly. The provider scope here is
+      // intentional: we want the gates active so the test catches a
+      // regression where the injection field gets reset by gate-passing
+      // logic (vs. the default-fallback path covered by the focused
+      // #3200 tests).
+      writeFileSync(join(dir, 'a-prepend.md'),
+        '---\nname: a-prepend\nproviders: [claude]\ninjection: prepend\n---\nA\n')
+      writeFileSync(join(dir, 'b-append.md'),
+        '---\nname: b-append\nproviders: [claude-sdk]\ninjection: append\n---\nB\n')
+      writeFileSync(join(dir, 'c-system.md'),
+        '---\nname: c-system\nproviders: [claude]\ninjection: system\n---\nC\n')
+      const skills = loadActiveSkills(dir, {
+        provider: 'claude-sdk',
+        defaultInjectionMode: 'append',
+      })
+      const byName = Object.fromEntries(skills.map((s) => [s.name, s]))
+      assert.equal(byName['a-prepend']?.injectionMode, 'prepend')
+      assert.equal(byName['b-append']?.injectionMode, 'append')
+      assert.equal(byName['c-system']?.injectionMode, 'system')
+    })
+
+    it('mixed: scoped + auto-activation + injection routes correctly (no manual opt-in needed)', () => {
+      // Sanity: the combined-features test above exercises the manual
+      // path; auto-activation should also work end-to-end without an
+      // activeManualSkills set.
+      writeCombinedSkill({
+        providers: ['claude'],
+        activation: 'auto',
+        injection: 'system',
+      })
+      const skills = loadActiveSkills(dir, { provider: 'claude-sdk' })
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].injectionMode, 'system')
+    })
+
+    it('layered loader: combined skill loads through global tier with all gates active', () => {
+      // The layered path (loadActiveSkillsLayered) is what actually runs
+      // in production. Verify the combined-features contract survives
+      // global → repo merge.
+      const globalDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-3230-global-'))
+      const repoDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-3230-repo-'))
+      try {
+        writeFileSync(join(globalDir, 'g.md'),
+          '---\nname: g\nproviders: [claude]\nactivation: manual\ninjection: append\n---\nG body\n')
+        // Empty repo dir — global skill must come through unchanged.
+        const skills = loadActiveSkillsLayered({
+          globalDir,
+          repoDir,
+          provider: 'claude-sdk',
+          activeManualSkills: new Set(['g']),
+          defaultInjectionMode: 'prepend',
+        })
+        assert.equal(skills.length, 1)
+        assert.equal(skills[0].name, 'g')
+        assert.equal(skills[0].source, 'global')
+        assert.equal(skills[0].injectionMode, 'append')
+      } finally {
+        rmSync(globalDir, { recursive: true, force: true })
+        rmSync(repoDir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  // -----------------------------------------------------------------------
   // #3227: claude family alias must use the `-` boundary, not a bare prefix.
   // The old startsWith('claude') match incorrectly pulled in unrelated names
   // like `claudette`.
@@ -1587,6 +1740,67 @@ describe('skills-loader', () => {
       })
       assert.deepEqual(mismatches, [],
         `frontmatter-only edits must NOT count as a trust mismatch; recorded ${recordedHash}`)
+    })
+  })
+
+  // #3218: TOCTOU defense. Verify the loader reads from a file descriptor
+  // pinned at open time, not by re-resolving the path. The behavioural
+  // signal: if a regression reverts to path-based reads, the loader would
+  // be racing the filesystem; here we just assert that legitimate skill
+  // content is returned correctly across the new fd-based path (the
+  // existing 127 tests already cover that, but this one anchors the
+  // intent in a single named test referencing the issue).
+  describe('TOCTOU defense (#3218)', () => {
+    it('loads skill content from an fd opened at validation time', () => {
+      // Sanity: the standard load path returns the file's content. The
+      // fd-based read introduced in #3218 must not break this — if the
+      // implementation regresses to a path-based read after the realpath
+      // check, this test still passes for the unraced case but the
+      // surrounding 127 existing tests would catch any wider breakage.
+      writeFileSync(join(dir, 'pinned.md'), 'pinned-body\n')
+      const [skill] = loadActiveSkills(dir)
+      assert.equal(skill.name, 'pinned')
+      assert.equal(skill.body, 'pinned-body\n')
+    })
+
+    it('still loads skill content correctly through a symlink (fd opens the resolved inode)', () => {
+      // Set up: real skill at /real/x.md; symlinked into /skills/x.md.
+      // The fd-based read opens the symlink target's inode and reads
+      // bytes from that fd, regardless of any path-side races.
+      const realDir = join(dir, 'real')
+      const skillsDir = join(dir, 'skills')
+      mkdirSync(realDir, { recursive: true })
+      mkdirSync(skillsDir, { recursive: true })
+      writeFileSync(join(realDir, 'x.md'), 'symlinked-body\n')
+      // Match the existing "symlink defense" tests: skip silently on
+      // platforms (Windows / restricted CI) where symlinkSync isn't
+      // permitted, rather than failing the suite.
+      try { symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md')) } catch { return }
+
+      const [skill] = loadActiveSkills(skillsDir, {
+        allowedRoots: [realDir, skillsDir],
+      })
+      assert.equal(skill.name, 'x')
+      assert.equal(skill.body, 'symlinked-body\n')
+    })
+
+    it('loads many skills successfully (smoke test for fd-based path)', () => {
+      // Smoke test: the fd-based read introduced in #3218 should handle
+      // many skills in one call. This is NOT a true fd-leak detector —
+      // 50 skills won't exhaust the OS limit even with a leak. The
+      // assertion is that all 50 skills load and their content is
+      // correct, exercising every iteration's open/read/close path.
+      // A genuine fd-leak detector would need /proc/self/fd inspection,
+      // which is platform-specific and out of scope for this PR.
+      for (let i = 0; i < 50; i++) {
+        writeFileSync(join(dir, `s${i}.md`), `body-${i}\n`)
+      }
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 50)
+      // Spot-check one: content matches what we wrote.
+      const sample = skills.find((s) => s.name === 's25')
+      assert.ok(sample, 's25 skill must be present')
+      assert.equal(sample.body, 'body-25\n')
     })
   })
 })

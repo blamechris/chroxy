@@ -276,6 +276,57 @@ describe('evaluateDraft', () => {
         },
       )
     })
+
+    // #3100: surface the numeric upstream status on the wrapped error so the
+    // WS handler (and downstream dashboard) can branch on auth vs rate-limit
+    // vs 5xx without parsing the sanitized message string.
+    it('copies numeric err.status onto the wrapped error (401)', async () => {
+      const original = Object.assign(new Error('invalid x-api-key'), { status: 401 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.status, 401)
+          return true
+        },
+      )
+    })
+
+    it('copies numeric err.status onto the wrapped error (429)', async () => {
+      const original = Object.assign(new Error('rate_limit_exceeded'), { status: 429 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.status, 429)
+          return true
+        },
+      )
+    })
+
+    it('copies numeric err.status onto the wrapped error (503)', async () => {
+      const original = Object.assign(new Error('upstream timeout'), { status: 503 })
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.status, 503)
+          return true
+        },
+      )
+    })
+
+    it('leaves wrapped.status undefined when the SDK error has no status (network)', async () => {
+      const original = new Error('socket hang up')
+      const client = makeThrowingClient(original)
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'x', client }),
+        (err) => {
+          assert.equal(err.status, undefined)
+          return true
+        },
+      )
+    })
   })
 
   describe('passthrough to SDK', () => {
