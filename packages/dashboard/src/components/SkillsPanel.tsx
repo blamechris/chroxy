@@ -33,6 +33,13 @@ export interface SkillsPanelProps {
   mismatchedSkillNames?: Set<string>
   onActivate: (skillName: string) => void
   onDeactivate: (skillName: string) => void
+  // #3270: optional 'Accept new content' callback. When supplied, the
+  // panel renders an Accept button next to the mismatch flag for any
+  // skill in `mismatchedSkillNames`. Clicking sends the
+  // `skill_trust_accept` WS message via the wired store action; the
+  // resulting `skill_trust_accepted` broadcast clears the flag.
+  // Optional so older callers (and pre-#3269 servers) keep working.
+  onAcceptTrust?: (skillName: string) => void
   onClose: () => void
 }
 
@@ -92,6 +99,7 @@ export function SkillsPanel({
   mismatchedSkillNames,
   onActivate,
   onDeactivate,
+  onAcceptTrust,
   onClose,
 }: SkillsPanelProps) {
   // Auto skills are always active and live above manual ones (visual
@@ -117,6 +125,26 @@ export function SkillsPanel({
         role="img"
         aria-label="Hash mismatch: skill content changed since last verified"
       >⚠️</span>
+    )
+  }
+
+  // #3270: 'Accept new content' affordance. Only renders when:
+  //   1. The skill is in `mismatchedSkillNames` (hash mismatch fired this session), AND
+  //   2. The caller wired an `onAcceptTrust` handler (older callers and
+  //      pre-#3269 servers don't support runtime re-trust).
+  // Sits as a sibling to the <label> inside .skill-row so a click does
+  // NOT bubble into the label-association and toggle the checkbox.
+  function AcceptTrustButton({ name }: { name: string }) {
+    if (!onAcceptTrust || !mismatched.has(name)) return null
+    return (
+      <button
+        type="button"
+        className="skill-accept-trust"
+        data-testid={`skill-accept-trust-${name}`}
+        onClick={() => onAcceptTrust(name)}
+        title="Accept the current content as the new trusted version"
+        aria-label={`Accept new content for skill ${name}`}
+      >Accept</button>
     )
   }
 
@@ -152,8 +180,12 @@ export function SkillsPanel({
                       association doesn't apply here — keep the flag
                       inside the existing flex row so it renders
                       inline next to the skill name (matches v1
-                      visual layout). */}
+                      visual layout).
+                      #3270: AcceptTrustButton sits next to the flag
+                      so the recovery affordance is co-located with
+                      the warning indicator. */}
                   <MismatchFlag name={s.name} />
+                  <AcceptTrustButton name={s.name} />
                 </div>
                 <SkillMeta skill={s} />
               </li>
@@ -197,6 +229,11 @@ export function SkillsPanel({
                     {s.description && <span className="skill-desc">{s.description}</span>}
                   </label>
                   <MismatchFlag name={s.name} />
+                  {/* #3270: AcceptTrustButton sits as a sibling to
+                      <label>, NOT inside it, so a click doesn't
+                      bubble through label-association and flip the
+                      checkbox — same defense as MismatchFlag. */}
+                  <AcceptTrustButton name={s.name} />
                 </div>
                 <SkillMeta skill={s} />
               </li>

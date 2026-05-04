@@ -265,4 +265,97 @@ describe('SkillsPanel (#3209)', () => {
       expect(screen.getByTestId('skill-meta-last-verified-bad-time')).toBeInTheDocument()
     })
   })
+
+  // #3270: 'Accept new content' affordance for mismatched skills. Pairs
+  // with #3269's `skill_trust_accept` WS message — clicking the button
+  // calls the onAcceptTrust prop (which the App wires to the store
+  // action that sends the WS message). Server broadcasts back
+  // `skill_trust_accepted`, which the message-handler uses to remove the
+  // skill name from `mismatchedSkillNames`, clearing the badge.
+  describe("'Accept new content' button (#3270)", () => {
+    it('renders an Accept button next to the mismatch flag (auto skill)', () => {
+      renderPanel({
+        skills: [{ name: 'changed', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['changed']),
+        onAcceptTrust: vi.fn(),
+      })
+      expect(screen.getByTestId('skill-accept-trust-changed')).toBeInTheDocument()
+    })
+
+    it('renders an Accept button next to the mismatch flag (manual skill)', () => {
+      renderPanel({
+        skills: [{ name: 'manual-changed', activation: 'manual', active: false }],
+        mismatchedSkillNames: new Set(['manual-changed']),
+        onAcceptTrust: vi.fn(),
+      })
+      expect(screen.getByTestId('skill-accept-trust-manual-changed')).toBeInTheDocument()
+    })
+
+    it('calls onAcceptTrust(skillName) when clicked', () => {
+      const onAcceptTrust = vi.fn()
+      renderPanel({
+        skills: [{ name: 'changed', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['changed']),
+        onAcceptTrust,
+      })
+      fireEvent.click(screen.getByTestId('skill-accept-trust-changed'))
+      expect(onAcceptTrust).toHaveBeenCalledTimes(1)
+      expect(onAcceptTrust).toHaveBeenCalledWith('changed')
+    })
+
+    it('does NOT render the Accept button when the skill is not in mismatchedSkillNames', () => {
+      renderPanel({
+        skills: [{ name: 'clean', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['other-skill']),
+        onAcceptTrust: vi.fn(),
+      })
+      expect(screen.queryByTestId('skill-accept-trust-clean')).toBeNull()
+    })
+
+    it('does NOT render the Accept button when onAcceptTrust prop is omitted (back-compat)', () => {
+      renderPanel({
+        skills: [{ name: 'changed', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['changed']),
+        // onAcceptTrust intentionally omitted
+      })
+      expect(screen.queryByTestId('skill-accept-trust-changed')).toBeNull()
+      // Mismatch flag should still appear — just not the button.
+      expect(screen.getByTestId('skill-mismatch-changed')).toBeInTheDocument()
+    })
+
+    it('clicking the Accept button does NOT toggle the checkbox (manual skill)', () => {
+      // The button sits inside the same .skill-row flex container as the
+      // <label>, but as a sibling to <label>, so clicking it must not
+      // bubble into the label-association and flip the checkbox.
+      const onActivate = vi.fn()
+      const onDeactivate = vi.fn()
+      const onAcceptTrust = vi.fn()
+      renderPanel({
+        skills: [{ name: 'risky', activation: 'manual', active: false }],
+        mismatchedSkillNames: new Set(['risky']),
+        onActivate,
+        onDeactivate,
+        onAcceptTrust,
+      })
+
+      fireEvent.click(screen.getByTestId('skill-accept-trust-risky'))
+
+      expect(onAcceptTrust).toHaveBeenCalledWith('risky')
+      // Toggle handlers MUST NOT fire from the Accept click.
+      expect(onActivate).not.toHaveBeenCalled()
+      expect(onDeactivate).not.toHaveBeenCalled()
+      expect((screen.getByTestId('skill-toggle-risky') as HTMLInputElement).checked).toBe(false)
+    })
+
+    it('Accept button has an aria-label so screen readers announce it', () => {
+      renderPanel({
+        skills: [{ name: 'changed', activation: 'auto', active: true }],
+        mismatchedSkillNames: new Set(['changed']),
+        onAcceptTrust: vi.fn(),
+      })
+      const btn = screen.getByTestId('skill-accept-trust-changed')
+      expect(btn).toHaveAttribute('aria-label')
+      expect(btn.getAttribute('aria-label')).toMatch(/accept|trust/i)
+    })
+  })
 })
