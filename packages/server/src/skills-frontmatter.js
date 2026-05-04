@@ -137,7 +137,13 @@ export function parseFrontmatter(text) {
  * @returns {{ frontmatter: object|null, exhausted: boolean }}
  */
 export function _readFrontmatterOnly(fd, fstatSize, opts = {}) {
-  const maxBytes = opts.maxBytes || 4096
+  const rawMax = opts.maxBytes ?? 4096
+  if (!Number.isFinite(rawMax) || rawMax < 0) {
+    throw new TypeError(
+      `_readFrontmatterOnly: opts.maxBytes must be a non-negative finite number, got ${rawMax}`
+    )
+  }
+  const maxBytes = Math.floor(rawMax)
   const toRead = Math.min(fstatSize, maxBytes)
   const buf = Buffer.allocUnsafe(toRead)
   const bytesRead = toRead === 0 ? 0 : readSync(fd, buf, 0, toRead, 0)

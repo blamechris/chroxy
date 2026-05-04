@@ -2022,7 +2022,7 @@ describe('skills-loader', () => {
       }
     })
 
-    it('does not advance the fd position (position=0 is idempotent)', async () => {
+    it('does not advance the fd position', async () => {
       const { readSync: fsReadSync } = await import('node:fs')
       const path = join(fmDir, 'idempotent.md')
       writeFileSync(path, '---\npriority: 77\nname: stable\n---\nbody\n')
@@ -2031,12 +2031,58 @@ describe('skills-loader', () => {
         const size = fstatSync(fd).size
         // Call the helper — must NOT advance the fd cursor.
         _readFrontmatterOnly(fd, size)
-        // A second explicit position=0 read should see the same first bytes.
+        // Pass null as position so readSync reads from the current fd offset.
+        // If _readFrontmatterOnly advanced the cursor, this reads from wherever
+        // it left off (past byte 0) and will NOT see '---\n' at position 0.
         const again = Buffer.allocUnsafe(100)
-        const bytesRead = fsReadSync(fd, again, 0, 100, 0)
+        const bytesRead = fsReadSync(fd, again, 0, 100, null)
         assert.ok(bytesRead > 0)
-        // The file starts with '---\n' — verify the fd position was not moved.
+        // The file starts with '---\n' — verify the fd cursor was not advanced.
         assert.equal(again.toString('utf8', 0, 4), '---\n')
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('throws TypeError for negative maxBytes', () => {
+      const path = join(fmDir, 'neg.md')
+      writeFileSync(path, '---\npriority: 1\n---\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        assert.throws(
+          () => _readFrontmatterOnly(fd, size, { maxBytes: -1 }),
+          (err) => err instanceof TypeError && /non-negative finite/.test(err.message)
+        )
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('throws TypeError for NaN maxBytes', () => {
+      const path = join(fmDir, 'nan.md')
+      writeFileSync(path, '---\npriority: 1\n---\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        assert.throws(
+          () => _readFrontmatterOnly(fd, size, { maxBytes: NaN }),
+          (err) => err instanceof TypeError && /non-negative finite/.test(err.message)
+        )
+      } finally {
+        closeSync(fd)
+      }
+    })
+
+    it('returns frontmatter: null and exhausted: false when maxBytes is 0 and file is non-empty', () => {
+      const path = join(fmDir, 'zero.md')
+      writeFileSync(path, '---\npriority: 5\n---\n')
+      const fd = openSync(path, 'r')
+      try {
+        const size = fstatSync(fd).size
+        const result = _readFrontmatterOnly(fd, size, { maxBytes: 0 })
+        assert.equal(result.frontmatter, null)
+        assert.equal(result.exhausted, false)
       } finally {
         closeSync(fd)
       }
