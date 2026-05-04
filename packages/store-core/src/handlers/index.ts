@@ -1877,11 +1877,17 @@ function isDiffFile(v: unknown): v is DiffFile {
 }
 
 /**
- * Drop malformed elements from `arr` using the supplied type guard. Logs a
- * `console.debug` message identifying the handler name and the rejected
- * element's index so server-side regressions are visible without throwing.
- * The element value itself is intentionally NOT logged to keep the debug
- * output narrow and avoid leaking large/sensitive payloads in production.
+ * Drop malformed elements from `arr` using the supplied type guard. When ANY
+ * element is rejected, logs a SINGLE `console.debug` message with the
+ * dropped/total count so server-side regressions are visible without
+ * throwing. Element values themselves are intentionally NOT logged to avoid
+ * leaking large/sensitive payloads.
+ *
+ * #3184: aggregated rather than per-element. A pathological case (e.g. a
+ * 1000-file diff where every entry is malformed because of a server-side
+ * regression) previously emitted 1000 lines per payload to the
+ * Metro/Vite/browser console. The aggregated form gives operators the same
+ * signal (count + handler name) at bounded cost.
  */
 function validateGitElements<T>(
   arr: unknown[],
@@ -1889,16 +1895,18 @@ function validateGitElements<T>(
   handlerName: string,
 ): T[] {
   const out: T[] = []
+  let dropped = 0
   for (let i = 0; i < arr.length; i++) {
     const elem = arr[i]
     if (isValid(elem)) {
       out.push(elem)
     } else {
-      // Fail-soft: drop the malformed element. Keep the debug log narrow so
-      // production noise is bounded.
-      // eslint-disable-next-line no-console
-      console.debug(`[${handlerName}] dropping malformed element at index ${i}`)
+      dropped++
     }
+  }
+  if (dropped > 0) {
+    // eslint-disable-next-line no-console
+    console.debug(`[${handlerName}] dropped ${dropped}/${arr.length} malformed elements`)
   }
   return out
 }
