@@ -47,6 +47,29 @@ export function _priorityOf(skill) {
 }
 
 /**
+ * Comparator for sorting skills by priority descending, then name ascending
+ * as a tiebreaker. Returns a negative number when `a` should come first.
+ *
+ * Used by both `_enforceTotalBudget` (post-merge prune order) and — going
+ * forward — the loader's pass-1 candidate sort (#3279 priority-aware
+ * pre-pass). Keeping both in sync here is intentional: the pass-1 ranking
+ * and the post-merge prune MUST use the same comparator, or a high-priority
+ * skill that survives pass-1 could be pruned ahead of a lower-priority one
+ * by the budget enforcer. NEVER change this function without also auditing
+ * every call site that relies on it for stable ordering.
+ *
+ * @param {{ name: string, metadata?: { priority?: number } | null }} a
+ * @param {{ name: string, metadata?: { priority?: number } | null }} b
+ * @returns {number}
+ */
+export function _compareByPriorityThenName(a, b) {
+  const pa = _priorityOf(a)
+  const pb = _priorityOf(b)
+  if (pa !== pb) return pb - pa // higher priority first
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+}
+
+/**
  * Apply the global skills budget (#3202). Skills are sorted by priority
  * descending (higher priority kept first), with alphabetical name as the
  * tiebreaker — same direction as the existing top-level sort. We then walk
@@ -62,12 +85,7 @@ export function _priorityOf(skill) {
 export function _enforceTotalBudget(skills, maxTotalBytes) {
   if (!Array.isArray(skills) || skills.length === 0) return []
 
-  const ranked = skills.slice().sort((a, b) => {
-    const pa = _priorityOf(a)
-    const pb = _priorityOf(b)
-    if (pa !== pb) return pb - pa // higher priority first
-    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
-  })
+  const ranked = skills.slice().sort(_compareByPriorityThenName)
 
   const kept = []
   let total = 0
