@@ -1619,7 +1619,10 @@ describe('skills-loader', () => {
       mkdirSync(realDir, { recursive: true })
       mkdirSync(skillsDir, { recursive: true })
       writeFileSync(join(realDir, 'x.md'), 'symlinked-body\n')
-      symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md'))
+      // Match the existing "symlink defense" tests: skip silently on
+      // platforms (Windows / restricted CI) where symlinkSync isn't
+      // permitted, rather than failing the suite.
+      try { symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md')) } catch { return }
 
       const [skill] = loadActiveSkills(skillsDir, {
         allowedRoots: [realDir, skillsDir],
@@ -1628,14 +1631,14 @@ describe('skills-loader', () => {
       assert.equal(skill.body, 'symlinked-body\n')
     })
 
-    it('does not leak fds across many skills (closeSync runs in finally)', () => {
-      // Defense-in-depth: the fd is opened per iteration and released in
-      // a finally block. A regression that drops the close (or skips it
-      // on a `continue`) would leak fds at scale. Load 50 skills and
-      // assert success — Node's default fd limit is ~256, so a leaky
-      // 50-skill load would survive but a 1000-skill one wouldn't. We
-      // keep the count realistic; the structural assertion below is the
-      // real signal.
+    it('loads many skills successfully (smoke test for fd-based path)', () => {
+      // Smoke test: the fd-based read introduced in #3218 should handle
+      // many skills in one call. This is NOT a true fd-leak detector —
+      // 50 skills won't exhaust the OS limit even with a leak. The
+      // assertion is that all 50 skills load and their content is
+      // correct, exercising every iteration's open/read/close path.
+      // A genuine fd-leak detector would need /proc/self/fd inspection,
+      // which is platform-specific and out of scope for this PR.
       for (let i = 0; i < 50; i++) {
         writeFileSync(join(dir, `s${i}.md`), `body-${i}\n`)
       }

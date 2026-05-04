@@ -646,18 +646,43 @@ export function loadActiveSkills(dir, opts = {}) {
         continue
       }
 
+      // #3218 (review): inode-bind the open fd to the validated realPath.
+      // Without this, a swap during the window
+      //   openSync(fullPath)   → fd pinned to attacker-chosen inode
+      //   realpathSync(fullPath) → resolves to a now-allowed path
+      // would let an attacker trick the loader into reading bytes from
+      // an out-of-tree inode while the path-side check approves an
+      // in-tree realPath. Comparing dev+ino between fstat (the inode
+      // we have open) and statSync(realPath) (the inode the validated
+      // path now resolves to) catches this exact case: if they don't
+      // match, the fd is pointing at something other than what we
+      // validated, and we skip.
+      let realStat
+      try {
+        realStat = statSync(realPath)
+      } catch {
+        // realPath disappeared between realpathSync and statSync — abort.
+        continue
+      }
+      if (fstat.dev !== realStat.dev || fstat.ino !== realStat.ino) {
+        log.warn(`Skipping skill ${label}: fd inode does not match validated real path (TOCTOU swap detected)`)
+        log.debug(`skill ${label} full path: ${fullPath} fd ino=${fstat.ino} realPath ino=${realStat.ino}`)
+        continue
+      }
+
       // Strip the matching extension (case-preserving) when computing the
       // display name. We checked the lower-cased suffix above, so trim the
       // same number of chars (+1 for the dot).
       const name = entry.slice(0, -(ext.length + 1))
 
-      // #3248: parse-cache fast path. statSync's mtimeMs already gave
-      // us the file's mtime above; if the cache entry's mtimeMs+size
+      // #3248: parse-cache fast path. fstatSync above gave us the
+      // post-open file's mtime+size; if the cache entry's mtimeMs+size
       // match, skip readFileSync / text-validation / parseFrontmatter
       // and reuse the cached parse. Mismatch (or no entry) falls
-      // through to the full read+parse path below. Use fstat (post-open)
-      // for the size comparison so a path-side swap doesn't yield a
-      // false cache-hit on the original mtimeMs.
+      // through to the full read+parse path below. #3218: keying on
+      // fstat (not the path-side statSync done before openSync) means
+      // a swap-during-realpath can't yield a false cache-hit on the
+      // original mtimeMs.
       let body
       let frontmatter
       let finalBody
