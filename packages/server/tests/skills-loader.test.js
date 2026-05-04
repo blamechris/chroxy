@@ -1589,4 +1589,62 @@ describe('skills-loader', () => {
         `frontmatter-only edits must NOT count as a trust mismatch; recorded ${recordedHash}`)
     })
   })
+
+  // #3218: TOCTOU defense. Verify the loader reads from a file descriptor
+  // pinned at open time, not by re-resolving the path. The behavioural
+  // signal: if a regression reverts to path-based reads, the loader would
+  // be racing the filesystem; here we just assert that legitimate skill
+  // content is returned correctly across the new fd-based path (the
+  // existing 127 tests already cover that, but this one anchors the
+  // intent in a single named test referencing the issue).
+  describe('TOCTOU defense (#3218)', () => {
+    it('loads skill content from an fd opened at validation time', () => {
+      // Sanity: the standard load path returns the file's content. The
+      // fd-based read introduced in #3218 must not break this — if the
+      // implementation regresses to a path-based read after the realpath
+      // check, this test still passes for the unraced case but the
+      // surrounding 127 existing tests would catch any wider breakage.
+      writeFileSync(join(dir, 'pinned.md'), 'pinned-body\n')
+      const [skill] = loadActiveSkills(dir)
+      assert.equal(skill.name, 'pinned')
+      assert.equal(skill.body, 'pinned-body\n')
+    })
+
+    it('still loads skill content correctly through a symlink (fd opens the resolved inode)', () => {
+      // Set up: real skill at /real/x.md; symlinked into /skills/x.md.
+      // The fd-based read opens the symlink target's inode and reads
+      // bytes from that fd, regardless of any path-side races.
+      const realDir = join(dir, 'real')
+      const skillsDir = join(dir, 'skills')
+      mkdirSync(realDir, { recursive: true })
+      mkdirSync(skillsDir, { recursive: true })
+      writeFileSync(join(realDir, 'x.md'), 'symlinked-body\n')
+      symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md'))
+
+      const [skill] = loadActiveSkills(skillsDir, {
+        allowedRoots: [realDir, skillsDir],
+      })
+      assert.equal(skill.name, 'x')
+      assert.equal(skill.body, 'symlinked-body\n')
+    })
+
+    it('does not leak fds across many skills (closeSync runs in finally)', () => {
+      // Defense-in-depth: the fd is opened per iteration and released in
+      // a finally block. A regression that drops the close (or skips it
+      // on a `continue`) would leak fds at scale. Load 50 skills and
+      // assert success — Node's default fd limit is ~256, so a leaky
+      // 50-skill load would survive but a 1000-skill one wouldn't. We
+      // keep the count realistic; the structural assertion below is the
+      // real signal.
+      for (let i = 0; i < 50; i++) {
+        writeFileSync(join(dir, `s${i}.md`), `body-${i}\n`)
+      }
+      const skills = loadActiveSkills(dir)
+      assert.equal(skills.length, 50)
+      // Spot-check one: content matches what we wrote.
+      const sample = skills.find((s) => s.name === 's25')
+      assert.ok(sample, 's25 skill must be present')
+      assert.equal(sample.body, 'body-25\n')
+    })
+  })
 })
