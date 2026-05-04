@@ -48,6 +48,10 @@ export type {
   DiffFile,
   DiffHunk,
   DiffHunkLine,
+  // #3181: re-export GitFileStatus from store-core in place of the old
+  // dashboard-local GitStatusEntry. Same shape (path + status union) — was
+  // missed by the #3132 dedup sweep that moved DiffFile/Hunk/HunkLine.
+  GitFileStatus,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
@@ -65,6 +69,7 @@ import type {
   LogEntry,
   MessageAttachment,
   ModelInfo,
+  GitFileStatus,
   PendingPermissionConfirm,
   SavedConnection,
   SearchResult,
@@ -145,15 +150,14 @@ export interface FileContent {
   error: string | null;
 }
 
-export interface GitStatusEntry {
-  path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'unknown';
-}
-
+// #3181: GitStatusEntry was structurally identical to @chroxy/store-core's
+// `GitFileStatus` (path + status union). Dropped in favour of the canonical
+// re-export above so the dashboard and app share a single shape for staged/
+// unstaged entries — same dedup the #3132 sweep applied to DiffFile/Hunk.
 export interface GitStatusResult {
   branch: string | null;
-  staged: GitStatusEntry[];
-  unstaged: GitStatusEntry[];
+  staged: GitFileStatus[];
+  unstaged: GitFileStatus[];
   untracked: string[];
   error: string | null;
 }
@@ -196,7 +200,10 @@ export interface EvaluatorResultPayload {
   rewritten?: string | null;
   clarification?: string | null;
   reasoning?: string;
-  error?: { code: string; message: string };
+  // #3100: optional numeric upstream HTTP status (401/403/429/5xx) so the UI
+  // can pick a recovery hint without parsing the message string. Omitted for
+  // non-API errors (NO_API_KEY, BAD_RESPONSE) and network failures.
+  error?: { code: string; message: string; status?: number };
 }
 
 export interface SessionNotification {

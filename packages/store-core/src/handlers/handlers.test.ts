@@ -2560,6 +2560,51 @@ describe('handleDiffResult', () => {
     debugSpy.mockRestore()
   })
 
+  // #3184: aggregate the per-element drop logs into ONE bounded log per
+  // payload. A pathological case (1000-file diff where every entry is
+  // malformed because of a server-side regression) previously emitted 1000
+  // console.debug lines per `diff_result` event; the new contract emits a
+  // single line per call with the drop count.
+  it('emits a single aggregated debug log per payload, not one per dropped element (#3184)', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    // Construct 50 malformed entries — without the aggregation fix this
+    // would emit 50 console.debug calls.
+    const files = Array.from({ length: 50 }, (_, i) => ({
+      path: `bad${i}.txt`, // missing status
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+    }))
+    handleDiffResult({ files })
+
+    expect(debugSpy).toHaveBeenCalledTimes(1)
+    // The single line must carry the count and total so an operator can see
+    // the failure scope at a glance.
+    const message = debugSpy.mock.calls[0]?.[0] as string
+    expect(message).toMatch(/handleDiffResult\.files/)
+    expect(message).toMatch(/50.*50|50\/50/)
+    debugSpy.mockRestore()
+  })
+
+  it('does not log when every element is valid (#3184)', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    handleDiffResult({
+      files: [
+        { path: 'a.txt', status: 'added', additions: 0, deletions: 0, hunks: [] },
+        { path: 'b.txt', status: 'modified', additions: 1, deletions: 1, hunks: [] },
+      ],
+    })
+    expect(debugSpy).not.toHaveBeenCalled()
+    debugSpy.mockRestore()
+  })
+
+  it('does not log on empty input arrays (#3184)', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    handleDiffResult({ files: [] })
+    expect(debugSpy).not.toHaveBeenCalled()
+    debugSpy.mockRestore()
+  })
+
   it('defaults to [] for missing/non-array files', () => {
     expect(handleDiffResult({}).files).toEqual([])
     expect(handleDiffResult({ files: 'oops' }).files).toEqual([])
