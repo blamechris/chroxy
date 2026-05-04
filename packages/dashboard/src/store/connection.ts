@@ -794,6 +794,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultDuration: null,
       webFeatures: { available: false, remote: false, teleport: false },
       webTasks: [],
+      // #3272 review: clear advertised capabilities on disconnect so a
+      // reconnect against a different (or older) server can't have its
+      // UI gates left enabled by stale state. Empty map = fail-closed
+      // for any capability-gated affordance.
+      serverCapabilities: {},
       savedConnection: null,
       userDisconnected: true,
       viewingCachedSession: false,

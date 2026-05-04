@@ -413,6 +413,24 @@ describe('auth_ok handler', () => {
 
       expect(store.getState().serverCapabilities).toEqual({})
     })
+
+    // #3272 review: stale capabilities from a previous connection must
+    // be overwritten on fresh auth_ok. Otherwise UI gates from the old
+    // server stay enabled against a new (older) server that doesn't
+    // advertise the same flags.
+    it('overwrites stale capabilities from a previous connection on fresh auth_ok', () => {
+      store = createMockStore({
+        connectionPhase: 'reconnecting',
+        socket: null,
+        serverCapabilities: { skillTrustAccept: true, otherFlag: true },
+      } as unknown as ConnectionState)
+      setStore(store)
+
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any) // no capabilities in payload
+
+      expect(store.getState().serverCapabilities).toEqual({})
+    })
   })
 
   describe('reconnection', () => {
