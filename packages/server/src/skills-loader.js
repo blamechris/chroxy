@@ -63,9 +63,8 @@ import {
   openSync,
   closeSync,
 } from 'fs'
-import { basename, dirname, join, resolve, sep } from 'path'
+import { dirname, join, resolve, sep } from 'path'
 import { homedir } from 'os'
-import { createHash } from 'crypto'
 import { createLogger } from './logger.js'
 
 const log = createLogger('skills-loader')
@@ -75,124 +74,41 @@ export const DEFAULT_SKILLS_DIR = join(homedir(), '.chroxy', 'skills')
 // Cap walk-up iterations as a safety belt; real repos are nowhere near this deep.
 const REPO_DISCOVERY_MAX_DEPTH = 100
 
-// Default extensions accepted for skills. Just the suffix without the dot.
-// `markdown` is included alongside `md` because some editors / users prefer
-// the long form (#3219).
-const DEFAULT_ALLOWED_EXTENSIONS = ['md', 'markdown']
+// #3223: validator helpers extracted to skills-content-validator.js.
+import {
+  DEFAULT_ALLOWED_EXTENSIONS,
+  SKIP_DIRECTORY_NAMES,
+  _normalizeExtension,
+  _bufferLooksLikeText,
+  _pathLabel,
+} from './skills-content-validator.js'
 
-// Subdirectories we never recurse into. Keeps the loader from accidentally
-// inhaling vendored trees, build outputs, or compiled caches if a user drops
-// .chroxy/skills/ at a repo root that happens to contain them. (We only
-// scan the top level today, but the skip list is also applied if the loader
-// is asked to scan a directory tree explicitly.)
-const SKIP_DIRECTORY_NAMES = new Set([
-  '.git',
-  'node_modules',
-  '__pycache__',
-  'dist',
-  'build',
-])
+// #3223: budget + allowlist enforcement extracted to skills-budget.js.
+import {
+  DEFAULT_MAX_SKILL_BYTES,
+  DEFAULT_MAX_TOTAL_SKILL_BYTES,
+  _enforceTotalBudget,
+  _filterByProviderAllowlist,
+} from './skills-budget.js'
 
-// Per-skill byte cap and global skills budget (#3202). Tuned to keep skills
-// from ballooning the system prompt — 32KB is roughly 8K tokens, 256KB is
-// ~64K tokens, both well under any provider's context window but large
-// enough that no honest skill should bump them.
-const DEFAULT_MAX_SKILL_BYTES = 32 * 1024
-const DEFAULT_MAX_TOTAL_SKILL_BYTES = 256 * 1024
+// #3223: frontmatter parser + frontmatter-driven gating helpers extracted
+// to skills-frontmatter.js. Re-exported below for back-compat with the
+// loader's public API surface (parseFrontmatter is consumed by tests and
+// findSkillForRetrust here).
+import {
+  parseFrontmatter,
+  _normalizeProviderName,
+  _isClaudeFamilyProvider,
+  _coerceManualSet,
+  _skillMatchesProvider,
+  _normalizeInjectionMode,
+  _resolveInjectionMode,
+  _skillIsActive,
+} from './skills-frontmatter.js'
 
-// Recognized YAML frontmatter keys (#3197). The parser only accepts these —
-// anything else is dropped to keep the surface area tight. Consumers of the
-// metadata fields land in #3198 (providers), #3199 (activation), #3200
-// (injection); priority is consumed by the size-budget pruner (#3202).
-const FRONTMATTER_KEYS = new Set([
-  'name',
-  'description',
-  'allowed-tools',
-  'providers',
-  'activation',
-  'injection',
-  'priority',
-  'version',
-])
+// Re-export for callers that historically imported from skills-loader.js.
+export { parseFrontmatter }
 
-// Valid `activation:` values (#3199). Any other string falls through to the
-// default ('auto') so a typo doesn't silently mute a skill. Manual activation
-// requires the skill name to be present in the loader's `activeManualSkills`
-// Set; absent the Set, manual skills are skipped entirely.
-const VALID_ACTIVATION_MODES = new Set(['auto', 'manual'])
-
-// Valid `injection:` values (#3200). 'prepend' inserts skills before the
-// first user message (Codex / Gemini default), 'append' adds them to the
-// system prompt (Claude SDK default), 'system' is a synonym for 'append'
-// kept for clarity in user-authored frontmatter — both routes do the same
-// thing on Claude SDK; on subprocess providers without a system-prompt
-// flag, 'system' falls back to 'prepend'.
-const VALID_INJECTION_MODES = new Set(['prepend', 'append', 'system'])
-
-/**
- * Return true if `s` is a string of `[a-z0-9]+` (i.e., a clean extension
- * suffix without leading dot). Cheap input validation for the allowlist so a
- * caller passing `'.md'` or `'MD'` doesn't silently break the comparison.
- */
-function _normalizeExtension(ext) {
-  if (typeof ext !== 'string') return null
-  const trimmed = ext.trim().replace(/^\.+/, '').toLowerCase()
-  if (!trimmed) return null
-  if (!/^[a-z0-9]+$/.test(trimmed)) return null
-  return trimmed
-}
-
-/**
- * Validate that `body` looks like printable text (#3203 + #3216). UTF-8
- * multi-byte sequences are fine — we only reject NUL bytes and control
- * characters outside the standard whitespace set (\t, \n, \v, \f, \r).
- *
- * The earlier implementation only sniffed the first 512 bytes, which let a
- * file with a valid markdown head and a binary tail past that window load
- * as a skill. We now walk every byte; cost is linear in file size, which is
- * already bounded by `maxSkillBytes` upstream.
- *
- * @param {Buffer} buf - Full file contents (raw bytes, not decoded).
- * @returns {boolean} true when every byte is acceptable, false on first violation.
- */
-function _bufferLooksLikeText(buf) {
-  for (let i = 0; i < buf.length; i++) {
-    const byte = buf[i]
-    if (byte === 0) return false
-    // Allow standard ASCII whitespace control chars.
-    if (byte === 0x09 || byte === 0x0a || byte === 0x0b || byte === 0x0c || byte === 0x0d) continue
-    // Reject other control chars (0x00–0x1F, 0x7F). Bytes >= 0x80 are
-    // accepted: they're either valid UTF-8 continuation bytes for
-    // non-ASCII text, or genuinely binary content that we'd rather let
-    // pass than risk false-rejecting unicode markdown.
-    if (byte < 0x20 || byte === 0x7f) return false
-  }
-  return true
-}
-
-/**
- * Build a sanitized label for a skill file path (#3215). The label includes
- * the basename plus an 8-char SHA-256 prefix of the absolute path so server
- * operators correlating across log lines still get a stable identifier,
- * but a fan-out to a paired dashboard / mobile client (`log_entry`) does not
- * reveal the user's filesystem layout.
- *
- * Example: `evil.md#a1b2c3d4`
- *
- * @param {string} absPath
- * @returns {string}
- */
-function _pathLabel(absPath) {
-  const safeBase = typeof absPath === 'string' ? basename(absPath) : '<unknown>'
-  let hashPrefix = '00000000'
-  try {
-    hashPrefix = createHash('sha256').update(String(absPath)).digest('hex').slice(0, 8)
-  } catch {
-    // Hash failures should never block skill loading — fall back to a fixed
-    // sentinel so the label still has a recognisable shape.
-  }
-  return `${safeBase}#${hashPrefix}`
-}
 
 /**
  * Return true if `child` is the same as or nested inside `parent`. Both
@@ -238,182 +154,6 @@ function _resolveRoots(roots) {
   return out
 }
 
-/**
- * Parse a YAML-ish frontmatter block from the start of a markdown document
- * (#3197). Returns `{ frontmatter, body }`:
- *   - `frontmatter` is `null` when no leading `---` block is present, or
- *     when the block is malformed (which is non-fatal — callers fall back
- *     to body-only behaviour).
- *   - `body` is the remaining text after the closing `---` and one trailing
- *     newline. When there is no frontmatter, `body === text`.
- *
- * The parser accepts only the documented schema (see `FRONTMATTER_KEYS`)
- * and only handles three value shapes:
- *   - scalar:           `key: value`
- *   - inline list:      `key: [a, b, c]`
- *   - indented list:    `key:\n  - a\n  - b`
- *
- * Numeric `priority` is coerced; everything else stays as a string.
- * Unknown keys are ignored (silently dropped). This keeps the surface area
- * tight while we wire up consumers in follow-up issues.
- *
- * @param {string} text
- * @returns {{ frontmatter: Record<string, unknown> | null, body: string }}
- */
-export function parseFrontmatter(text) {
-  if (typeof text !== 'string' || text.length === 0) {
-    return { frontmatter: null, body: typeof text === 'string' ? text : '' }
-  }
-
-  // Frontmatter must start at byte 0 with `---` followed by a newline.
-  // Anything else (including a leading BOM or blank line) means no frontmatter.
-  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) {
-    return { frontmatter: null, body: text }
-  }
-
-  const afterOpen = text.startsWith('---\r\n') ? 5 : 4
-  const rest = text.slice(afterOpen)
-
-  // Find the closing fence. Accept `---` on its own line.
-  const closeMatch = rest.match(/(^|\r?\n)---(\r?\n|$)/)
-  if (!closeMatch) {
-    log.debug('parseFrontmatter: missing closing fence — treating as body')
-    return { frontmatter: null, body: text }
-  }
-
-  const closeIdx = closeMatch.index + closeMatch[1].length
-  const yamlRaw = rest.slice(0, closeIdx)
-  const bodyStart = closeIdx + 3 + (closeMatch[2] === '' ? 0 : closeMatch[2].length)
-  const body = rest.slice(bodyStart)
-
-  let frontmatter
-  try {
-    frontmatter = _parseFrontmatterBody(yamlRaw)
-  } catch (err) {
-    log.debug(`parseFrontmatter: malformed frontmatter — ${err && err.message ? err.message : err}`)
-    return { frontmatter: null, body: text }
-  }
-
-  return { frontmatter, body }
-}
-
-/**
- * Hand-rolled YAML parser that handles only the documented schema. Returns
- * an object on success, throws on anything weird (caller catches and falls
- * back to `metadata: null`).
- */
-function _parseFrontmatterBody(yaml) {
-  const out = {}
-  // Normalise line endings + drop trailing whitespace per line; we'll re-walk
-  // the array to support indented list values.
-  const lines = yaml.split(/\r?\n/)
-
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]
-    // Allow blank lines and full-line comments.
-    if (/^\s*$/.test(raw)) continue
-    if (/^\s*#/.test(raw)) continue
-
-    // Top-level key/value at column 0 (no leading whitespace).
-    const m = raw.match(/^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/)
-    if (!m) {
-      throw new Error(`unrecognised line: ${raw.slice(0, 60)}`)
-    }
-    const key = m[1]
-    let valueText = m[2]
-
-    // Strip inline trailing comment (e.g., `key: foo  # note`) — quote-aware
-    // so a `#` inside a quoted string is preserved. Examples that must NOT
-    // truncate: `description: "Fix issue #123"`, `name: 'C# tips'`,
-    // `summary: "foo # bar"`. Walk char-by-char tracking quote state and
-    // only treat ` #` (whitespace then hash) as a comment opener when
-    // outside any quote.
-    valueText = _stripUnquotedTrailingComment(valueText)
-    valueText = valueText.trim()
-
-    if (!FRONTMATTER_KEYS.has(key)) continue // silently drop unknown keys
-
-    if (valueText === '') {
-      // Indented list: collect subsequent `  - item` lines.
-      const items = []
-      while (i + 1 < lines.length) {
-        const next = lines[i + 1]
-        if (/^\s*$/.test(next)) { i++; continue }
-        const itemMatch = next.match(/^\s+-\s+(.*)$/)
-        if (!itemMatch) break
-        items.push(_unquote(itemMatch[1].trim()))
-        i++
-      }
-      out[key] = items
-      continue
-    }
-
-    // Inline list: `[a, b, c]`
-    if (valueText.startsWith('[') && valueText.endsWith(']')) {
-      const inner = valueText.slice(1, -1).trim()
-      const items = inner === ''
-        ? []
-        : inner.split(',').map((s) => _unquote(s.trim())).filter((s) => s.length > 0)
-      out[key] = items
-      continue
-    }
-
-    // Scalar.
-    const unquoted = _unquote(valueText)
-    if (key === 'priority') {
-      const n = Number(unquoted)
-      if (!Number.isFinite(n)) throw new Error(`priority must be numeric: ${valueText}`)
-      out[key] = n
-    } else {
-      out[key] = unquoted
-    }
-  }
-
-  return out
-}
-
-function _unquote(s) {
-  if (typeof s !== 'string') return ''
-  const t = s.trim()
-  if ((t.startsWith('"') && t.endsWith('"') && t.length >= 2)
-    || (t.startsWith("'") && t.endsWith("'") && t.length >= 2)) {
-    return t.slice(1, -1)
-  }
-  return t
-}
-
-/**
- * Strip a trailing `# comment` from a YAML scalar value, but only when the
- * `#` is OUTSIDE any quoted string. Without quote awareness, a value like
- * `"Fix issue #123"` would truncate to `"Fix issue` — corrupting metadata
- * and turning valid frontmatter into garbage.
- *
- * Walks char-by-char tracking single/double-quote state. Only the FIRST
- * unquoted ` #` (whitespace+hash) is treated as a comment opener; everything
- * before it is returned verbatim.
- */
-function _stripUnquotedTrailingComment(s) {
-  if (typeof s !== 'string' || s.length === 0) return s
-  let inSingle = false
-  let inDouble = false
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i]
-    if (!inSingle && ch === '"') {
-      inDouble = !inDouble
-      continue
-    }
-    if (!inDouble && ch === "'") {
-      inSingle = !inSingle
-      continue
-    }
-    if (inSingle || inDouble) continue
-    // Outside any quote — does this position open a trailing comment?
-    if (ch === '#' && i > 0 && /\s/.test(s[i - 1])) {
-      return s.slice(0, i - 1)
-    }
-  }
-  return s
-}
 
 /**
  * Scan `dir` for active skills and return them as an array sorted by name.
@@ -933,62 +673,6 @@ export function loadActiveSkills(dir, opts = {}) {
 }
 
 /**
- * Apply the global skills budget (#3202). Skills are sorted by priority
- * descending (higher priority kept first), with alphabetical name as the
- * tiebreaker — same direction as the existing top-level sort. We then walk
- * the list, accumulating bytes until we'd exceed the cap; the first skill
- * that wouldn't fit (and every later one) is dropped.
- *
- * Returns a fresh array sorted by name (for deterministic ordering downstream).
- *
- * @param {Array<object>} skills
- * @param {number} maxTotalBytes
- * @returns {Array<object>}
- */
-function _enforceTotalBudget(skills, maxTotalBytes) {
-  if (!Array.isArray(skills) || skills.length === 0) return []
-
-  const ranked = skills.slice().sort((a, b) => {
-    const pa = _priorityOf(a)
-    const pb = _priorityOf(b)
-    if (pa !== pb) return pb - pa // higher priority first
-    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
-  })
-
-  const kept = []
-  let total = 0
-  for (const s of ranked) {
-    const size = typeof s.body === 'string' ? Buffer.byteLength(s.body, 'utf8') : 0
-    if (total + size > maxTotalBytes) {
-      log.warn(
-        `Skipping skill ${_pathLabel(s.name)}: cumulative size would exceed total cap ${maxTotalBytes}`,
-      )
-      continue
-    }
-    total += size
-    kept.push(s)
-  }
-
-  kept.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  return kept
-}
-
-// Default priority for skills without an explicit `priority:` in frontmatter
-// (and for v1 skills that have no frontmatter at all). Per the #2958 schema,
-// the documented default is 100. Returning 0 here (the previous behaviour)
-// would push v1 / no-priority skills to the BOTTOM of the budget-prune order,
-// so any new v2 skill with even `priority: 1` would outrank them — wrong for
-// mixed v1/v2 sets.
-const DEFAULT_SKILL_PRIORITY = 100
-
-function _priorityOf(skill) {
-  if (skill && skill.metadata && Number.isFinite(skill.metadata.priority)) {
-    return skill.metadata.priority
-  }
-  return DEFAULT_SKILL_PRIORITY
-}
-
-/**
  * Walk up from `cwd` looking for the nearest `.chroxy/skills/` directory (#3067).
  *
  * The walk lets a user `cd` into any subfolder of a repo and still pick up the
@@ -1400,227 +1084,4 @@ export function groupSkillsByInjectionMode(skills) {
   return out
 }
 
-/**
- * Normalise an injection-mode string. Returns one of the canonical values
- * ('prepend' | 'append' | 'system') for recognised input, or null for
- * unrecognised / non-string input.
- */
-function _normalizeInjectionMode(s) {
-  if (typeof s !== 'string') return null
-  const v = s.trim().toLowerCase()
-  if (!v) return null
-  return VALID_INJECTION_MODES.has(v) ? v : null
-}
 
-/**
- * Resolve the injection mode for a skill given its frontmatter and the
- * provider-supplied default. Falls back to the default for malformed /
- * unknown values rather than dropping the skill (#3200).
- */
-function _resolveInjectionMode(frontmatter, defaultMode) {
-  if (frontmatter && typeof frontmatter.injection === 'string') {
-    const norm = _normalizeInjectionMode(frontmatter.injection)
-    if (norm) return norm
-  }
-  return defaultMode
-}
-
-/**
- * Normalise a provider name for case-insensitive comparison. Returns the
- * lowercased trimmed string, or null for empty / non-string input.
- */
-function _normalizeProviderName(p) {
-  if (typeof p !== 'string') return null
-  const v = p.trim().toLowerCase()
-  return v.length === 0 ? null : v
-}
-
-/**
- * Decide whether a normalised provider id belongs to the Claude family.
- *
- * Members:
- *   - bare alias `claude`
- *   - `claude-*` (e.g. `claude-sdk`, `claude-cli`)
- *   - `docker` alias and `docker-*` variants (`docker-cli`, `docker-sdk`)
- *     both wrap Claude sessions in a container — they share Claude's
- *     built-in tool gating, so for trust / allowlist purposes they are
- *     part of the family.
- *
- * The `-` boundary on `claude-` / `docker-` keeps unrelated names such as
- * `claudette` or `dockerize` from matching.
- *
- * @param {string|null|undefined} provider  raw or pre-normalised id
- * @returns {boolean}
- */
-function _isClaudeFamilyProvider(provider) {
-  const norm = _normalizeProviderName(provider)
-  if (!norm) return false
-  if (norm === 'claude' || norm.startsWith('claude-')) return true
-  if (norm === 'docker' || norm.startsWith('docker-')) return true
-  return false
-}
-
-/**
- * Coerce caller-supplied `activeManualSkills` (Set | array | null) into a
- * Set of strings. Anything else returns an empty Set so the lookup is
- * consistent regardless of input shape.
- */
-function _coerceManualSet(input) {
-  if (input instanceof Set) {
-    const out = new Set()
-    for (const v of input) {
-      if (typeof v === 'string' && v) out.add(v)
-    }
-    return out
-  }
-  if (Array.isArray(input)) {
-    const out = new Set()
-    for (const v of input) {
-      if (typeof v === 'string' && v) out.add(v)
-    }
-    return out
-  }
-  return new Set()
-}
-
-/**
- * Decide whether a skill matches the session's provider (#3198). Returns
- * true when:
- *   - frontmatter is null / missing, OR
- *   - frontmatter has no `providers` field, OR
- *   - `providers` is an empty list, OR
- *   - the session's provider is in the list (case-insensitive exact match).
- *
- * The bare alias `claude` is also accepted as a family match for any
- * `claude-*` provider key — users who write `providers: [claude]` should
- * not have to know whether the session backend is `claude-sdk` or
- * `claude-cli`. The reverse is also true: a session running `claude-sdk`
- * with `providers: [claude]` matches.
- */
-function _skillMatchesProvider(frontmatter, provider) {
-  if (!frontmatter) return true
-  // Accept both list and scalar shapes for `providers:` (#3229). YAML
-  // beginners write `providers: claude` and expect it to work; without
-  // this normalization the field is silently treated as a no-op string
-  // and the scoping is lost. A non-empty string is wrapped to a
-  // single-element list at consumption time.
-  let list
-  if (Array.isArray(frontmatter.providers)) {
-    list = frontmatter.providers
-  } else if (typeof frontmatter.providers === 'string' && frontmatter.providers.trim() !== '') {
-    list = [frontmatter.providers]
-  } else if (frontmatter.providers === undefined || frontmatter.providers === null
-    || frontmatter.providers === '') {
-    return true
-  } else {
-    return true
-  }
-  if (list.length === 0) return true
-  if (!provider) return false // skill scoped, but we don't know the provider
-  const target = provider // already lowercased
-  for (const raw of list) {
-    if (typeof raw !== 'string') continue
-    const v = raw.trim().toLowerCase()
-    if (!v) continue
-    if (v === target) return true
-    // Family alias: `claude` matches any `claude-*` provider, and a skill
-    // scoped to `claude-sdk` matches a session declared as the bare
-    // `claude` alias. Use the `-` boundary instead of a bare prefix so
-    // unrelated names like `claudette` don't get pulled into the family
-    // (#3227).
-    if (v === 'claude' && target.startsWith('claude-')) return true
-    if (target === 'claude' && v.startsWith('claude-')) return true
-  }
-  return false
-}
-
-/**
- * Apply the per-provider skill allowlist (#3207).
- *
- * Semantics:
- *   - `allowlist` is null / undefined / not an object → no allowlist
- *     configured: legacy permissive behaviour, every skill passes through
- *     unchanged. This keeps existing setups working without forcing
- *     operators to opt every skill into a list before upgrading.
- *   - `provider` starts with `claude` (the family alias used by
- *     `_skillMatchesProvider`) → permissive. Claude has built-in tool
- *     gating so skills there are lower risk; the allowlist is meant to
- *     harden providers (Codex, Gemini, …) that don't enforce tool scopes
- *     the same way.
- *   - For any other (non-Claude) provider: only skills whose `name` is
- *     present in `allowlist[provider]` are kept. A missing key OR an
- *     empty array filters out ALL skills (fail-secure default — an
- *     operator who configures the allowlist but forgets to add an entry
- *     for `gemini` should NOT be silently permissive).
- *   - `provider` is null / unknown when an allowlist is configured →
- *     fail-secure: drop everything. The operator opted in to scoping;
- *     unknown contexts shouldn't bypass it.
- *
- * @param {Array<object>} skills
- * @param {string|null} provider
- * @param {Record<string, string[]>|null|undefined} allowlist
- * @returns {Array<object>}
- */
-function _filterByProviderAllowlist(skills, provider, allowlist) {
-  if (!Array.isArray(skills) || skills.length === 0) return skills
-  if (allowlist == null || typeof allowlist !== 'object' || Array.isArray(allowlist)) {
-    return skills // no allowlist configured → permissive (back-compat)
-  }
-
-  const norm = _normalizeProviderName(provider)
-  // Claude-family providers stay permissive even when an allowlist is
-  // configured. Membership covers the bare alias `claude`, the
-  // `claude-*` variants (`claude-sdk`, `claude-cli`), and the Docker
-  // wrappers (`docker`, `docker-cli`, `docker-sdk`) which inherit
-  // Claude's built-in tool gating. The shared
-  // `_isClaudeFamilyProvider` helper keeps the membership rule in one
-  // place so the trust / allowlist / family-alias paths can't drift.
-  if (_isClaudeFamilyProvider(norm)) return skills
-
-  // No provider id at all — fail-secure: the operator scoped the
-  // allowlist but we can't tell which bucket this session belongs to.
-  if (!norm) return []
-
-  // Look up the per-provider entry. Missing key OR empty array →
-  // fail-secure (drop everything for this provider). Anything other
-  // than an array of strings is treated as missing.
-  const raw = Object.prototype.hasOwnProperty.call(allowlist, norm) ? allowlist[norm] : undefined
-  if (!Array.isArray(raw) || raw.length === 0) {
-    if (skills.length > 0) {
-      log.warn(`Per-provider skill allowlist: no entry for provider '${norm}' — dropping all ${skills.length} skill(s)`)
-    }
-    return []
-  }
-
-  const allowedNames = new Set()
-  for (const v of raw) {
-    if (typeof v === 'string' && v) allowedNames.add(v)
-  }
-
-  const kept = []
-  for (const s of skills) {
-    if (s && typeof s.name === 'string' && allowedNames.has(s.name)) {
-      kept.push(s)
-    } else if (s && typeof s.name === 'string') {
-      log.warn(`Per-provider skill allowlist: skill '${s.name}' not in allowlist for provider '${norm}' — filtered`)
-    }
-  }
-  return kept
-}
-
-/**
- * Decide whether a skill is in the default-active set (#3199). Skills
- * with `metadata.activation === 'manual'` are filtered out unless their
- * name is in `activeManualSkills`. Anything else (including missing /
- * unrecognised activation values) defaults to `auto` = active.
- */
-function _skillIsActive(frontmatter, name, activeManualSkills) {
-  if (!frontmatter) return true
-  const raw = frontmatter.activation
-  if (typeof raw !== 'string') return true
-  const v = raw.trim().toLowerCase()
-  if (!VALID_ACTIVATION_MODES.has(v)) return true // unknown → behave as auto
-  if (v === 'auto') return true
-  // v === 'manual' — require explicit opt-in.
-  return activeManualSkills.has(name)
-}
