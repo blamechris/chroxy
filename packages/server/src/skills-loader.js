@@ -384,7 +384,7 @@ export function loadActiveSkills(dir, opts = {}) {
       // re-opening the file entirely and use all cached parse fields.
       if (cachedFrontmatter) {
         const name = entry.slice(0, -(ext.length + 1))
-        const { body, frontmatter, finalBody, description } = cachedFrontmatter
+        const { frontmatter, finalBody, description } = cachedFrontmatter
 
         if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
 
