@@ -747,6 +747,92 @@ describe('skills-loader', () => {
       assert.equal(tight.length, 1)
       assert.equal(tight[0].name, 'one')
     })
+
+    // #3222: per-tier budget guardrail — bound peak memory by stopping
+    // each tier's read loop once cumulative bytes for THAT tier would
+    // exceed the budget. Without this, the layered loader could read
+    // both tiers fully into memory before pruning post-merge, which
+    // surprises operators on low-RAM deployments dropping a directory
+    // of valid-but-many skills under ~/.chroxy/skills/.
+    describe('per-tier budget enforcement (#3222)', () => {
+      it('stops reading a tier once cumulative bytes would exceed maxTotalBytes', () => {
+        // Five 1KB skills; budget = 2.5KB → only the first 2 should be
+        // read (alphabetical order, since loadActiveSkills now sorts
+        // for determinism).
+        const body = 'A'.repeat(1024)
+        for (const name of ['e', 'd', 'c', 'b', 'a']) {
+          writeFileSync(join(dir, `${name}.md`), body)
+        }
+        const skills = loadActiveSkills(dir, {
+          maxSkillBytes: 4 * 1024,
+          maxTotalBytes: 2 * 1024 + 512, // fits 2 of the 1KB skills, third would push over
+        })
+        // 'a', 'b' fit; 'c' would push tierTotal to 3072 > 2560 so skip.
+        // 'd' and 'e' likewise rejected.
+        assert.equal(skills.length, 2,
+          'tier load must stop when cumulative bytes exceed maxTotalBytes')
+        assert.deepEqual(skills.map((s) => s.name).sort(), ['a', 'b'])
+      })
+
+      it('processes entries in sorted order (deterministic across platforms)', () => {
+        // Five skills; budget keeps only the first 2 alphabetically. If
+        // the order weren't deterministic, a re-run could pick a
+        // different pair and the test would flake.
+        const body = 'B'.repeat(1024)
+        // Write in non-alphabetical order to ensure the loader sorts.
+        for (const name of ['z', 'a', 'm', 'b', 'q']) {
+          writeFileSync(join(dir, `${name}.md`), body)
+        }
+        const skills = loadActiveSkills(dir, {
+          maxSkillBytes: 4 * 1024,
+          maxTotalBytes: 2 * 1024 + 512,
+        })
+        assert.deepEqual(skills.map((s) => s.name).sort(), ['a', 'b'])
+      })
+
+      it('default = unbounded (no maxTotalBytes opt → reads everything)', () => {
+        // Back-compat: prior callers that don't pass the opt see no
+        // change in behaviour.
+        const body = 'C'.repeat(512)
+        for (const name of ['x', 'y', 'z']) {
+          writeFileSync(join(dir, `${name}.md`), body)
+        }
+        const skills = loadActiveSkills(dir, { maxSkillBytes: 4 * 1024 })
+        // No tier budget → all three load.
+        assert.equal(skills.length, 3)
+      })
+
+      it('layered loader passes maxTotalSkillBytes to each tier as a guardrail', () => {
+        // Set up: 4 oversized skills in global, 4 in repo. Without per-
+        // tier enforcement, the layered loader would read all 8 (8 *
+        // 1KB = 8KB) before pruning post-merge to 2KB. With per-tier,
+        // each tier reads at most 2KB worth.
+        const globalDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-3222-g-'))
+        const repoDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-3222-r-'))
+        try {
+          const body = 'D'.repeat(1024)
+          for (const name of ['ga', 'gb', 'gc', 'gd']) {
+            writeFileSync(join(globalDir, `${name}.md`), body)
+          }
+          for (const name of ['ra', 'rb', 'rc', 'rd']) {
+            writeFileSync(join(repoDir, `${name}.md`), body)
+          }
+          const skills = loadActiveSkillsLayered({
+            globalDir,
+            repoDir,
+            maxSkillBytes: 4 * 1024,
+            // 2KB total. Per-tier, each tier reads at most 2 skills (=2KB).
+            // After merge: 4 skills total = 4KB. Post-merge prune keeps 2.
+            maxTotalSkillBytes: 2 * 1024,
+          })
+          assert.equal(skills.length, 2,
+            'post-merge prune trims to maxTotalSkillBytes after tier-bounded loads')
+        } finally {
+          rmSync(globalDir, { recursive: true, force: true })
+          rmSync(repoDir, { recursive: true, force: true })
+        }
+      })
+    })
   })
 
   // -----------------------------------------------------------------------

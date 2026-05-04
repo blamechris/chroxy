@@ -556,6 +556,28 @@ export function loadActiveSkills(dir, opts = {}) {
     ? Math.floor(opts.maxSkillBytes)
     : DEFAULT_MAX_SKILL_BYTES
 
+  // #3222: per-tier byte budget. Bounds peak memory before the layered
+  // loader's post-merge prune by stopping the read loop once cumulative
+  // bytes for THIS tier would exceed the budget. Default = unbounded
+  // (back-compat — prior behaviour was post-merge-only). Layered loader
+  // sets this to `maxTotalSkillBytes` so a single tier can never exhaust
+  // more than the global cap, capping peak memory at 2× the global cap
+  // across both tier loads. Final cross-tier pruning still runs in
+  // `_enforceTotalBudget` after the merge.
+  const tierBudget = Number.isFinite(opts.maxTotalBytes) && opts.maxTotalBytes > 0
+    ? Math.floor(opts.maxTotalBytes)
+    : null
+  let tierTotalBytes = 0
+
+  // #3222: process entries in deterministic order so the per-tier
+  // budget cuts off the same skills across runs (filesystem readdir
+  // order is platform-dependent). Sort alphabetically by basename —
+  // matches the post-merge sort and gives operators a predictable
+  // tiebreaker when budget eviction kicks in.
+  entries = Array.isArray(entries)
+    ? entries.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    : []
+
   const skills = []
   for (const entry of entries) {
     if (typeof entry !== 'string' || !entry) continue
@@ -731,6 +753,20 @@ export function loadActiveSkills(dir, opts = {}) {
           log.debug(`skill ${label} full path: ${fullPath}`)
           continue
         }
+
+        // #3222: per-tier budget guardrail. If reading this skill would
+        // push the tier's cumulative byte total over the budget, skip
+        // it (and every subsequent skill in this tier). The per-skill
+        // cap above already filters giants; this catches "many small
+        // skills". Cross-tier priority pruning still runs after merge,
+        // so an over-budget tier load won't accidentally evict a
+        // higher-priority skill from the OTHER tier.
+        if (tierBudget !== null && tierTotalBytes + buf.length > tierBudget) {
+          log.warn(`Skipping skill ${label}: tier budget reached (${tierTotalBytes + buf.length} > ${tierBudget})`)
+          log.debug(`skill ${label} full path: ${fullPath}`)
+          continue
+        }
+        tierTotalBytes += buf.length
 
         if (!_bufferLooksLikeText(buf)) {
           log.warn(`Skipping skill ${label}: content does not look like text (NUL or control byte)`)
@@ -1079,6 +1115,15 @@ export function loadActiveSkillsLayered({
   if (Array.isArray(allowedRoots)) loaderOpts.allowedRoots = allowedRoots
   if (Array.isArray(allowedExtensions)) loaderOpts.allowedExtensions = allowedExtensions
   if (Number.isFinite(maxSkillBytes) && maxSkillBytes > 0) loaderOpts.maxSkillBytes = maxSkillBytes
+  // #3222: pass the global byte cap to each tier as the per-tier budget
+  // so peak memory across both loads is bounded. The post-merge prune
+  // still runs to apply priority-aware cuts down to one full budget,
+  // but each tier on its own can never read more than the global cap.
+  if (Number.isFinite(maxTotalSkillBytes) && maxTotalSkillBytes > 0) {
+    loaderOpts.maxTotalBytes = Math.floor(maxTotalSkillBytes)
+  } else {
+    loaderOpts.maxTotalBytes = DEFAULT_MAX_TOTAL_SKILL_BYTES
+  }
   if (provider != null) loaderOpts.provider = provider
   if (activeManualSkills != null) loaderOpts.activeManualSkills = activeManualSkills
   if (defaultInjectionMode != null) loaderOpts.defaultInjectionMode = defaultInjectionMode
