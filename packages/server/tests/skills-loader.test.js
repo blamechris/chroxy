@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, openSync, closeSync, fstatSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -13,7 +13,6 @@ import {
   parseFrontmatter,
 } from '../src/skills-loader.js'
 import { _compareByPriorityThenName } from '../src/skills-budget.js'
-import { _readFrontmatterOnly } from '../src/skills-frontmatter.js'
 
 describe('skills-loader', () => {
   let dir
