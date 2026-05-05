@@ -2002,3 +2002,125 @@ describe('EnvironmentManager._persist() rename-failure cleanup (regression: #294
     assert.equal(existsSync(statePath + '.tmp'), false, '.tmp must never accumulate across repeated failures')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EnvironmentManager.reconnect() — backend reconnectAgentToken integration (#3339)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('EnvironmentManager.reconnect() — reconnectAgentToken delegation (#3339)', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('calls reconnectAgentToken on the backend for each environment', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-k8s-1',
+        name: 'k8s-env',
+        cwd: '/tmp',
+        image: 'chroxy-pod-agent:latest',
+        containerId: 'chroxy-env-k8s-1',
+        containerUser: 'root',
+        containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-01-01T00:00:00Z',
+        memoryLimit: null,
+        cpuLimit: null,
+        compose: null,
+        composeProject: null,
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const reconnectedIds = []
+    const mockBackend = {
+      getEnvironmentStatus: async () => true,
+      reconnectAgentToken: async (podName) => { reconnectedIds.push(podName); return true },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend: mockBackend })
+    await manager.reconnect()
+
+    assert.deepEqual(reconnectedIds, ['chroxy-env-k8s-1'],
+      'reconnect() must call reconnectAgentToken for each environment with a containerId')
+  })
+
+  it('logs a warning but does not throw when reconnectAgentToken rejects', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-k8s-err',
+        name: 'k8s-err',
+        cwd: '/tmp',
+        image: 'chroxy-pod-agent:latest',
+        containerId: 'chroxy-env-k8s-err',
+        containerUser: 'root',
+        containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-01-01T00:00:00Z',
+        memoryLimit: null,
+        cpuLimit: null,
+        compose: null,
+        composeProject: null,
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const mockBackend = {
+      getEnvironmentStatus: async () => true,
+      reconnectAgentToken: async () => { throw new Error('k8s api error') },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend: mockBackend })
+    // Must not throw even when reconnectAgentToken rejects
+    await assert.doesNotReject(() => manager.reconnect(),
+      'reconnect() must absorb token refresh errors')
+
+    // Environment should still be marked running from getEnvironmentStatus
+    assert.equal(manager.get('env-k8s-err').status, 'running')
+  })
+
+  it('skips reconnectAgentToken when backend does not support it (Docker)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-docker-1',
+        name: 'docker-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: 'abc123',
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-01-01T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+        compose: null,
+        composeProject: null,
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    // Backend without reconnectAgentToken (simulates DockerBackend)
+    const mockBackend = {
+      getEnvironmentStatus: async () => true,
+      // No reconnectAgentToken property
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend: mockBackend })
+    // Should not throw even without reconnectAgentToken on the backend
+    await assert.doesNotReject(() => manager.reconnect())
+    assert.equal(manager.get('env-docker-1').status, 'running')
+  })
+})
