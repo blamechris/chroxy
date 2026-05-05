@@ -1,9 +1,18 @@
 # Integration Tests
 
-These tests exercise real infrastructure (Docker, Kubernetes) and are **opt-in** — they
-are never run by the default `npm test` command. Each test suite gates on an environment
-variable and/or tool availability check; if the gate is not satisfied the file prints a
-skip message and exits cleanly (zero tests registered, zero failures).
+This directory contains two kinds of integration tests:
+
+- **Always-on** (e.g. `encrypted-roundtrip.test.js`, `ws-roundtrip.test.js`,
+  `permission-whitelist.test.js`) — pure in-process roundtrips that need no external
+  infrastructure. They run as part of the default `npm test` command.
+- **Infrastructure-dependent / opt-in** (e.g. `docker-sdk-roundtrip.test.js`,
+  `k8s-sidecar-roundtrip.test.js`) — boot real Docker containers or Kubernetes
+  clusters. They are gated on an environment variable and/or a tool-availability
+  check. If the gate is not satisfied the file prints a skip message and exits
+  cleanly (zero tests registered, zero failures), so they are safe to leave in the
+  default test glob.
+
+The remainder of this document covers the opt-in suites and how to run them locally.
 
 ---
 
