@@ -75,6 +75,12 @@ if (typeof mock.module !== 'function') {
   // `fabricatedIno` is set by fstatSync and read by statSync (for
   // the realPath2 check) so both see the same modified ino — this lets
   // the inner fd-vs-realpath guard pass while Guard 2 fires.
+  //
+  // IMPORTANT: This relies on the test creating exactly ONE skill file.
+  // With one file: pass-1 fstatSync = call #1, pass-2 fstatSync = call #2.
+  // Adding a second skill file would shift call #2 to the pass-1 fstat
+  // for that file, breaking the Guard 2 trigger — the test would still
+  // pass while no longer covering its claimed path.
   let fstatSwapEnabled = false
   let fstatCallCount = 0
   let fabricatedIno = null      // set by fstatSync on pass-2 call; read by statSync
