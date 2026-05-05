@@ -1384,13 +1384,14 @@ describe('PodAgent', () => {
       await new Promise((r) => setTimeout(r, 20))
 
       let stdinEnded = false
-      child.stdin.once('end', () => { stdinEnded = true })
+      child.stdin.once('finish', () => { stdinEnded = true })
 
       ws.send(JSON.stringify({ type: 'stdin', data: 'some input\n' }))
       ws.send(JSON.stringify({ type: 'stdin_end' }))
       await new Promise((r) => setTimeout(r, 30))
 
       assert.ok(stdinEnded, 'child.stdin should have ended after stdin_end frame')
+      assert.ok(child.stdin.writableEnded, 'child.stdin.writableEnded should be true')
 
       ws.close()
     })
