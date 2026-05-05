@@ -170,8 +170,8 @@ the child's stdin in the order they are received.
 | `data` | string | yes      | UTF-8 text to write to child stdin                       |
 
 Sending `stdin` on a connection that has no active session returns an `error`
-frame (`stdin: no active session`).  Sending a frame with a non-string `data`
-field returns `stdin: data must be a string`.
+frame with message `stdin: no active session (send spawn first)`.  Sending a
+frame with a non-string `data` field returns `stdin: data must be a string`.
 
 If the child was spawned with `stdin: 'ignore'` or `stdin: 'inherit'`,
 `child.stdin` is `null`; `stdin` frames are **silently dropped** in that case
@@ -528,8 +528,8 @@ replies with `{ type: 'pong' }`.
 | `resume` with stale lastSeq (gap)            | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
 | `resume` while session has active client     | `error` frame + close `1008`                                     |
 | stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1000` |
-| `stdin` before `spawn`                       | `error` frame (`stdin: no active session`), connection stays open |
-| `stdin_end` before `spawn`                   | `error` frame (`stdin_end: no active session`), connection stays open |
+| `stdin` before `spawn`                       | `error` frame (`stdin: no active session (send spawn first)`), connection stays open |
+| `stdin_end` before `spawn`                   | `error` frame (`stdin_end: no active session (send spawn first)`), connection stays open |
 | `stdin` with non-string `data`               | `error` frame (`stdin: data must be a string`), connection stays open |
 | `stdin` when child stdin is not piped        | silently dropped (no error frame)                                |
 
