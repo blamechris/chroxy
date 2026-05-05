@@ -63,7 +63,7 @@ import {
   openSync,
   closeSync,
 } from 'fs'
-import { dirname, join, resolve, sep } from 'path'
+import { dirname, join, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { createLogger } from './logger.js'
 
@@ -198,6 +198,8 @@ function _resolveRoots(roots) {
  *   defaultInjectionMode?: 'prepend'|'append'|'system'|null,
  *   trustStore?: object|null,
  *   onTrustMismatch?: (info: object) => void,
+ *   communityTrustChecker?: ((realPath: string, author: string) => boolean) | null,
+ *   onCommunityTrustPending?: (info: object) => void,
  * }} [opts]
  *   - `provider`: the session's provider id (e.g. `claude-sdk`, `codex`).
  *     When set, skills whose frontmatter declares a `providers:` list are
@@ -240,6 +242,33 @@ function _resolveRoots(roots) {
  *     (back-compat). Layered loader sets this to `maxTotalSkillBytes` so a
  *     single tier can never exhaust more than the global cap, capping peak
  *     memory at 2× the global cap across both tier loads.
+ *   - `communityTrustChecker`: optional `(realPath, author) => boolean`. When
+ *     provided, called for every skill discovered under `community/<author>/`.
+ *     Returns `true` if the author is trusted, `false` if not yet trusted
+ *     (pending). When `null`/undefined the loader fails-open (treats all
+ *     community skills as trusted) — required for trust-disabled sessions and
+ *     for back-compat with callers that don't pass the option. (#3206 / #3296)
+ *   - `onCommunityTrustPending`: optional `(info) => void`. Fired once per
+ *     pending community skill (i.e. a skill under `community/<author>/` where
+ *     `communityTrustChecker` returns false). `info` shape:
+ *     `{ name, author, source, description, path }`. PR B will wire this to a
+ *     `skill_trust_request` WS broadcast. (#3206 / #3296)
+ *
+ * Community-namespace gate (#3206 / #3296):
+ *   Skills under `<root>/community/<author>/` are subject to a first-
+ *   activation prompt. `communityTrustChecker(realPath, author)` decides
+ *   trusted vs pending. Pending skills are excluded from the default-active
+ *   set (when `includeInactive: false`, the default) and only surface in the
+ *   `includeInactive` listing path so the dashboard can render them with a
+ *   trust-grant affordance. Trusted community skills run through the full
+ *   pipeline unchanged and are tagged `trustState: 'trusted'`. Non-community
+ *   skills are not tagged with `trustState` or `communityAuthor`.
+ *
+ *   Walk depth: the loader performs a one-level recursive walk under
+ *   `community/` — `<root>/community/<author>/x.md` is discovered;
+ *   `<root>/community/<author>/sub/y.md` is NOT (depth capped at 1 under
+ *   each author dir as a v1 simplification; can be lifted later). The walk
+ *   still respects `SKIP_DIRECTORY_NAMES` under `community/`.
  * @returns {Array<{ name: string, body: string, description: string, source?: string, metadata: object|null, injectionMode: string }>}
  */
 export function loadActiveSkills(dir, opts = {}) {
@@ -272,6 +301,18 @@ export function loadActiveSkills(dir, opts = {}) {
   // Map; first call populates, subsequent calls hit. Invalidation
   // is automatic — any on-disk edit bumps mtimeMs.
   const parseCache = opts.parseCache instanceof Map ? opts.parseCache : null
+  // #3206 / #3296: community-namespace gate. When provided,
+  // communityTrustChecker(realPath, author) decides if a community skill is
+  // trusted or pending. Null/undefined → fail-open (treat as trusted) so
+  // trust-disabled sessions and callers that don't pass the opt are unaffected.
+  const communityTrustChecker = typeof opts.communityTrustChecker === 'function'
+    ? opts.communityTrustChecker
+    : null
+  // Callback fired once per pending community skill so callers can fan a
+  // skill_trust_request WS event. Non-fatal if it throws — loader swallows.
+  const onCommunityTrustPending = typeof opts.onCommunityTrustPending === 'function'
+    ? opts.onCommunityTrustPending
+    : null
   let entries
   try {
     entries = readdirSync(dir)
@@ -329,6 +370,73 @@ export function loadActiveSkills(dir, opts = {}) {
   entries = Array.isArray(entries)
     ? entries.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
     : []
+
+  // #3206 / #3296: one-level recursive walk under community/.
+  // Each string entry in `entries` is a basename relative to `dir`. After the
+  // top-level sort, augment the list with entries discovered under any
+  // `community/<author>/` subdirectory. Community entries are represented as
+  // objects `{ entry: basename, fullPath: string }` (vs plain strings for
+  // top-level entries) so both loops below can reconstruct the correct path and
+  // name stem without confusing the two forms.
+  //
+  // Walk depth: one level under each author dir. Files at
+  // `<root>/community/<author>/sub/y.md` are NOT discovered (v1 cap).
+  //
+  // The SKIP_DIRECTORY_NAMES guard is applied to both the `community/` dir
+  // itself and each author-level subdir to mirror the top-level entry filter.
+  for (const entry of entries) {
+    if (typeof entry !== 'string') continue
+    if (entry !== 'community') continue
+    // `entry` is the literal string 'community'. Verify it is actually a
+    // directory (not a file named 'community.md' would never reach here, but
+    // a file named 'community' might).
+    const communityPath = join(dir, entry)
+    let communityDirSt
+    try {
+      communityDirSt = statSync(communityPath)
+    } catch {
+      continue
+    }
+    if (!communityDirSt.isDirectory()) continue
+    // Read the author-level subdirectories.
+    let authorEntries
+    try {
+      authorEntries = readdirSync(communityPath)
+    } catch {
+      continue
+    }
+    for (const authorEntry of authorEntries) {
+      if (typeof authorEntry !== 'string' || !authorEntry) continue
+      // Hidden author dirs (e.g. `.alice`) are not valid community namespaces.
+      if (authorEntry.startsWith('.')) continue
+      if (SKIP_DIRECTORY_NAMES.has(authorEntry)) continue
+      const authorPath = join(communityPath, authorEntry)
+      let authorSt
+      try {
+        authorSt = statSync(authorPath)
+      } catch {
+        continue
+      }
+      if (!authorSt.isDirectory()) continue
+      // Walk one level inside the author dir.
+      let authorFiles
+      try {
+        authorFiles = readdirSync(authorPath)
+      } catch {
+        continue
+      }
+      for (const fileEntry of authorFiles) {
+        if (typeof fileEntry !== 'string' || !fileEntry) continue
+        if (SKIP_DIRECTORY_NAMES.has(fileEntry)) continue
+        // Inject as an object so the per-entry loop can distinguish it from
+        // top-level string entries and compute the full path correctly.
+        entries.push({ entry: fileEntry, fullPath: join(authorPath, fileEntry) })
+      }
+    }
+    // Only one 'community' directory can exist at the top level; stop after
+    // finding it.
+    break
+  }
 
   // ── Two-pass priority-aware path (#3279) ──
   // When a tier budget is set, run _collectCandidates (pass 1) to gather a
@@ -399,6 +507,34 @@ export function loadActiveSkills(dir, opts = {}) {
           continue
         }
 
+        // #3206 / #3296: community-namespace gate (cache fast path).
+        const { isCommunity: isCommunityC, author: communityAuthorC } = _isCommunityNamespace(realPath, dirReal)
+        let communityTrustStateC = null
+        if (isCommunityC) {
+          const trustedC = communityTrustChecker
+            ? !!communityTrustChecker(realPath, communityAuthorC)
+            : true
+          if (!trustedC) {
+            communityTrustStateC = 'pending'
+            if (onCommunityTrustPending) {
+              try {
+                onCommunityTrustPending({ name, author: communityAuthorC, source: source || null, description, path: realPath })
+              } catch (err) {
+                log.warn(`onCommunityTrustPending callback threw for ${label}: ${err && err.message ? err.message : err}`)
+              }
+            }
+            if (!includeInactive) continue
+            const pending = {
+              name, description, metadata: frontmatter, active: false, path: realPath,
+              trustState: 'pending', communityAuthor: communityAuthorC,
+            }
+            if (source) pending.source = source
+            skills.push(pending)
+            continue
+          }
+          communityTrustStateC = 'trusted'
+        }
+
         const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
 
         if (trustStore && typeof trustStore.inspect === 'function') {
@@ -432,6 +568,10 @@ export function loadActiveSkills(dir, opts = {}) {
         if (source) skill.source = source
         skill.active = isActive
         skill.path = realPath
+        if (communityTrustStateC !== null) {
+          skill.trustState = communityTrustStateC
+          skill.communityAuthor = communityAuthorC
+        }
         skills.push(skill)
         continue
       }
@@ -578,6 +718,34 @@ export function loadActiveSkills(dir, opts = {}) {
           continue
         }
 
+        // #3206 / #3296: community-namespace gate (two-pass cache-miss path).
+        const { isCommunity: isCommunityM, author: communityAuthorM } = _isCommunityNamespace(realPath2, dirReal)
+        let communityTrustStateM = null
+        if (isCommunityM) {
+          const trustedM = communityTrustChecker
+            ? !!communityTrustChecker(realPath2, communityAuthorM)
+            : true
+          if (!trustedM) {
+            communityTrustStateM = 'pending'
+            if (onCommunityTrustPending) {
+              try {
+                onCommunityTrustPending({ name, author: communityAuthorM, source: source || null, description, path: realPath2 })
+              } catch (err) {
+                log.warn(`onCommunityTrustPending callback threw for ${label}: ${err && err.message ? err.message : err}`)
+              }
+            }
+            if (!includeInactive) continue
+            const pending = {
+              name, description, metadata: frontmatter, active: false, path: realPath2,
+              trustState: 'pending', communityAuthor: communityAuthorM,
+            }
+            if (source) pending.source = source
+            skills.push(pending)
+            continue
+          }
+          communityTrustStateM = 'trusted'
+        }
+
         const injectionMode = _resolveInjectionMode(frontmatter, defaultInjectionMode)
 
         if (trustStore && typeof trustStore.inspect === 'function') {
@@ -611,6 +779,10 @@ export function loadActiveSkills(dir, opts = {}) {
         if (source) skill.source = source
         skill.active = isActive
         skill.path = realPath2
+        if (communityTrustStateM !== null) {
+          skill.trustState = communityTrustStateM
+          skill.communityAuthor = communityAuthorM
+        }
         skills.push(skill)
       } finally {
         try { closeSync(fd2) } catch { /* non-fatal */ }
@@ -626,9 +798,22 @@ export function loadActiveSkills(dir, opts = {}) {
   // do not pass `maxTotalBytes` continue to get exactly the prior behaviour
   // (no priority awareness, no frontmatter pre-read, alphabetical order).
   const skills = []
-  for (const entry of entries) {
-    if (typeof entry !== 'string' || !entry) continue
-    if (SKIP_DIRECTORY_NAMES.has(entry)) continue
+  for (const rawEntry of entries) {
+    // Each element is either:
+    //   string — top-level basename (fullPath = join(dir, entry))
+    //   object { entry: basename, fullPath: string } — community entry
+    let entry, fullPath
+    if (typeof rawEntry === 'string') {
+      if (!rawEntry) continue
+      if (SKIP_DIRECTORY_NAMES.has(rawEntry)) continue
+      entry = rawEntry
+      fullPath = join(dir, entry)
+    } else if (rawEntry && typeof rawEntry === 'object' && typeof rawEntry.entry === 'string') {
+      entry = rawEntry.entry
+      fullPath = rawEntry.fullPath
+    } else {
+      continue
+    }
 
     // Extract extension and reject anything outside the allowlist before we
     // touch the file. This also catches `.md` vs `.MD` consistently.
@@ -642,7 +827,6 @@ export function loadActiveSkills(dir, opts = {}) {
     // and generalize for any other allowed extension.
     if (entry.endsWith(`.disabled.${ext}`)) continue
 
-    const fullPath = join(dir, entry)
     const label = _pathLabel(fullPath)
 
     // statSync FOLLOWS symlinks — that's intentional here. We just need to
@@ -860,6 +1044,47 @@ export function loadActiveSkills(dir, opts = {}) {
         continue
       }
 
+      // #3206 / #3296: community-namespace gate. Runs after provider and
+      // activation gates but BEFORE trustStore.inspect(). For skills under
+      // <root>/community/<author>/, the communityTrustChecker decides whether
+      // the author is trusted or pending. Pending skills bypass inspect()
+      // entirely — they're never injected into prompts until first-activation
+      // consent is granted (PR B wires the trust-grant WS flow).
+      const { isCommunity, author: communityAuthor } = _isCommunityNamespace(realPath, dirReal)
+      let communityTrustState = null
+      if (isCommunity) {
+        const trusted = communityTrustChecker
+          ? !!communityTrustChecker(realPath, communityAuthor)
+          : true  // fail-open when no checker (trust-disabled session)
+        if (!trusted) {
+          communityTrustState = 'pending'
+          if (onCommunityTrustPending) {
+            try {
+              onCommunityTrustPending({ name, author: communityAuthor, source: source || null, description, path: realPath })
+            } catch (err) {
+              log.warn(`onCommunityTrustPending callback threw for ${label}: ${err && err.message ? err.message : err}`)
+            }
+          }
+          if (!includeInactive) continue
+          // includeInactive path: surface the skill so the dashboard can
+          // render a trust-grant affordance. No body — same as inactive
+          // manual skills above.
+          const pending = {
+            name,
+            description,
+            metadata: frontmatter,
+            active: false,
+            path: realPath,
+            trustState: 'pending',
+            communityAuthor,
+          }
+          if (source) pending.source = source
+          skills.push(pending)
+          continue
+        }
+        communityTrustState = 'trusted'
+      }
+
       // Resolve the per-skill injection mode (#3200). Fall through to the
       // caller-supplied default (typically the provider's preferred channel)
       // when the skill doesn't pin a mode itself or pins something we don't
@@ -927,6 +1152,13 @@ export function loadActiveSkills(dir, opts = {}) {
       // absolute filesystem path never crosses the wire (operator-
       // facing log lines use basename via `_pathLabel`).
       skill.path = realPath
+      // #3206 / #3296: community-namespace tags. Only set for skills that
+      // are actually under community/<author>/. Non-community skills do not
+      // carry these fields so the wire payload stays tight.
+      if (communityTrustState !== null) {
+        skill.trustState = communityTrustState
+        skill.communityAuthor = communityAuthor
+      }
       skills.push(skill)
     } finally {
       // #3218: always release the fd, even when `continue` short-circuits
@@ -996,9 +1228,22 @@ export function loadActiveSkills(dir, opts = {}) {
 function _collectCandidates(entries, dir, dirReal, allowedRoots, allowedExtensions, maxSkillBytes, parseCache) {
   const candidates = []
 
-  for (const entry of entries) {
-    if (typeof entry !== 'string' || !entry) continue
-    if (SKIP_DIRECTORY_NAMES.has(entry)) continue
+  for (const rawEntry of entries) {
+    // Each element is either:
+    //   string — top-level basename (fullPath = join(dir, entry))
+    //   object { entry: basename, fullPath: string } — community entry
+    let entry, fullPath
+    if (typeof rawEntry === 'string') {
+      if (!rawEntry) continue
+      if (SKIP_DIRECTORY_NAMES.has(rawEntry)) continue
+      entry = rawEntry
+      fullPath = join(dir, entry)
+    } else if (rawEntry && typeof rawEntry === 'object' && typeof rawEntry.entry === 'string') {
+      entry = rawEntry.entry
+      fullPath = rawEntry.fullPath
+    } else {
+      continue
+    }
 
     const dotIdx = entry.lastIndexOf('.')
     if (dotIdx <= 0) continue
@@ -1006,7 +1251,6 @@ function _collectCandidates(entries, dir, dirReal, allowedRoots, allowedExtensio
     if (!allowedExtensions.has(ext)) continue
     if (entry.endsWith(`.disabled.${ext}`)) continue
 
-    const fullPath = join(dir, entry)
     const label = _pathLabel(fullPath)
 
     let st
@@ -1382,6 +1626,47 @@ function _sameAbsolutePath(a, b) {
   } catch {
     return false
   }
+}
+
+/**
+ * Determine whether `realPath` lives inside a community-namespace directory
+ * directly under `dirReal`, i.e. `<dirReal>/community/<author>/<file>`.
+ *
+ * Returns `{ isCommunity: boolean, author: string|null }`.
+ *
+ * Rules:
+ *   - First segment of the relative path must be exactly `'community'`
+ *   - Second segment (the author dir) must be non-empty, must not be `'.'`
+ *     or `'..'`, and must not start with `'.'` (no hidden author dirs)
+ *   - If both conditions hold: `isCommunity = true, author = segment[1]`
+ *   - Otherwise: `isCommunity = false, author = null`
+ *
+ * Edge cases:
+ *   `<dirReal>/community/skill.md` (no author dir) → false
+ *   `<dirReal>/community/.alice/skill.md` (hidden author) → false
+ *   `<dirReal>/foo/community/skill.md` (community not at root) → false
+ *
+ * @param {string} realPath  Absolute, realpath-resolved skill path
+ * @param {string} dirReal   Absolute, realpath-resolved skills root
+ * @returns {{ isCommunity: boolean, author: string|null }}
+ */
+export function _isCommunityNamespace(realPath, dirReal) {
+  if (typeof realPath !== 'string' || typeof dirReal !== 'string') {
+    return { isCommunity: false, author: null }
+  }
+  const rel = relative(dirReal, realPath)
+  // relative() returns paths starting with '..' when realPath escapes dirReal.
+  // Those should never reach this helper (allowedRoots gate blocks them), but
+  // guard here anyway.
+  if (!rel || rel.startsWith('..')) return { isCommunity: false, author: null }
+  const segments = rel.split(sep)
+  if (segments.length < 3) return { isCommunity: false, author: null }
+  if (segments[0] !== 'community') return { isCommunity: false, author: null }
+  const author = segments[1]
+  if (!author || author === '.' || author === '..' || author.startsWith('.')) {
+    return { isCommunity: false, author: null }
+  }
+  return { isCommunity: true, author }
 }
 
 // Header text emitted at the top of the formatted skills payload. Exposed as
