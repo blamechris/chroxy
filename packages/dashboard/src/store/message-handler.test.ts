@@ -1539,6 +1539,24 @@ describe('dashboard message-handler dispatch', () => {
         // List should be unchanged (no valid match)
         expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-a', author: 'alice' }])
       })
+
+      it('does not remove a same-name entry from a different author', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, pendingCommunitySkills: [
+              { name: 'skill-x', author: 'alice' },
+              { name: 'skill-x', author: 'bob' },
+            ] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_granted', skillName: 'skill-x', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-x', author: 'bob' }])
+      })
     })
 
     // #3298: skill_trust_grant_ok is a no-op ack — state unchanged.
