@@ -276,14 +276,12 @@ if (typeof mock.module !== 'function') {
     // Guard 2 as the only active gate. This makes the test causally specific
     // to Guard 2.
     //
-    // If Guard 2 is removed, fstat2.ino === fstatSnap.ino (and inner guard
-    // passes since statSync returns fabricatedIno but fstatSync returns real
-    // ino on pass 1... wait, that doesn't work).
-    //
-    // Actually: fabricatedIno is set on fstatSync call #2 (pass 2). If Guard 2
-    // is removed, statSync still returns fabricatedIno for realPath2 in pass 2
-    // (since fabricatedIno was just set), so inner guard also sees matching inos
-    // and passes. The skill then loads, confirming Guard 2 is causally responsible.
+    // Causality: `fabricatedIno` is set lazily by fstatSync call #2 (pass 2)
+    // and read by statSync for realPath2 in the same pass, so fstat2.ino ===
+    // realStat2.ino — the inner fd-vs-realpath guard sees matching inodes and
+    // passes. With Guard 2 removed, fstat2.ino would also equal fstatSnap.ino
+    // (no drift), so the skill would load. This confirms Guard 2 is the sole
+    // active gate in this scenario.
 
     it('Guard 2 (inode change): skill skipped when fstat ino changes between passes', () => {
       writeFileSync(join(dir, 's.md'), '# skill\n\nbody\n')
