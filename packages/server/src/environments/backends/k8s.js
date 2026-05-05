@@ -157,9 +157,32 @@ export class K8sBackend {
    * Returns as soon as `createNamespacedPod` resolves — the Pod has been accepted
    * by the API server but may not yet be scheduled or Running.
    *
+   * Workspace mount strategy — hostPath:
+   *   `opts.cwd` is mounted into the Pod as a `hostPath` volume at `/workspace`.
+   *   This is the simplest strategy for local clusters (kind, minikube, Docker
+   *   Desktop) where the Node running the Pod shares the host filesystem.  For
+   *   production clusters where Pods run on remote nodes the host path will not
+   *   exist; operators should provision a PVC pre-populated with the workspace and
+   *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
+   *   must be able to read the path provided in opts.cwd from its local filesystem.
+   *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
+   * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
+   * @param {string}   [opts.memoryLimit]  - K8s memory quantity string (e.g. "2Gi").
+   *   Applied to both `resources.limits.memory` and `resources.requests.memory`.
+   *   Accepts Docker-style suffixes ("g"/"m") and standard K8s suffixes ("Gi"/"Mi").
+   * @param {string}   [opts.cpuLimit]     - K8s CPU quantity string (e.g. "2" or "500m").
+   *   Applied to both `resources.limits.cpu` and `resources.requests.cpu`.
+   *   A plain integer or float (e.g. "2", "0.5") is valid K8s CPU quantity syntax.
+   * @param {number[]|string[]} [opts.forwardPorts] - Extra ports to expose from the container
+   *   (in addition to the built-in AGENT_PORT).  Each value may be a bare port number
+   *   or a "hostPort:containerPort" string; only the containerPort is used in the Pod spec.
+   * @param {string[]} [opts.mounts]       - Additional volume mounts in Docker-style
+   *   "hostPath:containerPath[:ro]" format.  Each entry is translated into a
+   *   `hostPath` volume + corresponding `volumeMount`.  The volume name is derived
+   *   from the entry index ("extra-vol-0", "extra-vol-1", …).
    * @param {Object}   [opts.containerEnv] - Extra environment variables
    * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
@@ -171,7 +194,11 @@ export class K8sBackend {
    *   secretName   — Secret name (stored by caller so destroyEnvironment can delete it)
    */
   async createEnvironment(opts) {
-    const { envId, containerEnv, namespace, imagePullPolicy: callImagePullPolicy } = opts
+    const {
+      envId, cwd, containerEnv, namespace,
+      memoryLimit, cpuLimit, forwardPorts, mounts,
+      imagePullPolicy: callImagePullPolicy,
+    } = opts
     const ns = namespace || this._namespace
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
@@ -224,15 +251,86 @@ export class K8sBackend {
       }
     }
 
-    // 4. Create the Pod
-    // Resolve imagePullPolicy: per-call opt > constructor opt > omit (K8s default)
+    // 4. Resolve imagePullPolicy: per-call opt > constructor opt > omit (K8s default)
     const imagePullPolicy = callImagePullPolicy || this._imagePullPolicy
 
+    // 4. Build volumes + volumeMounts
+    // 4a. Workspace: mount opts.cwd as /workspace via hostPath.
+    //     Requirement: the K8s node must be able to read opts.cwd from its local
+    //     filesystem.  Satisfied automatically for single-node clusters (kind,
+    //     minikube, Docker Desktop).  For multi-node clusters operators must ensure
+    //     the path exists on the scheduled node or use a PVC passed via opts.mounts.
+    const volumes = []
+    const volumeMounts = []
+
+    if (cwd) {
+      volumes.push({
+        name: 'workspace',
+        hostPath: { path: cwd, type: 'DirectoryOrCreate' },
+      })
+      volumeMounts.push({
+        name: 'workspace',
+        mountPath: '/workspace',
+      })
+    }
+
+    // 4b. Additional mounts: Docker-style "hostPath:containerPath[:ro]" strings.
+    if (mounts && mounts.length > 0) {
+      for (let i = 0; i < mounts.length; i++) {
+        const parsed = _parseMountString(mounts[i])
+        if (!parsed) {
+          log.warn(`createEnvironment: ignoring unparseable mount entry "${mounts[i]}"`)
+          continue
+        }
+        const volName = `extra-vol-${i}`
+        volumes.push({
+          name: volName,
+          hostPath: { path: parsed.hostPath, type: 'DirectoryOrCreate' },
+        })
+        const vm = { name: volName, mountPath: parsed.containerPath }
+        if (parsed.readOnly) vm.readOnly = true
+        volumeMounts.push(vm)
+      }
+    }
+
+    // 5. Build ports list: AGENT_PORT is always present; forwardPorts adds more.
+    const ports = [{ containerPort: AGENT_PORT, name: 'agent' }]
+    if (forwardPorts && forwardPorts.length > 0) {
+      for (const entry of forwardPorts) {
+        // Accept bare port number or "hostPort:containerPort" strings.
+        const containerPort = _parseContainerPort(entry)
+        if (containerPort && containerPort !== AGENT_PORT) {
+          ports.push({ containerPort })
+        }
+      }
+    }
+
+    // 6. Build resource limits/requests.
+    //    Convert Docker-style suffixes (g → Gi, m → Mi) to K8s quantity strings.
+    //    A plain integer/float string (e.g. "2", "0.5") is already valid K8s CPU syntax.
+    const resources = {}
+    if (memoryLimit || cpuLimit) {
+      const limits = {}
+      const requests = {}
+      if (memoryLimit) {
+        const mem = _normaliseMemoryQuantity(memoryLimit)
+        limits.memory = mem
+        requests.memory = mem
+      }
+      if (cpuLimit) {
+        limits.cpu = String(cpuLimit)
+        requests.cpu = String(cpuLimit)
+      }
+      resources.limits = limits
+      resources.requests = requests
+    }
+
+    // 7. Assemble container spec
     const containerSpec = {
       name: 'agent',
       image: sidecarImage,
       env,
-      ports: [{ containerPort: AGENT_PORT, name: 'agent' }],
+      ports,
       livenessProbe: {
         httpGet: { path: '/healthz', port: AGENT_PORT },
         initialDelaySeconds: 5,
@@ -249,6 +347,24 @@ export class K8sBackend {
       containerSpec.imagePullPolicy = imagePullPolicy
     }
 
+    if (volumeMounts.length > 0) {
+      containerSpec.volumeMounts = volumeMounts
+    }
+
+    if (Object.keys(resources).length > 0) {
+      containerSpec.resources = resources
+    }
+
+    // 8. Assemble Pod spec
+    const podSpec = {
+      restartPolicy: 'Never',
+      containers: [containerSpec],
+    }
+
+    if (volumes.length > 0) {
+      podSpec.volumes = volumes
+    }
+
     const pod = {
       apiVersion: 'v1',
       kind: 'Pod',
@@ -259,10 +375,7 @@ export class K8sBackend {
           'chroxy-env-id': envId,
         },
       },
-      spec: {
-        restartPolicy: 'Never',
-        containers: [containerSpec],
-      },
+      spec: podSpec,
     }
 
     log.info(`Creating Pod ${podName} in namespace ${ns}`)
@@ -1215,4 +1328,76 @@ function _deriveSecretName(podName) {
   }
   // Fallback: best-effort token cleanup name based on the pod name itself.
   return `chroxy-token-${podName}`
+}
+
+/**
+ * Parse a Docker-style volume mount string into its components.
+ *
+ * Supported formats:
+ *   "/host/path:/container/path"
+ *   "/host/path:/container/path:ro"
+ *
+ * Returns null for unrecognised input so the caller can log and skip.
+ *
+ * @param {string} mountStr
+ * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
+ */
+function _parseMountString(mountStr) {
+  if (typeof mountStr !== 'string') return null
+  const parts = mountStr.split(':')
+  if (parts.length < 2) return null
+  const hostPath = parts[0]
+  const containerPath = parts[1]
+  if (!hostPath || !containerPath) return null
+  const readOnly = parts[2] === 'ro'
+  return { hostPath, containerPath, readOnly }
+}
+
+/**
+ * Extract the container port from a forwardPorts entry.
+ *
+ * Accepts:
+ *   - A bare number or numeric string: "8080" → 8080
+ *   - A "hostPort:containerPort" string: "9000:8080" → 8080
+ *
+ * Returns null for non-numeric or zero values.
+ *
+ * @param {string|number} entry
+ * @returns {number | null}
+ */
+function _parseContainerPort(entry) {
+  const str = String(entry)
+  const colonIdx = str.indexOf(':')
+  const portStr = colonIdx >= 0 ? str.slice(colonIdx + 1) : str
+  const port = parseInt(portStr, 10)
+  return Number.isFinite(port) && port > 0 ? port : null
+}
+
+/**
+ * Normalise a memory quantity string to a valid Kubernetes quantity.
+ *
+ * Docker accepts lowercase suffixes ("g", "m", "k") while Kubernetes expects
+ * binary SI suffixes ("Gi", "Mi", "Ki").  This function converts Docker-style
+ * single-letter suffixes to their K8s equivalents.  Values that already use
+ * K8s suffixes (e.g. "2Gi", "512Mi") or plain integers (bytes) are returned
+ * unchanged.
+ *
+ * Mapping:
+ *   "2g"   → "2Gi"
+ *   "512m" → "512Mi"
+ *   "1024k"→ "1024Ki"
+ *   "2Gi"  → "2Gi"   (already valid)
+ *   "1024" → "1024"  (plain bytes, valid K8s quantity)
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function _normaliseMemoryQuantity(value) {
+  const str = String(value)
+  // Replace trailing lone-letter suffix (g/m/k, case-insensitive) with the
+  // K8s binary equivalent.  A trailing 'i' (already K8s-style) is left alone.
+  return str.replace(/^(\d+(?:\.\d+)?)\s*([gGmMkK])$/, (_, num, unit) => {
+    const map = { g: 'Gi', G: 'Gi', m: 'Mi', M: 'Mi', k: 'Ki', K: 'Ki' }
+    return num + (map[unit] || unit)
+  })
 }
