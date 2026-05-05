@@ -52,6 +52,26 @@ export const DEFAULT_MAX_LINE_BYTES = Number.isFinite(_PARSED_MAX_LINE_BYTES) &&
   ? _PARSED_MAX_LINE_BYTES
   : FALLBACK_MAX_LINE_BYTES
 
+// Idle resume window: how long a disconnected session waits for the client to
+// reconnect before the child is killed and the session is evicted. Prevents
+// orphaned child processes accumulating in long-lived pods.
+// Configurable via CHROXY_AGENT_RESUME_TIMEOUT_MS (default 60 s).
+const FALLBACK_RESUME_TIMEOUT_MS = 60_000
+const _PARSED_RESUME_TIMEOUT = parseInt(process.env.CHROXY_AGENT_RESUME_TIMEOUT_MS ?? `${FALLBACK_RESUME_TIMEOUT_MS}`, 10)
+const DEFAULT_RESUME_TIMEOUT_MS = Number.isFinite(_PARSED_RESUME_TIMEOUT) && _PARSED_RESUME_TIMEOUT > 0
+  ? _PARSED_RESUME_TIMEOUT
+  : FALLBACK_RESUME_TIMEOUT_MS
+
+// Hard cap on concurrent sessions. When a new spawn would exceed the cap the
+// oldest idle session (by lastActiveAt) is evicted first. Defense-in-depth
+// against a client that reconnects repeatedly without resuming.
+// Configurable via CHROXY_AGENT_MAX_SESSIONS (default 8).
+const FALLBACK_MAX_SESSIONS = 8
+const _PARSED_MAX_SESSIONS = parseInt(process.env.CHROXY_AGENT_MAX_SESSIONS ?? `${FALLBACK_MAX_SESSIONS}`, 10)
+const DEFAULT_MAX_SESSIONS = Number.isFinite(_PARSED_MAX_SESSIONS) && _PARSED_MAX_SESSIONS > 0
+  ? _PARSED_MAX_SESSIONS
+  : FALLBACK_MAX_SESSIONS
+
 // --- Auth token -----------------------------------------------------------------
 // Read once at boot. If unset we stay up (dev convenience) but reject all WS
 // upgrades so the agent is fail-secure in production.
@@ -148,14 +168,23 @@ export class LineLimitTransform extends Transform {
 export class PodAgent {
   /**
    * @param {object} opts
-   * @param {Function} [opts.spawnFn]       Override child_process.spawn for tests.
-   * @param {string}   [opts.token]         Override CHROXY_AGENT_TOKEN for tests.
-   * @param {number}   [opts.killGraceMs]   Override SIGTERM→SIGKILL grace (tests).
-   * @param {number}   [opts.bufferSize]    Override ring-buffer capacity per session (tests).
-   * @param {number}   [opts.maxLineBytes]  Override NDJSON line length cap (tests).
+   * @param {Function} [opts.spawnFn]         Override child_process.spawn for tests.
+   * @param {string}   [opts.token]           Override CHROXY_AGENT_TOKEN for tests.
+   * @param {number}   [opts.killGraceMs]     Override SIGTERM→SIGKILL grace (tests).
+   * @param {number}   [opts.bufferSize]      Override ring-buffer capacity per session (tests).
+   * @param {number}   [opts.maxLineBytes]    Override NDJSON line length cap (tests).
+   * @param {number}   [opts.resumeTimeoutMs] Override idle resume window in ms (tests).
+   * @param {number}   [opts.maxSessions]     Override concurrent session cap (tests).
+   * @param {Function} [opts.setTimeoutFn]    Override setTimeout for deterministic timer tests.
+   * @param {Function} [opts.clearTimeoutFn]  Override clearTimeout for deterministic timer tests.
    */
   constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS,
-    bufferSize = DEFAULT_BUFFER_SIZE, maxLineBytes = DEFAULT_MAX_LINE_BYTES } = {}) {
+    bufferSize = DEFAULT_BUFFER_SIZE,
+    maxLineBytes = DEFAULT_MAX_LINE_BYTES,
+    resumeTimeoutMs = DEFAULT_RESUME_TIMEOUT_MS,
+    maxSessions = DEFAULT_MAX_SESSIONS,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout } = {}) {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
@@ -168,6 +197,14 @@ export class PodAgent {
     this._maxLineBytes = Number.isFinite(maxLineBytes) && maxLineBytes > 0
       ? maxLineBytes
       : FALLBACK_MAX_LINE_BYTES
+    this._resumeTimeoutMs = Number.isFinite(resumeTimeoutMs) && resumeTimeoutMs > 0
+      ? resumeTimeoutMs
+      : FALLBACK_RESUME_TIMEOUT_MS
+    this._maxSessions = Number.isFinite(maxSessions) && maxSessions > 0
+      ? maxSessions
+      : FALLBACK_MAX_SESSIONS
+    this._setTimeoutFn = setTimeoutFn
+    this._clearTimeoutFn = clearTimeoutFn
 
     // Fail-secure warning. Emitted from the constructor (not module-load) so
     // tests and embedders that pass an explicit `token` don't see a misleading
@@ -188,8 +225,10 @@ export class PodAgent {
     // Live sessions, keyed by sessionId. A session persists beyond its current
     // WS connection so that a reconnecting client can resume after a network
     // blip. Structure:
-    //   { sessionId, child, activeWs, seq, buffer: Array<{seq, frame}> }
+    //   { sessionId, child, activeWs, seq, buffer: Array<{seq, frame}>,
+    //     lastActiveAt: number, idleTimer: TimerHandle|null }
     // `activeWs` is null while disconnected.
+    // `idleTimer` fires when the resume window expires and evicts the session.
     this._sessions = new Map()
 
     // Ping/pong state mirrors ws-server.js: send ping every 30 s, terminate if
@@ -223,8 +262,9 @@ export class PodAgent {
         clearInterval(this._pingInterval)
         this._pingInterval = null
       }
-      // Kill children for all live sessions.
+      // Kill children for all live sessions and cancel any idle timers.
       for (const session of this._sessions.values()) {
+        this._cancelIdleTimer(session)
         if (session.child) {
           this._killChild(session.child)
           session.child = null
@@ -328,6 +368,8 @@ export class PodAgent {
   // Connection cleanup — detach WS from session (child keeps running for
   // resume). Kill the child only if the session has no sessionId (pre-spawn
   // disconnect) because the child was never tracked in _sessions.
+  // For sessions with a sessionId, start the idle-resume timer so the session
+  // is evicted if the client does not reconnect within the resume window.
   // Idempotent: safe to call from both 'close' and 'error' handlers.
   // ---------------------------------------------------------------------------
 
@@ -337,6 +379,9 @@ export class PodAgent {
       const session = this._sessions.get(sessionId)
       if (session && session.activeWs === ws) {
         session.activeWs = null
+        // Start the idle-resume timer. The child stays alive until the timer
+        // fires so a reconnecting client can resume within the window.
+        this._startIdleTimer(session)
       }
     } else {
       // Pre-spawn connection — no session yet; kill any tracked child directly.
@@ -346,6 +391,91 @@ export class PodAgent {
       }
     }
     if (this._activeWs === ws) this._activeWs = null
+  }
+
+  // ---------------------------------------------------------------------------
+  // Idle-resume timer — started when a session's WS disconnects. If the
+  // client does not resume within _resumeTimeoutMs the session is evicted:
+  // child is killed and the session is removed from _sessions.
+  // ---------------------------------------------------------------------------
+
+  _startIdleTimer(session) {
+    // Idempotent guard: don't arm a second timer if one is already running.
+    if (session.idleTimer !== null) return
+
+    session.idleTimer = this._setTimeoutFn(() => {
+      session.idleTimer = null
+      this._evictSession(session, 'idle_timeout')
+    }, this._resumeTimeoutMs)
+
+    // Don't keep the event loop alive just for the eviction timer.
+    if (session.idleTimer && typeof session.idleTimer.unref === 'function') {
+      session.idleTimer.unref()
+    }
+  }
+
+  _cancelIdleTimer(session) {
+    if (session.idleTimer !== null) {
+      this._clearTimeoutFn(session.idleTimer)
+      session.idleTimer = null
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session eviction — kill the child, drop from _sessions. Called by the
+  // idle timer or by the max-sessions cap enforcer.
+  // ---------------------------------------------------------------------------
+
+  _evictSession(session, reason) {
+    const { sessionId, child } = session
+
+    console.warn(`[chroxy-pod-agent] Evicting session ${sessionId} reason=${reason}`)
+
+    if (child) {
+      this._killChild(child)
+      session.child = null
+    }
+
+    // If the session still has an activeWs at eviction time (e.g. evicted by
+    // the size cap while a connection is live), close it cleanly.
+    if (session.activeWs) {
+      try { session.activeWs.close(1001, 'session evicted') } catch {}
+      session.activeWs = null
+    }
+
+    this._sessions.delete(sessionId)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Size-cap enforcer — evict the oldest idle session (by lastActiveAt) when
+  // _sessions.size >= _maxSessions. Called before inserting a new session.
+  // ---------------------------------------------------------------------------
+
+  _enforceSessionCap() {
+    if (this._sessions.size < this._maxSessions) return
+
+    // Prefer evicting idle sessions (no activeWs) over live ones.
+    let evictTarget = null
+    for (const session of this._sessions.values()) {
+      if (session.activeWs !== null) continue
+      if (evictTarget === null || session.lastActiveAt < evictTarget.lastActiveAt) {
+        evictTarget = session
+      }
+    }
+
+    // Fall back to evicting the globally oldest session if all are active.
+    if (evictTarget === null) {
+      for (const session of this._sessions.values()) {
+        if (evictTarget === null || session.lastActiveAt < evictTarget.lastActiveAt) {
+          evictTarget = session
+        }
+      }
+    }
+
+    if (evictTarget) {
+      this._cancelIdleTimer(evictTarget)
+      this._evictSession(evictTarget, 'max_sessions')
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -422,6 +552,10 @@ export class PodAgent {
       return
     }
 
+    // Enforce the concurrent session cap before creating a new session. Evicts
+    // the oldest idle session if needed so the Map never exceeds _maxSessions.
+    this._enforceSessionCap()
+
     // Build the child env: start from the agent's env, strip agent-only
     // secrets, then layer the per-spawn env on top. This prevents the auth
     // token (and any future agent-internal credentials) from leaking into
@@ -452,6 +586,8 @@ export class PodAgent {
       activeWs: ws,
       seq: 0,
       buffer: [],
+      lastActiveAt: Date.now(),
+      idleTimer: null,
     }
     this._sessions.set(sessionId, session)
     ws._sessionId = sessionId
@@ -474,6 +610,7 @@ export class PodAgent {
         if (session.activeWs && session.activeWs.readyState === 1) {
           session.activeWs.close(1000, 'spawn failed')
         }
+        this._cancelIdleTimer(session)
         this._sessions.delete(sessionId)
       }, 50)
     })
@@ -542,7 +679,8 @@ export class PodAgent {
         if (session.activeWs && session.activeWs.readyState === 1) {
           session.activeWs.close(1000, 'process exited')
         }
-        // Remove session from map once the child is gone.
+        // Cancel any pending idle timer and remove session from map.
+        this._cancelIdleTimer(session)
         this._sessions.delete(sessionId)
       }, 50)
     })
@@ -569,6 +707,9 @@ export class PodAgent {
       return
     }
 
+    // Resume arrived within the window — cancel the idle eviction timer.
+    this._cancelIdleTimer(session)
+
     // Resume-with-gap detection (#3347).
     // If the oldest seq still in the ring buffer is greater than `lastSeq + 1`,
     // some events between (lastSeq, oldestSeq) were evicted by buffer overflow.
@@ -580,8 +721,9 @@ export class PodAgent {
       return
     }
 
-    // Attach this WS to the session.
+    // Attach this WS to the session and refresh activity timestamp.
     session.activeWs = ws
+    session.lastActiveAt = Date.now()
     ws._sessionId = sessionId
 
     // Replay any buffered frames the client hasn't seen yet (seq > lastSeq).
@@ -611,6 +753,7 @@ export class PodAgent {
 
   _emitSessionFrame(session, frame) {
     session.seq += 1
+    session.lastActiveAt = Date.now()
     const seqFrame = { ...frame, seq: session.seq }
 
     // Ring buffer: drop oldest entry when at capacity.

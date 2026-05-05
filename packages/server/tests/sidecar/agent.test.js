@@ -1205,4 +1205,307 @@ describe('PodAgent', () => {
       }
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // Idle-resume TTL eviction (#3349)
+  // ---------------------------------------------------------------------------
+
+  describe('idle-resume TTL eviction', () => {
+    /**
+     * Deterministic fake timer: exposes `advance(ms)` to fire pending callbacks
+     * without actually waiting.  Returned handles have a no-op `.unref()` so the
+     * idempotent guard in _startIdleTimer works normally.
+     */
+    function makeFakeClock() {
+      let now = 0
+      const pending = []
+
+      function fakeSetTimeout(fn, delay) {
+        const handle = { _fn: fn, _at: now + delay, _cancelled: false, unref() {} }
+        pending.push(handle)
+        return handle
+      }
+
+      function fakeClearTimeout(handle) {
+        if (handle) handle._cancelled = true
+      }
+
+      function advance(ms) {
+        now += ms
+        // Fire all callbacks that have become due (sorted earliest-first for
+        // deterministic ordering when multiple timers share the same deadline).
+        const due = pending
+          .filter((h) => !h._cancelled && h._at <= now)
+          .sort((a, b) => a._at - b._at)
+        for (const h of due) {
+          h._cancelled = true
+          h._fn()
+        }
+      }
+
+      return { fakeSetTimeout, fakeClearTimeout, advance }
+    }
+
+    it('idle timer fires after TTL and kills the child + drops session', async () => {
+      const clock = makeFakeClock()
+      const TTL = 200
+      const mock2 = createMockSpawn()
+      const child2 = mock2.child
+      const { agent: ttlAgent, port: ttlPort } = await startAgent({
+        spawnFn: mock2.spawnFn,
+        killGraceMs: 25,
+        resumeTimeoutMs: TTL,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws = connect(ttlPort, TOKEN)
+        await waitOpen(ws)
+
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Disconnect — should arm the idle timer.
+        ws.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // Verify session is still in the map (timer hasn't fired yet).
+        assert.equal(ttlAgent._sessions.size, 1, 'session must still exist before TTL expires')
+
+        // Advance clock past the TTL.
+        clock.advance(TTL + 1)
+
+        // Timer callback is synchronous — session should be gone immediately.
+        assert.equal(ttlAgent._sessions.size, 0, 'session must be evicted after TTL expires')
+        assert.ok(
+          child2.killSignals.includes('SIGTERM'),
+          `child must be killed on TTL eviction, got ${JSON.stringify(child2.killSignals)}`,
+        )
+      } finally {
+        await ttlAgent.close()
+      }
+    })
+
+    it('resume before TTL cancels the idle timer', async () => {
+      const clock = makeFakeClock()
+      const TTL = 500
+      const mock2 = createMockSpawn()
+      const { agent: ttlAgent, port: ttlPort } = await startAgent({
+        spawnFn: mock2.spawnFn,
+        killGraceMs: 25,
+        resumeTimeoutMs: TTL,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws1 = connect(ttlPort, TOKEN)
+        await waitOpen(ws1)
+
+        const ws1Msgs = []
+        ws1.on('message', (d) => {
+          try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
+        })
+
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+
+        // Disconnect — idle timer is now armed.
+        ws1.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // Advance time partially (within TTL window).
+        clock.advance(TTL / 2)
+
+        // Resume — must cancel the timer.
+        const ws2 = connect(ttlPort, TOKEN)
+        await waitOpen(ws2)
+        const ws2Msgs = []
+        ws2.on('message', (d) => {
+          try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
+        })
+        ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Confirm resumed.
+        const resumed = ws2Msgs.find((m) => m.type === 'resumed')
+        assert.ok(resumed, 'resumed frame must be received')
+
+        // Session must have no idle timer after cancel.
+        const session = ttlAgent._sessions.get(sessionId)
+        assert.ok(session, 'session must still exist after resume')
+        assert.equal(session.idleTimer, null, 'idleTimer must be null after cancel')
+
+        // Advance past original TTL — timer was cancelled so session stays.
+        clock.advance(TTL)
+        assert.equal(ttlAgent._sessions.size, 1, 'session must NOT be evicted when timer was cancelled')
+
+        ws2.close()
+      } finally {
+        await ttlAgent.close()
+      }
+    })
+
+    it('agent.close() cancels idle timers and kills children', async () => {
+      const clock = makeFakeClock()
+      const TTL = 500
+      const mock2 = createMockSpawn()
+      const child2 = mock2.child
+      const { agent: ttlAgent, port: ttlPort } = await startAgent({
+        spawnFn: mock2.spawnFn,
+        killGraceMs: 25,
+        resumeTimeoutMs: TTL,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      const ws = connect(ttlPort, TOKEN)
+      await waitOpen(ws)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Disconnect — idle timer is armed.
+      ws.close()
+      await new Promise((r) => setTimeout(r, 30))
+
+      assert.equal(ttlAgent._sessions.size, 1)
+
+      // Close the agent — must cancel the idle timer and kill children.
+      await ttlAgent.close()
+
+      assert.equal(ttlAgent._sessions.size, 0, 'sessions must be cleared on close')
+      assert.ok(
+        child2.killSignals.includes('SIGTERM'),
+        `child must be killed on close, got ${JSON.stringify(child2.killSignals)}`,
+      )
+
+      // Advancing the clock after close must not throw or re-run eviction.
+      assert.doesNotThrow(() => clock.advance(TTL + 1))
+    })
+
+    it('session_lost(unknown_session) is delivered to a late resume after TTL eviction', async () => {
+      const clock = makeFakeClock()
+      const TTL = 100
+      const mock2 = createMockSpawn()
+      const { agent: ttlAgent, port: ttlPort } = await startAgent({
+        spawnFn: mock2.spawnFn,
+        killGraceMs: 25,
+        resumeTimeoutMs: TTL,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws1 = connect(ttlPort, TOKEN)
+        await waitOpen(ws1)
+        const ws1Msgs = []
+        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        ws1.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // Advance past TTL — session is evicted.
+        clock.advance(TTL + 1)
+        assert.equal(ttlAgent._sessions.size, 0, 'session must be gone after TTL')
+
+        // Late resume should get session_lost(unknown_session).
+        const ws2 = connect(ttlPort, TOKEN)
+        await waitOpen(ws2)
+        const ws2Msgs = []
+        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+
+        ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const lost = ws2Msgs.find((m) => m.type === 'session_lost')
+        assert.ok(lost, `expected session_lost frame, got ${JSON.stringify(ws2Msgs)}`)
+        assert.equal(lost.sessionId, sessionId)
+        assert.equal(lost.reason, 'unknown_session',
+          'evicted sessions look the same as unknown ones to clients')
+
+        ws2.close()
+      } finally {
+        await ttlAgent.close()
+      }
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // Max-sessions cap (#3349)
+  // ---------------------------------------------------------------------------
+
+  describe('max-sessions cap', () => {
+    it('oldest idle session is evicted when cap is reached', async () => {
+      // Use a cap of 2 to keep the test short.
+      const children = []
+      const spawnFn = (_cmd, _args, _opts) => {
+        const mock = createMockSpawn()
+        children.push(mock.child)
+        return mock.child
+      }
+
+      const { agent: capAgent, port: capPort } = await startAgent({
+        spawnFn,
+        maxSessions: 2,
+        resumeTimeoutMs: 60_000,  // long TTL so idle timer doesn't race
+      })
+
+      try {
+        // Session 1 — connect, spawn, then disconnect (goes idle).
+        const ws1 = connect(capPort, TOKEN)
+        await waitOpen(ws1)
+        const ws1Msgs = []
+        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const sid1 = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        ws1.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        assert.equal(capAgent._sessions.size, 1, 'one idle session after first spawn')
+
+        // Session 2 — connect, spawn, then disconnect (goes idle).
+        const ws2 = connect(capPort, TOKEN)
+        await waitOpen(ws2)
+        const ws2Msgs = []
+        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const sid2 = ws2Msgs.find((m) => m.type === 'session_started').sessionId
+        ws2.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        assert.equal(capAgent._sessions.size, 2, 'two idle sessions before cap eviction')
+
+        // Session 3 — spawning this must evict the oldest idle session (session 1).
+        const ws3 = connect(capPort, TOKEN)
+        await waitOpen(ws3)
+        const ws3Msgs = []
+        ws3.on('message', (d) => { try { ws3Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws3.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // After spawn 3: cap evicted session 1, so map has [sid2, sid3].
+        assert.equal(capAgent._sessions.size, 2, 'session count stays at cap after eviction')
+        assert.ok(!capAgent._sessions.has(sid1), 'oldest session (sid1) must be evicted')
+        assert.ok(capAgent._sessions.has(sid2), 'newer idle session (sid2) must survive')
+
+        // children[0] is the child for session 1 — must have been SIGTERMed.
+        assert.ok(
+          children[0].killSignals.includes('SIGTERM'),
+          `evicted child must be SIGTERMed, got ${JSON.stringify(children[0].killSignals)}`,
+        )
+
+        ws3.close()
+      } finally {
+        await capAgent.close()
+      }
+    })
+  })
 })
