@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import WebSocket from 'ws'
-import { PodAgent } from '../../sidecar/agent.js'
+import { PodAgent, LineLimitTransform, DEFAULT_MAX_LINE_BYTES } from '../../sidecar/agent.js'
 
 const TOKEN = 'test-secret-token-abc123'
 const WRONG_TOKEN = 'wrong-token'
@@ -936,6 +936,228 @@ describe('PodAgent', () => {
       assert.equal(resumed.replayedCount, 3)
 
       ws2.close()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LineLimitTransform unit tests (#3327)
+  // ---------------------------------------------------------------------------
+
+  describe('LineLimitTransform', () => {
+    /** Pipe all chunks through a LineLimitTransform and collect output. */
+    function collect(transform, chunks) {
+      return new Promise((resolve, reject) => {
+        const out = []
+        let oversized = false
+        transform.on('oversized_line', () => { oversized = true })
+        transform.on('data', (chunk) => out.push(chunk))
+        transform.on('end', () => resolve({ output: Buffer.concat(out).toString(), oversized }))
+        transform.on('error', reject)
+        for (const chunk of chunks) {
+          transform.write(Buffer.from(chunk))
+        }
+        transform.end()
+      })
+    }
+
+    it('passes normal short lines through unchanged', async () => {
+      const t = new LineLimitTransform({ maxBytes: 100 })
+      const line = JSON.stringify({ type: 'assistant', content: 'hello' }) + '\n'
+      const { output, oversized } = await collect(t, [line])
+      assert.equal(output, line)
+      assert.equal(oversized, false)
+    })
+
+    it('passes multiple short lines through unchanged', async () => {
+      const t = new LineLimitTransform({ maxBytes: 100 })
+      const line1 = 'first\n'
+      const line2 = 'second\n'
+      const { output, oversized } = await collect(t, [line1, line2])
+      assert.equal(output, line1 + line2)
+      assert.equal(oversized, false)
+    })
+
+    it('resets line counter after each newline', async () => {
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      // Each individual line is 9 bytes (under cap); total bytes would exceed
+      // cap but that should not matter — counter resets on newline.
+      const { output, oversized } = await collect(t, ['123456789\n', '123456789\n'])
+      assert.equal(oversized, false)
+      assert.ok(output.includes('123456789\n'))
+    })
+
+    it('fires oversized_line and stops passing data when a line exceeds maxBytes', async () => {
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      // 11 bytes with no newline → should trip the guard
+      const bigChunk = 'A'.repeat(11)
+      const { oversized } = await collect(t, [bigChunk])
+      assert.equal(oversized, true)
+    })
+
+    it('fires oversized_line across multiple chunks accumulating one big line', async () => {
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      // Spread the big line across 3 chunks, each < cap, no newlines
+      const { oversized } = await collect(t, ['AAAA', 'AAAA', 'AAAA'])
+      assert.equal(oversized, true)
+    })
+
+    it('does not fire oversized_line when line is exactly maxBytes', async () => {
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      const exactly = 'A'.repeat(10) + '\n'
+      const { oversized } = await collect(t, [exactly])
+      assert.equal(oversized, false)
+    })
+
+    it('fires oversized_line when line is maxBytes + 1', async () => {
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      const oneOver = 'A'.repeat(11) + '\n'
+      const { oversized } = await collect(t, [oneOver])
+      assert.equal(oversized, true)
+    })
+
+    it('drops all data after the oversized_line event fires (second write is suppressed)', async () => {
+      const t = new LineLimitTransform({ maxBytes: 5 })
+      const received = []
+      let oversizedCount = 0
+      t.on('oversized_line', () => { oversizedCount += 1 })
+      t.on('data', (chunk) => received.push(chunk.toString()))
+
+      t.write(Buffer.from('AAAAAA'))  // trips the guard (6 > 5)
+      t.write(Buffer.from('should-be-dropped\n'))
+      t.end()
+
+      await new Promise((r) => t.once('end', r))
+      assert.equal(oversizedCount, 1, 'oversized_line must fire exactly once')
+      // The second write must have been dropped
+      const full = received.join('')
+      assert.ok(!full.includes('should-be-dropped'), 'post-trip data must be dropped')
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // NDJSON line buffer cap integration tests (#3327)
+  // ---------------------------------------------------------------------------
+
+  describe('NDJSON line buffer cap', () => {
+    it('DEFAULT_MAX_LINE_BYTES is a positive finite number', () => {
+      assert.ok(Number.isFinite(DEFAULT_MAX_LINE_BYTES) && DEFAULT_MAX_LINE_BYTES > 0,
+        `DEFAULT_MAX_LINE_BYTES should be a positive finite number, got ${DEFAULT_MAX_LINE_BYTES}`)
+    })
+
+    it('emits error frame with code line_too_long when stdout line exceeds cap', async () => {
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        // Use a tiny cap so we can trigger it without huge allocations.
+        maxLineBytes: 16,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const donePromise = collectUntilClose(ws, 3000)
+
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+        // Wait for session_started then push an oversized line (no newline).
+        await new Promise((r) => setTimeout(r, 10))
+        // 17 bytes, no newline — exceeds the 16-byte cap.
+        mock.child.stdout.write(Buffer.from('A'.repeat(17)))
+
+        const { messages } = await donePromise
+        const errFrame = messages.find((m) => m.type === 'error' && m.code === 'line_too_long')
+        assert.ok(errFrame, `expected error frame with code=line_too_long, got ${JSON.stringify(messages)}`)
+        assert.match(errFrame.message, /exceeded max length/)
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('kills the child when the line cap is exceeded', async () => {
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const donePromise = collectUntilClose(ws, 3000)
+
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 10))
+
+        mock.child.stdout.write(Buffer.from('B'.repeat(17)))
+
+        await donePromise
+
+        assert.ok(
+          mock.child.killSignals.includes('SIGTERM'),
+          `child must be SIGTERM-killed on line_too_long, got ${JSON.stringify(mock.child.killSignals)}`,
+        )
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('closes the WS cleanly after emitting the error frame', async () => {
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const donePromise = collectUntilClose(ws, 3000)
+
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 10))
+
+        mock.child.stdout.write(Buffer.from('C'.repeat(17)))
+
+        const { closeCode } = await donePromise
+        assert.equal(closeCode, 1000, `WS should close with code 1000, got ${closeCode}`)
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('normal lines still work when cap is set (happy path)', async () => {
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 64,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+
+        const msgsPromise = waitForDataMessages(ws, 1)
+
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        const payload = { type: 'assistant', content: 'hi' }
+        setTimeout(() => mock.controller.writeStdout(JSON.stringify(payload)), 10)
+
+        const msgs = await msgsPromise
+        assert.equal(msgs[0].type, 'event')
+        assert.deepEqual(msgs[0].payload, payload)
+
+        ws.close()
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('invalid maxLineBytes falls back to 1 MiB default', () => {
+      // Verify that passing a non-positive value falls back to FALLBACK_MAX_LINE_BYTES.
+      const agent = new PodAgent({ token: TOKEN, maxLineBytes: -1 })
+      assert.equal(agent._maxLineBytes, 1024 * 1024)
+      agent.close()
     })
   })
 })
