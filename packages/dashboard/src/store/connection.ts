@@ -1257,6 +1257,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #3298: grant first-activation trust to a community skill author.
+  // Server wires communityTrustChecker + grantCommunityTrust in
+  // BaseSession._loadSkills, reloads skills, and broadcasts
+  // skill_trust_granted (removes pending row) + skill_trust_grant_ok
+  // (ack to requesting client).
+  grantCommunitySkillTrust: (skillName: string, author: string) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const requestId = `trust-grant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const payload: Record<string, unknown> = {
+        type: 'skill_trust_grant',
+        skillName,
+        author,
+        scope: 'author',
+        requestId,
+      };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    }
+  },
+
   confirmPermissionMode: (mode: string) => {
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

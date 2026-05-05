@@ -48,9 +48,9 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'extension_message',  // extension framework, routed to extension handlers not main switch
   // 'skills_list' removed — dashboard now handles it (#3209)
   // 'skill_changed' removed — dashboard now handles it (#3205)
-  'skill_trust_request',  // PR B server-only emit (#3297); PR C (#3298) adds dashboard handler and moves to PLATFORM_SPECIFIC
-  'skill_trust_granted',  // PR B server-only broadcast (#3297); PR C (#3298) adds dashboard handler and moves to PLATFORM_SPECIFIC
-  'skill_trust_grant_ok', // PR B handler ack (#3297); PR C (#3298) adds dashboard handler and moves to PLATFORM_SPECIFIC
+  // 'skill_trust_request' removed — dashboard now handles it (#3298)
+  // 'skill_trust_granted' removed — dashboard now handles it (#3298)
+  // 'skill_trust_grant_ok' removed — dashboard now handles it (#3298)
 ])
 
 // ---------------------------------------------------------------------------
@@ -83,6 +83,9 @@ const PLATFORM_SPECIFIC = {
   'skill_activated': 'dashboard',   // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
   'skill_deactivated': 'dashboard', // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
   'skill_trust_accepted': 'dashboard', // operator-confirmed re-trust (#3235) is dashboard-only for v1 — pairs with skill_changed; mobile app exposure tracked under parent epic #2959
+  'skill_trust_request': 'dashboard',  // community skill awaiting first-activation grant (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
+  'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
+  'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
 }
 
 // ---------------------------------------------------------------------------
