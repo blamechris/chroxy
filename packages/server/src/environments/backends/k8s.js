@@ -79,10 +79,13 @@ export class K8sBackend {
    * @param {Function} [opts._dialWs]                   - Injected WS dial factory for testing: (url, token) => WebSocket
    * @param {number[]} [opts._reconnectDelays]          - Override backoff delays in ms for testing
    * @param {number}   [opts._maxRetries]               - Override max reconnect retries for testing
+   * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
+   * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
   constructor({ namespace, inCluster, kubeconfigPath, sidecarImage,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
-    _reconnectDelays, _maxRetries } = {}) {
+    _reconnectDelays, _maxRetries,
+    _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
     this._connectMode = connectMode || 'portforward'
@@ -138,6 +141,9 @@ export class K8sBackend {
     this._maxRetries = Number.isFinite(_maxRetries) && _maxRetries >= 0
       ? _maxRetries
       : DEFAULT_MAX_RETRIES
+    // Timer seam: allow tests to substitute a fake clock and avoid real-time polling.
+    this._setTimeout = setTimeoutImpl || setTimeout
+    this._clearTimeout = clearTimeoutImpl || clearTimeout
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -527,8 +533,13 @@ export class K8sBackend {
         : '/workspace'
     }
 
-    const { _reconnectDelays: reconnectDelays, _maxRetries: maxRetries } = this
-    const proc = new SidecarProcess({ reconnectDelays, maxRetries })
+    const {
+      _reconnectDelays: reconnectDelays,
+      _maxRetries: maxRetries,
+      _setTimeout: setTimeoutImpl,
+      _clearTimeout: clearTimeoutImpl,
+    } = this
+    const proc = new SidecarProcess({ reconnectDelays, maxRetries, setTimeoutImpl, clearTimeoutImpl })
 
     // Bind a redial function so the reconnect loop inside _wireWsToProc can
     // re-dial the same pod without holding a reference to this K8sBackend.
@@ -764,10 +775,17 @@ export class K8sBackend {
 class SidecarProcess extends EventEmitter {
   /**
    * @param {Object} [opts]
-   * @param {number[]} [opts.reconnectDelays] - Backoff delay schedule in ms
-   * @param {number}   [opts.maxRetries]      - Max reconnect attempts before giving up
+   * @param {number[]} [opts.reconnectDelays]  - Backoff delay schedule in ms
+   * @param {number}   [opts.maxRetries]       - Max reconnect attempts before giving up
+   * @param {Function} [opts.setTimeoutImpl]   - setTimeout override for deterministic testing
+   * @param {Function} [opts.clearTimeoutImpl] - clearTimeout override for deterministic testing
    */
-  constructor({ reconnectDelays = DEFAULT_RECONNECT_DELAYS, maxRetries = DEFAULT_MAX_RETRIES } = {}) {
+  constructor({
+    reconnectDelays = DEFAULT_RECONNECT_DELAYS,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    setTimeoutImpl,
+    clearTimeoutImpl,
+  } = {}) {
     super()
     this.stdout = new PassThrough()
     this.stderr = new PassThrough()
@@ -785,6 +803,10 @@ class SidecarProcess extends EventEmitter {
     this._sessionId = null   // set by _wireWsToProc when session_started arrives
     this._lastSeq = 0        // last seq number seen from the sidecar
     this._redial = null      // injected by K8sBackend.streamCliInEnvironment
+
+    // Timer seam: defaults to globals; override in tests for deterministic scheduling.
+    this._setTimeout = setTimeoutImpl || setTimeout
+    this._clearTimeout = clearTimeoutImpl || clearTimeout
   }
 
   kill(signal = 'SIGTERM') {
@@ -793,7 +815,7 @@ class SidecarProcess extends EventEmitter {
     log.info(`SidecarProcess.kill(${signal}) — closing WS`)
     // Cancel any pending reconnect timer so we don't re-dial after kill.
     if (this._retryTimer) {
-      clearTimeout(this._retryTimer)
+      this._clearTimeout(this._retryTimer)
       this._retryTimer = null
     }
     if (this._ws) {
@@ -857,7 +879,7 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     if (proc._exited) return
     proc._exited = true
     if (proc._retryTimer) {
-      clearTimeout(proc._retryTimer)
+      proc._clearTimeout(proc._retryTimer)
       proc._retryTimer = null
     }
     proc.stdout.push(null)
@@ -898,7 +920,7 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     ]
     proc._retryAttempt += 1
     log.info(`SidecarProcess: scheduling reconnect attempt ${proc._retryAttempt} in ${delay}ms`)
-    proc._retryTimer = setTimeout(() => {
+    proc._retryTimer = proc._setTimeout(() => {
       proc._retryTimer = null
       if (proc._exited || proc.killed) return
       proc._redial().then((dialResult) => {
