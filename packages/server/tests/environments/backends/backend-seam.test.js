@@ -300,10 +300,10 @@ describe('EnvironmentManager.restore() → backend methods', () => {
 
     const backend = createMockBackend({
       commitEnvironment: spy('sha256:snap'),
-      renameEnvironment: spy((...args) => { callOrder.push('rename'); return Promise.resolve() }),
-      restoreEnvironment: spy((...args) => { callOrder.push('restoreEnvironment'); return Promise.resolve('new-restore-ctr') }),
-      getEnvironmentStatus: spy((...args) => { callOrder.push('getStatus'); return Promise.resolve(true) }),
-      destroyEnvironment: spy((...args) => { callOrder.push('destroy'); return Promise.resolve() }),
+      renameEnvironment: spy(() => { callOrder.push('rename'); return Promise.resolve() }),
+      restoreEnvironment: spy(() => { callOrder.push('restoreEnvironment'); return Promise.resolve('new-restore-ctr') }),
+      getEnvironmentStatus: spy(() => { callOrder.push('getStatus'); return Promise.resolve(true) }),
+      destroyEnvironment: spy(() => { callOrder.push('destroy'); return Promise.resolve() }),
     })
 
     const manager = new EnvironmentManager({ statePath, backend })
