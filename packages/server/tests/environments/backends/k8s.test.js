@@ -1084,7 +1084,7 @@ describe('K8sBackend._dialViaPortForward() listener bridge', () => {
     let listenCallback = null
 
     const fakeServer = {
-      listen: (port, host, cb) => {
+      listen: (_port, _host, cb) => {
         serverListened = true
         listenCallback = cb
       },
