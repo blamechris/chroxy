@@ -1121,7 +1121,7 @@ export class SessionManager extends EventEmitter {
     // without the event being replayed on every reconnect (the loader re-checks
     // the hash every time skills are scanned, so the latest state is always
     // canonical).
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed']
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {

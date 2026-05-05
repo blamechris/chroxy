@@ -107,6 +107,18 @@ export const SkillTrustAcceptSchema = z.object({
     sessionId: z.string().max(256).optional(),
     requestId: z.string().max(256).optional(),
 });
+// #3297: grant community-skill first-activation trust. `author` is the
+// subdirectory name under community/ (e.g. 'alice' for community/alice/).
+// `scope` is reserved for future granularity (e.g. 'path' | 'author');
+// currently both indexes (byAuthor + byPath) are always written.
+export const SkillTrustGrantSchema = z.object({
+    type: z.literal('skill_trust_grant'),
+    skillName: z.string().min(1).max(256),
+    author: z.string().min(1).max(256),
+    scope: z.string().max(64).optional(),
+    sessionId: z.string().max(256).optional(),
+    requestId: z.string().max(256).optional(),
+});
 export const PermissionResponseSchema = z.object({
     type: z.literal('permission_response'),
     requestId: z.string().min(1).max(256),
@@ -388,6 +400,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SkillActivateSchema,
     SkillDeactivateSchema,
     SkillTrustAcceptSchema,
+    SkillTrustGrantSchema,
     PermissionResponseSchema,
     ListSessionsSchema,
     SwitchSessionSchema,

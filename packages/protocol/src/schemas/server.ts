@@ -343,6 +343,25 @@ export const ServerSkillTrustAcceptedSchema = z.object({
   skillName: z.string(),
 })
 
+// #3297: community skill pending first-activation trust grant. Transient.
+export const ServerSkillTrustRequestSchema = z.object({
+  type: z.literal('skill_trust_request'),
+  skillName: z.string(),
+  author: z.string(),
+  source: z.string(),
+  description: z.string(),
+  path: z.string(),
+  sessionId: z.string().nullable(),
+})
+
+// #3297: community skill trust granted by operator.
+export const ServerSkillTrustGrantedSchema = z.object({
+  type: z.literal('skill_trust_granted'),
+  sessionId: z.string(),
+  skillName: z.string(),
+  author: z.string(),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),

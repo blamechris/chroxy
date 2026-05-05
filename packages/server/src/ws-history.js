@@ -76,6 +76,9 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // #3235/#3269 — `skill_trust_accept` handler + `skill_trust_accepted`
     // broadcast. Gates the SkillsPanel 'Accept new content' button (#3270).
     skillTrustAccept: true,
+    // #3297 — `skill_trust_grant` handler + `skill_trust_granted` broadcast.
+    // Gates the community-skill first-activation trust-grant UI.
+    skillTrustGrant: true,
   }
 
   send(ws, {

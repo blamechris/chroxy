@@ -8,16 +8,25 @@
  * later edit (whether by the user, an extension, or a hostile process)
  * surfaces in the server log + a `skill_changed` WS event.
  *
- * Storage shape (sidecar JSON file):
+ * Storage shape v2 (sidecar JSON file):
  *
  *   {
- *     "/abs/path/to/skill.md": {
- *       "sha256": "<64 hex chars>",
- *       "firstSeen": "2026-05-03T12:34:56.000Z",
- *       "lastVerified": "2026-05-03T12:34:56.000Z"
+ *     "skills": {
+ *       "/abs/path/to/skill.md": {
+ *         "sha256": "<64 hex chars>",
+ *         "firstSeen": "2026-05-03T12:34:56.000Z",
+ *         "lastVerified": "2026-05-03T12:34:56.000Z"
+ *       },
+ *       ...
  *     },
- *     ...
+ *     "communityTrust": {
+ *       "by-author": { "alice": { "grantedAt": "...", "grantedBy": "user" } },
+ *       "by-path":   { "/abs/community/alice/skill.md": { "grantedAt": "..." } }
+ *     }
  *   }
+ *
+ * v1 (flat path-keyed object at root) is detected and migrated on first load
+ * (#3297). The file is rewritten to v2 on the next flush.
  *
  * Default location: `~/.chroxy/skills-trust.json`. Picked instead of
  * folding into `session-state.json` because session state is per-session,
@@ -166,11 +175,17 @@ export class SkillsTrustStore {
     this._verifyThrottleMs = Number.isFinite(verifyThrottleMs) && verifyThrottleMs >= 0
       ? verifyThrottleMs
       : DEFAULT_VERIFY_THROTTLE_MS
-    this._records = this._load()
+    const loaded = this._load()
+    this._records = loaded.records
+    // Community trust indexes (#3297): byAuthor maps author -> grant record;
+    // byPath maps realPath -> grant record. Either index is sufficient for
+    // isCommunityTrusted() — a skill is trusted if its author OR its exact
+    // path has been granted.
+    this.communityTrust = loaded.communityTrust
     // Track whether anything changed since the last persist so we can
     // skip writes when a session loaded skills with no mismatches and no
     // first-time records.
-    this._dirty = false
+    this._dirty = loaded.migratedLegacy || false
   }
 
   get mode() {
@@ -200,9 +215,8 @@ export class SkillsTrustStore {
   }
 
   /**
-   * Read + JSON-parse the trust file. Returns an empty object on any
-   * failure (missing file, malformed JSON, non-object root, etc.) so a
-   * corrupted record can never block the loader.
+   * Read + JSON-parse the trust file. Returns `{ records, communityTrust, migratedLegacy }`.
+   * Fails open to empty state on any read/parse error.
    *
    * #3232: a stale `<path>.tmp` from a prior crash is intentionally
    * ignored — only the canonical target path is consulted. The next
@@ -213,13 +227,20 @@ export class SkillsTrustStore {
    * #3233: keys read from disk are normalised through `_normalizePathKey`
    * so a ledger written under one casing on a case-insensitive FS is
    * still found when realpath resolves to a different casing later.
-   * Older ledgers keyed verbatim are upgraded transparently — the first
-   * `inspect` that hits a normalised key still finds the existing
-   * record.
    *
-   * @returns {Record<string, { sha256: string, firstSeen: string, lastVerified: string }>}
+   * #3297: v1 (flat path-keyed root) is detected and migrated to v2
+   * on load. `migratedLegacy: true` instructs the constructor to set
+   * `_dirty` so the rewritten v2 shape is flushed on the next access.
+   *
+   * @returns {{ records: object, communityTrust: { byAuthor: object, byPath: object }, migratedLegacy: boolean }}
    */
   _load() {
+    const emptyResult = {
+      records: Object.create(null),
+      communityTrust: { byAuthor: Object.create(null), byPath: Object.create(null) },
+      migratedLegacy: false,
+    }
+
     let raw
     try {
       raw = readFileSync(this._filePath, 'utf8')
@@ -227,7 +248,7 @@ export class SkillsTrustStore {
       if (err && err.code !== 'ENOENT') {
         log.warn(`Could not read trust file (${err.code || err.message}); starting fresh`)
       }
-      return Object.create(null)
+      return emptyResult
     }
 
     let parsed
@@ -235,16 +256,50 @@ export class SkillsTrustStore {
       parsed = JSON.parse(raw)
     } catch (err) {
       log.warn(`Trust file is malformed JSON (${err && err.message ? err.message : err}); starting fresh`)
-      return Object.create(null)
+      return emptyResult
     }
 
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       log.warn('Trust file root is not an object; starting fresh')
-      return Object.create(null)
+      return emptyResult
+    }
+
+    // v2 detection: top-level `skills` key present.
+    // v1 detection: flat path-keyed sha256 records at the root (legacy format).
+    // Anything else treated as empty (fail open).
+    let rawSkillsMap
+    let rawCommunityTrust = null
+    let migratedLegacy = false
+
+    if (parsed.skills && typeof parsed.skills === 'object' && !Array.isArray(parsed.skills)) {
+      // v2 format
+      rawSkillsMap = parsed.skills
+      rawCommunityTrust = parsed.communityTrust && typeof parsed.communityTrust === 'object'
+        ? parsed.communityTrust
+        : null
+    } else {
+      // Detect v1: every top-level value has a `sha256` string.
+      const topLevelKeys = Object.keys(parsed)
+      const looksLikeV1 = topLevelKeys.length === 0 || topLevelKeys.every((k) => {
+        const v = parsed[k]
+        return v && typeof v === 'object' && typeof v.sha256 === 'string' && /^[0-9a-f]{64}$/.test(v.sha256)
+      })
+      if (looksLikeV1 && topLevelKeys.length > 0) {
+        log.info('Trust file is v1 format; migrating to v2 on next flush')
+        rawSkillsMap = parsed
+        migratedLegacy = true
+      } else if (topLevelKeys.length === 0) {
+        // Empty object — treat as v2 with no records
+        rawSkillsMap = {}
+      } else {
+        // Unrecognised shape — fail open
+        log.warn('Trust file has unrecognised shape; starting fresh')
+        return emptyResult
+      }
     }
 
     const out = Object.create(null)
-    for (const [key, value] of Object.entries(parsed)) {
+    for (const [key, value] of Object.entries(rawSkillsMap)) {
       // Defensive: drop any record that lacks the required shape. A
       // partially-corrupt record is treated as missing so the next
       // load re-records cleanly. This matches the "malformed = empty"
@@ -267,7 +322,33 @@ export class SkillsTrustStore {
         }
       }
     }
-    return out
+
+    // Parse community trust indexes from disk (kebab-case on disk → camelCase in memory)
+    const byAuthor = Object.create(null)
+    const byPath = Object.create(null)
+    if (rawCommunityTrust) {
+      const rawByAuthor = rawCommunityTrust['by-author']
+      if (rawByAuthor && typeof rawByAuthor === 'object' && !Array.isArray(rawByAuthor)) {
+        for (const [author, record] of Object.entries(rawByAuthor)) {
+          if (record && typeof record === 'object' && typeof record.grantedAt === 'string') {
+            byAuthor[author] = {
+              grantedAt: record.grantedAt,
+              grantedBy: typeof record.grantedBy === 'string' ? record.grantedBy : 'user',
+            }
+          }
+        }
+      }
+      const rawByPath = rawCommunityTrust['by-path']
+      if (rawByPath && typeof rawByPath === 'object' && !Array.isArray(rawByPath)) {
+        for (const [p, record] of Object.entries(rawByPath)) {
+          if (record && typeof record === 'object' && typeof record.grantedAt === 'string') {
+            byPath[p] = { grantedAt: record.grantedAt }
+          }
+        }
+      }
+    }
+
+    return { records: out, communityTrust: { byAuthor, byPath }, migratedLegacy }
   }
 
   /**
@@ -310,12 +391,26 @@ export class SkillsTrustStore {
     let fd = null
     try {
       mkdirSync(dirname(this._filePath), { recursive: true })
-      // Convert the null-prototype object to a plain object before
-      // serialising; JSON.stringify handles either, but explicit copy
-      // avoids surprises on test-mock comparisons.
-      const out = {}
+      // Convert to v2 shape: { skills: {...}, communityTrust: { "by-author": {...}, "by-path": {...} } }
+      // Null-prototype objects are converted to plain objects before serialisation.
+      const skills = {}
       for (const [k, v] of Object.entries(this._records)) {
-        out[k] = v
+        skills[k] = v
+      }
+      const byAuthorOut = {}
+      for (const [k, v] of Object.entries(this.communityTrust.byAuthor)) {
+        byAuthorOut[k] = v
+      }
+      const byPathOut = {}
+      for (const [k, v] of Object.entries(this.communityTrust.byPath)) {
+        byPathOut[k] = v
+      }
+      const out = {
+        skills,
+        communityTrust: {
+          'by-author': byAuthorOut,
+          'by-path': byPathOut,
+        },
       }
       const payload = JSON.stringify(out, null, 2) + '\n'
 
@@ -424,6 +519,43 @@ export class SkillsTrustStore {
       newHash,
       blocked: this._mode === TRUST_MODE_BLOCK,
     }
+  }
+
+  /**
+   * Check whether a community skill has been granted trust (#3297).
+   *
+   * Returns true when either:
+   *   - `author` is present in the `byAuthor` index (author-level grant), or
+   *   - `realPath` is present in the `byPath` index (path-level grant).
+   *
+   * @param {string} realPath  Absolute realpath of the skill file
+   * @param {string} author    Author name (subdirectory under community/)
+   * @returns {boolean}
+   */
+  isCommunityTrusted(realPath, author) {
+    if (typeof author === 'string' && author && this.communityTrust.byAuthor[author]) return true
+    if (typeof realPath === 'string' && realPath && this.communityTrust.byPath[realPath]) return true
+    return false
+  }
+
+  /**
+   * Grant community trust for a given author (and optionally a specific
+   * realPath) (#3297). Writes both the byAuthor and byPath indexes (when
+   * realPath is provided) then flushes synchronously so the grant survives
+   * a crash.
+   *
+   * @param {string} author  Author name (subdirectory under community/)
+   * @param {{ realPath?: string }} [opts]
+   */
+  grantCommunityTrust(author, { realPath } = {}) {
+    if (typeof author !== 'string' || !author) return
+    const now = new Date().toISOString()
+    this.communityTrust.byAuthor[author] = { grantedAt: now, grantedBy: 'user' }
+    if (typeof realPath === 'string' && realPath) {
+      this.communityTrust.byPath[realPath] = { grantedAt: now }
+    }
+    this._dirty = true
+    this.flush()
   }
 
   /**

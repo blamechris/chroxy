@@ -157,6 +157,23 @@ Object.assign(EVENT_MAP, {
     }
   },
 
+  // #3297: community skill pending first-activation trust grant. Transient —
+  // not replayed on reconnect. Fired when the loader discovers a community
+  // skill for which no trust grant exists yet.
+  skill_trust_request: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'skill_trust_request',
+        skillName: data?.name || '',
+        author: data?.author || '',
+        source: data?.source || 'global',
+        description: data?.description || '',
+        path: data?.path || '',
+        sessionId: ctx.sessionId || null,
+      },
+    }],
+  }),
+
   plan_started: () => ({
     messages: [{ msg: { type: 'plan_started' } }],
   }),
