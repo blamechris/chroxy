@@ -243,6 +243,7 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
 
       const frames = []
       let stdoutBuf = ''
+      let stderrBuf = ''
 
       await new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('streamCliInEnvironment timed out')), STREAM_TIMEOUT)
@@ -262,6 +263,9 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
             }
           }
         })
+
+        // Collect sidecar stderr — includes the per-spawn sentinel line (#3344).
+        proc.stderr.on('data', (chunk) => { stderrBuf += chunk.toString() })
 
         proc.on('exit', () => {
           clearTimeout(timer)
@@ -283,6 +287,13 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
       assert.ok(
         mockEvent,
         `should have received mock-event frame through WS bridge. Frames: ${JSON.stringify(frames)}`
+      )
+
+      // The sidecar must emit a per-spawn sentinel as the first stderr frame (#3344).
+      // This proves the chroxy-pod-agent handled the spawn (not a shorter path).
+      assert.ok(
+        stderrBuf.includes('[chroxy-pod-agent] spawn cmd=node'),
+        `proc.stderr must contain sidecar sentinel line. Got: ${JSON.stringify(stderrBuf)}`
       )
     })
 

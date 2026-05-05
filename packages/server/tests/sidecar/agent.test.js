@@ -281,7 +281,8 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      const msgsPromise = waitForDataMessages(ws, 1)
+      // Wait for 2 data messages: sentinel stderr (seq=1) + event from child stdout.
+      const msgsPromise = waitForDataMessages(ws, 2)
 
       ws.send(JSON.stringify({
         type: 'spawn',
@@ -296,9 +297,10 @@ describe('PodAgent', () => {
       setTimeout(() => controller.writeStdout(JSON.stringify(payload)), 10)
 
       const msgs = await msgsPromise
-      assert.ok(msgs.length >= 1)
-      assert.equal(msgs[0].type, 'event')
-      assert.deepEqual(msgs[0].payload, payload)
+      // Find the event frame — it arrives after the sentinel.
+      const eventFrame = msgs.find((m) => m.type === 'event')
+      assert.ok(eventFrame, `expected an event frame, got ${JSON.stringify(msgs)}`)
+      assert.deepEqual(eventFrame.payload, payload)
 
       ws.close()
     })
@@ -307,16 +309,21 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      const msgsPromise = waitForDataMessages(ws, 1)
+      // Wait for 2 data messages: sentinel (seq=1) + child stderr.
+      const msgsPromise = waitForDataMessages(ws, 2)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
 
       setTimeout(() => controller.writeStderr('error: something went wrong\n'), 10)
 
       const msgs = await msgsPromise
-      assert.ok(msgs.length >= 1)
+      assert.ok(msgs.length >= 2, `expected at least 2 data frames, got ${JSON.stringify(msgs)}`)
+      // First data frame is always the sentinel.
       assert.equal(msgs[0].type, 'stderr')
-      assert.equal(msgs[0].data, 'error: something went wrong\n')
+      assert.match(msgs[0].data, /^\[chroxy-pod-agent\] spawn/, 'first stderr frame must be the sentinel')
+      // Second is the real child stderr.
+      assert.equal(msgs[1].type, 'stderr')
+      assert.equal(msgs[1].data, 'error: something went wrong\n')
 
       ws.close()
     })
@@ -350,6 +357,95 @@ describe('PodAgent', () => {
       assert.ok(msgs.length >= 1)
       assert.equal(msgs[0].type, 'error')
       assert.match(msgs[0].message, /cmd is required/)
+
+      ws.close()
+    })
+
+    // ── sentinel tests (#3344) ──────────────────────────────────────────────
+
+    it('emits sentinel stderr frame as first data frame on every spawn', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      // The sentinel is the very first data frame (seq=1), emitted before any
+      // child output.  waitForDataMessages skips session_started, so msgs[0]
+      // must be the sentinel.
+      const msgsPromise = waitForDataMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: ['--help'] }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'stderr', 'sentinel must be a stderr frame')
+      assert.match(
+        msgs[0].data,
+        /^\[chroxy-pod-agent\] spawn cmd=claude/,
+        `sentinel data must start with [chroxy-pod-agent] spawn cmd=claude, got: ${JSON.stringify(msgs[0].data)}`,
+      )
+      assert.ok(
+        msgs[0].data.includes('"--help"'),
+        `sentinel must include args, got: ${JSON.stringify(msgs[0].data)}`,
+      )
+      assert.ok(
+        msgs[0].data.includes('sessionId='),
+        `sentinel must include sessionId=, got: ${JSON.stringify(msgs[0].data)}`,
+      )
+
+      ws.close()
+    })
+
+    it('sentinel arrives before child stderr', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      // Collect sentinel + real child stderr.
+      const msgsPromise = waitForDataMessages(ws, 2)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'node', args: ['-e', ''] }))
+      // Child stderr arrives 20 ms after spawn — well after the synchronous sentinel.
+      setTimeout(() => controller.writeStderr('real-child-stderr\n'), 20)
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'stderr')
+      assert.match(msgs[0].data, /^\[chroxy-pod-agent\] spawn/, 'first data frame must be sentinel')
+      assert.equal(msgs[1].type, 'stderr')
+      assert.equal(msgs[1].data, 'real-child-stderr\n', 'second data frame must be real child stderr')
+
+      ws.close()
+    })
+
+    it('sentinel includes correct cmd, args, and matching sessionId', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      // waitForMessages(ws, 2) gets session_started + sentinel together.
+      const msgsPromise = waitForMessages(ws, 2)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'node', args: ['-e', 'process.exit(0)'] }))
+
+      const msgs = await msgsPromise
+      const started = msgs.find((m) => m.type === 'session_started')
+      const sentinel = msgs.find((m) => m.type === 'stderr')
+
+      assert.ok(started, 'session_started must be present')
+      assert.ok(sentinel, 'sentinel stderr must be present')
+
+      // Sentinel must contain the spawned cmd, the args, and the same sessionId.
+      assert.ok(sentinel.data.includes('cmd=node'), `sentinel must show cmd=node, got ${sentinel.data}`)
+      assert.ok(sentinel.data.includes('process.exit(0)'), `sentinel must include args, got ${sentinel.data}`)
+      assert.ok(
+        sentinel.data.includes(`sessionId=${started.sessionId}`),
+        `sentinel sessionId must match session_started.sessionId (${started.sessionId}), got ${sentinel.data}`,
+      )
+
+      ws.close()
+    })
+
+    it('sentinel carries seq=1 — it is the first sequenced output frame', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForDataMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].seq, 1, `sentinel must carry seq=1, got seq=${msgs[0].seq}`)
 
       ws.close()
     })
@@ -548,16 +644,19 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      const msgsPromise = waitForDataMessages(ws, 1)
+      // Wait for 2 data messages: sentinel (seq=1) + async error frame.
+      const msgsPromise = waitForDataMessages(ws, 2)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'nonexistent-bin', args: [] }))
 
       // Simulate the async ENOENT-style error Node would emit a tick after spawn.
       setTimeout(() => child.emit('error', Object.assign(new Error('ENOENT'), { code: 'ENOENT' })), 10)
 
       const msgs = await msgsPromise
-      assert.equal(msgs[0].type, 'error')
-      assert.match(msgs[0].message, /spawn failed/)
-      assert.match(msgs[0].message, /ENOENT/)
+      // Find the error frame — sentinel arrives before it.
+      const errFrame = msgs.find((m) => m.type === 'error')
+      assert.ok(errFrame, `expected an error frame, got ${JSON.stringify(msgs)}`)
+      assert.match(errFrame.message, /spawn failed/)
+      assert.match(errFrame.message, /ENOENT/)
 
       ws.close()
     })
@@ -578,12 +677,14 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      // First spawn — ack via stdout line (skip session_started).
-      const firstAck = waitForDataMessages(ws, 1)
+      // First spawn — wait for sentinel + event (skip session_started).
+      const firstAck = waitForDataMessages(ws, 2)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
       setTimeout(() => controller.writeStdout(JSON.stringify({ type: 'assistant' })), 10)
       const firstMsgs = await firstAck
-      assert.equal(firstMsgs[0].type, 'event')
+      // Find the event frame (sentinel is first).
+      const firstEvent = firstMsgs.find((m) => m.type === 'event')
+      assert.ok(firstEvent, `expected an event frame in first spawn ack, got ${JSON.stringify(firstMsgs)}`)
 
       // Second spawn — must be rejected with an error frame, first child untouched.
       const secondAck = waitForDataMessages(ws, 1)
@@ -905,8 +1006,10 @@ describe('PodAgent', () => {
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
       await new Promise((r) => setTimeout(r, 10))
 
-      // Push exactly bufferSize events; the oldest seq still buffered is 1.
-      for (let i = 0; i < 3; i++) {
+      // Push exactly bufferSize - 1 events. The sentinel occupies seq=1, so
+      // the 2 events are seq=2 and seq=3. With bufferSize=3 the buffer holds
+      // all 3 frames (sentinel + 2 events) — no eviction occurs.
+      for (let i = 0; i < 2; i++) {
         controller.writeStdout(JSON.stringify({ idx: i }))
       }
       await new Promise((r) => setTimeout(r, 20))
@@ -923,16 +1026,17 @@ describe('PodAgent', () => {
         try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
       })
 
-      // lastSeq=0 with no eviction (buffer full but starts at seq=1) must
-      // succeed and replay everything.
+      // lastSeq=0 with no eviction (buffer starts at seq=1) must succeed and
+      // replay all 3 buffered frames (sentinel + 2 events).
       ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
       await new Promise((r) => setTimeout(r, 20))
 
       const replayed = ws2Msgs.filter((m) => m.type === 'event')
-      assert.equal(replayed.length, 3, 'all 3 buffered events must replay when no gap')
+      assert.equal(replayed.length, 2, 'all 2 buffered events must replay when no gap')
 
       const resumed = ws2Msgs.find((m) => m.type === 'resumed')
       assert.ok(resumed, 'resumed frame required on successful resume')
+      // sentinel (seq=1) + 2 events (seq=2, seq=3) = 3 replayed frames total.
       assert.equal(resumed.replayedCount, 3)
 
       ws2.close()

@@ -381,6 +381,16 @@ export class PodAgent {
     // Notify the client so it can store the sessionId for future resume.
     this._send(ws, { type: 'session_started', sessionId })
 
+    // Sentinel: emit a recognisable per-spawn stderr frame immediately after
+    // the spawn is accepted so that integration tests can assert the sidecar
+    // code specifically handled the spawn (not a shorter path that bypasses
+    // the agent). The format `[chroxy-pod-agent] spawn cmd=…` is distinct
+    // from real child stderr and stable enough to grep reliably. See #3344.
+    this._emitSessionFrame(session, {
+      type: 'stderr',
+      data: `[chroxy-pod-agent] spawn cmd=${cmd} args=${JSON.stringify(args)} sessionId=${sessionId}\n`,
+    })
+
     // Handle async spawn failures (ENOENT, EACCES) so an unhandled 'error'
     // event does not crash the agent process. Spawn errors arrive after the
     // synchronous spawn() returns, which is why this can't go in the catch
