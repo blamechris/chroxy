@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'events'
+import { PassThrough } from 'stream'
 import { DockerBackend } from '../../../src/environments/backends/docker.js'
 
 /**
@@ -540,6 +542,172 @@ describe('DockerBackend.renameEnvironment()', () => {
     const backend = new DockerBackend({ _execFile: mockExec })
 
     await assert.doesNotReject(() => backend.renameEnvironment('old-ctr', 'new-name'))
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DockerBackend.streamCliInEnvironment — security hardening (parity with
+// docker-sdk-session.js#_createSpawnCallback). Regression guard for #3334.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('DockerBackend.streamCliInEnvironment() security hardening', () => {
+  // Build a fake child + a spawn spy that captures the docker exec invocation.
+  function makeBackendWithSpawnSpy() {
+    let lastSpawn = null
+    const fakeChild = new EventEmitter()
+    fakeChild.stdout = new PassThrough()
+    fakeChild.stderr = new PassThrough()
+    fakeChild.stdin = new PassThrough()
+    fakeChild.killed = false
+    fakeChild.kill = () => { fakeChild.killed = true }
+
+    function fakeSpawn(cmd, args, opts) {
+      lastSpawn = { cmd, args, opts }
+      return fakeChild
+    }
+
+    const backend = new DockerBackend({ _spawn: fakeSpawn })
+    return { backend, getLastSpawn: () => lastSpawn }
+  }
+
+  it('runs as the configured containerUser (docker exec -u <user>)', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node', args: [], containerUser: 'chroxy',
+    })
+
+    const { args } = getLastSpawn()
+    const userIdx = args.indexOf('-u')
+    assert.ok(userIdx >= 0, 'docker exec must include -u flag')
+    assert.equal(args[userIdx + 1], 'chroxy', 'must run as the configured user, never root')
+  })
+
+  it('forwards only allowlisted env vars (FORWARDED_ENV_KEYS)', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: [],
+      env: {
+        ANTHROPIC_API_KEY: 'sk-test',
+        NODE_ENV: 'production',
+        SECRET_TOKEN: 'should-not-leak',
+        AWS_SECRET_ACCESS_KEY: 'should-not-leak',
+        HOME: '/should-not-override',
+      },
+    })
+
+    const { args } = getLastSpawn()
+    const envPairs = []
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--env') envPairs.push(args[i + 1])
+    }
+
+    // Allowlisted: present
+    assert.ok(envPairs.includes('ANTHROPIC_API_KEY=sk-test'), 'ANTHROPIC_API_KEY must be forwarded')
+    assert.ok(envPairs.includes('NODE_ENV=production'), 'NODE_ENV must be forwarded')
+
+    // Non-allowlisted: must NOT appear
+    assert.ok(!envPairs.some(p => p.startsWith('SECRET_TOKEN=')), 'unlisted vars must not leak')
+    assert.ok(!envPairs.some(p => p.startsWith('AWS_SECRET_ACCESS_KEY=')), 'unlisted secrets must not leak')
+
+    // HOME from caller env must not override our explicit value
+    assert.ok(!envPairs.some(p => p === 'HOME=/should-not-override'),
+      'caller-provided HOME must not be forwarded; we set our own')
+  })
+
+  it('sets explicit HOME and PATH for the container user', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node', args: [], containerUser: 'chroxy',
+    })
+
+    const { args } = getLastSpawn()
+    const envPairs = []
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--env') envPairs.push(args[i + 1])
+    }
+
+    assert.ok(envPairs.includes('HOME=/home/chroxy'), 'must set HOME for the container user')
+    assert.ok(envPairs.some(p => p.startsWith('PATH=/usr/local/sbin:/usr/local/bin:')),
+      'must set explicit PATH including container binaries')
+  })
+
+  it('remaps host cli.js path to containerCliPath', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    const hostCliPath = '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+    const containerCliPath = '/opt/installed/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: [hostCliPath, '-p', '--input-format', 'stream-json'],
+      containerCliPath,
+    })
+
+    const { args } = getLastSpawn()
+    // The args after the container ID should start with: node, <containerCliPath>, ...
+    // Find 'node' in args (the cmd)
+    const nodeIdx = args.lastIndexOf('node')
+    assert.ok(nodeIdx >= 0, 'node command must be present in docker exec args')
+    assert.equal(args[nodeIdx + 1], containerCliPath, 'cli.js path must be remapped to container path')
+    assert.ok(!args.includes(hostCliPath), 'host cli.js path must not appear in container exec args')
+  })
+
+  it('falls back to default container CLI path when none provided', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: ['/host/path/@anthropic-ai/claude-code/cli.js'],
+    })
+
+    const { args } = getLastSpawn()
+    const nodeIdx = args.lastIndexOf('node')
+    assert.equal(args[nodeIdx + 1], '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+      'default containerCliPath must be used when none is supplied')
+  })
+
+  it('remaps host cwd to /workspace mount point', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node', args: [],
+      hostCwd: '/home/user/project',
+      cwd: '/home/user/project/src/lib',
+    })
+
+    const { args } = getLastSpawn()
+    const wIdx = args.indexOf('--workdir')
+    assert.ok(wIdx >= 0, '--workdir must be set')
+    assert.equal(args[wIdx + 1], '/workspace/src/lib', 'cwd must be remapped relative to /workspace')
+  })
+
+  it('honors abort signal by killing the child', async () => {
+    const { backend } = makeBackendWithSpawnSpy()
+    const ac = new AbortController()
+
+    const child = backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node', args: [], signal: ac.signal,
+    })
+
+    ac.abort()
+    // Allow the abort listener to fire
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(child.killed, true, 'child must be killed when abort signal fires')
+  })
+
+  it('defaults containerUser to chroxy when not specified', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', { cmd: 'node', args: [] })
+
+    const { args } = getLastSpawn()
+    const userIdx = args.indexOf('-u')
+    assert.equal(args[userIdx + 1], 'chroxy', 'default containerUser must be chroxy (never root)')
   })
 })
 

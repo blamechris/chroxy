@@ -1,33 +1,10 @@
-import { spawn, execFile } from 'child_process'
+import { execFile } from 'child_process'
 import { SdkSession } from './sdk-session.js'
 import { createLogger } from './logger.js'
 import { classifyDockerError } from './docker-session.js'
+import { DockerBackend, FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH } from './environments/backends/docker.js'
 
 const log = createLogger('docker-sdk')
-
-/**
- * Env vars explicitly forwarded into the Docker container.
- * Only vars needed for Claude Code operation — never forward the full host env.
- *
- * This list is intentionally narrower than DockerSession's allowlist.
- * The SDK manages permissions in-process (no external hook HTTP calls),
- * so CLI-specific vars like CHROXY_PORT, CHROXY_HOOK_SECRET,
- * CHROXY_PERMISSION_MODE, and CLAUDE_HEADLESS are not needed.
- * HOME and PATH are set explicitly in _createSpawnCallback() rather
- * than forwarded from the host.
- *
- * See also: FORWARDED_ENV_KEYS in docker-session.js
- */
-const FORWARDED_ENV_KEYS = [
-  'ANTHROPIC_API_KEY',
-  'NODE_ENV',
-]
-
-/**
- * Default container CLI path for globally-installed Claude Code.
- * Resolved dynamically after install; this is the fallback.
- */
-const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 /**
  * Valid POSIX username: starts with lowercase letter or underscore,
@@ -281,11 +258,12 @@ export class DockerSdkSession extends SdkSession {
    * The SDK calls this with SpawnOptions { command, args, cwd, env, signal }
    * and expects a SpawnedProcess (Node ChildProcess satisfies this).
    *
-   * Critical: The SDK passes the HOST's absolute path to cli.js as args[0].
-   * Inside the container that path doesn't exist -- we remap to the container's
-   * installed path.
+   * Delegates to DockerBackend.streamCliInEnvironment so the docker-exec
+   * invocation shape (containerUser, env allowlist, HOME/PATH, cli.js path
+   * remap, stderr logging, abort wiring) has a single source of truth.
    */
   _createSpawnCallback() {
+    const backend = this._backend || (this._backend = new DockerBackend())
     const containerId = this._containerId
     const containerCliPath = this._containerCliPath || DEFAULT_CONTAINER_CLI_PATH
     const containerUser = this._containerUser
@@ -293,67 +271,16 @@ export class DockerSdkSession extends SdkSession {
 
     return (options) => {
       const { command, args, cwd, env, signal } = options
-
-      const dockerArgs = ['exec', '-i', '-u', containerUser]
-
-      // Remap host cwd to container mount point — the SDK passes the host's
-      // absolute path but the container only has /workspace
-      if (cwd) {
-        const containerCwd = cwd.startsWith(hostCwd)
-          ? '/workspace' + cwd.slice(hostCwd.length)
-          : '/workspace'
-        dockerArgs.push('--workdir', containerCwd)
-      }
-
-      // Forward only allowlisted env vars -- never leak the whole host env
-      for (const key of FORWARDED_ENV_KEYS) {
-        const val = env?.[key]
-        if (val !== undefined) {
-          dockerArgs.push('--env', `${key}=${val}`)
-        }
-      }
-
-      // Override HOME and PATH for the container user
-      dockerArgs.push('--env', `HOME=/home/${containerUser}`)
-      dockerArgs.push('--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
-
-      // Remap host paths in args to container paths
-      const containerCommand = command
-      const containerArgs = [...args]
-
-      if (containerArgs.length > 0 && containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
-        log.info(`Remapped CLI path: ${args[0]} -> ${containerCliPath}`)
-        containerArgs[0] = containerCliPath
-      }
-
-      dockerArgs.push(containerId, containerCommand, ...containerArgs)
-
-      log.info(`Docker exec: ${containerId.slice(0, 12)} ${containerCommand} ${containerArgs.slice(0, 2).join(' ')}...`)
-
-      const child = spawn('docker', dockerArgs, {
-        stdio: ['pipe', 'pipe', 'pipe'],
+      return backend.streamCliInEnvironment(containerId, {
+        cmd: command,
+        args,
+        env,
+        cwd,
+        signal,
+        containerUser,
+        containerCliPath,
+        hostCwd,
       })
-
-      // Log stderr for debugging
-      child.stderr.on('data', (chunk) => {
-        const text = chunk.toString().trim()
-        if (text) log.info(`container stderr: ${text}`)
-      })
-
-      // Wire up abort signal — guard against pre-aborted signals
-      if (signal) {
-        if (signal.aborted) {
-          child.kill('SIGTERM')
-        } else {
-          signal.addEventListener('abort', () => {
-            if (!child.killed) {
-              child.kill('SIGTERM')
-            }
-          }, { once: true })
-        }
-      }
-
-      return child
     }
   }
 
@@ -381,5 +308,7 @@ export class DockerSdkSession extends SdkSession {
   }
 }
 
-// Re-export the forwarded env keys and default CLI path for testing
+// Re-export the forwarded env keys and default CLI path for testing.
+// Both are owned by ./environments/backends/docker.js — re-exported here for
+// callers that import from docker-sdk-session.js.
 export { FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH }
