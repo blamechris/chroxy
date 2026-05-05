@@ -6,8 +6,23 @@ const log = createLogger('k8s-backend')
 const POLL_INTERVAL_MS = 1_000
 const DESTROY_TIMEOUT_MS = 30_000
 
+// Per-method deferral tracking: each Phase-1 stub points to the issue/phase that owns it.
+// Keep this in sync with the Backend interface (types.js) and the K8s phase plan in #3191.
+const NOT_IMPLEMENTED_REASON = {
+  createComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
+  destroyComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
+  removeImage: 'N/A for K8s — image lifecycle is owned by the cluster registry/CRI',
+  execInEnvironment: 'deferred to #3192',
+  getEnvironmentStatus: 'deferred to Phase 2',
+  listEnvironments: 'deferred to Phase 2',
+  commitEnvironment: 'deferred to Phase 2',
+  renameEnvironment: 'no-op pending #3313',
+  restoreEnvironment: 'deferred to Phase 2',
+}
+
 function notImplemented(method) {
-  const err = new Error(`K8sBackend.${method} is not implemented in Phase 1 — deferred to #3192`)
+  const reason = NOT_IMPLEMENTED_REASON[method] || 'deferred to a later phase'
+  const err = new Error(`K8sBackend.${method} is not implemented in Phase 1 — ${reason}`)
   err.name = 'NotImplementedError'
   return err
 }
@@ -51,14 +66,15 @@ export class K8sBackend {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // createEnvironment — create a Pod and wait for it to reach Running phase
+  // createEnvironment — create a Pod (returns when the API call is accepted)
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Creates a single-container Pod named `chroxy-env-{envId}`.
    *
-   * Returns as soon as the Pod is accepted by the API (phase Pending or Running).
-   * The caller (EnvironmentManager) is responsible for any further readiness gating.
+   * Returns as soon as `createNamespacedPod` resolves — the Pod has been accepted
+   * by the API server but may not yet be scheduled or Running. The caller
+   * (EnvironmentManager) is responsible for any further readiness gating.
    *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
@@ -116,7 +132,15 @@ export class K8sBackend {
 
   /**
    * Deletes the named Pod and polls until it no longer exists (404).
-   * Idempotent: if the Pod is already gone, resolves immediately with no error.
+   *
+   * Best-effort by design (mirrors `DockerBackend._removeContainer`):
+   *   - Idempotent: if the Pod is already gone (404 on delete), resolves immediately.
+   *   - If `deleteNamespacedPod` fails with a non-404 error, logs a warning and resolves
+   *     without throwing (the env record is removed regardless).
+   *   - The poll loop exits early on the first non-404 read error rather than retrying;
+   *     transient API hiccups during teardown are accepted as "we did our best".
+   *   - Falls through to a timeout warning if the Pod never disappears within
+   *     {@link DESTROY_TIMEOUT_MS}.
    *
    * @param {string} podName - Pod name (the containerId handle stored by EnvironmentManager)
    * @param {Object} [opts]
