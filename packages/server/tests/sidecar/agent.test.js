@@ -938,4 +938,234 @@ describe('PodAgent', () => {
       ws2.close()
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // stdin forwarding (#3329)
+  // ---------------------------------------------------------------------------
+
+  describe('stdin forwarding', () => {
+    let agent, port, child, capturedStdin
+
+    beforeEach(async () => {
+      // Create a mock child with a writable stdin PassThrough so we can assert
+      // what the agent writes into it.
+      child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.stdin = new PassThrough()
+      child.killSignals = []
+      child.kill = (signal) => { child.killSignals.push(signal); return true }
+
+      capturedStdin = []
+      child.stdin.on('data', (chunk) => capturedStdin.push(chunk.toString()))
+
+      const spawnFn = (_cmd, _args, _opts) => child
+      ;({ agent, port } = await startAgent({ spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('forwards stdin frame data to child.stdin', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      ws.send(JSON.stringify({ type: 'stdin', data: '{"prompt":"hello"}\n' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.ok(capturedStdin.length > 0, 'expected at least one stdin chunk')
+      assert.ok(
+        capturedStdin.join('').includes('{"prompt":"hello"}\n'),
+        `expected stdin data forwarded, got: ${JSON.stringify(capturedStdin)}`,
+      )
+
+      ws.close()
+    })
+
+    it('forwards multiple stdin frames in order', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      ws.send(JSON.stringify({ type: 'stdin', data: 'line1\n' }))
+      ws.send(JSON.stringify({ type: 'stdin', data: 'line2\n' }))
+      ws.send(JSON.stringify({ type: 'stdin', data: 'line3\n' }))
+      await new Promise((r) => setTimeout(r, 30))
+
+      const received = capturedStdin.join('')
+      assert.ok(received.includes('line1\n'), `expected line1 in stdin, got: ${received}`)
+      assert.ok(received.includes('line2\n'), `expected line2 in stdin, got: ${received}`)
+      assert.ok(received.includes('line3\n'), `expected line3 in stdin, got: ${received}`)
+
+      ws.close()
+    })
+
+    it('stdin_end closes child.stdin', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      let stdinEnded = false
+      child.stdin.once('end', () => { stdinEnded = true })
+
+      ws.send(JSON.stringify({ type: 'stdin', data: 'some input\n' }))
+      ws.send(JSON.stringify({ type: 'stdin_end' }))
+      await new Promise((r) => setTimeout(r, 30))
+
+      assert.ok(stdinEnded, 'child.stdin should have ended after stdin_end frame')
+
+      ws.close()
+    })
+
+    it('stdin frame before spawn returns error', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'stdin', data: 'hello\n' }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'error')
+      assert.match(msgs[0].message, /no active session/)
+
+      ws.close()
+    })
+
+    it('stdin_end before spawn returns error', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'stdin_end' }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'error')
+      assert.match(msgs[0].message, /no active session/)
+
+      ws.close()
+    })
+
+    it('stdin frame with non-string data returns error', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const msgsPromise = waitForDataMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'stdin', data: 42 }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'error')
+      assert.match(msgs[0].message, /data must be a string/)
+
+      ws.close()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // spawn stdin option (#3329)
+  // ---------------------------------------------------------------------------
+
+  describe('spawn stdin option', () => {
+    let agent, port, capturedOpts
+
+    beforeEach(async () => {
+      const child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.stdin = new PassThrough()
+      child.kill = () => true
+
+      const spawnFn = (_cmd, _args, opts) => {
+        capturedOpts = opts
+        return child
+      }
+      ;({ agent, port } = await startAgent({ spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('defaults to pipe when spawn frame omits stdin field', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.ok(capturedOpts, 'spawn should have been called')
+      assert.equal(capturedOpts.stdio[0], 'pipe', 'default stdin mode must be "pipe"')
+
+      ws.close()
+    })
+
+    it('passes pipe to Node spawn when stdin: pipe is explicit', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], stdin: 'pipe' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.ok(capturedOpts, 'spawn should have been called')
+      assert.equal(capturedOpts.stdio[0], 'pipe', 'explicit stdin: pipe must be forwarded')
+
+      ws.close()
+    })
+
+    it('passes ignore to Node spawn when stdin: ignore is requested', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], stdin: 'ignore' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.ok(capturedOpts, 'spawn should have been called')
+      assert.equal(capturedOpts.stdio[0], 'ignore', 'stdin stdio entry must be "ignore"')
+
+      ws.close()
+    })
+
+    it('silently drops stdin frame when child.stdin is null (ignore mode)', async () => {
+      // Rebuild with a child that has no stdin to simulate the ignore case.
+      await agent.close()
+      const noStdinChild = new EventEmitter()
+      noStdinChild.stdout = new PassThrough()
+      noStdinChild.stderr = new PassThrough()
+      noStdinChild.stdin = null
+      noStdinChild.kill = () => true
+      const spawnFn2 = (_cmd, _args, opts) => {
+        capturedOpts = opts
+        return noStdinChild
+      }
+      ;({ agent, port } = await startAgent({ spawnFn: spawnFn2 }))
+
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], stdin: 'ignore' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Send stdin frame -- should be silently dropped (no error frame).
+      let gotError = false
+      ws.on('message', (d) => {
+        try {
+          const msg = JSON.parse(d.toString())
+          if (msg.type === 'error') gotError = true
+        } catch {}
+      })
+
+      ws.send(JSON.stringify({ type: 'stdin', data: 'test\n' }))
+      await new Promise((r) => setTimeout(r, 50))
+
+      assert.equal(gotError, false, 'must not send error frame for stdin on no-stdin child')
+
+      ws.close()
+    })
+  })
 })
