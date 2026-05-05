@@ -2570,6 +2570,31 @@ describe('skills-loader', () => {
         assert.equal(_isCommunityNamespace(null, '/skills').isCommunity, false)
         assert.equal(_isCommunityNamespace('/skills/community/alice/x.md', null).isCommunity, false)
       })
+
+      // #3301: case-normalisation on HFS+/APFS/NTFS
+      const isCaseInsensitivePlatformCI = process.platform === 'darwin' || process.platform === 'win32'
+
+      it(
+        'detects Community/ (capital C) as community namespace on case-insensitive platforms',
+        { skip: !isCaseInsensitivePlatformCI },
+        () => {
+          const dirReal = '/skills'
+          const result = _isCommunityNamespace('/skills/Community/alice/x.md', dirReal)
+          assert.equal(result.isCommunity, true)
+          assert.equal(result.author, 'alice')
+        },
+      )
+
+      it(
+        'detects COMMUNITY/ (all-caps) as community namespace on case-insensitive platforms',
+        { skip: !isCaseInsensitivePlatformCI },
+        () => {
+          const dirReal = '/skills'
+          const result = _isCommunityNamespace('/skills/COMMUNITY/alice/x.md', dirReal)
+          assert.equal(result.isCommunity, true)
+          assert.equal(result.author, 'alice')
+        },
+      )
     })
 
     // ── Loader integration tests ──
@@ -2906,5 +2931,29 @@ describe('skills-loader', () => {
       assert.equal(skills[0].communityAuthor, 'alice')
       assert.equal(inspectCallCount, 1, 'inspect() must run for trusted community skills (two-pass cache-fast-path)')
     })
+
+    // #3301: walk case-normalisation
+    it(
+      'walk discovers Community/ (capital C) as community namespace on case-insensitive platforms',
+      { skip: !(process.platform === 'darwin' || process.platform === 'win32') },
+      () => {
+        // On HFS+/APFS/NTFS the directory 'Community' (capital C) names the
+        // same inode as 'community' — the walk must match it case-insensitively.
+        mkdirSync(join(communityDir, 'Community', 'alice'), { recursive: true })
+        writeFileSync(
+          join(communityDir, 'Community', 'alice', 'caps.md'),
+          '# Caps skill\n\nBody.\n',
+        )
+
+        const skills = loadActiveSkills(communityDir, {
+          communityTrustChecker: () => true,
+        })
+
+        assert.equal(skills.length, 1, 'skill under Community/ must be discovered')
+        assert.equal(skills[0].name, 'caps')
+        assert.equal(skills[0].trustState, 'trusted')
+        assert.equal(skills[0].communityAuthor, 'alice')
+      },
+    )
   })
 })
