@@ -2730,6 +2730,51 @@ describe('skills-loader', () => {
       assert.equal(pendingCalls.length, 0, 'onCommunityTrustPending must not fire for top-level community.md')
     })
 
+    it('inactive-manual community skill receives trustState + communityAuthor in includeInactive path', () => {
+      // Regression test: when a community skill has `activation: manual` and is
+      // not in activeManualSkills, the inactive-manual early-continue used to
+      // fire before _isCommunityNamespace was called, producing an entry with
+      // no trustState/communityAuthor. The fix hoists _isCommunityNamespace
+      // before the activation check and decorates the inactive entry.
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(
+        join(communityDir, 'community', 'alice', 'manual-skill.md'),
+        '---\nname: manual-skill\nactivation: manual\n---\nBody.\n',
+      )
+
+      // Trusted community, no activeManualSkills → skill is inactive
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        includeInactive: true,
+      })
+      assert.equal(skills.length, 1, 'inactive-manual community skill must appear with includeInactive')
+      assert.equal(skills[0].active, false)
+      assert.equal(skills[0].communityAuthor, 'alice', 'communityAuthor must be set on inactive-manual community entry')
+      assert.equal(skills[0].trustState, 'trusted', 'trustState must be set on inactive-manual community entry')
+    })
+
+    it('inactive-manual community skill receives trustState:pending when author is untrusted (includeInactive)', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(
+        join(communityDir, 'community', 'alice', 'manual-pending.md'),
+        '---\nname: manual-pending\nactivation: manual\n---\nBody.\n',
+      )
+
+      // Untrusted community author + skill is inactive-manual
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        includeInactive: true,
+      })
+      // Should appear exactly once (inactive entry from the manual-inactive path,
+      // NOT a duplicate from the pending-community path — since the activation
+      // check fires first and continues before the trust-checker call)
+      const manual = skills.filter((s) => s.name === 'manual-pending')
+      assert.equal(manual.length, 1, 'untrusted inactive-manual community skill must appear once')
+      assert.equal(manual[0].active, false)
+      assert.equal(manual[0].communityAuthor, 'alice')
+      assert.equal(manual[0].trustState, 'pending')
+    })
+
     it('SKIP_DIRECTORY_NAMES is respected under community/ (e.g. .git skipped)', () => {
       // .git starts with '.' so our hidden-author guard already skips it,
       // but node_modules is also in SKIP_DIRECTORY_NAMES — verify both are skipped.

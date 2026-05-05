@@ -1023,6 +1023,14 @@ export function loadActiveSkills(dir, opts = {}) {
       // installed skills" view doesn't silently drop scoped entries.
       if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
 
+      // #3206 / #3296: community-namespace detection. Resolved early — before
+      // the activation gate — so that inactive-manual community skills also
+      // receive trustState/communityAuthor in the includeInactive path. The
+      // trust-checker call (and onCommunityTrustPending callback) is deferred
+      // to after the activation check: it only fires for active skills, keeping
+      // the existing semantics that inactive skills skip trust inspection.
+      const { isCommunity, author: communityAuthor } = _isCommunityNamespace(realPath, dirReal)
+
       // Manual activation (#3199): skills with `activation: manual` are off
       // by default and require explicit opt-in via `activeManualSkills`.
       // #3209: `includeInactive` keeps inactive manual skills in the
@@ -1038,19 +1046,27 @@ export function loadActiveSkills(dir, opts = {}) {
         // dashboard only needs name + description + metadata to render
         // the toggle, and shipping the body to the WS client when the
         // skill is inactive wastes bandwidth.
+        // Include community fields so the dashboard can render trust-grant
+        // affordances for inactive-manual community skills too.
         const inactive = { name, description, metadata: frontmatter, active: false, path: realPath }
+        if (isCommunity) {
+          inactive.communityAuthor = communityAuthor
+          inactive.trustState = communityTrustChecker
+            ? (communityTrustChecker(realPath, communityAuthor) ? 'trusted' : 'pending')
+            : 'trusted'  // fail-open when no checker (trust-disabled session)
+        }
         if (source) inactive.source = source
         skills.push(inactive)
         continue
       }
 
-      // #3206 / #3296: community-namespace gate. Runs after provider and
-      // activation gates but BEFORE trustStore.inspect(). For skills under
+      // #3206 / #3296: community-namespace trust gate. Runs after the activation
+      // check but BEFORE trustStore.inspect(). For skills under
       // <root>/community/<author>/, the communityTrustChecker decides whether
       // the author is trusted or pending. Pending skills bypass inspect()
       // entirely — they're never injected into prompts until first-activation
       // consent is granted (PR B wires the trust-grant WS flow).
-      const { isCommunity, author: communityAuthor } = _isCommunityNamespace(realPath, dirReal)
+      // NOTE: isCommunity/communityAuthor already resolved above.
       let communityTrustState = null
       if (isCommunity) {
         const trusted = communityTrustChecker
