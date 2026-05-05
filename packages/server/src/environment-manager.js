@@ -260,13 +260,10 @@ export class EnvironmentManager extends EventEmitter {
       await this._backend.renameEnvironment(oldContainerId, `chroxy-env-${envId}-old`)
 
       // Start new container from snapshot BEFORE removing old one.
-      // For restore we only need `docker run` — no user setup or CLI install
-      // because the snapshot image already contains them.  We call the backend's
-      // internal _startContainer directly rather than createEnvironment (which
-      // would re-run setup and fail on a pre-configured snapshot image).
-      // This is intentional: restore is a manager-owned orchestration operation
-      // that requires a lower-level primitive than the full createEnvironment flow.
-      const containerId = await this._backend._startContainer({
+      // Use restoreEnvironment (not createEnvironment) because the snapshot
+      // image already has the user, CLI, and workspace baked in — re-running
+      // full setup would fail on a pre-configured image.
+      const containerId = await this._backend.restoreEnvironment({
         envId,
         cwd: env.cwd,
         image: snap.image,

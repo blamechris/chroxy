@@ -196,3 +196,25 @@
  * @param {string} newName     - New name
  * @returns {Promise<void>} Resolves regardless of success — rename failures are logged only
  */
+
+/**
+ * Start a container from a pre-configured image WITHOUT running user setup or
+ * CLI install.  Used exclusively by the restore flow, where the snapshot image
+ * already has the user, CLI, and workspace baked in.
+ *
+ * This is distinct from createEnvironment (which runs full setup) because
+ * re-running setup on a pre-configured snapshot image would fail or corrupt
+ * the environment.  Backends that do not support snapshotting (e.g. K8sBackend
+ * before snapshots are implemented, #3191) should throw a descriptive error.
+ *
+ * @function restoreEnvironment
+ * @memberof Backend
+ * @param {Object} opts
+ * @param {string} opts.envId        - Environment ID (used to name the container `chroxy-env-{envId}`)
+ * @param {string} opts.cwd          - Host working directory to mount as /workspace
+ * @param {string} opts.image        - Snapshot image tag to run
+ * @param {string} opts.memoryLimit  - Docker memory limit string (e.g. "2g")
+ * @param {string} opts.cpuLimit     - Docker CPU limit string (e.g. "2")
+ * @returns {Promise<string>} The full container ID of the newly-started container
+ * @throws {Error} If the container fails to start
+ */

@@ -174,6 +174,18 @@ export class DockerBackend {
     return this._renameContainer(containerId, newName)
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // restoreEnvironment — start a snapshot image without re-running setup
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * @param {Object} opts - See Backend interface in types.js
+   * @returns {Promise<string>} Full container ID of the newly-started container
+   */
+  restoreEnvironment(opts) {
+    return this._startContainer(opts)
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
   // Private Docker shellout helpers
   // ──────────────────────────────────────────────────────────────────────────

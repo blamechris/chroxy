@@ -46,8 +46,7 @@ function createMockBackend(overrides = {}) {
     listEnvironments: spy([]),
     commitEnvironment: spy('sha256:mock-commit'),
     renameEnvironment: spy(undefined),
-    _startContainer: spy('mock-restore-ctr'),
-    _composeServices: spy([]),
+    restoreEnvironment: spy('mock-restore-ctr'),
     ...overrides,
   }
 }
@@ -281,7 +280,7 @@ describe('EnvironmentManager.snapshot() → backend.commitEnvironment()', () => 
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// restore() — delegates to backend._startContainer, getEnvironmentStatus, destroyEnvironment, renameEnvironment
+// restore() — delegates to backend.restoreEnvironment, getEnvironmentStatus, destroyEnvironment, renameEnvironment
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('EnvironmentManager.restore() → backend methods', () => {
@@ -296,13 +295,13 @@ describe('EnvironmentManager.restore() → backend methods', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('calls renameEnvironment, _startContainer, getEnvironmentStatus, destroyEnvironment in order', async () => {
+  it('calls renameEnvironment, restoreEnvironment, getEnvironmentStatus, destroyEnvironment in order', async () => {
     const callOrder = []
 
     const backend = createMockBackend({
       commitEnvironment: spy('sha256:snap'),
       renameEnvironment: spy((...args) => { callOrder.push('rename'); return Promise.resolve() }),
-      _startContainer: spy((...args) => { callOrder.push('startContainer'); return Promise.resolve('new-restore-ctr') }),
+      restoreEnvironment: spy((...args) => { callOrder.push('restoreEnvironment'); return Promise.resolve('new-restore-ctr') }),
       getEnvironmentStatus: spy((...args) => { callOrder.push('getStatus'); return Promise.resolve(true) }),
       destroyEnvironment: spy((...args) => { callOrder.push('destroy'); return Promise.resolve() }),
     })
@@ -321,7 +320,7 @@ describe('EnvironmentManager.restore() → backend methods', () => {
 
     // Must rename before starting new container
     assert.equal(callOrder[0], 'rename', 'rename must be first')
-    assert.equal(callOrder[1], 'startContainer', 'startContainer must be second')
+    assert.equal(callOrder[1], 'restoreEnvironment', 'restoreEnvironment must be second')
     assert.equal(callOrder[2], 'getStatus', 'getStatus must be third (health check)')
     assert.equal(callOrder[3], 'destroy', 'destroy old container must be last')
   })
@@ -332,7 +331,7 @@ describe('EnvironmentManager.restore() → backend methods', () => {
     const backend = createMockBackend({
       commitEnvironment: spy('sha256:snap'),
       renameEnvironment: spy(undefined),
-      _startContainer: spy(() => Promise.resolve('bad-new-ctr')),
+      restoreEnvironment: spy(() => Promise.resolve('bad-new-ctr')),
       getEnvironmentStatus: spy(() => Promise.resolve(false)),  // health check fails
       destroyEnvironment: spy((cid) => {
         destroyedContainers.push(cid)
