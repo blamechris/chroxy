@@ -1,0 +1,17 @@
+{
+  "name": "chroxy-pod-agent",
+  "version": "0.1.0",
+  "description": "In-pod WS agent sidecar for chroxy K8s environments",
+  "type": "module",
+  "main": "agent.js",
+  "bin": {
+    "chroxy-pod-agent": "agent.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
