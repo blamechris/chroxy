@@ -751,6 +751,10 @@ function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSe
       hashPrefix: typeof s.hashPrefix === 'string' ? s.hashPrefix : undefined,
       firstSeen: typeof s.firstSeen === 'string' ? s.firstSeen : undefined,
       lastVerified: typeof s.lastVerified === 'string' ? s.lastVerified : undefined,
+      // #3298: community-skill trust fields. Only present on community skills;
+      // absent (undefined) for global/repo skills.
+      trustState: s.trustState === 'pending' || s.trustState === 'trusted' ? s.trustState : undefined,
+      communityAuthor: typeof s.communityAuthor === 'string' ? s.communityAuthor : undefined,
     };
   }).filter(s => s.name);
   updateSession(targetId, () => ({ skills }));
