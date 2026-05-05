@@ -35,7 +35,7 @@ probes cannot carry headers).
 
 ## Handshake Sequences
 
-### New Session
+### New Session (non-interactive `-p` mode)
 
 ```
 K8sBackend                       chroxy-pod-agent
@@ -46,10 +46,31 @@ K8sBackend                       chroxy-pod-agent
      │                                  │   reject → 401 (socket end, no WS frame)
      │                                  │   accept → WS connection open
      │                                  │
-     │── { type: 'spawn', ... } ────────▶
+     │── { type: 'spawn', stdin: 'ignore', ... } ──▶
      │◀─ { type: 'session_started', sessionId }
      │◀─ { type: 'event', payload: <object|string>, seq: N }
      │◀─ { type: 'stderr', data: '...', seq: N }
+     │◀─ { type: 'exit', code: 0, seq: N }
+     │                                  │   (WS close follows within 50 ms)
+```
+
+### New Session (stream-json input format)
+
+For `--input-format stream-json` the client must open a `stdin: 'pipe'` session,
+forward NDJSON lines via `stdin` frames, then close stdin with `stdin_end` so
+the child knows the input is complete.
+
+```
+K8sBackend                       chroxy-pod-agent
+     │                                  │
+     │── WS Upgrade (Authorization: Bearer <token>) ──▶
+     │                                  │   accept → WS connection open
+     │                                  │
+     │── { type: 'spawn', stdin: 'pipe', ... } ──▶
+     │◀─ { type: 'session_started', sessionId }
+     │── { type: 'stdin', data: '{"prompt":"hello"}\n' } ──▶
+     │── { type: 'stdin_end' } ──────────▶
+     │◀─ { type: 'event', payload: <object|string>, seq: N }
      │◀─ { type: 'exit', code: 0, seq: N }
      │                                  │   (WS close follows within 50 ms)
 ```
@@ -117,20 +138,59 @@ Start a child process inside the pod.
 
 ```json
 {
-  "type": "spawn",
-  "cmd":  "claude",
-  "args": ["--input-format", "stream-json", "--output-format", "stream-json", "-p"],
-  "env":  { "CLAUDE_HEADLESS": "1" },
-  "cwd":  "/workspace"
+  "type":  "spawn",
+  "cmd":   "claude",
+  "args":  ["--input-format", "stream-json", "--output-format", "stream-json", "-p"],
+  "env":   { "CLAUDE_HEADLESS": "1" },
+  "cwd":   "/workspace",
+  "stdin": "pipe"
 }
 ```
 
-| Field  | Type              | Required | Description                                        |
-|--------|-------------------|----------|----------------------------------------------------|
-| `cmd`  | string            | yes      | Binary to execute                                  |
-| `args` | string[]          | no       | Argument list (default `[]`)                       |
-| `env`  | object (strings)  | no       | Extra env vars merged on top of the agent's env    |
-| `cwd`  | string            | no       | Working directory for the child process             |
+| Field   | Type              | Required | Description                                                  |
+|---------|-------------------|----------|--------------------------------------------------------------|
+| `cmd`   | string            | yes      | Binary to execute                                            |
+| `args`  | string[]          | no       | Argument list (default `[]`)                                 |
+| `env`   | object (strings)  | no       | Extra env vars merged on top of the agent's env              |
+| `cwd`   | string            | no       | Working directory for the child process                       |
+| `stdin` | string            | no       | Child stdin mode: `'pipe'` (default), `'inherit'`, `'ignore'`. Use `'pipe'` for `--input-format stream-json` workflows; use `'ignore'` for fire-and-forget `-p` runs. |
+
+#### `stdin`
+
+Forward a chunk of data into the child's stdin stream.  Must be sent **after**
+`spawn` and **before** the child exits.  Multiple `stdin` frames are written to
+the child's stdin in the order they are received.
+
+```json
+{ "type": "stdin", "data": "{\"prompt\":\"hello\"}\n" }
+```
+
+| Field  | Type   | Required | Description                                              |
+|--------|--------|----------|----------------------------------------------------------|
+| `data` | string | yes      | UTF-8 text to write to child stdin                       |
+
+Sending `stdin` on a connection that has no active session returns an `error`
+frame (`stdin: no active session`).  Sending a frame with a non-string `data`
+field returns `stdin: data must be a string`.
+
+If the child was spawned with `stdin: 'ignore'` or `stdin: 'inherit'`,
+`child.stdin` is `null`; `stdin` frames are **silently dropped** in that case
+(no error is returned) so callers do not need to track the stdin mode.
+
+#### `stdin_end`
+
+Close the write end of the child's stdin pipe (equivalent to EOF).  After this
+the child process will see EOF on its stdin, which for
+`--input-format stream-json` causes `claude` to stop reading and begin
+processing the buffered input.
+
+```json
+{ "type": "stdin_end" }
+```
+
+Sending `stdin_end` before `spawn` returns an `error` frame.  Sending
+additional `stdin` frames after `stdin_end` is idempotent — the underlying
+`stdin.end()` call is a no-op once the stream has already ended.
 
 #### `resume`
 
@@ -453,21 +513,25 @@ replies with `{ type: 'pong' }`.
 
 ## Error Cases
 
-| Condition                           | Agent behaviour                                    |
-|-------------------------------------|----------------------------------------------------|
-| No `Authorization` header           | `401` socket end, no WS frame                      |
-| Wrong token                         | `401` socket end, no WS frame                      |
-| `CHROXY_AGENT_TOKEN` not set        | `401` socket end for all upgrades + startup warn   |
-| Second WS connection                | Auth validated, then `error` frame + close `1008`  |
-| `spawn` without `cmd`               | `error` frame, connection stays open               |
-| `spawn` while child already running | `error` frame, first child unaffected              |
-| Unknown message type                | `error` frame, connection stays open               |
-| Child process spawn failure         | `error` frame, connection stays open               |
-| Invalid JSON frame from client      | `error` frame, connection stays open               |
-| `resume` with unknown sessionId     | `session_lost` frame (`reason: unknown_session`), connection stays open |
-| `resume` with stale lastSeq (gap)   | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
-| `resume` while session has active client | `error` frame + close `1008`                  |
+| Condition                                    | Agent behaviour                                                  |
+|----------------------------------------------|------------------------------------------------------------------|
+| No `Authorization` header                    | `401` socket end, no WS frame                                    |
+| Wrong token                                  | `401` socket end, no WS frame                                    |
+| `CHROXY_AGENT_TOKEN` not set                 | `401` socket end for all upgrades + startup warn                 |
+| Second WS connection                         | Auth validated, then `error` frame + close `1008`                |
+| `spawn` without `cmd`                        | `error` frame, connection stays open                             |
+| `spawn` while child already running          | `error` frame, first child unaffected                            |
+| Unknown message type                         | `error` frame, connection stays open                             |
+| Child process spawn failure                  | `error` frame, connection stays open                             |
+| Invalid JSON frame from client               | `error` frame, connection stays open                             |
+| `resume` with unknown sessionId              | `session_lost` frame (`reason: unknown_session`), connection stays open |
+| `resume` with stale lastSeq (gap)            | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
+| `resume` while session has active client     | `error` frame + close `1008`                                     |
 | stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1000` |
+| `stdin` before `spawn`                       | `error` frame (`stdin: no active session`), connection stays open |
+| `stdin_end` before `spawn`                   | `error` frame (`stdin_end: no active session`), connection stays open |
+| `stdin` with non-string `data`               | `error` frame (`stdin: data must be a string`), connection stays open |
+| `stdin` when child stdin is not piped        | silently dropped (no error frame)                                |
 
 ---
 
@@ -511,6 +575,13 @@ at review time, not silently in CI.
 ---
 
 ## Future Work
+
+**K8sBackend stdin wiring (#3336)**
+
+This PR adds the `stdin` / `stdin_end` frame types to the agent and documents
+the protocol.  The `K8sBackend` client-side plumbing — reading the prompt from
+the SDK session and forwarding it as `stdin` frames — is tracked separately in
+issue #3336.
 
 **Disk-backed session buffer**
 
