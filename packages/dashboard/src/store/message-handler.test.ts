@@ -1484,6 +1484,69 @@ describe('dashboard message-handler dispatch', () => {
         const state = (store.getState() as any).sessionStates.s1
         expect(state.pendingCommunitySkills).toBeUndefined()
       })
+
+      // #3310: description and path are now captured from the wire payload.
+      it('captures description and path when present in the message', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({
+          type: 'skill_trust_request',
+          skillName: 'alice-skill',
+          author: 'alice',
+          description: 'Does useful things',
+          path: '/home/user/.chroxy/skills/community/alice/alice-skill.md',
+          sessionId: 's1',
+        }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{
+          name: 'alice-skill',
+          author: 'alice',
+          description: 'Does useful things',
+          path: '/home/user/.chroxy/skills/community/alice/alice-skill.md',
+        }])
+      })
+
+      it('omits description / path from entry when absent in the message', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_request', skillName: 'alice-skill', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        const entry = state.pendingCommunitySkills[0]
+        expect(entry.description).toBeUndefined()
+        expect(entry.path).toBeUndefined()
+      })
+
+      it('omits description / path when they are empty strings', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({
+          type: 'skill_trust_request',
+          skillName: 'alice-skill',
+          author: 'alice',
+          description: '',
+          path: '',
+          sessionId: 's1',
+        }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        const entry = state.pendingCommunitySkills[0]
+        expect(entry.description).toBeUndefined()
+        expect(entry.path).toBeUndefined()
+      })
     })
 
     // #3298: community trust granted — remove from pendingCommunitySkills.

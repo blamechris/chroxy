@@ -833,6 +833,12 @@ function handleSkillTrustRequest(msg: Record<string, unknown>, get: MsgGet, _set
   const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
   const author = typeof msg.author === 'string' ? msg.author : null;
   if (!skillName || !author) return;
+  // #3310: capture optional description / path from the wire payload so
+  // the SkillsPanel "Pending review" row can surface them for the operator.
+  // Defensive typed — absent or non-string values become undefined so the
+  // type matches PendingCommunitySkill's optional fields.
+  const description = typeof msg.description === 'string' && msg.description ? msg.description : undefined;
+  const path = typeof msg.path === 'string' && msg.path ? msg.path : undefined;
   const targetId = resolveSessionId(msg, get().activeSessionId);
   if (!targetId || !get().sessionStates[targetId]) return;
   updateSession(targetId, (state) => {
@@ -840,7 +846,10 @@ function handleSkillTrustRequest(msg: Record<string, unknown>, get: MsgGet, _set
       ? state.pendingCommunitySkills
       : [];
     if (existing.some(p => p.name === skillName && p.author === author)) return {};
-    return { pendingCommunitySkills: [...existing, { name: skillName, author }] };
+    const entry: PendingCommunitySkill = { name: skillName, author };
+    if (description !== undefined) entry.description = description;
+    if (path !== undefined) entry.path = path;
+    return { pendingCommunitySkills: [...existing, entry] };
   });
 }
 
