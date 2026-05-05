@@ -261,6 +261,7 @@ export function App() {
     thinkingLevel,
     skills: activeSkills,
     mismatchedSkillNames: activeMismatched,
+    pendingCommunitySkills: activePendingCommunitySkills,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -319,6 +320,13 @@ export function App() {
   // flag as false — fail-closed.
   const skillTrustAcceptSupported = useConnectionStore(s =>
     s.connectionPhase === 'connected' && !!s.serverCapabilities?.skillTrustAccept,
+  )
+  // #3298: community-skill first-activation trust grant. Gate on (a)
+  // server capability AND (b) connected socket — same pattern as
+  // skillTrustAcceptSupported above.
+  const grantCommunitySkillTrust = useConnectionStore(s => s.grantCommunitySkillTrust)
+  const skillTrustGrantSupported = useConnectionStore(s =>
+    s.connectionPhase === 'connected' && !!s.serverCapabilities?.skillTrustGrant,
   )
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
@@ -1440,6 +1448,9 @@ export function App() {
           onActivate={activateSkill}
           onDeactivate={deactivateSkill}
           onAcceptTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
+          pendingCommunitySkills={activePendingCommunitySkills}
+          onGrantTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
+          capabilities={{ skillTrustGrant: skillTrustGrantSupported }}
           onClose={() => setSkillsPanelOpen(false)}
         />
       )}

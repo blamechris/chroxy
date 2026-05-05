@@ -358,4 +358,153 @@ describe('SkillsPanel (#3209)', () => {
       expect(btn.getAttribute('aria-label')).toMatch(/accept|trust/i)
     })
   })
+
+  // #3298: "Pending review" section for community skills awaiting
+  // first-activation trust grant. Rendered above Always-on / Manual,
+  // gated on capabilities.skillTrustGrant === true.
+  describe("'Pending review' section (#3298)", () => {
+    it('renders the pending section when capability is true and entries exist', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.getByTestId('skills-panel-pending-section')).toBeInTheDocument()
+    })
+
+    it('does not render the pending section when capability is false', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: false },
+      })
+      expect(screen.queryByTestId('skills-panel-pending-section')).toBeNull()
+    })
+
+    it('does not render the pending section when capabilities is omitted', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        // capabilities intentionally omitted
+      })
+      expect(screen.queryByTestId('skills-panel-pending-section')).toBeNull()
+    })
+
+    it('does not render the pending section when pendingCommunitySkills is empty', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skills-panel-pending-section')).toBeNull()
+    })
+
+    it('does not render the pending section when onGrantTrust is omitted', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        // onGrantTrust intentionally omitted
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skills-panel-pending-section')).toBeNull()
+    })
+
+    it('renders a Trust button per pending entry with correct testid', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [
+          { name: 'skill-a', author: 'alice' },
+          { name: 'skill-b', author: 'bob' },
+        ],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.getByTestId('skill-grant-trust-alice/skill-a')).toBeInTheDocument()
+      expect(screen.getByTestId('skill-grant-trust-bob/skill-b')).toBeInTheDocument()
+    })
+
+    it('calls onGrantTrust(skillName, author) when Trust button is clicked', () => {
+      const onGrantTrust = vi.fn()
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust,
+        capabilities: { skillTrustGrant: true },
+      })
+      fireEvent.click(screen.getByTestId('skill-grant-trust-alice/alice-skill'))
+      expect(onGrantTrust).toHaveBeenCalledTimes(1)
+      expect(onGrantTrust).toHaveBeenCalledWith('alice-skill', 'alice')
+    })
+
+    it('section disappears when pendingCommunitySkills becomes empty', () => {
+      const { rerender } = renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.getByTestId('skills-panel-pending-section')).toBeInTheDocument()
+
+      rerender(
+        <SkillsPanel
+          skills={[]}
+          pendingCommunitySkills={[]}
+          onGrantTrust={vi.fn()}
+          capabilities={{ skillTrustGrant: true }}
+          onActivate={vi.fn()}
+          onDeactivate={vi.fn()}
+          onClose={NOOP}
+        />,
+      )
+      expect(screen.queryByTestId('skills-panel-pending-section')).toBeNull()
+    })
+
+    it('Trust button has an aria-label for screen readers', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const btn = screen.getByTestId('skill-grant-trust-alice/alice-skill')
+      expect(btn).toHaveAttribute('aria-label')
+      expect(btn.getAttribute('aria-label')).toMatch(/trust|alice/i)
+    })
+
+    it('shows author in the skill row', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      // The pending row shows "from: alice"
+      expect(screen.getByText(/from: alice/i)).toBeInTheDocument()
+    })
+
+    it('renders empty state when no skills loaded AND no pending', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [],
+        capabilities: { skillTrustGrant: true },
+        onGrantTrust: vi.fn(),
+      })
+      expect(screen.getByTestId('skills-panel-empty')).toBeInTheDocument()
+    })
+
+    it('does NOT render empty state when there are pending entries (pending section is shown instead)', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skills-panel-empty')).toBeNull()
+      expect(screen.getByTestId('skills-panel-pending-section')).toBeInTheDocument()
+    })
+  })
 })

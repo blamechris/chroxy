@@ -11,11 +11,13 @@
  * #3205: skills metadata (source, version, last-activated, hash) +
  * red-flag indicator on hash mismatch so operators can audit before
  * activating community-shared skills.
+ * #3298: "Pending review" section for community skills awaiting
+ * first-activation trust grant, with a per-row Trust button.
  *
  * Compact native checkboxes — no extra deps. Accessibility comes from
  * the label association.
  */
-import type { SessionSkillInfo } from '../store/types'
+import type { PendingCommunitySkill, SessionSkillInfo } from '../store/types'
 
 export interface SkillsPanelProps {
   skills: SessionSkillInfo[] | undefined
@@ -40,6 +42,21 @@ export interface SkillsPanelProps {
   // resulting `skill_trust_accepted` broadcast clears the flag.
   // Optional so older callers (and pre-#3269 servers) keep working.
   onAcceptTrust?: (skillName: string) => void
+  // #3298: community skills pending first-activation trust grant.
+  // Populated by skill_trust_request events; cleared by
+  // skill_trust_granted. When supplied (and non-empty), the panel
+  // renders a "Pending review" section above Always-on / Manual.
+  pendingCommunitySkills?: PendingCommunitySkill[]
+  // #3298: callback to grant first-activation trust to a community
+  // skill author. Sends skill_trust_grant WS message. Only called
+  // when capabilities?.skillTrustGrant is true — see section gate.
+  onGrantTrust?: (skillName: string, author: string) => void
+  // #3298: server-advertised capabilities. Gates the "Pending review"
+  // section on the server supporting skill_trust_grant (advertised via
+  // auth_ok.capabilities.skillTrustGrant). Older servers without this
+  // capability won't emit skill_trust_request events anyway, so the
+  // section would be empty — but the gate makes the contract explicit.
+  capabilities?: { skillTrustGrant?: boolean }
   onClose: () => void
 }
 
@@ -100,12 +117,22 @@ export function SkillsPanel({
   onActivate,
   onDeactivate,
   onAcceptTrust,
+  pendingCommunitySkills,
+  onGrantTrust,
+  capabilities,
   onClose,
 }: SkillsPanelProps) {
   // Auto skills are always active and live above manual ones (visual
   // hierarchy: "always-on" first, "operator-controlled" below).
   const autoSkills = (skills || []).filter(s => s.activation !== 'manual')
   const manualSkills = (skills || []).filter(s => s.activation === 'manual')
+
+  // #3298: "Pending review" section is gated on the server capability
+  // AND at least one pending entry being present.
+  const showPendingReview = !!capabilities?.skillTrustGrant
+    && !!onGrantTrust
+    && Array.isArray(pendingCommunitySkills)
+    && pendingCommunitySkills.length > 0
 
   // Stable empty Set so call sites without mismatch tracking don't
   // need to construct one — and the .has() check below stays cheap.
@@ -161,10 +188,37 @@ export function SkillsPanel({
         >×</button>
       </div>
 
-      {(!skills || skills.length === 0) && (
+      {(!skills || skills.length === 0) && !showPendingReview && (
         <p className="skills-panel-empty" data-testid="skills-panel-empty">
           No skills loaded for this session.
         </p>
+      )}
+
+      {/* #3298: community skills awaiting first-activation trust grant.
+          Rendered above Always-on / Manual so it appears as a prompt
+          the operator should act on before reviewing the active set. */}
+      {showPendingReview && (
+        <section data-testid="skills-panel-pending-section">
+          <h4>Pending review</h4>
+          <ul className="skills-panel-list">
+            {(pendingCommunitySkills!).map(({ name, author }) => (
+              <li key={`${author}/${name}`} data-testid={`skill-pending-${author}/${name}`}>
+                <div className="skill-row">
+                  <span className="skill-name">{name}</span>
+                  <span className="skill-desc">from: {author}</span>
+                  <button
+                    type="button"
+                    className="skill-accept-trust"
+                    data-testid={`skill-grant-trust-${author}/${name}`}
+                    onClick={() => onGrantTrust!(name, author)}
+                    title={`Grant first-activation trust to community author '${author}'`}
+                    aria-label={`Trust author ${author} for skill ${name}`}
+                  >Trust &apos;{author}&apos;</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {autoSkills.length > 0 && (

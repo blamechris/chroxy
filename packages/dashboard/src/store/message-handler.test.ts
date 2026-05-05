@@ -1425,6 +1425,143 @@ describe('dashboard message-handler dispatch', () => {
         ).not.toThrow()
       })
     })
+
+    // #3298: community skill pending first-activation trust grant.
+    // skill_trust_request adds to pendingCommunitySkills; idempotent.
+    describe('skill_trust_request (#3298)', () => {
+      it('adds entry to pendingCommunitySkills on active session', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_request', skillName: 'alice-skill', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{ name: 'alice-skill', author: 'alice' }])
+      })
+
+      it('is idempotent — duplicate skill_trust_request does not double-add', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_request', skillName: 'alice-skill', author: 'alice', sessionId: 's1' }, ctx() as any)
+        handleMessage({ type: 'skill_trust_request', skillName: 'alice-skill', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toHaveLength(1)
+      })
+
+      it('appends different entries (same author, different skill)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_request', skillName: 'skill-a', author: 'alice', sessionId: 's1' }, ctx() as any)
+        handleMessage({ type: 'skill_trust_request', skillName: 'skill-b', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toHaveLength(2)
+      })
+
+      it('ignores missing skillName or author (no-op, no throw)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        expect(() => handleMessage({ type: 'skill_trust_request', skillName: null, author: 'alice' }, ctx() as any)).not.toThrow()
+        expect(() => handleMessage({ type: 'skill_trust_request', skillName: 'x', author: null }, ctx() as any)).not.toThrow()
+        expect(() => handleMessage({ type: 'skill_trust_request' }, ctx() as any)).not.toThrow()
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toBeUndefined()
+      })
+    })
+
+    // #3298: community trust granted — remove from pendingCommunitySkills.
+    describe('skill_trust_granted (#3298)', () => {
+      it('removes matching entry from pendingCommunitySkills', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, pendingCommunitySkills: [
+              { name: 'skill-a', author: 'alice' },
+              { name: 'skill-b', author: 'alice' },
+            ] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_granted', skillName: 'skill-a', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-b', author: 'alice' }])
+      })
+
+      it('is a no-op for unknown entries (does not throw)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, pendingCommunitySkills: [{ name: 'skill-a', author: 'alice' }] },
+          },
+        }))
+        setStore(store)
+        expect(() =>
+          handleMessage({ type: 'skill_trust_granted', skillName: 'nonexistent', author: 'alice', sessionId: 's1' }, ctx() as any),
+        ).not.toThrow()
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-a', author: 'alice' }])
+      })
+
+      it('ignores missing skillName or author (no-op, no throw)', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, pendingCommunitySkills: [{ name: 'skill-a', author: 'alice' }] },
+          },
+        }))
+        setStore(store)
+        expect(() => handleMessage({ type: 'skill_trust_granted', skillName: null, author: 'alice' }, ctx() as any)).not.toThrow()
+        expect(() => handleMessage({ type: 'skill_trust_granted', skillName: 'skill-a', author: null }, ctx() as any)).not.toThrow()
+
+        const state = (store.getState() as any).sessionStates.s1
+        // List should be unchanged (no valid match)
+        expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-a', author: 'alice' }])
+      })
+    })
+
+    // #3298: skill_trust_grant_ok is a no-op ack — state unchanged.
+    describe('skill_trust_grant_ok (#3298)', () => {
+      it('is a no-op — does not modify session state', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, pendingCommunitySkills: [{ name: 'skill-a', author: 'alice' }] },
+          },
+        }))
+        setStore(store)
+        const stateBefore = (store.getState() as any).sessionStates.s1.pendingCommunitySkills
+
+        expect(() =>
+          handleMessage({ type: 'skill_trust_grant_ok', requestId: 'req-1', sessionId: 's1', skillName: 'skill-a', author: 'alice' }, ctx() as any),
+        ).not.toThrow()
+
+        const stateAfter = (store.getState() as any).sessionStates.s1.pendingCommunitySkills
+        expect(stateAfter).toEqual(stateBefore)
+      })
+    })
   })
 
   // #3100 / #3068: evaluator round-trip resolves the matching pending entry

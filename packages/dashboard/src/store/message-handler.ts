@@ -112,6 +112,7 @@ import type {
   EnvironmentInfo,
   FileEntry,
   McpServer,
+  PendingCommunitySkill,
   QueuedMessage,
   SessionInfo,
   SessionNotification,
@@ -737,6 +738,7 @@ function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSe
   const skills = (msg.skills as Array<Record<string, unknown>>).map(s => {
     const source = s.source === 'global' || s.source === 'repo' ? s.source : undefined;
     const activation = s.activation === 'auto' || s.activation === 'manual' ? s.activation : undefined;
+    const trustState = s.trustState === 'pending' || s.trustState === 'trusted' ? s.trustState : undefined;
     return {
       name: typeof s.name === 'string' ? s.name : '',
       description: typeof s.description === 'string' ? s.description : undefined,
@@ -750,6 +752,10 @@ function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSe
       hashPrefix: typeof s.hashPrefix === 'string' ? s.hashPrefix : undefined,
       firstSeen: typeof s.firstSeen === 'string' ? s.firstSeen : undefined,
       lastVerified: typeof s.lastVerified === 'string' ? s.lastVerified : undefined,
+      // #3298: community-skill trust fields. Only present on community skills;
+      // absent (undefined) for global/repo skills.
+      trustState: trustState as 'pending' | 'trusted' | undefined,
+      communityAuthor: typeof s.communityAuthor === 'string' ? s.communityAuthor : undefined,
     };
   }).filter(s => s.name);
   updateSession(targetId, () => ({ skills }));
@@ -816,6 +822,57 @@ function handleSkillTrustAccepted(msg: Record<string, unknown>, get: MsgGet, _se
     if (!prev.includes(skillName)) return {};
     return { mismatchedSkillNames: prev.filter((n) => n !== skillName) };
   });
+}
+
+// #3298: community skill is awaiting first-activation trust grant. Add
+// an entry to `pendingCommunitySkills` on the active (or target) session
+// so the SkillsPanel "Pending review" section renders a Trust button.
+// Idempotent — duplicate events (e.g. two sessions loading the same
+// community author) are collapsed so the list stays de-duped.
+function handleSkillTrustRequest(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
+  const author = typeof msg.author === 'string' ? msg.author : null;
+  if (!skillName || !author) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => {
+    const existing: PendingCommunitySkill[] = Array.isArray(state.pendingCommunitySkills)
+      ? state.pendingCommunitySkills
+      : [];
+    if (existing.some(p => p.name === skillName && p.author === author)) return {};
+    return { pendingCommunitySkills: [...existing, { name: skillName, author }] };
+  });
+}
+
+// #3298: community skill trust was granted (broadcast to all clients
+// bound to the session). Remove the matching entry from
+// `pendingCommunitySkills` so the "Pending review" row disappears. The
+// server will also refresh skills_list to reflect the newly-trusted skill.
+function handleSkillTrustGranted(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
+  const author = typeof msg.author === 'string' ? msg.author : null;
+  if (!skillName || !author) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => {
+    const existing: PendingCommunitySkill[] = Array.isArray(state.pendingCommunitySkills)
+      ? state.pendingCommunitySkills
+      : [];
+    return {
+      pendingCommunitySkills: existing.filter(
+        p => !(p.name === skillName && p.author === author),
+      ),
+    };
+  });
+}
+
+// #3298: ack sent to the requesting client after a successful
+// skill_trust_grant. No state change needed — the actual update flows
+// through skill_trust_granted (broadcast) and a subsequent skills_list
+// refresh. The handler exists so the message-handler.ts HANDLERS map
+// covers the type and the protocol handler-coverage contract test passes.
+function handleSkillTrustGrantOk(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // intentional no-op — state already updated via skill_trust_granted
 }
 
 function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
@@ -1383,6 +1440,9 @@ const HANDLERS: Record<string, Handler> = {
   skill_activated: handleSkillActivated,
   skill_trust_accepted: handleSkillTrustAccepted,
   skill_deactivated: handleSkillDeactivated,
+  skill_trust_request: handleSkillTrustRequest,
+  skill_trust_granted: handleSkillTrustGranted,
+  skill_trust_grant_ok: handleSkillTrustGrantOk,
   permission_mode_changed: handlePermissionModeChanged,
   available_permission_modes: handleAvailablePermissionModes,
   session_updated: handleSessionUpdated,

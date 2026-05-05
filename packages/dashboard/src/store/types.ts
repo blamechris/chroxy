@@ -258,6 +258,18 @@ export interface SessionSkillInfo {
   // ISO-8601 timestamps from the SkillsTrustStore.
   firstSeen?: string;
   lastVerified?: string;
+  // #3298: community-skill first-activation trust state. Set by the
+  // server loader when the skill lives under community/<author>/. Only
+  // present on community skills; absent for global/repo skills.
+  trustState?: 'pending' | 'trusted';
+  communityAuthor?: string;
+}
+
+// #3298: one pending community skill awaiting first-activation trust
+// grant. Populated by skill_trust_request, cleared by skill_trust_granted.
+export interface PendingCommunitySkill {
+  name: string;
+  author: string;
 }
 
 export interface SessionState extends BaseSessionState {
@@ -284,6 +296,12 @@ export interface SessionState extends BaseSessionState {
   // skills load re-checks hashes, so the loader will re-emit any
   // mismatches that still apply).
   mismatchedSkillNames?: string[];
+  // #3298: community skills pending first-activation trust grant
+  // (skill_trust_request events). Cleared when the operator grants
+  // trust (skill_trust_granted) or on session destruction. Not
+  // persisted across reconnects — the server re-emits trust_request
+  // events each time skills are loaded.
+  pendingCommunitySkills?: PendingCommunitySkill[];
 }
 
 export interface ConnectionState {
@@ -517,6 +535,12 @@ export interface ConnectionState {
   //   - `SKILL_NOT_FOUND` — name doesn't match any loaded skill
   //   - `TRUST_FLUSH_FAILED` — accepted in memory but persist failed
   acceptSkillTrust: (skillName: string) => void;
+  // #3298: grant first-activation trust to a community skill author.
+  // Sends `skill_trust_grant`; the server broadcasts
+  // `skill_trust_granted` (clears the pending row) and then
+  // `skill_trust_grant_ok` (ack to the requesting client). The next
+  // skills_list broadcast reflects the newly-trusted skill.
+  grantCommunitySkillTrust: (skillName: string, author: string) => void;
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
   resize: (cols: number, rows: number) => void;
