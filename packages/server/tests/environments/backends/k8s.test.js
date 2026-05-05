@@ -937,6 +937,21 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
     assert.equal(frame.cwd, '/workspace')
   })
 
+  it('spawn frame always carries stdin: ignore (regression #3398)', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: ['-p'], agentToken: 'tok',
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.type, 'spawn')
+    assert.equal(frame.stdin, 'ignore',
+      'K8sBackend spawn frame must set stdin:ignore so the child does not block on an unowned pipe')
+  })
+
   it('pushes NDJSON line to stdout on event frame', async () => {
     const { backend, controller } = makeBackendWithFakeWs()
     const proc = backend.streamCliInEnvironment('pod-x', {

@@ -1164,7 +1164,7 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
       frame = { type: 'resume', sessionId: proc._sessionId, lastSeq: proc._lastSeq }
       log.info(`Sent resume frame: sessionId=${proc._sessionId} lastSeq=${proc._lastSeq}`)
     } else {
-      frame = { type: 'spawn', cmd, args }
+      frame = { type: 'spawn', cmd, args, stdin: 'ignore' }
       if (env && Object.keys(env).length > 0) frame.env = env
       if (cwd) frame.cwd = cwd
       log.info(`Sent spawn frame: ${cmd} ${args.slice(0, 2).join(' ')}`)
