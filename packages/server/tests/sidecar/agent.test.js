@@ -1369,9 +1369,14 @@ describe('PodAgent', () => {
       await new Promise((r) => setTimeout(r, 30))
 
       const received = capturedStdin.join('')
-      assert.ok(received.includes('line1\n'), `expected line1 in stdin, got: ${received}`)
-      assert.ok(received.includes('line2\n'), `expected line2 in stdin, got: ${received}`)
-      assert.ok(received.includes('line3\n'), `expected line3 in stdin, got: ${received}`)
+      const idx1 = received.indexOf('line1\n')
+      const idx2 = received.indexOf('line2\n')
+      const idx3 = received.indexOf('line3\n')
+      assert.ok(idx1 >= 0, `expected line1 in stdin, got: ${received}`)
+      assert.ok(idx2 >= 0, `expected line2 in stdin, got: ${received}`)
+      assert.ok(idx3 >= 0, `expected line3 in stdin, got: ${received}`)
+      assert.ok(idx1 < idx2, `expected line1 before line2, got offsets ${idx1} ${idx2}`)
+      assert.ok(idx2 < idx3, `expected line2 before line3, got offsets ${idx2} ${idx3}`)
 
       ws.close()
     })
