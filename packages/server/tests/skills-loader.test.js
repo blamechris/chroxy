@@ -11,6 +11,7 @@ import {
   formatSkillsForPrompt,
   groupSkillsByInjectionMode,
   parseFrontmatter,
+  _isCommunityNamespace,
 } from '../src/skills-loader.js'
 import { _compareByPriorityThenName } from '../src/skills-budget.js'
 import { _readFrontmatterOnly } from '../src/skills-frontmatter.js'
@@ -2503,6 +2504,296 @@ describe('skills-loader', () => {
       assert.equal(skills.length, 1, 'exactly one skill should fit under the budget')
       assert.equal(skills[0].name, 'abc',
         'stem tiebreak: "abc" < "abc-extra" — abc.md must win (not abc-extra.md)')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #3206 / #3296: community-namespace gate + community/<author>/ walk
+  // Phase 1 of 3 for the community-skill first-activation prompt.
+  // -----------------------------------------------------------------------
+
+  describe('community-namespace gate (#3206 PR A)', () => {
+    let communityDir
+
+    beforeEach(() => {
+      communityDir = mkdtempSync(join(tmpdir(), 'chroxy-community-'))
+    })
+
+    afterEach(() => {
+      rmSync(communityDir, { recursive: true, force: true })
+    })
+
+    // ── _isCommunityNamespace unit tests ──
+
+    describe('_isCommunityNamespace', () => {
+      it('detects a valid community skill: <root>/community/alice/x.md', () => {
+        const dirReal = '/skills'
+        const realPath = '/skills/community/alice/x.md'
+        const result = _isCommunityNamespace(realPath, dirReal)
+        assert.equal(result.isCommunity, true)
+        assert.equal(result.author, 'alice')
+      })
+
+      it('returns false for a top-level skill: <root>/x.md', () => {
+        const dirReal = '/skills'
+        const realPath = '/skills/x.md'
+        const result = _isCommunityNamespace(realPath, dirReal)
+        assert.equal(result.isCommunity, false)
+        assert.equal(result.author, null)
+      })
+
+      it('returns false for community/skill.md (no author dir)', () => {
+        const dirReal = '/skills'
+        const realPath = '/skills/community/x.md'
+        const result = _isCommunityNamespace(realPath, dirReal)
+        assert.equal(result.isCommunity, false)
+        assert.equal(result.author, null)
+      })
+
+      it('returns false for community/.alice/skill.md (hidden author)', () => {
+        const dirReal = '/skills'
+        const realPath = '/skills/community/.alice/x.md'
+        const result = _isCommunityNamespace(realPath, dirReal)
+        assert.equal(result.isCommunity, false)
+        assert.equal(result.author, null)
+      })
+
+      it('returns false when community is not at the root of the skills dir', () => {
+        const dirReal = '/skills'
+        const realPath = '/skills/foo/community/x.md'
+        const result = _isCommunityNamespace(realPath, dirReal)
+        assert.equal(result.isCommunity, false)
+        assert.equal(result.author, null)
+      })
+
+      it('returns false for non-string inputs', () => {
+        assert.equal(_isCommunityNamespace(null, '/skills').isCommunity, false)
+        assert.equal(_isCommunityNamespace('/skills/community/alice/x.md', null).isCommunity, false)
+      })
+    })
+
+    // ── Loader integration tests ──
+
+    it('tags pending community skills with trustState:pending when communityTrustChecker returns false (includeInactive)', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Test community skill\n\nBody.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        includeInactive: true,
+      })
+
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'test')
+      assert.equal(skills[0].active, false)
+      assert.equal(skills[0].trustState, 'pending')
+      assert.equal(skills[0].communityAuthor, 'alice')
+    })
+
+    it('excludes pending community skills from default-active set (includeInactive: false)', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Community skill\n\nBody.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        includeInactive: false,
+      })
+
+      assert.equal(skills.length, 0, 'pending community skill must not appear in default-active set')
+    })
+
+    it('fires onCommunityTrustPending callback once per pending community skill', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Pending skill\n\nBody.\n')
+
+      const pendingCalls = []
+      loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        onCommunityTrustPending: (info) => pendingCalls.push(info),
+        includeInactive: true,
+      })
+
+      assert.equal(pendingCalls.length, 1, 'callback should be called exactly once')
+      const info = pendingCalls[0]
+      assert.equal(info.name, 'test')
+      assert.equal(info.author, 'alice')
+      assert.ok(typeof info.description === 'string', 'description should be present')
+      assert.ok(typeof info.path === 'string', 'path should be present')
+    })
+
+    it('pending community skill does NOT call trustStore.inspect()', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Community skill\n\nBody.\n')
+
+      let inspectCallCount = 0
+      const stubTrustStore = {
+        mode: 'audit',
+        inspect: (_path, _body) => {
+          inspectCallCount++
+          return null
+        },
+      }
+
+      loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        trustStore: stubTrustStore,
+        includeInactive: true,
+      })
+
+      assert.equal(inspectCallCount, 0, 'inspect() must not be called for pending community skills')
+    })
+
+    it('trusted community skills load normally with trustState:trusted and communityAuthor', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Trusted skill\n\nBody.\n')
+
+      let inspectCallCount = 0
+      const stubTrustStore = {
+        mode: 'audit',
+        inspect: (_path, _body) => {
+          inspectCallCount++
+          return null
+        },
+      }
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        trustStore: stubTrustStore,
+      })
+
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'test')
+      assert.equal(skills[0].active, true)
+      assert.equal(skills[0].trustState, 'trusted')
+      assert.equal(skills[0].communityAuthor, 'alice')
+      assert.equal(inspectCallCount, 1, 'inspect() must run for trusted community skills')
+    })
+
+    it('fail-open without communityTrustChecker: community skill loads as trusted', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Fail-open skill\n\nBody.\n')
+
+      // No communityTrustChecker provided — back-compat / trust-disabled session
+      const skills = loadActiveSkills(communityDir)
+
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'test')
+      assert.equal(skills[0].active, true)
+      assert.equal(skills[0].trustState, 'trusted')
+      assert.equal(skills[0].communityAuthor, 'alice')
+    })
+
+    it('discovers skills from multiple authors (subdirectory walk)', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      mkdirSync(join(communityDir, 'community', 'bob'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'x.md'), '# Alice skill\n\nAlice body.\n')
+      writeFileSync(join(communityDir, 'community', 'bob', 'y.md'), '# Bob skill\n\nBob body.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+      })
+
+      const names = skills.map((s) => s.name).sort()
+      assert.ok(names.includes('x'), 'alice skill x.md must be discovered')
+      assert.ok(names.includes('y'), 'bob skill y.md must be discovered')
+      assert.equal(skills.find((s) => s.name === 'x').communityAuthor, 'alice')
+      assert.equal(skills.find((s) => s.name === 'y').communityAuthor, 'bob')
+    })
+
+    it('depth-1 constraint: community/<author>/sub/z.md is NOT discovered', () => {
+      mkdirSync(join(communityDir, 'community', 'alice', 'sub'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'sub', 'z.md'), '# Deep skill\n\nNested body.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        includeInactive: true,
+      })
+
+      assert.equal(skills.length, 0, 'skills nested deeper than community/<author>/ must not be discovered')
+    })
+
+    it('top-level community.md file is not treated as a community namespace', () => {
+      writeFileSync(join(communityDir, 'community.md'), '# Top-level community skill\n\nJust a regular skill.\n')
+
+      const pendingCalls = []
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        onCommunityTrustPending: (info) => pendingCalls.push(info),
+        includeInactive: true,
+      })
+
+      // The file should load as a normal skill (not community-gated)
+      assert.equal(skills.length, 1, 'community.md should load as a normal top-level skill')
+      assert.equal(skills[0].name, 'community')
+      assert.equal(skills[0].trustState, undefined, 'top-level community.md must not have trustState')
+      assert.equal(skills[0].communityAuthor, undefined, 'top-level community.md must not have communityAuthor')
+      assert.equal(pendingCalls.length, 0, 'onCommunityTrustPending must not fire for top-level community.md')
+    })
+
+    it('inactive-manual community skill receives trustState + communityAuthor in includeInactive path', () => {
+      // Regression test: when a community skill has `activation: manual` and is
+      // not in activeManualSkills, the inactive-manual early-continue used to
+      // fire before _isCommunityNamespace was called, producing an entry with
+      // no trustState/communityAuthor. The fix hoists _isCommunityNamespace
+      // before the activation check and decorates the inactive entry.
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(
+        join(communityDir, 'community', 'alice', 'manual-skill.md'),
+        '---\nname: manual-skill\nactivation: manual\n---\nBody.\n',
+      )
+
+      // Trusted community, no activeManualSkills → skill is inactive
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        includeInactive: true,
+      })
+      assert.equal(skills.length, 1, 'inactive-manual community skill must appear with includeInactive')
+      assert.equal(skills[0].active, false)
+      assert.equal(skills[0].communityAuthor, 'alice', 'communityAuthor must be set on inactive-manual community entry')
+      assert.equal(skills[0].trustState, 'trusted', 'trustState must be set on inactive-manual community entry')
+    })
+
+    it('inactive-manual community skill receives trustState:pending when author is untrusted (includeInactive)', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(
+        join(communityDir, 'community', 'alice', 'manual-pending.md'),
+        '---\nname: manual-pending\nactivation: manual\n---\nBody.\n',
+      )
+
+      // Untrusted community author + skill is inactive-manual
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        includeInactive: true,
+      })
+      // Should appear exactly once (inactive entry from the manual-inactive path,
+      // NOT a duplicate from the pending-community path — since the activation
+      // check fires first and continues before the trust-checker call)
+      const manual = skills.filter((s) => s.name === 'manual-pending')
+      assert.equal(manual.length, 1, 'untrusted inactive-manual community skill must appear once')
+      assert.equal(manual[0].active, false)
+      assert.equal(manual[0].communityAuthor, 'alice')
+      assert.equal(manual[0].trustState, 'pending')
+    })
+
+    it('SKIP_DIRECTORY_NAMES is respected under community/ (e.g. .git skipped)', () => {
+      // .git starts with '.' so our hidden-author guard already skips it,
+      // but node_modules is also in SKIP_DIRECTORY_NAMES — verify both are skipped.
+      mkdirSync(join(communityDir, 'community', '.git'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', '.git', 'config'), '# not a skill')
+      mkdirSync(join(communityDir, 'community', 'node_modules'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'node_modules', 'bad.md'), '# bad')
+      // A valid author dir to confirm the walk itself works
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'good.md'), '# Good skill\n\nBody.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+      })
+
+      const names = skills.map((s) => s.name)
+      assert.ok(names.includes('good'), 'valid community skill should be found')
+      assert.ok(!names.includes('config'), '.git/config must not be loaded as a skill')
+      assert.ok(!names.includes('bad'), 'node_modules/bad.md must not be loaded as a skill')
     })
   })
 })
