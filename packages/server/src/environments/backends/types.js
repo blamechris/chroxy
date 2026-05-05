@@ -1,0 +1,198 @@
+/**
+ * @module environments/backends/types
+ *
+ * Defines the pluggable Backend interface for container environments.
+ *
+ * The EnvironmentManager owns lifecycle state — the in-memory map, persistence,
+ * per-environment mutexes, naming, input validation, and event emission.  The
+ * Backend owns the underlying execution mechanism — Docker shellout today,
+ * Kubernetes API tomorrow (#3191+).
+ *
+ * Backends MUST NOT hold environment state of their own.  Every method receives
+ * all the information it needs on each call via its arguments.  State ownership
+ * stays with EnvironmentManager.
+ *
+ * "Handle" is an opaque identifier that maps to the underlying resource.  For
+ * DockerBackend it is the container ID string returned by `docker run`.  For
+ * compose environments it is the compose project name.  The manager stores the
+ * handle inside the environment record and passes it back on every subsequent
+ * call.
+ */
+
+/**
+ * @interface Backend
+ *
+ * Contract that every backend implementation MUST satisfy.  Implementations
+ * live in sibling files (e.g. docker.js) and are injected into EnvironmentManager
+ * via the `backend` constructor parameter.
+ */
+
+// ─── Method contracts ──────────────────────────────────────────────────────
+
+/**
+ * Start a new standalone (non-compose) container and prepare it for use.
+ *
+ * Responsibilities:
+ *   - Launch the container with the requested resource limits and mounts
+ *   - Create the non-root user inside the container
+ *   - Install Claude Code CLI globally
+ *   - Determine the installed CLI path
+ *   - Run postCreateCommand if provided
+ *   - On any failure after the container starts, stop and remove the container
+ *     before re-throwing so the manager never sees a partially-initialised handle
+ *
+ * @function createEnvironment
+ * @memberof Backend
+ * @param {Object} opts
+ * @param {string}   opts.envId           - Unique environment ID (used to name the container `chroxy-env-{envId}`)
+ * @param {string}   opts.cwd             - Host working directory; mounted as /workspace inside the container
+ * @param {string}   opts.image           - Docker image tag (already resolved to a default before this call)
+ * @param {string}   opts.memoryLimit     - Docker memory limit string (e.g. "2g")
+ * @param {string}   opts.cpuLimit        - Docker CPU limit string (e.g. "2")
+ * @param {string}   opts.containerUser   - Non-root username to create inside the container
+ * @param {Object}   [opts.containerEnv]  - Extra environment variables to inject (already sanitized)
+ * @param {number[]|string[]} [opts.forwardPorts] - Ports to expose from the container
+ * @param {string[]} [opts.mounts]        - Additional volume mounts (already validated)
+ * @param {string}   [opts.postCreateCommand] - Shell command to run after setup completes
+ * @returns {Promise<{ containerId: string, containerCliPath: string }>}
+ *   containerId — the full container ID string returned by the runtime
+ *   containerCliPath — absolute path inside the container where the CLI binary was installed
+ * @throws {Error} If any step fails; the container is cleaned up before throwing
+ */
+
+/**
+ * Start a Docker Compose stack and prepare the primary service container.
+ *
+ * Responsibilities:
+ *   - Run `docker compose up -d` for the given compose file
+ *   - Identify the primary container (by service name or first service)
+ *   - Set up the non-root user and install Claude Code inside the primary container
+ *   - Return the full list of services in the project
+ *   - On any failure, run `docker compose down` before re-throwing
+ *
+ * @function createComposeEnvironment
+ * @memberof Backend
+ * @param {Object} opts
+ * @param {string}  opts.envId           - Unique environment ID
+ * @param {string}  opts.cwd             - Working directory (passed to docker compose as its cwd)
+ * @param {string}  opts.composeFile     - Absolute path to the docker-compose.yml file
+ * @param {string}  opts.composeProject  - Compose project name (e.g. "chroxy-env-{envId}")
+ * @param {string}  opts.containerUser   - Non-root username to create inside the primary container
+ * @param {string}  [opts.primaryService] - Service name to target as the primary; uses first service if omitted
+ * @returns {Promise<{ containerId: string, containerCliPath: string, services: Array<{name: string, status: string, primary: boolean}> }>}
+ *   containerId — container ID of the primary service
+ *   containerCliPath — absolute path to the CLI inside the primary container
+ *   services — metadata for all services in the compose project
+ * @throws {Error} If up, identification, or setup fails; compose stack is torn down before throwing
+ */
+
+/**
+ * Destroy a standalone container environment.
+ *
+ * @function destroyEnvironment
+ * @memberof Backend
+ * @param {string} containerId - Container ID to force-remove (`docker rm -f`)
+ * @returns {Promise<void>} Resolves when the container is removed (or was already gone).
+ *                          Never rejects — removal failures are logged and swallowed.
+ */
+
+/**
+ * Tear down a Docker Compose stack.
+ *
+ * @function destroyComposeEnvironment
+ * @memberof Backend
+ * @param {Object} opts
+ * @param {string} opts.composeFile    - Absolute path to the docker-compose.yml
+ * @param {string} opts.composeProject - Compose project name
+ * @param {string} opts.cwd            - Working directory for docker compose
+ * @returns {Promise<void>} Resolves after `docker compose down --remove-orphans`.
+ *                          Never rejects — failures are logged and swallowed.
+ */
+
+/**
+ * Remove a local Docker image (e.g. a snapshot image created by commitEnvironment).
+ *
+ * @function removeImage
+ * @memberof Backend
+ * @param {string} imageTag - Image tag to remove
+ * @returns {Promise<void>} Resolves when the image is removed (or was already gone).
+ *                          Never rejects — removal failures are logged and swallowed.
+ */
+
+/**
+ * Execute a shell command inside a running container.
+ *
+ * Used by EnvironmentManager for any in-container operation that goes beyond
+ * setup/install (e.g. running a one-off tool command initiated by a session).
+ * The DockerBackend implements this as `docker exec`.
+ *
+ * @function execInEnvironment
+ * @memberof Backend
+ * @param {string} containerId - Container ID
+ * @param {Object} opts
+ * @param {string}   opts.cmd            - Shell command to run (passed as `bash -c <cmd>`)
+ * @param {Object}   [opts.env]          - Extra environment variables for the exec process
+ * @param {string}   [opts.cwd]          - Working directory inside the container
+ * @param {number}   [opts.timeout]      - Timeout in ms (default 30 000)
+ * @returns {Promise<{ stdout: string, stderr: string }>}
+ * @throws {Error} If the command exits non-zero
+ */
+
+/**
+ * Inspect a container and return whether it is currently running.
+ *
+ * Used by reconnect() to check container health after server restart, and by
+ * restore() to validate a newly-started container before removing the old one.
+ *
+ * @function getEnvironmentStatus
+ * @memberof Backend
+ * @param {string} containerId - Container ID to inspect
+ * @returns {Promise<boolean>} true if the container exists and is in the Running state
+ * @throws {Error} If the container does not exist (lets the caller distinguish
+ *                 "not found" from "stopped")
+ */
+
+/**
+ * List all running containers whose names match the `chroxy-env-*` pattern.
+ *
+ * Used by reconcile() to detect orphaned containers that are not tracked in
+ * the environment registry.
+ *
+ * @function listEnvironments
+ * @memberof Backend
+ * @returns {Promise<string[]>} Array of short container IDs
+ * @throws {Error} If the Docker daemon is unreachable (caller must handle)
+ */
+
+/**
+ * Commit a running container to a new local image (snapshot).
+ *
+ * This maps to `docker commit`.  It does not fit neatly into the
+ * create/destroy/exec/status/list quintet because it produces a named artifact
+ * (the image tag) that lives outside the container lifecycle.  It is therefore
+ * a 6th method on the interface rather than being squeezed into an existing one.
+ *
+ * @function commitEnvironment
+ * @memberof Backend
+ * @param {string} containerId - Running container to commit
+ * @param {string} imageTag    - Local image tag to create (e.g. "chroxy-env:{envId}-{timestamp}")
+ * @returns {Promise<string>} The image SHA returned by `docker commit`
+ * @throws {Error} If the commit fails
+ */
+
+/**
+ * Rename a container (used during atomic restore to free the chroxy-env-{envId} name).
+ *
+ * This is an 8th method beyond the standard 5.  It is needed by the atomic
+ * restore flow: before starting the new container under the canonical name, the
+ * old container must be renamed so the name is free.  It does not fit into any
+ * of the other 5 methods and is too low-level to be a composite operation.
+ * Failures are swallowed (logged only) because the rename is best-effort and
+ * the restore can proceed without it.
+ *
+ * @function renameEnvironment
+ * @memberof Backend
+ * @param {string} containerId - Container to rename
+ * @param {string} newName     - New name
+ * @returns {Promise<void>} Resolves regardless of success — rename failures are logged only
+ */

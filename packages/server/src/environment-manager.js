@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'path'
 import { homedir } from 'os'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { DockerBackend } from './environments/backends/docker.js'
 
 const log = createLogger('environment-manager')
 
@@ -14,7 +15,6 @@ const DEFAULT_IMAGE = 'node:22-slim'
 const DEFAULT_MEMORY_LIMIT = '2g'
 const DEFAULT_CPU_LIMIT = '2'
 const DEFAULT_CONTAINER_USER = 'chroxy'
-const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -30,14 +30,19 @@ const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
  * creating sessions with an environmentId.
  */
 export class EnvironmentManager extends EventEmitter {
-  constructor({ statePath, _execFile } = {}) {
+  constructor({ statePath, _execFile, backend } = {}) {
     super()
     this._statePath = statePath || DEFAULT_STATE_PATH
     this._environments = new Map()
     // Per-environment mutex: Map<envId, Promise> — serializes operations
     this._locks = new Map()
-    // Injected for testing — falls back to real execFile
+    // Injected for testing — falls back to real execFile.
+    // _execFile is forwarded to DockerBackend so existing tests that inject a
+    // mock execFile continue to work without modification.
     this._execFile = _execFile || execFile
+    // Pluggable backend — defaults to DockerBackend with the same _execFile
+    // so the existing _execFile test seam still reaches Docker shellouts.
+    this._backend = backend || new DockerBackend({ _execFile: this._execFile })
   }
 
   /**
@@ -105,26 +110,18 @@ export class EnvironmentManager extends EventEmitter {
     const validatedMounts = this._validateMounts(dcConfig.mounts, cwd)
     const validatedEnv = this._sanitizeContainerEnv(dcConfig.containerEnv)
 
-    const containerId = await this._startContainer({
-      envId: id, cwd, image: resolvedImage, memoryLimit: resolvedMemory,
+    const { containerId, containerCliPath } = await this._backend.createEnvironment({
+      envId: id,
+      cwd,
+      image: resolvedImage,
+      memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
+      containerUser: user,
       containerEnv: validatedEnv,
       forwardPorts: dcConfig.forwardPorts,
       mounts: validatedMounts,
+      postCreateCommand: dcConfig.postCreateCommand,
     })
-
-    let containerCliPath
-    try {
-      await this._setupContainer(containerId, user)
-      containerCliPath = await this._discoverCliPath(containerId)
-      if (dcConfig.postCreateCommand) {
-        await this._runPostCreateCommand(containerId, dcConfig.postCreateCommand)
-      }
-    } catch (err) {
-      log.warn(`Environment setup failed, removing container ${containerId.slice(0, 12)}: ${err.message}`)
-      await this._removeContainer(containerId)
-      throw err
-    }
 
     const env = {
       id,
@@ -158,28 +155,14 @@ export class EnvironmentManager extends EventEmitter {
   async _createComposeEnvironment({ id, name, cwd, user, compose, primaryService, composeProject }) {
     log.info(`Creating compose environment "${name}" (id: ${id}, compose: ${compose})`)
 
-    await this._composeUp(compose, composeProject, cwd)
-
-    let containerId
-    try {
-      containerId = await this._composePrimaryContainerId(composeProject, primaryService)
-    } catch (err) {
-      log.warn(`Failed to identify primary container, tearing down: ${err.message}`)
-      await this._composeDown(compose, composeProject, cwd)
-      throw err
-    }
-
-    let containerCliPath
-    try {
-      await this._setupContainer(containerId, user)
-      containerCliPath = await this._discoverCliPath(containerId)
-    } catch (err) {
-      log.warn(`Compose environment setup failed, tearing down: ${err.message}`)
-      await this._composeDown(compose, composeProject, cwd)
-      throw err
-    }
-
-    const services = await this._composeServices(composeProject)
+    const { containerId, containerCliPath, services } = await this._backend.createComposeEnvironment({
+      envId: id,
+      cwd,
+      composeFile: compose,
+      composeProject,
+      containerUser: user,
+      primaryService,
+    })
 
     const env = {
       id,
@@ -227,7 +210,7 @@ export class EnvironmentManager extends EventEmitter {
 
       log.info(`Creating snapshot "${name || snapshotId}" for environment "${env.name}"`)
 
-      await this._commitContainer(env.containerId, imageTag)
+      await this._backend.commitEnvironment(env.containerId, imageTag)
 
       const snap = {
         id: snapshotId,
@@ -274,10 +257,16 @@ export class EnvironmentManager extends EventEmitter {
       const oldContainerId = env.containerId
 
       // Rename old container so the new one can reuse the chroxy-env-{envId} name
-      await this._renameContainer(oldContainerId, `chroxy-env-${envId}-old`)
+      await this._backend.renameEnvironment(oldContainerId, `chroxy-env-${envId}-old`)
 
-      // Start new container from snapshot BEFORE removing old one
-      const containerId = await this._startContainer({
+      // Start new container from snapshot BEFORE removing old one.
+      // For restore we only need `docker run` — no user setup or CLI install
+      // because the snapshot image already contains them.  We call the backend's
+      // internal _startContainer directly rather than createEnvironment (which
+      // would re-run setup and fail on a pre-configured snapshot image).
+      // This is intentional: restore is a manager-owned orchestration operation
+      // that requires a lower-level primitive than the full createEnvironment flow.
+      const containerId = await this._backend._startContainer({
         envId,
         cwd: env.cwd,
         image: snap.image,
@@ -288,7 +277,7 @@ export class EnvironmentManager extends EventEmitter {
       // Health check: verify the new container is running
       let healthy = false
       try {
-        healthy = await this._inspectContainer(containerId)
+        healthy = await this._backend.getEnvironmentStatus(containerId)
       } catch (err) {
         log.warn(`Restore health check inspect failed for container ${containerId.slice(0, 12)}: ${err.message}`)
       }
@@ -296,12 +285,12 @@ export class EnvironmentManager extends EventEmitter {
       if (!healthy) {
         // New container failed — clean it up and preserve the old one
         log.warn(`Restore health check failed for new container ${containerId.slice(0, 12)}, rolling back`)
-        await this._removeContainer(containerId)
+        await this._backend.destroyEnvironment(containerId)
         throw new Error(`Restored container health check failed for environment "${env.name}"`)
       }
 
       // New container is healthy — remove the old one
-      await this._removeContainer(oldContainerId)
+      await this._backend.destroyEnvironment(oldContainerId)
 
       env.containerId = containerId
       env.status = 'running'
@@ -327,15 +316,19 @@ export class EnvironmentManager extends EventEmitter {
       log.info(`Destroying environment "${env.name}" (${envId})`)
 
       if (env.compose && env.composeProject) {
-        await this._composeDown(env.compose, env.composeProject, env.cwd)
+        await this._backend.destroyComposeEnvironment({
+          composeFile: env.compose,
+          composeProject: env.composeProject,
+          cwd: env.cwd,
+        })
       } else if (env.containerId && env.status === 'running') {
-        await this._removeContainer(env.containerId)
+        await this._backend.destroyEnvironment(env.containerId)
       }
 
       // Clean up snapshot images
       if (Array.isArray(env.snapshots)) {
         for (const snap of env.snapshots) {
-          await this._removeImage(snap.image)
+          await this._backend.removeImage(snap.image)
         }
       }
 
@@ -423,7 +416,7 @@ export class EnvironmentManager extends EventEmitter {
         continue
       }
       try {
-        const running = await this._inspectContainer(env.containerId)
+        const running = await this._backend.getEnvironmentStatus(env.containerId)
         if (running) {
           env.status = 'running'
           log.info(`Environment "${env.name}" reconnected (container: ${env.containerId.slice(0, 12)})`)
@@ -452,7 +445,7 @@ export class EnvironmentManager extends EventEmitter {
   async reconcile() {
     let containerIds
     try {
-      containerIds = await this._listChroxyContainers()
+      containerIds = await this._backend.listEnvironments()
     } catch (err) {
       log.warn(`Reconcile: failed to list containers: ${err.message}`)
       return
@@ -469,184 +462,24 @@ export class EnvironmentManager extends EventEmitter {
     log.info(`Reconcile: found ${orphans.length} orphaned container(s), removing`)
     for (const id of orphans) {
       log.info(`Reconcile: removing orphaned container ${id.slice(0, 12)}`)
-      await this._removeContainer(id)
+      await this._backend.destroyEnvironment(id)
     }
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // Docker operations (async wrappers around execFile)
+  // Backward-compat delegation shim
+  //
+  // Tests that call manager._composeServices() directly (graceful degradation
+  // tests) continue to work via this thin delegation to the backend.
+  // No other Docker-specific private methods live here — they have all moved
+  // to DockerBackend in packages/server/src/environments/backends/docker.js.
   // ──────────────────────────────────────────────────────────────────────────
 
-  _startContainer({ envId, cwd, image, memoryLimit, cpuLimit, containerEnv, forwardPorts, mounts }) {
-    return new Promise((resolve, reject) => {
-      const runArgs = [
-        'run', '-d', '--init',
-        '--name', `chroxy-env-${envId}`,
-        '--memory', memoryLimit,
-        '--cpus', cpuLimit,
-        '--pids-limit', '512',
-        '--cap-drop', 'ALL',
-        '--security-opt', 'no-new-privileges',
-        '-v', `${cwd}:/workspace`,
-        '-w', '/workspace',
-      ]
-
-      const apiKey = process.env.ANTHROPIC_API_KEY
-      if (apiKey) {
-        runArgs.push('--env', `ANTHROPIC_API_KEY=${apiKey}`)
-      }
-
-      // DevContainer: extra environment variables
-      if (containerEnv) {
-        for (const [key, value] of Object.entries(containerEnv)) {
-          runArgs.push('--env', `${key}=${value}`)
-        }
-      }
-
-      // DevContainer: port forwards
-      if (forwardPorts) {
-        for (const port of forwardPorts) {
-          runArgs.push('-p', `${port}:${port}`)
-        }
-      }
-
-      // DevContainer: additional mounts
-      if (mounts) {
-        for (const mount of mounts) {
-          runArgs.push('-v', mount)
-        }
-      }
-
-      if (process.platform === 'linux') {
-        runArgs.push('--add-host', 'host.docker.internal:host-gateway')
-      }
-
-      runArgs.push(image, 'sleep', 'infinity')
-
-      this._execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
-        if (err) {
-          reject(new Error(stderr ? stderr.trim() : err.message))
-          return
-        }
-        resolve(stdout.trim())
-      })
-    })
-  }
-
-  _setupContainer(containerId, user) {
-    return new Promise((resolve, reject) => {
-      const setupCmd = [
-        `useradd -m -s /bin/bash ${user}`,
-        `chown ${user}:${user} /workspace`,
-      ].join(' && ')
-
-      this._execFile('docker', [
-        'exec', containerId, 'bash', '-c', setupCmd,
-      ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
-        if (err) reject(new Error(`Failed to create container user: ${err.message}`))
-        else resolve()
-      })
-    })
-  }
-
-  _installClaudeCode(containerId) {
-    return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'exec', containerId, 'npm', 'install', '-g', '@anthropic-ai/claude-code',
-      ], { encoding: 'utf-8', timeout: 120_000 }, (err) => {
-        if (err) reject(new Error(`Failed to install Claude Code: ${err.message}`))
-        else resolve()
-      })
-    })
-  }
-
-  async _discoverCliPath(containerId) {
-    await this._installClaudeCode(containerId)
-
-    return new Promise((resolve) => {
-      this._execFile('docker', [
-        'exec', containerId, 'npm', 'prefix', '-g',
-      ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
-        if (!err && stdout?.trim()) {
-          resolve(`${stdout.trim()}/lib/node_modules/@anthropic-ai/claude-code/cli.js`)
-        } else {
-          log.warn('Could not determine CLI path, using default')
-          resolve(DEFAULT_CONTAINER_CLI_PATH)
-        }
-      })
-    })
-  }
-
-  _commitContainer(containerId, imageTag) {
-    return new Promise((resolve, reject) => {
-      this._execFile('docker', ['commit', containerId, imageTag], { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
-        if (err) {
-          reject(new Error(stderr ? stderr.trim() : err.message))
-          return
-        }
-        resolve(stdout.trim())
-      })
-    })
-  }
-
-  _renameContainer(containerId, newName) {
-    return new Promise((resolve) => {
-      this._execFile('docker', ['rename', containerId, newName], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
-        if (err) log.warn(`Failed to rename container ${containerId.slice(0, 12)}: ${err.message}`)
-        resolve()
-      })
-    })
-  }
-
-  _removeContainer(containerId) {
-    return new Promise((resolve) => {
-      this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
-        if (err) log.warn(`Failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
-        resolve()
-      })
-    })
-  }
-
-  _removeImage(imageTag) {
-    return new Promise((resolve) => {
-      this._execFile('docker', ['rmi', imageTag], { stdio: 'ignore' }, (err) => {
-        if (err) log.warn(`Failed to remove image ${imageTag}: ${err.message}`)
-        resolve()
-      })
-    })
-  }
-
-  _inspectContainer(containerId) {
-    return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'inspect', '--format', '{{.State.Running}}', containerId,
-      ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
-        if (err) {
-          reject(err)
-          return
-        }
-        resolve(stdout.trim() === 'true')
-      })
-    })
-  }
-
   /**
-   * List all running chroxy-env-* container IDs.
-   * Used by reconcile() to detect orphaned containers.
+   * @deprecated Call via this._backend instead.  Kept for test backward-compat.
    */
-  _listChroxyContainers() {
-    return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'ps', '-q', '--filter', 'name=chroxy-env',
-      ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
-        if (err) {
-          reject(new Error(err.message))
-          return
-        }
-        const ids = stdout.trim().split('\n').filter(Boolean)
-        resolve(ids)
-      })
-    })
+  _composeServices(project) {
+    return this._backend._composeServices(project)
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -796,112 +629,6 @@ export class EnvironmentManager extends EventEmitter {
     }
 
     return hasKeys ? sanitized : undefined
-  }
-
-  /**
-   * Run a postCreateCommand inside a container via docker exec.
-   */
-  _runPostCreateCommand(containerId, command) {
-    return new Promise((resolve, reject) => {
-      log.info(`Running postCreateCommand: ${command}`)
-      this._execFile('docker', [
-        'exec', containerId, 'bash', '-c', command,
-      ], { encoding: 'utf-8', timeout: 120_000 }, (err) => {
-        if (err) reject(new Error(`postCreateCommand failed: ${err.message}`))
-        else resolve()
-      })
-    })
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // Docker Compose operations
-  // ──────────────────────────────────────────────────────────────────────────
-
-  _composeUp(composeFile, project, cwd) {
-    return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'compose', '-f', composeFile, '-p', project, 'up', '-d',
-      ], { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
-        if (err) {
-          reject(new Error(stderr ? stderr.trim() : err.message))
-          return
-        }
-        resolve()
-      })
-    })
-  }
-
-  _composeDown(composeFile, project, cwd) {
-    return new Promise((resolve) => {
-      this._execFile('docker', [
-        'compose', '-f', composeFile, '-p', project, 'down', '--remove-orphans',
-      ], { encoding: 'utf-8', timeout: 30_000, cwd }, (err) => {
-        if (err) log.warn(`docker compose down failed: ${err.message}`)
-        resolve()
-      })
-    })
-  }
-
-  /**
-   * Find the primary container ID in a compose project.
-   * Uses primaryService if specified, otherwise picks the first service.
-   */
-  _composePrimaryContainerId(project, primaryService) {
-    return new Promise((resolve, reject) => {
-      const args = ['compose', '-p', project, 'ps', '--format', 'json']
-      if (primaryService) args.push(primaryService)
-
-      this._execFile('docker', args, { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
-        if (err) {
-          reject(new Error(`Failed to list compose containers: ${err.message}`))
-          return
-        }
-        // docker compose ps --format json outputs one JSON object per line
-        const lines = stdout.trim().split('\n').filter(Boolean)
-        if (lines.length === 0) {
-          reject(new Error('No running containers found in compose project'))
-          return
-        }
-        try {
-          const container = JSON.parse(lines[0])
-          resolve(container.ID || container.Id)
-        } catch {
-          reject(new Error('Failed to parse compose container info'))
-        }
-      })
-    })
-  }
-
-  /**
-   * List all services in a compose project with their status.
-   */
-  _composeServices(project) {
-    return new Promise((resolve) => {
-      this._execFile('docker', [
-        'compose', '-p', project, 'ps', '--format', 'json',
-      ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
-        if (err) {
-          log.warn(`Failed to list compose services for project "${project}": ${err.message}`)
-          resolve([])
-          return
-        }
-        try {
-          const lines = stdout.trim().split('\n').filter(Boolean)
-          const services = lines.map(line => {
-            const c = JSON.parse(line)
-            return {
-              name: c.Service || c.Name,
-              status: c.State || 'unknown',
-              primary: false,
-            }
-          })
-          resolve(services)
-        } catch (parseErr) {
-          log.warn(`Failed to parse compose services for project "${project}": ${parseErr.message}`)
-          resolve([])
-        }
-      })
-    })
   }
 
   // ──────────────────────────────────────────────────────────────────────────
