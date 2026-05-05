@@ -754,12 +754,28 @@ export class K8sBackend {
  * Exposes:
  *   - `stdout` {PassThrough} — receives data pushed via `event` WS frames
  *   - `stderr` {PassThrough} — receives data pushed via `stderr` WS frames
- *   - `stdin`  {PassThrough} — writes here are forwarded to the child (future)
+ *   - `stdin`  {PassThrough} — writes here are forwarded to the sidecar as
+ *                              `stdin` / `stdin_end` WS frames (#3336)
  *   - `'exit'` event (code)  — emitted when the `exit` WS frame arrives or on error
  *
  * On unexpected WS disconnect the process attempts to reconnect with exponential
  * backoff (#3321). The redial function is injected via `proc._redial` after
  * construction by `K8sBackend.streamCliInEnvironment`.
+ *
+ * ### stdin forwarding and reconnect semantics
+ *
+ * `stdin` frames are NOT buffered by the agent's ring buffer and are NOT
+ * replayed on resume.  A reconnect (`resume` frame) picks up output from where
+ * the client left off — it does NOT re-send stdin.  Callers must NOT replay
+ * stdin data after a reconnect; doing so would cause the in-pod child to
+ * receive duplicate input.
+ *
+ * ### stdin write before WS is open
+ *
+ * Writes that arrive before the WS dial resolves are held in `_stdinBuffer`
+ * (an array of Buffer chunks) and flushed as `stdin` frames when `_wireStdin`
+ * is called by `_wireWsToProc` after the connection opens.  If the process is
+ * killed or exits before the dial resolves, the buffer is discarded silently.
  */
 class SidecarProcess extends EventEmitter {
   /**
@@ -785,6 +801,32 @@ class SidecarProcess extends EventEmitter {
     this._sessionId = null   // set by _wireWsToProc when session_started arrives
     this._lastSeq = 0        // last seq number seen from the sidecar
     this._redial = null      // injected by K8sBackend.streamCliInEnvironment
+
+    // stdin forwarding (#3336): buffer writes that arrive before the WS opens.
+    // Once _wireStdin() is called the buffer is flushed and subsequent writes
+    // go directly to the live WS.
+    this._stdinBuffer = []       // Array<Buffer> — pre-dial write buffer
+    this._stdinWired = false     // true once _wireStdin() has been called
+    this._stdinEnded = false     // true once stdin 'end' has fired
+
+    // Accumulate stdin data until the WS is ready.
+    this.stdin.on('data', (chunk) => {
+      if (this._stdinWired) {
+        // _wireStdin() already flushed and replaced this handler — should not
+        // reach here, but guard defensively.
+        return
+      }
+      this._stdinBuffer.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    })
+
+    this.stdin.on('end', () => {
+      this._stdinEnded = true
+      if (this._stdinWired) {
+        // WS is live — send stdin_end frame if WS is still open.
+        _sendStdinEnd(this._ws)
+      }
+      // If not yet wired, _wireStdin() will send stdin_end after flushing.
+    })
   }
 
   kill(signal = 'SIGTERM') {
@@ -932,12 +974,22 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
       frame = { type: 'resume', sessionId: proc._sessionId, lastSeq: proc._lastSeq }
       log.info(`Sent resume frame: sessionId=${proc._sessionId} lastSeq=${proc._lastSeq}`)
     } else {
-      frame = { type: 'spawn', cmd, args }
+      // Always request a piped stdin channel so the consumer can write user
+      // turns as NDJSON (--input-format stream-json workflow). Matches the
+      // sidecar protocol default introduced by #3329.
+      frame = { type: 'spawn', cmd, args, stdin: 'pipe' }
       if (env && Object.keys(env).length > 0) frame.env = env
       if (cwd) frame.cwd = cwd
       log.info(`Sent spawn frame: ${cmd} ${args.slice(0, 2).join(' ')}`)
     }
     ws.send(JSON.stringify(frame))
+    // Wire proc.stdin → WS after the first frame is sent so the agent has
+    // already opened a piped stdin channel before we forward any data.
+    // On reconnect we do NOT re-wire — stdin forwarding is not resumed
+    // (see class-level JSDoc on resume semantics).
+    if (!isReconnect) {
+      _wireStdin(ws, proc)
+    }
   }
 
   if (ws.readyState === WebSocket.OPEN) {
@@ -1067,6 +1119,79 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     } else {
       signal.addEventListener('abort', onAbort, { once: true })
     }
+  }
+}
+
+// ─── stdin forwarding helpers (#3336) ────────────────────────────────────────
+
+/**
+ * Flush the pre-dial stdin buffer and wire future writes to the live WS.
+ *
+ * Called once by `_wireWsToProc` immediately after the spawn frame is sent.
+ * Removes the accumulator `data` listener from `proc.stdin`, replaces it with
+ * a live-forwarding listener, flushes any buffered chunks, and sends
+ * `stdin_end` if the stream already ended while we were dialling.
+ *
+ * This function is intentionally NOT called on reconnect because stdin frames
+ * are not replayed by the agent's ring buffer.  The consumer must not send
+ * the same stdin bytes twice.
+ *
+ * @param {WebSocket} ws
+ * @param {SidecarProcess} proc
+ */
+function _wireStdin(ws, proc) {
+  // Mark as wired first to suppress the accumulator listener's fallthrough.
+  proc._stdinWired = true
+
+  // Replace the accumulator with a live-forwarding listener.
+  // Remove all 'data' listeners that the constructor added (there should be
+  // only the one accumulator, but removeAllListeners scopes to this event).
+  proc.stdin.removeAllListeners('data')
+  proc.stdin.on('data', (chunk) => {
+    if (ws.readyState !== WebSocket.OPEN) {
+      // WS closed mid-stream. Emit an error on proc so the consumer knows
+      // stdin writes are being dropped, then swallow silently afterwards.
+      proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      // Stop forwarding — remove this listener so further writes are silent.
+      proc.stdin.removeAllListeners('data')
+      return
+    }
+    try {
+      const data = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+      ws.send(JSON.stringify({ type: 'stdin', data }))
+    } catch (err) {
+      log.warn(`SidecarProcess: failed to send stdin frame: ${err.message}`)
+    }
+  })
+
+  // Flush buffered chunks accumulated before the WS opened.
+  for (const chunk of proc._stdinBuffer) {
+    if (ws.readyState !== WebSocket.OPEN) break
+    try {
+      ws.send(JSON.stringify({ type: 'stdin', data: chunk.toString('utf8') }))
+    } catch (err) {
+      log.warn(`SidecarProcess: failed to flush buffered stdin frame: ${err.message}`)
+    }
+  }
+  proc._stdinBuffer = []  // release memory
+
+  // stdin may have already ended while we were buffering.
+  if (proc._stdinEnded) {
+    _sendStdinEnd(ws)
+  }
+}
+
+/**
+ * Send a `stdin_end` frame over the WS if the connection is still open.
+ *
+ * @param {WebSocket|null} ws
+ */
+function _sendStdinEnd(ws) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return
+  try {
+    ws.send(JSON.stringify({ type: 'stdin_end' }))
+  } catch (err) {
+    log.warn(`SidecarProcess: failed to send stdin_end frame: ${err.message}`)
   }
 }
 

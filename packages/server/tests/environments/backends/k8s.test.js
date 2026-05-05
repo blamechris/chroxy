@@ -1725,3 +1725,212 @@ describe('SidecarProcess session_lost reasons', () => {
       'buffer_overflow session_lost must surface as exit(-2) (unrecoverable)')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess stdin wiring (#3336)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess stdin wiring (#3336)', () => {
+  function makeBackendWithFakeWs() {
+    const { ws, controller } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+    return { backend, ws, controller }
+  }
+
+  it('spawn frame includes stdin:"pipe"', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: ['-p'], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    const spawnFrame = JSON.parse(ws.sent[0])
+    assert.equal(spawnFrame.type, 'spawn')
+    assert.equal(spawnFrame.stdin, 'pipe',
+      'spawn frame must include stdin:"pipe" for stream-json workflow')
+  })
+
+  it('writing to proc.stdin sends a stdin frame over WS', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: ['-p'], agentToken: 'tok',
+    })
+
+    // Wait for dial + spawn frame
+    await new Promise(r => setImmediate(r))
+
+    proc.stdin.write('{"prompt":"hello"}\n')
+
+    // Give the data event a chance to fire
+    await new Promise(r => setImmediate(r))
+
+    // ws.sent[0] = spawn frame, ws.sent[1] = stdin frame
+    assert.ok(ws.sent.length >= 2, 'WS should have a stdin frame after the spawn frame')
+    const stdinFrame = JSON.parse(ws.sent[1])
+    assert.equal(stdinFrame.type, 'stdin')
+    assert.equal(stdinFrame.data, '{"prompt":"hello"}\n')
+  })
+
+  it('ending proc.stdin sends a stdin_end frame over WS', async () => {
+    const { backend, ws } = makeBackendWithFakeWs()
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: ['-p'], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    proc.stdin.write('{"prompt":"hi"}\n')
+    proc.stdin.end()
+
+    await new Promise(r => setImmediate(r))
+
+    const frames = ws.sent.map(s => JSON.parse(s))
+    const stdinEndFrame = frames.find(f => f.type === 'stdin_end')
+    assert.ok(stdinEndFrame, 'stdin_end frame must be sent when proc.stdin ends')
+  })
+
+  it('writes before WS opens are buffered and flushed on open', async () => {
+    // Dial returns a WS that is NOT yet open (readyState=0) — open fires async.
+    const { ws: realWs, controller } = createFakeWs()
+    // Simulate a WS that starts in CONNECTING state.
+    const pendingOpenListeners = []
+    const connectingWs = {
+      readyState: 0,  // CONNECTING
+      sent: realWs.sent,
+      send: (data) => realWs.sent.push(data),
+      close: realWs.close,
+      once: (ev, fn) => {
+        if (ev === 'open') {
+          pendingOpenListeners.push(fn)
+        } else {
+          realWs.once(ev, fn)
+        }
+      },
+      on: (ev, fn) => realWs.on(ev, fn),
+    }
+
+    const api = createMockApi()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(connectingWs),
+    })
+    backend._agentTokens.set('pod-x', 'tok')
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    // Write before the WS fires 'open' — should be buffered.
+    proc.stdin.write('line1\n')
+    proc.stdin.write('line2\n')
+
+    // Sanity: no frames sent yet (WS not open)
+    await new Promise(r => setImmediate(r))
+    assert.equal(connectingWs.sent.length, 0,
+      'no frames should be sent while WS is still connecting')
+
+    // Open the WS — triggers spawn + stdin flush.
+    connectingWs.readyState = 1  // OPEN
+    for (const fn of pendingOpenListeners) fn()
+
+    await new Promise(r => setImmediate(r))
+
+    const frames = connectingWs.sent.map(s => JSON.parse(s))
+    const stdinFrames = frames.filter(f => f.type === 'stdin')
+    assert.equal(stdinFrames.length, 2,
+      'both buffered stdin chunks should be flushed after WS opens')
+    assert.equal(stdinFrames[0].data, 'line1\n')
+    assert.equal(stdinFrames[1].data, 'line2\n')
+  })
+
+  it('emits error on proc when WS closes mid-stdin-write', async () => {
+    const { backend, ws, controller } = makeBackendWithFakeWs()
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    // Simulate WS closing while stdin is still open
+    controller.triggerClose(1006)
+    await new Promise(r => setImmediate(r))
+
+    // Mark WS as closed so the live listener sees it
+    ws.readyState = 3  // CLOSED
+
+    const errors = []
+    proc.on('error', (err) => errors.push(err))
+
+    // Write to stdin after WS is gone — should emit error
+    proc.stdin.write('data after close\n')
+
+    await new Promise(r => setImmediate(r))
+
+    assert.ok(errors.length > 0, 'proc should emit error when WS is closed during stdin write')
+    assert.ok(errors[0].message.includes('WS closed'), 'error message should mention WS closed')
+  })
+
+  it('stdin frames are NOT forwarded on the reconnect WS (resume semantics)', async () => {
+    // Verify that _wireStdin is NOT called on a reconnect path: the second WS
+    // (ws2) should receive only a `resume` frame, never a `stdin` frame, even
+    // if the consumer writes to proc.stdin after reconnection.
+    const { ws: ws1, controller: ctrl1 } = createFakeWs()
+    const { ws: ws2, controller: ctrl2 } = createFakeWs()
+
+    let dialCount = 0
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        dialCount += 1
+        return Promise.resolve(dialCount === 1 ? ws1 : ws2)
+      },
+      _reconnectDelays: [10],
+      _maxRetries: 5,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    // Attach a no-op error handler so any emitted errors don't throw.
+    proc.on('error', () => {})
+
+    // Wait for initial dial + spawn frame on ws1
+    await new Promise(r => setImmediate(r))
+
+    // Establish a session via session_started so proc._sessionId is set.
+    ctrl1.receive(JSON.stringify({ type: 'session_started', sessionId: 'rsid-1' }))
+    await new Promise(r => setImmediate(r))
+
+    // Trigger an unexpected WS close to kick off reconnect to ws2.
+    ctrl1.triggerClose(1006)
+
+    // Wait for the reconnect timer (10 ms) + dial + resume frame.
+    await new Promise(r => setTimeout(r, 30))
+
+    // ws2 should have received exactly one frame: the resume frame.
+    const ws2Frames = ws2.sent.map(s => JSON.parse(s))
+    assert.equal(ws2Frames.length, 1, 'reconnect WS should receive only the resume frame')
+    assert.equal(ws2Frames[0].type, 'resume',
+      'first frame on reconnect WS must be resume, not spawn')
+
+    // Write to stdin AFTER reconnect — it should NOT appear on ws2.
+    proc.stdin.write('should not be forwarded on reconnect WS\n')
+    await new Promise(r => setImmediate(r))
+
+    const ws2FramesAfter = ws2.sent.map(s => JSON.parse(s))
+    const stdinOnReconnect = ws2FramesAfter.filter(f => f.type === 'stdin')
+    assert.equal(stdinOnReconnect.length, 0,
+      'stdin frames must NOT be forwarded on a reconnect WS — resume picks up output only')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})
