@@ -1212,7 +1212,6 @@ describe('K8sBackend Phase-1 stubs', () => {
     ['removeImage', b => b.removeImage('tag')],
     ['listEnvironments', b => b.listEnvironments()],
     ['commitEnvironment', b => b.commitEnvironment('id', 'tag')],
-    ['renameEnvironment', b => b.renameEnvironment('id', 'new')],
     ['restoreEnvironment', b => b.restoreEnvironment({})],
   ]
 
@@ -1229,6 +1228,13 @@ describe('K8sBackend Phase-1 stubs', () => {
       )
     })
   }
+
+  it('renameEnvironment() is a no-op — resolves without I/O (K8s pods have unique names)', async () => {
+    const backend = makeBackend()
+    // Must resolve, not reject — the restore flow calls this unconditionally and
+    // a rejection would abort the restore.  See Backend interface in types.js.
+    await assert.doesNotReject(() => backend.renameEnvironment('pod-id', 'new-name'))
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
