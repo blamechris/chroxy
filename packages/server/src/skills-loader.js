@@ -972,7 +972,7 @@ export function loadActiveSkills(dir, opts = {}) {
  * entry so pass 1 never holds more than one fd open at a time.
  *
  * Returns an array of lightweight candidate descriptors:
- *   { entry, name, fullPath, label, realPath, fstat: { size, mtimeMs, dev, ino },
+ *   { name, fullPath, label, realPath, fstat: { size, mtimeMs, dev, ino },
  *     priority, cachedFrontmatter }
  *
  * `name` is the pre-computed stem (entry without extension). Storing it on the
@@ -1117,7 +1117,6 @@ function _collectCandidates(entries, dir, dirReal, allowedRoots, allowedExtensio
       }
 
       candidates.push({
-        entry,
         name: entry.slice(0, -(ext.length + 1)),
         fullPath,
         label,
