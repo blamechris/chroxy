@@ -13,7 +13,7 @@
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { execSync, execFileSync, execFile } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve as pathResolve } from 'node:path'
 
@@ -47,14 +47,6 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
   const POD_READY_POLL_MS = 2_000
 
   // ─── helpers ───────────────────────────────────────────────────────────────
-
-  function execFileAsync(cmd, args, opts = {}) {
-    return new Promise((resolve, reject) => {
-      execFile(cmd, args, { encoding: 'utf-8', timeout: 30_000, ...opts }, (err, stdout, stderr) => {
-        if (err) { err.stderr = stderr; reject(err) } else resolve({ stdout, stderr })
-      })
-    })
-  }
 
   /**
    * Poll K8sBackend.getEnvironmentStatus until the Pod is Running or the
