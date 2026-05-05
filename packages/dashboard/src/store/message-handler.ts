@@ -738,6 +738,7 @@ function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSe
   const skills = (msg.skills as Array<Record<string, unknown>>).map(s => {
     const source = s.source === 'global' || s.source === 'repo' ? s.source : undefined;
     const activation = s.activation === 'auto' || s.activation === 'manual' ? s.activation : undefined;
+    const trustState = s.trustState === 'pending' || s.trustState === 'trusted' ? s.trustState : undefined;
     return {
       name: typeof s.name === 'string' ? s.name : '',
       description: typeof s.description === 'string' ? s.description : undefined,
@@ -753,7 +754,7 @@ function handleSkillsList(msg: Record<string, unknown>, get: MsgGet, _set: MsgSe
       lastVerified: typeof s.lastVerified === 'string' ? s.lastVerified : undefined,
       // #3298: community-skill trust fields. Only present on community skills;
       // absent (undefined) for global/repo skills.
-      trustState: s.trustState === 'pending' || s.trustState === 'trusted' ? s.trustState : undefined,
+      trustState: trustState as 'pending' | 'trusted' | undefined,
       communityAuthor: typeof s.communityAuthor === 'string' ? s.communityAuthor : undefined,
     };
   }).filter(s => s.name);
