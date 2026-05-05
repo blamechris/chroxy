@@ -7,7 +7,8 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
-import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
+import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
+import { realpathSync } from 'fs'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -734,6 +735,139 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
   })
 }
 
+/**
+ * #3297: grant community trust for a given author/skill. Fired when the
+ * dashboard operator accepts the first-activation prompt for a community
+ * skill. Unlike `skill_trust_accept` (hash mismatch recovery), this
+ * handler:
+ *
+ *   1. Validates `skillName` and `author` from the payload.
+ *   2. Resolves the skill's realpath from the session's skills dirs
+ *      (falling back to a direct community/<author>/<name>.md scan
+ *      because community skills are absent from `_getSkills()` while
+ *      pending trust).
+ *   3. Applies a security gate: verifies the resolved path is genuinely
+ *      under `community/<author>/` via `_isCommunityNamespace`, and that
+ *      the directory author matches the claimed `author`.
+ *   4. Calls `trustStore.grantCommunityTrust(author, { realPath })` to
+ *      write both the byAuthor and byPath indexes and flush synchronously.
+ *   5. Calls `session._loadSkills()` so the just-trusted skill is active
+ *      for the CURRENT session immediately (no restart required).
+ *   6. Broadcasts `skill_trust_granted` to all session clients and sends
+ *      `skill_trust_grant_ok` ack to the requesting client.
+ *
+ * Error codes:
+ *   - `INVALID_SKILL_NAME` — missing/empty skillName
+ *   - `INVALID_AUTHOR` — missing/empty author
+ *   - `No active session` (session_error) — no bound session
+ *   - `TRUST_NOT_ENABLED` — session has no trust store
+ *   - `SKILL_NOT_FOUND` — can't find the skill on disk
+ *   - `TRUST_FLUSH_FAILED` — granted in memory but the trust ledger could not be persisted
+ */
+function handleSkillTrustGrant(ws, client, msg, ctx) {
+  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
+    sendError(ws, msg?.requestId, 'INVALID_SKILL_NAME', 'skill_trust_grant requires a non-empty `skillName`')
+    return
+  }
+  if (typeof msg.author !== 'string' || msg.author === '') {
+    sendError(ws, msg?.requestId, 'INVALID_AUTHOR', 'skill_trust_grant requires a non-empty `author`')
+    return
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  const trustStore = entry?.session?.getTrustStore?.() ?? null
+  if (!trustStore || typeof trustStore.grantCommunityTrust !== 'function') {
+    sendError(ws, msg?.requestId, 'TRUST_NOT_ENABLED', 'This session has no skills trust store wired.')
+    return
+  }
+
+  // Resolve the skill path. Community skills are absent from _getSkills()
+  // while pending trust, so we scan the community dirs directly.
+  const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+  const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
+    ? entry.session._repoSkillsDir
+    : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)
+
+  // Collect all skills roots to search
+  const skillsRoots = [sessionGlobalDir]
+  if (sessionRepoDir) skillsRoots.push(sessionRepoDir)
+
+  let resolvedPath = null
+  let dirReal = null
+
+  for (const root of skillsRoots) {
+    let rootReal
+    try {
+      rootReal = realpathSync(root)
+    } catch {
+      continue
+    }
+    // Try community/<author>/<skillName> with each allowed extension (.md, .markdown)
+    let candidateReal = null
+    for (const ext of ['md', 'markdown']) {
+      const candidatePath = `${root}/community/${msg.author}/${msg.skillName}.${ext}`
+      try {
+        candidateReal = realpathSync(candidatePath)
+        break
+      } catch {
+        // not found with this extension — try next
+      }
+    }
+    if (!candidateReal) continue
+    // Security gate: verify the resolved path is under community/<author>/
+    const { isCommunity, author: actualAuthor } = _isCommunityNamespace(candidateReal, rootReal)
+    if (!isCommunity) continue
+    if (actualAuthor !== msg.author) continue
+    resolvedPath = candidateReal
+    dirReal = rootReal
+    break
+  }
+
+  if (!resolvedPath) {
+    sendError(ws, msg?.requestId, 'SKILL_NOT_FOUND', `No community skill '${msg.skillName}' found for author '${msg.author}'.`)
+    return
+  }
+
+  try {
+    trustStore.grantCommunityTrust(msg.author, { realPath: resolvedPath })
+  } catch (err) {
+    log.warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
+    sendError(
+      ws,
+      msg?.requestId,
+      'TRUST_FLUSH_FAILED',
+      'Granted in memory but the trust ledger could not be persisted. Retry; the next restart may re-prompt for trust.',
+    )
+    return
+  }
+
+  // Reload skills immediately so the just-trusted skill is active in this session.
+  if (typeof entry.session._loadSkills === 'function') {
+    entry.session._loadSkills()
+  }
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'skill_trust_granted',
+    sessionId,
+    skillName: msg.skillName,
+    author: msg.author,
+  })
+
+  ctx.send(ws, {
+    type: 'skill_trust_grant_ok',
+    requestId: msg?.requestId ?? null,
+    sessionId,
+    skillName: msg.skillName,
+    author: msg.author,
+  })
+}
+
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
@@ -902,6 +1036,7 @@ export const settingsHandlers = {
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,
+  skill_trust_grant: handleSkillTrustGrant,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }

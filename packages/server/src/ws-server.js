@@ -224,6 +224,7 @@ function _isSecureRequest(req) {
  *   { type: 'skill_activate', skillName, sessionId? }   — activate a manual skill at runtime (#3209)
  *   { type: 'skill_deactivate', skillName, sessionId? } — deactivate a manual skill at runtime (#3209)
  *   { type: 'skill_trust_accept', skillName, sessionId?, requestId? } — re-trust a skill after a content-hash mismatch (#3235)
+ *   { type: 'skill_trust_grant', skillName, author, scope?, sessionId?, requestId? } — grant community-skill trust (#3297)
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *   { type: 'create_environment', name, cwd, image?, ... } — create persistent container environment
  *   { type: 'list_environments' }                       — list all persistent environments
@@ -322,6 +323,9 @@ function _isSecureRequest(req) {
  *   { type: 'skill_activated', sessionId, skillName }   — manual skill toggled on at runtime (#3209)
  *   { type: 'skill_deactivated', sessionId, skillName } — manual skill toggled off at runtime (#3209)
  *   { type: 'skill_trust_accepted', sessionId, skillName } — operator re-trusted a skill after hash mismatch (#3235)
+ *   { type: 'skill_trust_request', skillName, author, source, description, path, sessionId } — community skill awaiting first-activation grant (#3297, transient)
+ *   { type: 'skill_trust_granted', sessionId, skillName, author } — community skill trust granted (#3297)
+ *   { type: 'skill_trust_grant_ok', requestId, sessionId, skillName, author } — ack for skill_trust_grant handler (#3297)
  *   { type: 'push_token_error', message }               — push token registration error
  *   { type: 'cost_update', sessionId, cost }            — session cost update
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit

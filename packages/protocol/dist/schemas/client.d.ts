@@ -122,6 +122,14 @@ export declare const SkillTrustAcceptSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SkillTrustGrantSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_trust_grant">;
+    skillName: z.ZodString;
+    author: z.ZodString;
+    scope: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const PermissionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_response">;
     requestId: z.ZodString;
@@ -459,6 +467,13 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"skill_trust_accept">;
     skillName: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"skill_trust_grant">;
+    skillName: z.ZodString;
+    author: z.ZodString;
+    scope: z.ZodOptional<z.ZodString>;
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{

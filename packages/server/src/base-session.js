@@ -148,11 +148,14 @@ export class BaseSession extends EventEmitter {
     // `process.nextTick` because SessionManager wires event listeners
     // AFTER the constructor returns — a synchronous emit here would
     // land on an empty listener set.
-    const pendingTrustEvents = this._loadSkills({ collectTrustEvents: true })
-    if (pendingTrustEvents.length > 0) {
+    const { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents } = this._loadSkills({ collectTrustEvents: true })
+    if (pendingTrustEvents.length > 0 || pendingCommunityTrustEvents.length > 0) {
       process.nextTick(() => {
         for (const ev of pendingTrustEvents) {
           this.emit('skill_changed', ev)
+        }
+        for (const ev of pendingCommunityTrustEvents) {
+          this.emit('skill_trust_request', ev)
         }
       })
     }
@@ -166,9 +169,9 @@ export class BaseSession extends EventEmitter {
    * state stays the single source of truth.
    *
    * @param {{ collectTrustEvents?: boolean }} [opts]
-   * @returns {Array<object>} - array of pending trust events when
-   *   `collectTrustEvents` is true; an empty array otherwise. Caller
-   *   decides whether/when to emit them.
+   * @returns {{ trustEvents: Array<object>, communityTrustEvents: Array<object> }}
+   *   `trustEvents` — pending skill_changed events (mismatch) when collectTrustEvents=true.
+   *   `communityTrustEvents` — pending skill_trust_request events for untrusted community skills.
    * @private
    */
   _loadSkills({ collectTrustEvents = false } = {}) {
@@ -195,6 +198,7 @@ export class BaseSession extends EventEmitter {
     if (this._skillsParseCache instanceof Map) layerOpts.parseCache = this._skillsParseCache
 
     const pendingTrustEvents = []
+    const pendingCommunityTrustEvents = []
     if (this._trustStore) {
       layerOpts.trustStore = this._trustStore
       if (collectTrustEvents) {
@@ -207,6 +211,16 @@ export class BaseSession extends EventEmitter {
       // omit the callback so a user-initiated toggle does NOT
       // re-emit `skill_changed` events that already fired at session
       // construction.
+
+      // #3297: community trust checker — allows the loader to gate
+      // community skills pending a first-activation grant.
+      if (typeof this._trustStore.isCommunityTrusted === 'function') {
+        layerOpts.communityTrustChecker = this._trustStore.isCommunityTrusted.bind(this._trustStore)
+      }
+      // Always collect community trust pending events (fired on both
+      // construction and runtime reload so re-entry from other sessions
+      // sees the prompt after a grant clears an earlier block).
+      layerOpts.onCommunityTrustPending = (info) => { pendingCommunityTrustEvents.push(info) }
     }
 
     const all = loadActiveSkillsLayered(layerOpts)
@@ -236,7 +250,7 @@ export class BaseSession extends EventEmitter {
     this._skillsText = formatSkillsForPrompt(grouped.append)
     this._prependSkillsText = formatSkillsForPrompt(grouped.prepend)
 
-    return pendingTrustEvents
+    return { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents }
   }
 
   /**
@@ -288,11 +302,14 @@ export class BaseSession extends EventEmitter {
     // auto-skill name) we run a rollback scan to restore the active
     // set; the common success path stays at one layered scan.
     this._activeManualSkills.add(skillName)
-    this._loadSkills()
+    const { communityTrustEvents } = this._loadSkills()
     if (!this._manualSkillNames.has(skillName)) {
       this._activeManualSkills.delete(skillName)
       this._loadSkills()
       return false
+    }
+    for (const ev of communityTrustEvents) {
+      this.emit('skill_trust_request', ev)
     }
     return true
   }
@@ -312,7 +329,10 @@ export class BaseSession extends EventEmitter {
     if (typeof skillName !== 'string' || skillName === '') return false
     if (!this._activeManualSkills.has(skillName)) return false
     this._activeManualSkills.delete(skillName)
-    this._loadSkills()
+    const { communityTrustEvents } = this._loadSkills()
+    for (const ev of communityTrustEvents) {
+      this.emit('skill_trust_request', ev)
+    }
     return true
   }
 

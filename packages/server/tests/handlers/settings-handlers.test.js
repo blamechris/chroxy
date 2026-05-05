@@ -1040,6 +1040,195 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #3297: skill_trust_grant grants first-activation community trust.
+  describe('skill_trust_grant (#3297)', () => {
+    function makeCommunityTrustStore() {
+      const grants = []
+      return {
+        grantCommunityTrust: createSpy((author, opts) => { grants.push({ author, ...opts }) }),
+        grants,
+        getTrustStore: null, // used via session.getTrustStore()
+      }
+    }
+
+    it('returns INVALID_SKILL_NAME when skillName is missing', () => {
+      const ctx = makeCtx()
+      const ws = makeWs()
+      settingsHandlers.skill_trust_grant(ws, makeClient(), { skillName: '' }, ctx)
+      const err = ws._messages.find(m => m.code === 'INVALID_SKILL_NAME')
+      assert.ok(err, 'expected INVALID_SKILL_NAME')
+    })
+
+    it('returns INVALID_AUTHOR when author is missing', () => {
+      const ctx = makeCtx()
+      const ws = makeWs()
+      settingsHandlers.skill_trust_grant(ws, makeClient(), { skillName: 'foo', author: '' }, ctx)
+      const err = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+      assert.ok(err, 'expected INVALID_AUTHOR')
+    })
+
+    it('returns session_error when no active session', () => {
+      const ctx = makeCtx(new Map())
+      const ws = makeWs()
+      settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: null }), { skillName: 'foo', author: 'alice' }, ctx)
+      // session_error goes through ctx.send, not ws.send directly
+      const err = ctx._sent.find(m => m.type === 'session_error')
+      assert.ok(err, 'expected session_error for missing session')
+    })
+
+    it('returns TRUST_NOT_ENABLED when session has no trust store', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.getTrustStore = () => null
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'alice' }, ctx)
+      const err = ws._messages.find(m => m.code === 'TRUST_NOT_ENABLED')
+      assert.ok(err, 'expected TRUST_NOT_ENABLED')
+    })
+
+    it('returns SKILL_NOT_FOUND when no community skill file on disk', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-empty-'))
+      try {
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'nonexistent', author: 'alice' }, ctx)
+        const err = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.ok(err, 'expected SKILL_NOT_FOUND when no file on disk')
+        assert.equal(trustStore.grants.length, 0)
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('returns NOT_COMMUNITY_SKILL when skill is not under community/<author>/', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-notcomm-'))
+      try {
+        // Create community/alice/foo.md but claim author 'bob' — mismatch
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        // Claim 'bob' as author but file is under 'alice' — security check should fail
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.ok(err, 'expected SKILL_NOT_FOUND when author does not match directory')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('resolves community skills stored with .markdown extension', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-markdownext-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.markdown'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'alice' }, ctx)
+        assert.equal(trustStore.grants.length, 1, 'must resolve .markdown extension')
+        assert.ok(trustStore.grants[0].realPath.endsWith('.markdown'), 'realPath must end with .markdown')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('calls grantCommunityTrust, reloads skills, broadcasts skill_trust_granted, sends ack', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-success-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        let reloaded = false
+        session._loadSkills = () => { reloaded = true }
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.skill_trust_grant(ws, client, { skillName: 'foo', author: 'alice', requestId: 'req1' }, ctx)
+
+        assert.equal(trustStore.grants.length, 1, 'grantCommunityTrust must be called once')
+        assert.equal(trustStore.grants[0].author, 'alice')
+        assert.ok(trustStore.grants[0].realPath, 'realPath must be set')
+        assert.equal(reloaded, true, '_loadSkills must be called to activate the skill')
+
+        // broadcast
+        assert.equal(ctx._sessionBroadcasts.length, 1)
+        assert.equal(ctx._sessionBroadcasts[0].msg.type, 'skill_trust_granted')
+        assert.equal(ctx._sessionBroadcasts[0].msg.skillName, 'foo')
+        assert.equal(ctx._sessionBroadcasts[0].msg.author, 'alice')
+
+        // ack goes through ctx.send
+        const ack = ctx._sent.find(m => m.type === 'skill_trust_grant_ok')
+        assert.ok(ack, 'expected skill_trust_grant_ok ack')
+        assert.equal(ack.skillName, 'foo')
+        assert.equal(ack.author, 'alice')
+        assert.equal(ack.requestId, 'req1')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('returns TRUST_FLUSH_FAILED and skips broadcast when grantCommunityTrust throws', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-flush-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        trustStore.grantCommunityTrust = () => { throw new Error('disk full') }
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'alice', requestId: 'r1' }, ctx)
+
+        const err = ws._messages.find(m => m.code === 'TRUST_FLUSH_FAILED')
+        assert.ok(err, 'expected TRUST_FLUSH_FAILED when grantCommunityTrust throws')
+        assert.equal(ctx._sessionBroadcasts.length, 0, 'must NOT broadcast when persist failed')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+  })
+
   // #3067: list_skills should walk up from the active session's cwd to pick up
   // the per-repo .chroxy/skills/ overlay and tag each entry with its source.
   // We can't stub the global ~/.chroxy/skills tier here — that's the user's

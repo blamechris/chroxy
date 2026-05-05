@@ -271,6 +271,21 @@ export declare const ServerSkillTrustAcceptedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     skillName: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerSkillTrustRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_trust_request">;
+    skillName: z.ZodString;
+    author: z.ZodString;
+    source: z.ZodString;
+    description: z.ZodString;
+    path: z.ZodString;
+    sessionId: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerSkillTrustGrantedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_trust_granted">;
+    sessionId: z.ZodString;
+    skillName: z.ZodString;
+    author: z.ZodString;
+}, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"server_error">;
     category: z.ZodOptional<z.ZodString>;

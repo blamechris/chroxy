@@ -67,17 +67,18 @@ describe('skills-trust', () => {
       store.flush()
 
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
-      assert.ok(persisted['/abs/skill.md'])
-      assert.equal(persisted['/abs/skill.md'].sha256, sha256Hex('body content'))
-      assert.ok(typeof persisted['/abs/skill.md'].firstSeen === 'string')
-      assert.ok(typeof persisted['/abs/skill.md'].lastVerified === 'string')
+      // v2 format: records are nested under `skills`
+      assert.ok(persisted.skills['/abs/skill.md'])
+      assert.equal(persisted.skills['/abs/skill.md'].sha256, sha256Hex('body content'))
+      assert.ok(typeof persisted.skills['/abs/skill.md'].firstSeen === 'string')
+      assert.ok(typeof persisted.skills['/abs/skill.md'].lastVerified === 'string')
     })
 
     it('verified inspect updates lastVerified but never touches the recorded sha256', () => {
       const store = new SkillsTrustStore({ filePath: trustPath })
       store.inspect('/abs/skill.md', 'body')
       store.flush()
-      const beforeRecord = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md']
+      const beforeRecord = JSON.parse(readFileSync(trustPath, 'utf8')).skills['/abs/skill.md']
 
       // Re-inspect with the same body — `lastVerified` may bump if the ISO
       // timestamp changes, but `sha256` and `firstSeen` must stay pinned.
@@ -85,7 +86,8 @@ describe('skills-trust', () => {
       const r = store2.inspect('/abs/skill.md', 'body')
       store2.flush()
       assert.equal(r.status, 'verified')
-      const afterRecord = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md']
+      // v2 format: records are nested under `skills`
+      const afterRecord = JSON.parse(readFileSync(trustPath, 'utf8')).skills['/abs/skill.md']
       assert.equal(afterRecord.sha256, beforeRecord.sha256, 'sha256 must remain stable')
       assert.equal(afterRecord.firstSeen, beforeRecord.firstSeen, 'firstSeen must remain stable')
     })
@@ -154,7 +156,7 @@ describe('skills-trust', () => {
       const store = new SkillsTrustStore({ filePath: trustPath })
       store.inspect('/abs/skill.md', 'body')
       store.flush()
-      const before = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+      const before = JSON.parse(readFileSync(trustPath, 'utf8')).skills['/abs/skill.md'].lastVerified
 
       // Re-load and re-inspect. With the default 24h throttle the
       // record's lastVerified should NOT advance, and the store should
@@ -168,7 +170,7 @@ describe('skills-trust', () => {
       // Force a flush and confirm the persisted record was not
       // rewritten with a newer timestamp.
       store2.flush()
-      const after = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+      const after = JSON.parse(readFileSync(trustPath, 'utf8')).skills['/abs/skill.md'].lastVerified
       assert.equal(after, before,
         'lastVerified must not advance inside the throttle window')
     })
@@ -177,7 +179,7 @@ describe('skills-trust', () => {
       const store = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
       store.inspect('/abs/skill.md', 'body')
       store.flush()
-      const before = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+      const before = JSON.parse(readFileSync(trustPath, 'utf8')).skills['/abs/skill.md'].lastVerified
 
       // Sleep just long enough for the ISO timestamp to advance — 1ms
       // can land on the same string with low resolution clocks, so use
@@ -188,7 +190,7 @@ describe('skills-trust', () => {
       store2.inspect('/abs/skill.md', 'body')
       assert.equal(store2._dirty, true, 'throttle=0 should always bump and mark dirty')
       store2.flush()
-      const after = JSON.parse(readFileSync(trustPath, 'utf8'))['/abs/skill.md'].lastVerified
+      const after = JSON.parse(readFileSync(trustPath, 'utf8')).skills['/abs/skill.md'].lastVerified
       assert.notEqual(after, before, 'lastVerified must advance once the throttle has elapsed')
     })
   })
@@ -219,7 +221,7 @@ describe('skills-trust', () => {
       // The persisted record should still be the original hash — operator
       // must explicitly accept the new value via `acceptHash`.
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
-      assert.equal(persisted['/abs/skill.md'].sha256, sha256Hex('original'))
+      assert.equal(persisted.skills['/abs/skill.md'].sha256, sha256Hex('original'))
     })
   })
 
@@ -246,7 +248,7 @@ describe('skills-trust', () => {
       store.flush()
 
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
-      assert.equal(persisted['/abs/skill.md'].sha256, sha256Hex('new content'))
+      assert.equal(persisted.skills['/abs/skill.md'].sha256, sha256Hex('new content'))
     })
 
     it('records a brand-new entry if the path was unseen', () => {
@@ -254,7 +256,7 @@ describe('skills-trust', () => {
       store.acceptHash('/abs/never-seen.md', 'body')
       store.flush()
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
-      assert.equal(persisted['/abs/never-seen.md'].sha256, sha256Hex('body'))
+      assert.equal(persisted.skills['/abs/never-seen.md'].sha256, sha256Hex('body'))
     })
 
     // #3235 acceptance criterion: round-trip through the loader. Mismatch
@@ -295,7 +297,8 @@ describe('skills-trust', () => {
 
         // And the persisted ledger reflects the new hash.
         const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
-        const records = persisted.records || persisted
+        // v2 format: records nested under `skills`
+        const records = persisted.skills || persisted
         const recordedHash = records[realPath]?.sha256 || records[_normalizePathKey(realPath)]?.sha256
         assert.equal(recordedHash, sha256Hex('v2 body\n'))
       } finally {
@@ -322,10 +325,13 @@ describe('skills-trust', () => {
     })
 
     it('drops records missing required fields (sha256 must match /^[0-9a-f]{64}$/)', () => {
+      // Use v2 format so the parser reaches the record validation step.
       const bad = {
-        '/abs/x.md': { sha256: 'not-hex', firstSeen: '2024-01-01T00:00:00.000Z' },
-        '/abs/y.md': { sha256: sha256Hex('y'), firstSeen: '2024-01-01T00:00:00.000Z' },
-        '/abs/z.md': null,
+        skills: {
+          '/abs/x.md': { sha256: 'not-hex', firstSeen: '2024-01-01T00:00:00.000Z' },
+          '/abs/y.md': { sha256: sha256Hex('y'), firstSeen: '2024-01-01T00:00:00.000Z' },
+          '/abs/z.md': null,
+        },
       }
       writeFileSync(trustPath, JSON.stringify(bad))
 
@@ -355,12 +361,12 @@ describe('skills-trust', () => {
       assert.ok(existsSync(nestedPath), 'mkdirSync recursive should have created the directory')
     })
 
-    it('survives a write failure without throwing (fail-open)', () => {
+    it('throws on write failure so callers can surface persistence errors', () => {
       // Point at a directory path so writeFileSync errors with EISDIR.
       const store = new SkillsTrustStore({ filePath: dir })
       store.inspect('/abs/x.md', 'body')
-      // Should not throw — write failure is logged but swallowed.
-      store.flush()
+      // flush() re-throws after cleanup so handlers can return TRUST_FLUSH_FAILED.
+      assert.throws(() => store.flush(), /EISDIR|illegal operation/)
     })
   })
 
@@ -391,9 +397,9 @@ describe('skills-trust', () => {
       // Target file exists and parses cleanly.
       assert.ok(existsSync(trustPath), 'target file should exist after flush')
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
-      // Lookup uses the platform-normalised key.
+      // v2 format: records are nested under `skills`. Lookup uses the platform-normalised key.
       const expectedKey = _normalizePathKey('/abs/skill.md')
-      assert.ok(persisted[expectedKey], 'record should be persisted under normalised key')
+      assert.ok(persisted.skills[expectedKey], 'record should be persisted under normalised key')
 
       // Temp file should NOT linger after a clean flush — the rename
       // moved it onto the target. Anything left at <path>.tmp is a
@@ -434,7 +440,8 @@ describe('skills-trust', () => {
 
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       const expectedKey = _normalizePathKey('/abs/skill.md')
-      assert.ok(persisted[expectedKey], 'fresh record should land cleanly despite stale orphan')
+      // v2 format: records nested under `skills`
+      assert.ok(persisted.skills[expectedKey], 'fresh record should land cleanly despite stale orphan')
 
       // The orphan persists (we don't touch other writers' temps to
       // preserve the concurrent-writer fix from #3238 review). It's
@@ -485,7 +492,7 @@ describe('skills-trust', () => {
         'load must read the canonical target and ignore the .tmp orphan')
     })
 
-    it('survives a write failure without throwing or corrupting target (fail-open)', () => {
+    it('throws on write failure without corrupting an unrelated target', () => {
       // Seed a valid target file.
       const store = new SkillsTrustStore({ filePath: trustPath })
       store.inspect('/abs/skill.md', 'original')
@@ -493,16 +500,13 @@ describe('skills-trust', () => {
       const before = readFileSync(trustPath, 'utf8')
 
       // Now point the store at a directory path so the rename target
-      // is invalid and writeFileSync would have thrown EISDIR. The
-      // atomic-write path catches the error and leaves the original
-      // good file untouched.
+      // is invalid and the atomic-write throws. The cleanup path must
+      // leave the unrelated good file untouched.
       const badStore = new SkillsTrustStore({ filePath: dir })
       badStore.inspect('/abs/x.md', 'body')
-      badStore.flush() // must not throw
+      assert.throws(() => badStore.flush(), /EISDIR|illegal operation/)
 
-      // The original good file is untouched (different path, but the
-      // important guarantee is that a failed flush doesn't leave a
-      // half-baked target on disk).
+      // The original good file is untouched.
       assert.equal(readFileSync(trustPath, 'utf8'), before,
         'unrelated good file must not be affected by a failed flush elsewhere')
     })
@@ -563,7 +567,8 @@ describe('skills-trust', () => {
 
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       const expectedKey = _normalizePathKey('/Some/Mixed/Case/skill.md')
-      assert.ok(persisted[expectedKey],
+      // v2 format: records nested under `skills`
+      assert.ok(persisted.skills[expectedKey],
         `expected key ${expectedKey} in persisted ledger`)
     })
 
@@ -585,6 +590,130 @@ describe('skills-trust', () => {
       const r = store.inspect('/users/me/.chroxy/skills/foo.md', 'body')
       assert.equal(r.status, 'verified',
         'pre-#3233 verbatim-cased entries must still be found after normalisation')
+    })
+  })
+
+  // #3297: v2 schema migration from v1 flat format.
+  describe('v2 schema migration (#3297)', () => {
+    it('migrates v1 flat format to v2 on next flush', () => {
+      const sha = sha256Hex('body')
+      writeFileSync(trustPath, JSON.stringify({
+        '/abs/skill.md': { sha256: sha, firstSeen: '2024-01-01T00:00:00.000Z', lastVerified: '2024-01-01T00:00:00.000Z' },
+      }))
+
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Legacy records should still be accessible
+      assert.equal(store.inspect('/abs/skill.md', 'body').status, 'verified')
+      // Migration marks the store dirty so flush rewrites
+      assert.equal(store._dirty, true, 'v1 migration should mark store dirty')
+      store.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      // After migration, the file should be in v2 format
+      assert.ok(persisted.skills, 'v2 format should have a `skills` key')
+      assert.ok(persisted.communityTrust, 'v2 format should have a `communityTrust` key')
+      assert.ok(persisted.skills[_normalizePathKey('/abs/skill.md')], 'migrated record should exist under `skills`')
+    })
+
+    it('loads v2 format without migration (no dirty flag)', () => {
+      const sha = sha256Hex('body')
+      writeFileSync(trustPath, JSON.stringify({
+        skills: {
+          '/abs/skill.md': { sha256: sha, firstSeen: '2024-01-01T00:00:00.000Z', lastVerified: '2024-01-01T00:00:00.000Z' },
+        },
+        communityTrust: { 'by-author': {}, 'by-path': {} },
+      }))
+
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store._dirty, false, 'v2 load should not mark store dirty')
+      assert.equal(store.inspect('/abs/skill.md', 'body').status, 'verified')
+    })
+
+    it('empty v1 file (no records) is treated as fresh v2', () => {
+      writeFileSync(trustPath, JSON.stringify({}))
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Empty flat object treated as v2 with no records, not v1 migration
+      assert.equal(store._dirty, false)
+      assert.equal(store.inspect('/abs/x.md', 'body').status, 'recorded')
+    })
+  })
+
+  // #3297: isCommunityTrusted method.
+  describe('isCommunityTrusted (#3297)', () => {
+    it('returns false when neither author nor path is trusted', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store.isCommunityTrusted('/community/alice/skill.md', 'alice'), false)
+    })
+
+    it('returns true when author is trusted (byAuthor index)', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.communityTrust.byAuthor['alice'] = { grantedAt: new Date().toISOString(), grantedBy: 'user' }
+      assert.equal(store.isCommunityTrusted('/community/alice/skill.md', 'alice'), true)
+    })
+
+    it('returns true when path is trusted (byPath index)', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.communityTrust.byPath['/community/alice/skill.md'] = { grantedAt: new Date().toISOString() }
+      assert.equal(store.isCommunityTrusted('/community/alice/skill.md', 'alice'), true)
+    })
+
+    it('handles missing/invalid arguments gracefully', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store.isCommunityTrusted(null, null), false)
+      assert.equal(store.isCommunityTrusted('', ''), false)
+      assert.equal(store.isCommunityTrusted(undefined, undefined), false)
+    })
+  })
+
+  // #3297: grantCommunityTrust method.
+  describe('grantCommunityTrust (#3297)', () => {
+    it('records author in byAuthor index', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust('alice')
+      assert.ok(store.communityTrust.byAuthor['alice'], 'byAuthor should have alice')
+      assert.equal(typeof store.communityTrust.byAuthor['alice'].grantedAt, 'string')
+      assert.equal(store.communityTrust.byAuthor['alice'].grantedBy, 'user')
+    })
+
+    it('records realPath in byPath index when provided', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+      assert.ok(store.communityTrust.byPath['/community/alice/skill.md'], 'byPath should have the path')
+    })
+
+    it('persists community trust to disk in v2 format', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.communityTrust, 'must have communityTrust key')
+      assert.ok(persisted.communityTrust['by-author']['alice'], 'by-author must have alice')
+      assert.ok(persisted.communityTrust['by-path']['/community/alice/skill.md'], 'by-path must have path')
+    })
+
+    it('makes isCommunityTrusted return true after grant', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store.isCommunityTrusted('/community/alice/skill.md', 'alice'), false)
+      store.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+      assert.equal(store.isCommunityTrusted('/community/alice/skill.md', 'alice'), true)
+    })
+
+    it('round-trips through reload: granted trust persists after reload', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+
+      const store2 = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store2.isCommunityTrusted('/community/alice/skill.md', 'alice'), true,
+        'community trust must survive a store reload')
+    })
+
+    it('ignores invalid author (non-string / empty)', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust(null)
+      store.grantCommunityTrust('')
+      store.grantCommunityTrust(undefined)
+      // No entries should have been recorded
+      assert.equal(Object.keys(store.communityTrust.byAuthor).length, 0)
     })
   })
 })
