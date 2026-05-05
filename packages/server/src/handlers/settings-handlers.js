@@ -762,7 +762,7 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
  *   - `No active session` (session_error) — no bound session
  *   - `TRUST_NOT_ENABLED` — session has no trust store
  *   - `SKILL_NOT_FOUND` — can't find the skill on disk
- *   - `NOT_COMMUNITY_SKILL` — skill is not under community/<author>/
+ *   - `TRUST_FLUSH_FAILED` — granted in memory but the trust ledger could not be persisted
  */
 function handleSkillTrustGrant(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
@@ -808,14 +808,18 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
     } catch {
       continue
     }
-    // Try community/<author>/<skillName>.md
-    const candidatePath = `${root}/community/${msg.author}/${msg.skillName}.md`
-    let candidateReal
-    try {
-      candidateReal = realpathSync(candidatePath)
-    } catch {
-      continue
+    // Try community/<author>/<skillName> with each allowed extension (.md, .markdown)
+    let candidateReal = null
+    for (const ext of ['md', 'markdown']) {
+      const candidatePath = `${root}/community/${msg.author}/${msg.skillName}.${ext}`
+      try {
+        candidateReal = realpathSync(candidatePath)
+        break
+      } catch {
+        // not found with this extension — try next
+      }
     }
+    if (!candidateReal) continue
     // Security gate: verify the resolved path is under community/<author>/
     const { isCommunity, author: actualAuthor } = _isCommunityNamespace(candidateReal, rootReal)
     if (!isCommunity) continue
@@ -830,14 +834,18 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
     return
   }
 
-  // Double-check via _isCommunityNamespace with the matched dirReal
-  const { isCommunity } = _isCommunityNamespace(resolvedPath, dirReal)
-  if (!isCommunity) {
-    sendError(ws, msg?.requestId, 'NOT_COMMUNITY_SKILL', `Skill '${msg.skillName}' is not a community skill under community/${msg.author}/.`)
+  try {
+    trustStore.grantCommunityTrust(msg.author, { realPath: resolvedPath })
+  } catch (err) {
+    log.warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
+    sendError(
+      ws,
+      msg?.requestId,
+      'TRUST_FLUSH_FAILED',
+      'Granted in memory but the trust ledger could not be persisted. Retry; the next restart may re-prompt for trust.',
+    )
     return
   }
-
-  trustStore.grantCommunityTrust(msg.author, { realPath: resolvedPath })
 
   // Reload skills immediately so the just-trusted skill is active in this session.
   if (typeof entry.session._loadSkills === 'function') {

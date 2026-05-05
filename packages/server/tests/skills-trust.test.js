@@ -361,12 +361,12 @@ describe('skills-trust', () => {
       assert.ok(existsSync(nestedPath), 'mkdirSync recursive should have created the directory')
     })
 
-    it('survives a write failure without throwing (fail-open)', () => {
+    it('throws on write failure so callers can surface persistence errors', () => {
       // Point at a directory path so writeFileSync errors with EISDIR.
       const store = new SkillsTrustStore({ filePath: dir })
       store.inspect('/abs/x.md', 'body')
-      // Should not throw — write failure is logged but swallowed.
-      store.flush()
+      // flush() re-throws after cleanup so handlers can return TRUST_FLUSH_FAILED.
+      assert.throws(() => store.flush(), /EISDIR|illegal operation/)
     })
   })
 
@@ -492,7 +492,7 @@ describe('skills-trust', () => {
         'load must read the canonical target and ignore the .tmp orphan')
     })
 
-    it('survives a write failure without throwing or corrupting target (fail-open)', () => {
+    it('throws on write failure without corrupting an unrelated target', () => {
       // Seed a valid target file.
       const store = new SkillsTrustStore({ filePath: trustPath })
       store.inspect('/abs/skill.md', 'original')
@@ -500,16 +500,13 @@ describe('skills-trust', () => {
       const before = readFileSync(trustPath, 'utf8')
 
       // Now point the store at a directory path so the rename target
-      // is invalid and writeFileSync would have thrown EISDIR. The
-      // atomic-write path catches the error and leaves the original
-      // good file untouched.
+      // is invalid and the atomic-write throws. The cleanup path must
+      // leave the unrelated good file untouched.
       const badStore = new SkillsTrustStore({ filePath: dir })
       badStore.inspect('/abs/x.md', 'body')
-      badStore.flush() // must not throw
+      assert.throws(() => badStore.flush(), /EISDIR|illegal operation/)
 
-      // The original good file is untouched (different path, but the
-      // important guarantee is that a failed flush doesn't leave a
-      // half-baked target on disk).
+      // The original good file is untouched.
       assert.equal(readFileSync(trustPath, 'utf8'), before,
         'unrelated good file must not be affected by a failed flush elsewhere')
     })

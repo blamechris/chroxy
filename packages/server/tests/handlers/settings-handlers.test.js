@@ -1135,6 +1135,29 @@ describe('settings-handlers', () => {
       }
     })
 
+    it('resolves community skills stored with .markdown extension', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-markdownext-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.markdown'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'alice' }, ctx)
+        assert.equal(trustStore.grants.length, 1, 'must resolve .markdown extension')
+        assert.ok(trustStore.grants[0].realPath.endsWith('.markdown'), 'realPath must end with .markdown')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
     it('calls grantCommunityTrust, reloads skills, broadcasts skill_trust_granted, sends ack', () => {
       const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-success-'))
       try {
@@ -1173,6 +1196,33 @@ describe('settings-handlers', () => {
         assert.equal(ack.skillName, 'foo')
         assert.equal(ack.author, 'alice')
         assert.equal(ack.requestId, 'req1')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    it('returns TRUST_FLUSH_FAILED and skips broadcast when grantCommunityTrust throws', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-flush-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        trustStore.grantCommunityTrust = () => { throw new Error('disk full') }
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'alice', requestId: 'r1' }, ctx)
+
+        const err = ws._messages.find(m => m.code === 'TRUST_FLUSH_FAILED')
+        assert.ok(err, 'expected TRUST_FLUSH_FAILED when grantCommunityTrust throws')
+        assert.equal(ctx._sessionBroadcasts.length, 0, 'must NOT broadcast when persist failed')
       } finally {
         rmSync(skillsDir, { recursive: true, force: true })
       }

@@ -362,6 +362,15 @@ export const ServerSkillTrustGrantedSchema = z.object({
   author: z.string(),
 })
 
+// #3297: ack sent to the requesting client after a successful skill_trust_grant.
+export const ServerSkillTrustGrantOkSchema = z.object({
+  type: z.literal('skill_trust_grant_ok'),
+  requestId: z.string().nullable(),
+  sessionId: z.string(),
+  skillName: z.string(),
+  author: z.string(),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),
@@ -560,3 +569,4 @@ export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>
+export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>

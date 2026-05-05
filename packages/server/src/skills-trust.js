@@ -434,6 +434,7 @@ export class SkillsTrustStore {
       }
       try { unlinkSync(tmpPath) } catch { /* ignore */ }
       log.warn(`Could not persist trust file (${err && err.code ? err.code : err.message || err})`)
+      throw err
     }
   }
 
