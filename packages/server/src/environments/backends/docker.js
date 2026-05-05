@@ -139,12 +139,35 @@ export class DockerBackend {
    * @param {string} containerId
    * @param {{ cmd: string, env?: Object, cwd?: string, timeout?: number }} opts
    * @returns {Promise<{ stdout: string, stderr: string }>}
+   *
+   * opts.env — all key/value pairs are forwarded as `--env KEY=VAL` flags.
+   * No allowlist filter is applied here: unlike streamCliInEnvironment (which
+   * runs the long-lived Claude Code CLI and must never leak the full host env),
+   * execInEnvironment is a general-purpose helper invoked with an explicit env
+   * object constructed by the caller. The caller is responsible for passing only
+   * the vars required for the command. process.env is never consulted.
+   *
+   * opts.cwd — forwarded as `--workdir <cwd>`.  The path must already be an
+   * absolute path *inside* the container; callers are responsible for remapping
+   * host paths to container paths if necessary.
    */
-  execInEnvironment(containerId, { cmd, timeout = 30_000 }) {
+  execInEnvironment(containerId, { cmd, env, cwd, timeout = 30_000 }) {
     return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'exec', containerId, 'bash', '-c', cmd,
-      ], { encoding: 'utf-8', timeout }, (err, stdout, stderr) => {
+      const execArgs = ['exec']
+
+      if (cwd) {
+        execArgs.push('--workdir', cwd)
+      }
+
+      if (env) {
+        for (const [key, val] of Object.entries(env)) {
+          execArgs.push('--env', `${key}=${val}`)
+        }
+      }
+
+      execArgs.push(containerId, 'bash', '-c', cmd)
+
+      this._execFile('docker', execArgs, { encoding: 'utf-8', timeout }, (err, stdout, stderr) => {
         if (err) reject(new Error(stderr ? stderr.trim() : err.message))
         else resolve({ stdout: stdout || '', stderr: stderr || '' })
       })
