@@ -100,11 +100,20 @@ function waitForMessages(ws, count, timeoutMs = 2000) {
  * controller.writeStdout(line) pushes a newline-terminated NDJSON line.
  * controller.writeStderr(chunk) pushes raw text on stderr.
  * controller.exit(code) emits the 'close' event with the given code.
+ *
+ * child.kill is a spy that records every signal it was called with so tests
+ * can assert SIGTERM / SIGKILL behaviour deterministically.
  */
 function createMockSpawn() {
   const child = new EventEmitter()
   child.stdout = new PassThrough()
   child.stderr = new PassThrough()
+
+  child.killSignals = []
+  child.kill = (signal) => {
+    child.killSignals.push(signal)
+    return true
+  }
 
   const controller = {
     writeStdout(line) { child.stdout.write(line + '\n') },
@@ -352,6 +361,140 @@ describe('PodAgent', () => {
       assert.ok(msgs.length >= 1)
       assert.equal(msgs[0].type, 'error')
       assert.match(msgs[0].message, /unknown message type/)
+
+      ws.close()
+    })
+  })
+
+  describe('orphan child cleanup on WS disconnect', () => {
+    let agent, port, child, controller
+
+    beforeEach(async () => {
+      const mock = createMockSpawn()
+      child = mock.child
+      controller = mock.controller
+      // Short grace so the SIGKILL escalation completes within the test budget.
+      ;({ agent, port } = await startAgent({ spawnFn: mock.spawnFn, killGraceMs: 25 }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('sends SIGTERM to running child when client closes WS mid-spawn', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      // Yield so _handleSpawn has run and ws._child is wired up.
+      await new Promise((r) => setTimeout(r, 10))
+
+      ws.close()
+      // Wait for the close event to propagate server-side.
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.ok(
+        child.killSignals.includes('SIGTERM'),
+        `expected SIGTERM, got ${JSON.stringify(child.killSignals)}`,
+      )
+    })
+
+    it('escalates to SIGKILL after grace period if child does not exit', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      ws.close()
+      // Wait past the 25 ms grace configured above.
+      await new Promise((r) => setTimeout(r, 80))
+
+      assert.ok(child.killSignals.includes('SIGTERM'), 'expected SIGTERM first')
+      assert.ok(child.killSignals.includes('SIGKILL'), 'expected SIGKILL after grace')
+    })
+
+    it('does NOT escalate to SIGKILL if child exits within grace', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      ws.close()
+      // Simulate the child responding to SIGTERM well within the grace window.
+      await new Promise((r) => setTimeout(r, 5))
+      controller.exit(143)
+
+      // Wait past the original grace deadline.
+      await new Promise((r) => setTimeout(r, 80))
+
+      assert.ok(child.killSignals.includes('SIGTERM'), 'expected SIGTERM')
+      assert.ok(
+        !child.killSignals.includes('SIGKILL'),
+        `expected no SIGKILL, got ${JSON.stringify(child.killSignals)}`,
+      )
+    })
+
+    it('agent.close() kills any in-flight child', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      await agent.close()
+
+      assert.ok(
+        child.killSignals.includes('SIGTERM'),
+        `expected SIGTERM on agent.close(), got ${JSON.stringify(child.killSignals)}`,
+      )
+    })
+
+    it('child is not killed when it exits naturally before disconnect', async () => {
+      const ws = connect(port, TOKEN)
+      const donePromise = collectUntilClose(ws)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Natural exit — agent should send 'exit' frame and close WS without
+      // ever calling kill().
+      controller.exit(0)
+
+      const { messages } = await donePromise
+      assert.ok(messages.some((m) => m.type === 'exit' && m.code === 0))
+      assert.equal(child.killSignals.length, 0, `child should not have been killed, got ${JSON.stringify(child.killSignals)}`)
+    })
+  })
+
+  describe('multi-spawn guard', () => {
+    let agent, port, controller
+
+    beforeEach(async () => {
+      const mock = createMockSpawn()
+      controller = mock.controller
+      ;({ agent, port } = await startAgent({ spawnFn: mock.spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('rejects a second spawn frame on the same connection', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      // First spawn — ack via stdout line.
+      const firstAck = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      setTimeout(() => controller.writeStdout(JSON.stringify({ type: 'assistant' })), 10)
+      const firstMsgs = await firstAck
+      assert.equal(firstMsgs[0].type, 'event')
+
+      // Second spawn — must be rejected with an error frame, first child untouched.
+      const secondAck = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      const secondMsgs = await secondAck
+      assert.equal(secondMsgs[0].type, 'error')
+      assert.match(secondMsgs[0].message, /child already running/)
 
       ws.close()
     })

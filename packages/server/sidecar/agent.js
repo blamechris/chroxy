@@ -25,6 +25,11 @@ const VERSION = _pkg.version
 
 const PORT = parseInt(process.env.PORT ?? '7681', 10)
 
+// Grace period between SIGTERM and SIGKILL when killing a child whose WS has
+// disconnected. Long enough for claude to flush; short enough that a stuck
+// child does not pin pod memory.
+const KILL_GRACE_MS = 5_000
+
 // --- Auth token -----------------------------------------------------------------
 // Read once at boot. If unset we stay up (dev convenience) but reject all WS
 // upgrades so the agent is fail-secure in production.
@@ -58,12 +63,14 @@ function safeTokenCompare(a, b) {
 export class PodAgent {
   /**
    * @param {object} opts
-   * @param {Function} [opts.spawnFn]   Override child_process.spawn for tests.
-   * @param {string}   [opts.token]     Override CHROXY_AGENT_TOKEN for tests.
+   * @param {Function} [opts.spawnFn]      Override child_process.spawn for tests.
+   * @param {string}   [opts.token]        Override CHROXY_AGENT_TOKEN for tests.
+   * @param {number}   [opts.killGraceMs]  Override SIGTERM→SIGKILL grace (tests).
    */
-  constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN } = {}) {
+  constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS } = {}) {
     this._spawnFn = spawnFn
     this._token = token
+    this._killGraceMs = killGraceMs
 
     this.httpServer = createServer((req, res) => this._handleHttp(req, res))
     this.wss = new WebSocketServer({ noServer: true })
@@ -79,7 +86,7 @@ export class PodAgent {
     this._pingInterval = null
 
     this.httpServer.on('upgrade', (req, socket, head) => this._handleUpgrade(req, socket, head))
-    this.wss.on('connection', (ws, req) => this._handleConnection(ws, req))
+    this.wss.on('connection', (ws) => this._handleConnection(ws))
   }
 
   // ---------------------------------------------------------------------------
@@ -104,6 +111,16 @@ export class PodAgent {
       if (this._pingInterval) {
         clearInterval(this._pingInterval)
         this._pingInterval = null
+      }
+      // Kill any in-flight child and force-close the active WS so wss.close()
+      // does not hang waiting for the client to disconnect.
+      if (this._activeWs) {
+        if (this._activeWs._child) {
+          this._killChild(this._activeWs._child)
+          this._activeWs._child = null
+        }
+        try { this._activeWs.terminate() } catch {}
+        this._activeWs = null
       }
       this.wss.close(() => {
         this.httpServer.close(() => resolve())
@@ -171,16 +188,48 @@ export class PodAgent {
 
     this._activeWs = ws
     ws._isAlive = true
+    ws._child = null
 
     ws.on('pong', () => { ws._isAlive = true })
     ws.on('message', (data) => this._handleMessage(ws, data))
     ws.on('close', () => {
-      if (this._activeWs === ws) this._activeWs = null
+      this._cleanupConnection(ws)
     })
     ws.on('error', (err) => {
       console.error('[chroxy-pod-agent] WS error:', err.message)
-      if (this._activeWs === ws) this._activeWs = null
+      this._cleanupConnection(ws)
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connection cleanup — kill any in-flight child so the pod does not leak
+  // PIDs/memory across reconnect cycles. Idempotent: safe to call from both
+  // 'close' and 'error' handlers, and again from agent.close().
+  // ---------------------------------------------------------------------------
+
+  _cleanupConnection(ws) {
+    if (ws._child) {
+      this._killChild(ws._child)
+      ws._child = null
+    }
+    if (this._activeWs === ws) this._activeWs = null
+  }
+
+  // ---------------------------------------------------------------------------
+  // Kill an orphaned child: SIGTERM, then SIGKILL after grace if still alive.
+  // ---------------------------------------------------------------------------
+
+  _killChild(child) {
+    if (child._chroxyKilled) return
+    child._chroxyKilled = true
+    try { child.kill('SIGTERM') } catch {}
+    const graceTimer = setTimeout(() => {
+      try { child.kill('SIGKILL') } catch {}
+    }, this._killGraceMs)
+    // Don't keep the process alive just to wait for an unresponsive child.
+    if (typeof graceTimer.unref === 'function') graceTimer.unref()
+    // If the child exits before the grace expires, cancel the SIGKILL timer.
+    child.once('close', () => clearTimeout(graceTimer))
   }
 
   // ---------------------------------------------------------------------------
@@ -223,6 +272,14 @@ export class PodAgent {
       return
     }
 
+    // One spawn per connection. K8sBackend (#3320) is the sole consumer and
+    // assumes single-child semantics; a second 'spawn' frame indicates a bug
+    // upstream rather than a feature.
+    if (ws._child) {
+      this._send(ws, { type: 'error', message: 'spawn: child already running' })
+      return
+    }
+
     const spawnOpts = {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...env },
@@ -236,6 +293,9 @@ export class PodAgent {
       this._send(ws, { type: 'error', message: `spawn failed: ${err.message}` })
       return
     }
+
+    // Track the child on the WS so a disconnect can kill it (see _cleanupConnection).
+    ws._child = child
 
     // stdout — read line-by-line; each NDJSON line becomes one 'event' frame.
     const rl = createInterface({ input: child.stdout })
@@ -257,8 +317,10 @@ export class PodAgent {
       this._send(ws, { type: 'stderr', data: chunk.toString() })
     })
 
-    // exit — emit exit code and close the WS.
+    // exit — emit exit code and close the WS. Clear the tracked child so the
+    // disconnect handler does not try to kill an already-exited process.
     child.on('close', (code) => {
+      if (ws._child === child) ws._child = null
       this._send(ws, { type: 'exit', code: code ?? 1 })
       // Small delay so the exit frame is flushed before we close.
       setTimeout(() => {
@@ -278,8 +340,10 @@ export class PodAgent {
       if (ws.readyState !== 1) return
       if (!ws._isAlive) {
         console.warn('[chroxy-pod-agent] Client unresponsive, terminating')
+        // terminate() does not always fire 'close'; clean up the child here
+        // to guarantee the orphan-PID path is closed even on hard terminate.
+        this._cleanupConnection(ws)
         ws.terminate()
-        this._activeWs = null
         return
       }
       ws._isAlive = false

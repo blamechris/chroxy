@@ -148,6 +148,58 @@ followed by `ws.close(1008)`.  The first connection is unaffected.
 
 ---
 
+## One Spawn Per Connection
+
+Each connection may run **one** child process at a time.  A second `spawn`
+frame on a connection that already has a running child is rejected with:
+
+```json
+{ "type": "error", "message": "spawn: child already running" }
+```
+
+The first child continues unaffected.  K8sBackend (#3320) is the sole consumer
+and is expected to open one connection per session; multi-spawn semantics are
+not part of this protocol.
+
+---
+
+## Lifecycle and Orphan Prevention
+
+When the WS connection closes — for any reason: client `ws.close()`,
+client-side disconnect, ping-timeout `terminate()`, or agent shutdown — any
+running child for that connection is killed.  The agent sends `SIGTERM` first
+and escalates to `SIGKILL` after a 5 s grace period if the child is still
+alive.  This guarantees that long-lived pods do not leak PIDs/memory across
+reconnect cycles.
+
+Conversely, when the child exits naturally the agent sends an `exit` frame
+and closes the WS within 50 ms.
+
+---
+
+## Stream Ordering Guarantees
+
+Frames produced by the agent have the following ordering properties:
+
+- **Same-stream order is preserved.**  All `event` frames arrive in the order
+  the child wrote NDJSON lines to stdout.  All `stderr` frames arrive in the
+  order the child wrote bytes to stderr.
+- **Cross-stream order is NOT preserved.**  stdout is line-buffered (via
+  `readline`), so an `event` frame is only emitted on a newline.  stderr is
+  forwarded as raw `data` chunks the moment they arrive.  This means a stderr
+  byte written *before* a stdout newline can appear *after* the resulting
+  `event` frame on the wire — and vice-versa, a partial stdout line that
+  finally completes can flush *after* later stderr writes.
+
+Consumers that need to interleave the two streams (e.g. for log display) must
+buffer them locally and reconcile by timestamp or sequence — the wire order
+of `event` and `stderr` frames is not authoritative.
+
+The terminal `exit` frame is always the last frame on the connection, after
+which the WS close handshake follows within 50 ms.
+
+---
+
 ## Ping / Pong Keepalive
 
 The agent sends a WebSocket `ping` frame (not a `{ type: 'ping' }` JSON frame)
@@ -168,6 +220,7 @@ replies with `{ type: 'pong' }`.
 | `CHROXY_AGENT_TOKEN` not set        | `401` socket end for all upgrades + startup warn   |
 | Second WS connection                | Auth validated, then `error` frame + close `1008`  |
 | `spawn` without `cmd`               | `error` frame, connection stays open               |
+| `spawn` while child already running | `error` frame, first child unaffected              |
 | Unknown message type                | `error` frame, connection stays open               |
 | Child process spawn failure         | `error` frame, connection stays open               |
 | Invalid JSON frame from client      | `error` frame, connection stays open               |
