@@ -203,8 +203,14 @@ export class K8sBackend {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+// Detects a Kubernetes 404 across the shapes the JS clients have used over time.
+// `@kubernetes/client-node` v1.x throws `ApiException` with the HTTP status on
+// `err.code` — that's the canonical real-world shape. The other branches cover
+// older clients and adapter wrappers, so we keep them as a safety net.
 function _isNotFound(err) {
-  return err?.statusCode === 404 || err?.response?.statusCode === 404 ||
+  return err?.code === 404 ||
+    err?.statusCode === 404 ||
+    err?.response?.statusCode === 404 ||
     err?.body?.code === 404
 }
 

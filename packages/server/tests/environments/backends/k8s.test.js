@@ -8,9 +8,9 @@ import { K8sBackend } from '../../../src/environments/backends/k8s.js'
  * Creates a mock CoreV1Api that records calls and returns configured results.
  *
  * @param {Object} [opts]
- * @param {Function} [opts.createNamespacedPod]   - Override for create call
- * @param {Function} [opts.deleteNamespacedPod]   - Override for delete call
- * @param {Function} [opts.readNamespacedPod]     - Override for read/poll call
+ * @param {Function} [opts.createPod] - Override for `createNamespacedPod` call
+ * @param {Function} [opts.deletePod] - Override for `deleteNamespacedPod` call
+ * @param {Function} [opts.readPod]   - Override for `readNamespacedPod` (poll) call
  */
 function createMockApi({ createPod, deletePod, readPod } = {}) {
   const calls = { create: [], delete: [], read: [] }
@@ -33,10 +33,11 @@ function createMockApi({ createPod, deletePod, readPod } = {}) {
   return api
 }
 
+// Mirrors the real `@kubernetes/client-node` `ApiException` shape: the HTTP
+// status is exposed on `err.code` (not `err.statusCode`).
+// See node_modules/@kubernetes/client-node/dist/gen/apis/exception.d.ts
 function make404Error() {
-  const err = new Error('Not Found')
-  err.statusCode = 404
-  return err
+  return Object.assign(new Error('Not Found'), { code: 404 })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -206,6 +207,37 @@ describe('K8sBackend.destroyEnvironment()', () => {
     const backend = new K8sBackend({ _coreV1Api: api })
 
     await assert.doesNotReject(() => backend.destroyEnvironment('flaky-pod'))
+  })
+
+  it('detects ApiException with code=404 on delete (real client-node shape)', async () => {
+    // @kubernetes/client-node v1.x throws ApiException with `.code` (not `.statusCode`).
+    // Regression guard for #3317.
+    const api = createMockApi({
+      deletePod: async () => {
+        throw Object.assign(new Error('pods "ghost" not found'), { code: 404 })
+      },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.doesNotReject(() => backend.destroyEnvironment('ghost'))
+    // Idempotent 404 fast-path: no polling.
+    assert.equal(api.calls.read.length, 0)
+  })
+
+  it('detects ApiException with code=404 during poll (real client-node shape)', async () => {
+    // Verifies the poll-loop success signal also matches `err.code === 404`.
+    // Regression guard for #3317.
+    const api = createMockApi({
+      readPod: async () => {
+        throw Object.assign(new Error('pods "gone" not found'), { code: 404 })
+      },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.destroyEnvironment('gone')
+
+    // Single poll, then fast-path exit on 404.
+    assert.equal(api.calls.read.length, 1)
   })
 })
 
