@@ -128,8 +128,16 @@ export class K8sBackend {
     this._agentTokens = new Map()
 
     // Reconnect backoff config — injectable for deterministic unit tests.
-    this._reconnectDelays = _reconnectDelays || DEFAULT_RECONNECT_DELAYS
-    this._maxRetries = _maxRetries != null ? _maxRetries : DEFAULT_MAX_RETRIES
+    // Validate the delay schedule defensively: an empty array (or non-finite
+    // entries) would make `delay` undefined and let `setTimeout` fire on the
+    // next tick, producing a tight reconnect loop.
+    const delays = _reconnectDelays || DEFAULT_RECONNECT_DELAYS
+    const validDelays = Array.isArray(delays) && delays.length > 0 &&
+      delays.every((d) => Number.isFinite(d) && d >= 0)
+    this._reconnectDelays = validDelays ? delays : DEFAULT_RECONNECT_DELAYS
+    this._maxRetries = Number.isFinite(_maxRetries) && _maxRetries >= 0
+      ? _maxRetries
+      : DEFAULT_MAX_RETRIES
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -866,9 +874,15 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
    * Schedule a reconnect attempt with exponential backoff.
    * If no session has been established yet (pre-session failure) emit exit(-1).
    * If max retries are exceeded emit exit(-2) (session unrecoverable).
+   *
+   * Idempotent: WS 'error' and 'close' handlers can both fire for the same
+   * underlying drop; without de-dup we would create two pending timers and
+   * double-step the retry counter. Returning early when a timer is already
+   * pending guarantees one reconnect attempt per drop.
    */
   const scheduleReconnect = () => {
     if (proc._exited || proc.killed) return
+    if (proc._retryTimer) return  // already scheduled — drop duplicate trigger
     if (!proc._sessionId) {
       // Failed before the session was acknowledged — treat as connection failure.
       finishWithExit(-1)
@@ -895,7 +909,10 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
           const rCleanup = dialResult && typeof dialResult.cleanup === 'function'
             ? dialResult.cleanup : null
           if (rCleanup) { try { rCleanup() } catch (_) { /* ignore */ } }
-          if (!proc._exited) finishWithExit(-2)
+          // Caller-initiated cancellation → exit(-1) (matches the synchronous
+          // kill() before-dial path). exit(-2) is reserved for unrecoverable
+          // session loss the consumer cannot mitigate.
+          if (!proc._exited) finishWithExit(-1)
           return
         }
         const rws = dialResult && dialResult.ws ? dialResult.ws : dialResult
@@ -950,10 +967,18 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
         proc._retryAttempt = 0  // reset retry counter on fresh session
         log.info(`Sidecar session started: ${frame.sessionId}`)
         break
+      case 'resumed':
+        // Agent acknowledged a successful resume after replay (#3348). Reset
+        // the retry counter so `maxRetries` is a per-blip budget, not a
+        // session-lifetime budget. PROTOCOL.md documents this frame.
+        proc._retryAttempt = 0
+        log.info(`Sidecar session resumed: ${frame.sessionId} (replayed=${frame.replayedCount ?? 0})`)
+        break
       case 'session_lost':
-        // Agent does not recognise our sessionId — the in-pod child is gone.
-        // This is unrecoverable; exit(-2) signals session loss to the caller.
-        log.warn(`Sidecar session lost: ${frame.sessionId}`)
+        // Agent does not recognise our sessionId or cannot replay the gap
+        // (buffer overflow). Either way unrecoverable — exit(-2) signals
+        // session loss to the caller.
+        log.warn(`Sidecar session lost: ${frame.sessionId} (reason=${frame.reason || 'unknown'})`)
         finishWithExit(-2)
         break
       case 'event': {
@@ -997,11 +1022,30 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
   ws.on('error', (err) => {
     if (proc._exited) return
     log.warn(`Sidecar WS error for process: ${err.message}`)
+    // Caller asked to stop. Real-world WS errors (TCP reset, DNS, etc.) do
+    // NOT guarantee a follow-up close with code 1000 — emit exit(-1) here
+    // so the consumer's `on('exit')` listener fires regardless of which
+    // event the underlying ws emits. Without this, kill() before a 1006-
+    // shaped drop leaves _exited=false forever (#3346).
+    if (proc.killed || (signal && signal.aborted)) {
+      finishWithExit(-1)
+      return
+    }
     scheduleReconnect()
   })
 
   ws.on('close', (code) => {
     if (proc._exited) return
+    // Caller asked to stop — synthesize exit(-1) immediately, regardless of
+    // the close code. Real WS implementations emit 1006 when the TCP socket
+    // is dropped abruptly (the common case after kill()), and the original
+    // code path fell through to scheduleReconnect() which then bailed on
+    // proc.killed without ever emitting exit (#3346).
+    if (proc.killed || (signal && signal.aborted)) {
+      log.info(`Sidecar WS closed after kill (code=${code})`)
+      finishWithExit(-1)
+      return
+    }
     // Normal close codes (1000 = normal, 1001 = going away) indicate a
     // clean shutdown — treat as pre-session failure or natural exit.
     if (code === 1000 || code === 1001) {

@@ -721,10 +721,61 @@ describe('PodAgent', () => {
         `all replayed frames must have seq > ${resumeAfterSeq}, got ${JSON.stringify(replayed.map((m) => m.seq))}`)
       assert.ok(replayed.length >= 1, 'must have replayed at least one frame')
 
+      // The resume MUST be acknowledged by an explicit `resumed` frame after
+      // the replay (#3348). Without it, clients cannot reset their per-blip
+      // retry budget and `maxRetries` becomes a session-lifetime budget.
+      const resumed = ws2Msgs.find((m) => m.type === 'resumed')
+      assert.ok(resumed, `expected a resumed frame after replay, got ${JSON.stringify(ws2Msgs)}`)
+      assert.equal(resumed.sessionId, sessionId)
+      assert.equal(resumed.lastSeq, resumeAfterSeq)
+      assert.ok(typeof resumed.replayedCount === 'number' && resumed.replayedCount >= 1,
+        `resumed.replayedCount should be a positive number, got ${resumed.replayedCount}`)
+
       ws2.close()
     })
 
-    it('sends session_lost when sessionId is unknown', async () => {
+    it('emits resumed even when nothing was replayed (lastSeq up-to-date)', async () => {
+      const ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+
+      const ws1Msgs = []
+      ws1.on('message', (d) => {
+        try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      controller.writeStdout(JSON.stringify({ type: 'a' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+      const lastSeq = Math.max(...ws1Msgs.filter((m) => typeof m.seq === 'number').map((m) => m.seq))
+
+      ws1.close()
+      await new Promise((r) => setTimeout(r, 20))
+
+      const ws2 = connect(port, TOKEN)
+      await waitOpen(ws2)
+
+      const ws2Msgs = []
+      ws2.on('message', (d) => {
+        try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      // Resume already at the latest seq — replayedCount must be 0 but the
+      // resumed frame is still required so the client can ack the success.
+      ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const resumed = ws2Msgs.find((m) => m.type === 'resumed')
+      assert.ok(resumed, 'resumed frame must be sent even when nothing replayed')
+      assert.equal(resumed.replayedCount, 0)
+
+      ws2.close()
+    })
+
+    it('sends session_lost(unknown_session) when sessionId is unknown', async () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
@@ -734,6 +785,7 @@ describe('PodAgent', () => {
       const msgs = await msgsPromise
       assert.equal(msgs[0].type, 'session_lost')
       assert.equal(msgs[0].sessionId, 'does-not-exist')
+      assert.equal(msgs[0].reason, 'unknown_session')
 
       ws.close()
     })
@@ -787,7 +839,7 @@ describe('PodAgent', () => {
 
     afterEach(() => agent.close())
 
-    it('drops oldest events when buffer overflows', async () => {
+    it('emits session_lost(buffer_overflow) when resume lastSeq predates the buffer (#3347)', async () => {
       const ws1 = connect(port, TOKEN)
       await waitOpen(ws1)
 
@@ -809,6 +861,56 @@ describe('PodAgent', () => {
       assert.ok(allEvents.length === 5, `ws1 should see all 5 events live (got ${allEvents.length})`)
 
       // Disconnect then reconnect with lastSeq=0 (asking for full replay).
+      // Per #3347 this used to silently replay only what was still buffered;
+      // the corrected behaviour is to surface a session_lost(buffer_overflow)
+      // so the client never sees a partial NDJSON stream.
+      const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+      ws1.close()
+      await new Promise((r) => setTimeout(r, 20))
+
+      const ws2 = connect(port, TOKEN)
+      const ws2Done = collectUntilClose(ws2)
+      await waitOpen(ws2)
+
+      ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
+
+      const { messages, closeCode } = await ws2Done
+
+      // No event frames must be replayed when the gap is detected — the
+      // client's NDJSON stream cannot be safely continued.
+      const replayedEvents = messages.filter((m) => m.type === 'event')
+      assert.equal(replayedEvents.length, 0,
+        `must NOT replay any events on a stale-resume gap, got ${JSON.stringify(replayedEvents)}`)
+
+      const lost = messages.find((m) => m.type === 'session_lost')
+      assert.ok(lost, `expected session_lost frame, got ${JSON.stringify(messages)}`)
+      assert.equal(lost.sessionId, sessionId)
+      assert.equal(lost.reason, 'buffer_overflow',
+        'session_lost reason must be buffer_overflow on resume gap')
+      assert.equal(closeCode, 1008, 'WS must be closed with code 1008 on resume gap')
+    })
+
+    it('successful resume after partial drain still emits resumed', async () => {
+      // Consume a few frames live, then resume with lastSeq inside the window —
+      // verifies the gap check does not trip when the buffer still covers
+      // (lastSeq, head].
+      const ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+
+      const ws1Msgs = []
+      ws1.on('message', (d) => {
+        try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Push exactly bufferSize events; the oldest seq still buffered is 1.
+      for (let i = 0; i < 3; i++) {
+        controller.writeStdout(JSON.stringify({ idx: i }))
+      }
+      await new Promise((r) => setTimeout(r, 20))
+
       const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
       ws1.close()
       await new Promise((r) => setTimeout(r, 20))
@@ -821,17 +923,17 @@ describe('PodAgent', () => {
         try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
       })
 
+      // lastSeq=0 with no eviction (buffer full but starts at seq=1) must
+      // succeed and replay everything.
       ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
-      await new Promise((r) => setTimeout(r, 30))
+      await new Promise((r) => setTimeout(r, 20))
 
-      // With bufferSize=3, only the last 3 events should be replayed.
       const replayed = ws2Msgs.filter((m) => m.type === 'event')
-      assert.equal(replayed.length, 3,
-        `expected 3 replayed events (buffer=3), got ${replayed.length}: ${JSON.stringify(replayed)}`)
+      assert.equal(replayed.length, 3, 'all 3 buffered events must replay when no gap')
 
-      // The replayed events should correspond to idx 2, 3, 4 (the most recent 3).
-      const replayedIdx = replayed.map((m) => m.payload.idx)
-      assert.deepEqual(replayedIdx, [2, 3, 4])
+      const resumed = ws2Msgs.find((m) => m.type === 'resumed')
+      assert.ok(resumed, 'resumed frame required on successful resume')
+      assert.equal(resumed.replayedCount, 3)
 
       ws2.close()
     })

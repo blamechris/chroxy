@@ -32,7 +32,13 @@ const KILL_GRACE_MS = 5_000
 
 // Ring-buffer capacity: number of output frames retained per session for
 // replay on resume. Tunable at startup via CHROXY_AGENT_BUFFER_SIZE.
-const DEFAULT_BUFFER_SIZE = parseInt(process.env.CHROXY_AGENT_BUFFER_SIZE ?? '1000', 10)
+// Reject non-positive / NaN values so an invalid env var cannot disable
+// eviction (NaN >= length is always false → unbounded buffer growth).
+const FALLBACK_BUFFER_SIZE = 1000
+const _PARSED_BUFFER_SIZE = parseInt(process.env.CHROXY_AGENT_BUFFER_SIZE ?? `${FALLBACK_BUFFER_SIZE}`, 10)
+const DEFAULT_BUFFER_SIZE = Number.isFinite(_PARSED_BUFFER_SIZE) && _PARSED_BUFFER_SIZE > 0
+  ? _PARSED_BUFFER_SIZE
+  : FALLBACK_BUFFER_SIZE
 
 // --- Auth token -----------------------------------------------------------------
 // Read once at boot. If unset we stay up (dev convenience) but reject all WS
@@ -78,7 +84,12 @@ export class PodAgent {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
-    this._bufferSize = bufferSize
+    // Validate bufferSize defensively — a NaN or non-positive value would
+    // disable eviction (NaN >= length is always false) and let the buffer
+    // grow without bound.
+    this._bufferSize = Number.isFinite(bufferSize) && bufferSize > 0
+      ? bufferSize
+      : FALLBACK_BUFFER_SIZE
 
     // Fail-secure warning. Emitted from the constructor (not module-load) so
     // tests and embedders that pass an explicit `token` don't see a misleading
@@ -322,8 +333,13 @@ export class PodAgent {
     // One spawn per connection. K8sBackend (#3320) is the sole consumer and
     // assumes single-child semantics; a second 'spawn' frame indicates a bug
     // upstream rather than a feature.
-    if (ws._sessionId && this._sessions.has(ws._sessionId) &&
-        this._sessions.get(ws._sessionId).child) {
+    //
+    // We reject any second spawn while this WS is already bound to a session,
+    // even if the child has just exited and the session-cleanup timer has not
+    // yet fired (#3328 race window between child 'close' and the 50 ms WS-
+    // close timer). After natural exit the agent closes the WS — clients are
+    // expected to open a fresh connection rather than re-spawn on the same one.
+    if (ws._sessionId && this._sessions.has(ws._sessionId)) {
       this._send(ws, { type: 'error', message: 'spawn: child already running' })
       return
     }
@@ -372,6 +388,16 @@ export class PodAgent {
     child.on('error', (err) => {
       if (session.child === child) session.child = null
       this._emitSessionFrame(session, { type: 'error', message: `spawn failed: ${err.message}` })
+      // Async spawn never produced a child — there will be no 'close' event
+      // to clean up the session. Synthesize an exit and drop the session
+      // entry so the agent does not leak it indefinitely.
+      this._emitSessionFrame(session, { type: 'exit', code: -1 })
+      setTimeout(() => {
+        if (session.activeWs && session.activeWs.readyState === 1) {
+          session.activeWs.close(1000, 'spawn failed')
+        }
+        this._sessions.delete(sessionId)
+      }, 50)
     })
 
     // stdout — read line-by-line; each NDJSON line becomes one 'event' frame.
@@ -418,7 +444,7 @@ export class PodAgent {
 
     const session = this._sessions.get(sessionId)
     if (!session) {
-      this._send(ws, { type: 'session_lost', sessionId })
+      this._send(ws, { type: 'session_lost', sessionId, reason: 'unknown_session' })
       return
     }
 
@@ -430,16 +456,40 @@ export class PodAgent {
       return
     }
 
+    // Resume-with-gap detection (#3347).
+    // If the oldest seq still in the ring buffer is greater than `lastSeq + 1`,
+    // some events between (lastSeq, oldestSeq) were evicted by buffer overflow.
+    // Silent partial replay would corrupt the client's NDJSON stream — surface
+    // it as session_lost so the consumer can take recovery action (exit -2).
+    if (session.buffer.length > 0 && session.buffer[0].seq > lastSeq + 1) {
+      this._send(ws, { type: 'session_lost', sessionId, reason: 'buffer_overflow' })
+      ws.close(1008, 'resume gap')
+      return
+    }
+
     // Attach this WS to the session.
     session.activeWs = ws
     ws._sessionId = sessionId
 
     // Replay any buffered frames the client hasn't seen yet (seq > lastSeq).
+    let replayedCount = 0
     for (const entry of session.buffer) {
       if (entry.seq > lastSeq) {
         this._send(ws, entry.frame)
+        replayedCount += 1
       }
     }
+
+    // Emit an explicit `resumed` frame so the client can confirm the resume
+    // succeeded and reset its per-blip retry counter (#3348). Without this
+    // frame the client treats `maxRetries` as a lifetime budget rather than
+    // a per-disconnect budget. PROTOCOL.md documents this frame.
+    this._send(ws, {
+      type: 'resumed',
+      sessionId,
+      lastSeq,
+      replayedCount,
+    })
   }
 
   // ---------------------------------------------------------------------------

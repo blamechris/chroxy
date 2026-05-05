@@ -1411,7 +1411,12 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     proc.stdout.resume(); proc.stderr.resume()
   })
 
-  it('resets retry count on fresh session_started after successful reconnect', async () => {
+  it('resets retry count on `resumed` frame after successful reconnect (#3348)', async () => {
+    // Per PROTOCOL.md the agent emits `{ type: 'resumed', ... }` after replay
+    // on a successful resume. The client uses that frame — NOT a synthetic
+    // session_started — to reset its per-blip retry budget. This test mirrors
+    // real wire behaviour: only `session_started` on the FIRST dial, and
+    // `resumed` on every subsequent successful reconnect.
     const { backend, dials } = makeBackendWithDials(2)
     const [dial1, dial2] = dials
 
@@ -1441,12 +1446,14 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     const resumeFrame = JSON.parse(sent2[sent2.length - 1])
     assert.equal(resumeFrame.type, 'resume')
 
-    // Agent sends session_started on resume — should reset retry counter
-    dial2.controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-5' }))
+    // Agent sends `resumed` (not session_started) on successful resume.
+    dial2.controller.receive(JSON.stringify({
+      type: 'resumed', sessionId: 'sess-5', lastSeq: 0, replayedCount: 0,
+    }))
     await new Promise(r => setImmediate(r))
 
     assert.equal(proc._retryAttempt, 0,
-      `retry count should be reset to 0 after session_started on reconnect, got ${proc._retryAttempt}`)
+      `retry count should be reset to 0 after 'resumed' on reconnect, got ${proc._retryAttempt}`)
 
     // Clean up
     dial2.controller.receive(JSON.stringify({ type: 'exit', code: 0 }))
@@ -1454,5 +1461,267 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     assert.deepEqual(exitCodes, [0])
 
     proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('retry budget is per-blip — 3 reconnect cycles each reset the counter (#3348)', async () => {
+    // Lifetime-budget bug: without per-blip reset, 3 cycles with maxRetries=2
+    // would exhaust the counter on the 3rd cycle even though every prior
+    // resume succeeded. With per-blip reset all 3 cycles can succeed.
+    const dials = Array.from({ length: 4 }, () => createFakeWs())
+    let callIndex = 0
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        const d = dials[callIndex]
+        callIndex += 1
+        if (!d) throw new Error(`unexpected extra dial (${callIndex - 1})`)
+        return Promise.resolve(d.ws)
+      },
+      _reconnectDelays: [10],
+      _maxRetries: 2,  // tight budget — would fail on cycle 3 without per-blip reset
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+
+    // Initial session
+    dials[0].controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-life' }))
+    await new Promise(r => setImmediate(r))
+
+    // Cycle 1 reconnect → resumed
+    dials[0].controller.triggerClose(1006)
+    await new Promise(r => setTimeout(r, 30))
+    dials[1].controller.receive(JSON.stringify({
+      type: 'resumed', sessionId: 'sess-life', lastSeq: 0, replayedCount: 0,
+    }))
+    await new Promise(r => setImmediate(r))
+    assert.equal(proc._retryAttempt, 0, 'cycle 1: retry counter must reset on resumed')
+
+    // Cycle 2 reconnect → resumed
+    dials[1].controller.triggerClose(1006)
+    await new Promise(r => setTimeout(r, 30))
+    dials[2].controller.receive(JSON.stringify({
+      type: 'resumed', sessionId: 'sess-life', lastSeq: 0, replayedCount: 0,
+    }))
+    await new Promise(r => setImmediate(r))
+    assert.equal(proc._retryAttempt, 0, 'cycle 2: retry counter must reset on resumed')
+
+    // Cycle 3 reconnect → resumed
+    dials[2].controller.triggerClose(1006)
+    await new Promise(r => setTimeout(r, 30))
+    dials[3].controller.receive(JSON.stringify({
+      type: 'resumed', sessionId: 'sess-life', lastSeq: 0, replayedCount: 0,
+    }))
+    await new Promise(r => setImmediate(r))
+    assert.equal(proc._retryAttempt, 0, 'cycle 3: retry counter must reset on resumed')
+
+    // Should still be alive after 3 cycles
+    assert.deepEqual(exitCodes, [], 'must not exit after 3 successful reconnect cycles')
+
+    // Drain final exit
+    dials[3].controller.receive(JSON.stringify({ type: 'exit', code: 0 }))
+    await new Promise(r => setImmediate(r))
+    assert.deepEqual(exitCodes, [0])
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess.kill() — must always emit exit regardless of WS close code (#3346)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess.kill() exit semantics', () => {
+  /**
+   * Build a fake WS whose close() emits a configurable code instead of the
+   * default 1000. Real ws clients emit 1006 (abnormal closure) when the
+   * remote end drops the TCP connection without a close handshake — exactly
+   * the shape that triggered the #3346 hang.
+   */
+  function fakeWsWithCloseCode(code) {
+    const emitter = new EventEmitter()
+    const sent = []
+    const ws = {
+      readyState: 1,
+      send: (d) => { sent.push(d) },
+      close: () => { emitter.emit('close', code, '') },
+      once: (ev, fn) => emitter.once(ev, fn),
+      on: (ev, fn) => emitter.on(ev, fn),
+    }
+    ws.sent = sent
+    const controller = {
+      receive: (raw) => emitter.emit('message', raw),
+      triggerError: (err) => emitter.emit('error', err),
+      triggerClose: (c = code) => emitter.emit('close', c, ''),
+    }
+    return { ws, controller }
+  }
+
+  it('emits exit(-1) after kill() even when close fires with code 1006 (#3346)', async () => {
+    const { ws } = fakeWsWithCloseCode(1006)
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    // Allow dial + spawn frame + session ack so the close path follows the
+    // post-session branch (which previously fell into scheduleReconnect).
+    await new Promise(r => setImmediate(r))
+    // No session_started — but kill() still must produce exit regardless.
+    proc.kill('SIGTERM')
+
+    // proc.kill() calls ws.close() which synchronously emits the 1006.
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-1],
+      'kill() must emit exit(-1) regardless of WS close code (1006 was the canonical real-world failure)')
+  })
+
+  it('emits exit(-1) after kill() when close fires with 1006 mid-session', async () => {
+    const { ws, controller } = fakeWsWithCloseCode(1006)
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+      _reconnectDelays: [1000],  // long enough that no real reconnect timer fires
+      _maxRetries: 5,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+    // Establish session — this puts the close path into the
+    // scheduleReconnect branch, which is where the original bug lived.
+    controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'kill-1006' }))
+    await new Promise(r => setImmediate(r))
+
+    proc.kill('SIGTERM')
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-1],
+      'kill() mid-session must emit exit(-1) instead of falling through to scheduleReconnect')
+    // No reconnect timer should be pending after kill
+    assert.equal(proc._retryTimer, null, 'kill() must clear any pending reconnect timer')
+  })
+
+  it('emits exit(-1) when WS error fires after kill() (#3346)', async () => {
+    const { ws, controller } = fakeWsWithCloseCode(1006)
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+    controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'kill-err' }))
+    await new Promise(r => setImmediate(r))
+
+    proc.kill('SIGTERM')
+    // Some ws clients emit 'error' alongside (or instead of) close — exit
+    // must still fire exactly once.
+    controller.triggerError(new Error('socket hang up'))
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-1],
+      'kill() must emit exit(-1) even when the underlying ws emits error after kill')
+  })
+
+  it('error and close handlers do not double-schedule reconnect (#3191269007)', async () => {
+    const { ws, controller } = fakeWsWithCloseCode(1006)
+    const dial2 = createFakeWs()
+    let dialCount = 0
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        dialCount += 1
+        if (dialCount === 1) return Promise.resolve(ws)
+        if (dialCount === 2) return Promise.resolve(dial2.ws)
+        throw new Error(`unexpected extra dial (${dialCount})`)
+      },
+      _reconnectDelays: [10],
+      _maxRetries: 5,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+    controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'dbl' }))
+    await new Promise(r => setImmediate(r))
+
+    // Real ws clients commonly fire BOTH 'error' and 'close' for the same
+    // socket failure. Without a guard the reconnect would be scheduled twice
+    // and _retryAttempt would jump from 0 → 2 instead of 0 → 1.
+    controller.triggerError(new Error('ECONNRESET'))
+    controller.triggerClose(1006)
+
+    // Yield so the timer has a chance to fire — second dial would be
+    // attempted twice without the guard.
+    await new Promise(r => setTimeout(r, 30))
+
+    assert.equal(proc._retryAttempt, 1,
+      `retry counter must increment by 1 per drop, got ${proc._retryAttempt}`)
+    assert.equal(dialCount, 2, `expected exactly 2 dials (initial + 1 reconnect), got ${dialCount}`)
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess.session_lost(buffer_overflow) — emits exit(-2) (#3347)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess session_lost reasons', () => {
+  function makeBackendWithFakeWs() {
+    const { ws, controller } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+    return { backend, ws, controller }
+  }
+
+  it('emits exit(-2) on session_lost(buffer_overflow) frame (#3347)', async () => {
+    const { backend, controller } = makeBackendWithFakeWs()
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+    controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'gap' }))
+    controller.receive(JSON.stringify({
+      type: 'session_lost', sessionId: 'gap', reason: 'buffer_overflow',
+    }))
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-2],
+      'buffer_overflow session_lost must surface as exit(-2) (unrecoverable)')
   })
 })

@@ -65,9 +65,14 @@ K8sBackend                       chroxy-pod-agent
      │── { type: 'resume', sessionId, lastSeq } ──▶
      │◀─ { type: 'event', ..., seq: N+1 }   (buffered frames replayed)
      │◀─ ...
+     │◀─ { type: 'resumed', sessionId, lastSeq, replayedCount }
      │◀─ { type: 'exit', code: 0, seq: M }
      │                                  │   (WS close follows within 50 ms)
 ```
+
+The `resumed` frame is sent **after** the buffered replay finishes and signals
+that the connection is now in live-forwarding mode.  Clients use it to confirm
+a successful resume (e.g. to reset per-blip retry budgets — see #3348).
 
 ### Session Lost After Agent Restart
 
@@ -77,9 +82,28 @@ K8sBackend                       chroxy-pod-agent
      │── WS Upgrade ───────────────────▶
      │                                  │
      │── { type: 'resume', sessionId } ─▶
-     │◀─ { type: 'session_lost', sessionId }
+     │◀─ { type: 'session_lost', sessionId, reason: 'unknown_session' }
      │                                  │   (connection stays open for a new spawn)
 ```
+
+### Session Lost After Resume Gap (Buffer Overflow)
+
+```
+K8sBackend                       chroxy-pod-agent
+     │                                  │
+     │── WS Upgrade ───────────────────▶
+     │                                  │
+     │── { type: 'resume', sessionId, lastSeq } ──▶
+     │                                  │   buffer evicted seq <= lastSeq + N
+     │◀─ { type: 'session_lost', sessionId, reason: 'buffer_overflow' }
+     │                                  │   (WS closes 1008; session is unrecoverable)
+```
+
+When the requested `lastSeq` is older than the oldest seq still in the agent's
+ring buffer, replaying only what remains would silently drop a contiguous gap
+of frames and corrupt the client's NDJSON stream.  The agent surfaces this as
+`session_lost` with `reason: 'buffer_overflow'` so the client can map it to
+`exit(-2)` / unrecoverable rather than continuing with a partial stream.
 
 ---
 
@@ -169,15 +193,46 @@ of sending this frame.
 { "type": "exit", "code": 0, "seq": 3 }
 ```
 
-#### `session_lost`
+#### `resumed`
 
-Sent in response to a `resume` frame when the agent has no record of the
-given `sessionId` (e.g. the agent process restarted and lost all session
-state).  The connection stays open; the client may open a new session with
-`spawn` or simply close.
+Sent in response to a successful `resume`, after any buffered frames have been
+replayed and before any new live frames.  This frame has no `seq` (it is
+control, not session output) and signals the client that:
+
+- the resume succeeded (gap-free replay was possible),
+- `replayedCount` frames were sent during the catch-up phase,
+- the connection is now in live-forwarding mode.
+
+Clients use this frame to reset per-blip retry budgets (see #3348).
 
 ```json
-{ "type": "session_lost", "sessionId": "550e8400-e29b-41d4-a716-446655440000" }
+{
+  "type": "resumed",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "lastSeq": 42,
+  "replayedCount": 3
+}
+```
+
+#### `session_lost`
+
+Sent in response to a `resume` frame when the session is unrecoverable.
+
+| `reason`            | Meaning                                                    |
+|---------------------|------------------------------------------------------------|
+| `unknown_session`   | No record of the given `sessionId` (agent restarted, etc.) |
+| `buffer_overflow`   | `lastSeq` predates the oldest buffered frame — gap detected |
+
+For `unknown_session` the connection stays open so the client can open a fresh
+session with `spawn`.  For `buffer_overflow` the agent closes the WS with code
+`1008` because continuing on the same WS would still see a partial stream.
+
+```json
+{
+  "type": "session_lost",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "reason": "unknown_session"
+}
 ```
 
 #### `pong`
@@ -231,20 +286,29 @@ not part of this protocol.
 
 When a `spawn` is accepted the agent assigns a UUID `sessionId` and begins
 buffering output frames (up to `CHROXY_AGENT_BUFFER_SIZE`, default 1000).
-Each frame carries a monotonically increasing `seq` number scoped to the
-session.
+**Output frames** (`event`, `stderr`, `exit`) carry a monotonically increasing
+`seq` number scoped to the session.  **Control frames** (`session_started`,
+`resumed`, `session_lost`, `error`, `pong`) do **not** carry a `seq` — they
+are out-of-band acknowledgements, not replayable session output.
 
 When the WS connection closes — for any reason other than a natural child
 exit — the **child process continues running** inside the pod.  This allows
 a reconnecting client to resume the session and receive replayed output.
 
 When the client reconnects it sends `{ type: 'resume', sessionId, lastSeq }`.
-The agent replays any buffered frames with `seq > lastSeq` and then resumes
-live forwarding.
+The agent then chooses one of:
+
+1. **Successful resume** — replay any buffered frames with `seq > lastSeq`
+   followed by a single `{ type: 'resumed', sessionId, lastSeq, replayedCount }`
+   frame, then continue live forwarding.
+2. **Unknown session** — `{ type: 'session_lost', reason: 'unknown_session' }`.
+3. **Resume gap** — `{ type: 'session_lost', reason: 'buffer_overflow' }` when
+   the requested `lastSeq` predates the oldest buffered seq.  Followed by
+   `ws.close(1008)`.
 
 If the agent has no record of the `sessionId` (e.g. the agent process
-restarted), it sends `{ type: 'session_lost', sessionId }`.  The child process
-is gone in this case; the session is unrecoverable.
+restarted), it sends `{ type: 'session_lost', sessionId, reason: 'unknown_session' }`.
+The child process is gone in this case; the session is unrecoverable.
 
 ### PID 1 Reaping Limitation
 
@@ -321,7 +385,8 @@ replies with `{ type: 'pong' }`.
 | Unknown message type                | `error` frame, connection stays open               |
 | Child process spawn failure         | `error` frame, connection stays open               |
 | Invalid JSON frame from client      | `error` frame, connection stays open               |
-| `resume` with unknown sessionId     | `session_lost` frame, connection stays open        |
+| `resume` with unknown sessionId     | `session_lost` frame (`reason: unknown_session`), connection stays open |
+| `resume` with stale lastSeq (gap)   | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
 | `resume` while session has active client | `error` frame + close `1008`                  |
 
 ---
