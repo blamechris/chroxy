@@ -13,6 +13,7 @@
     "test": "c8 node --experimental-test-module-mocks --test --test-force-exit './tests/**/*.test.js'",
     "test:coverage": "c8 --reporter=text --reporter=html node --experimental-test-module-mocks --test --test-force-exit './tests/**/*.test.js'",
     "test:integration": "node --test ./tests/*.integration.test.js",
+    "test:integration:k8s": "RUN_K8S_INTEGRATION=1 node --test ./tests/integration/k8s-sidecar-roundtrip.test.js",
     "lint": "eslint src/"
   },
   "dependencies": {
