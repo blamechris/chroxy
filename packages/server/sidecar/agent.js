@@ -87,19 +87,23 @@ function safeTokenCompare(a, b) {
 // Sits between child.stdout and readline.createInterface.  Counts raw bytes
 // in the current (not-yet-newline-terminated) fragment; if the running total
 // exceeds maxBytes it emits an 'oversized_line' event on the transform
-// instance and lets the caller decide how to respond (kill child, error frame,
-// close WS).  The stream is paused / unpiped by the caller after that.
+// instance and drops all further data so readline never buffers the overrun.
+// The caller is responsible for killing the child and closing the WS.
 // ---------------------------------------------------------------------------
 
 export class LineLimitTransform extends Transform {
   /**
    * @param {object} opts
    * @param {number} opts.maxBytes  Maximum bytes per line before firing the
-   *                                'oversized_line' event.
+   *                                'oversized_line' event.  Must be a finite
+   *                                positive number; falls back to
+   *                                DEFAULT_MAX_LINE_BYTES if invalid.
    */
   constructor({ maxBytes, ...streamOpts } = {}) {
     super(streamOpts)
-    this._maxBytes = maxBytes
+    this._maxBytes = Number.isFinite(maxBytes) && maxBytes > 0
+      ? maxBytes
+      : DEFAULT_MAX_LINE_BYTES
     this._pending = 0   // bytes counted in the current un-terminated line
     this._fired = false // emit the event at most once per instance
   }
@@ -485,6 +489,7 @@ export class PodAgent {
     const lineGuard = new LineLimitTransform({ maxBytes: this._maxLineBytes })
     lineGuard.once('oversized_line', () => {
       console.error(`[chroxy-pod-agent] stdout line exceeded ${this._maxLineBytes} bytes — killing child`)
+      session._oversized = true
       if (session.child === child) {
         this._killChild(child)
         session.child = null
@@ -496,7 +501,7 @@ export class PodAgent {
       })
       setTimeout(() => {
         if (session.activeWs && session.activeWs.readyState === 1) {
-          session.activeWs.close(1000, 'line_too_long')
+          session.activeWs.close(1008, 'line_too_long')
         }
         this._sessions.delete(sessionId)
       }, 50)
@@ -522,8 +527,14 @@ export class PodAgent {
 
     // exit — emit exit code and close the WS. Clear the tracked child so the
     // disconnect handler does not try to kill an already-exited process.
+    //
+    // If the session was terminated by the oversized-line guard, the error
+    // frame and WS close are already handled there.  Emitting a spurious exit
+    // frame here would contradict the protocol (client already received
+    // error+close(1008)) and could confuse K8sBackend.  Skip the exit path.
     child.on('close', (code) => {
       if (session.child === child) session.child = null
+      if (session._oversized) return
       const exitFrame = { type: 'exit', code: code ?? 1 }
       this._emitSessionFrame(session, exitFrame)
       // Small delay so the exit frame is flushed before we close.

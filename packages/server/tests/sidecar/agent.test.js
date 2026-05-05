@@ -1120,7 +1120,7 @@ describe('PodAgent', () => {
         mock.child.stdout.write(Buffer.from('C'.repeat(17)))
 
         const { closeCode } = await donePromise
-        assert.equal(closeCode, 1000, `WS should close with code 1000, got ${closeCode}`)
+        assert.equal(closeCode, 1008, `WS should close with code 1008 after line_too_long, got ${closeCode}`)
       } finally {
         await agent.close()
       }
@@ -1153,11 +1153,56 @@ describe('PodAgent', () => {
       }
     })
 
-    it('invalid maxLineBytes falls back to 1 MiB default', () => {
+    it('invalid maxLineBytes falls back to 1 MiB default', async () => {
       // Verify that passing a non-positive value falls back to FALLBACK_MAX_LINE_BYTES.
       const agent = new PodAgent({ token: TOKEN, maxLineBytes: -1 })
       assert.equal(agent._maxLineBytes, 1024 * 1024)
-      agent.close()
+      await agent.close()
+    })
+
+    it('no exit frame is emitted after oversized-line error (regression: #3380)', async () => {
+      // When the oversized-line guard trips, child.on('close') fires shortly
+      // after SIGTERM.  The bug was that _emitSessionFrame(exit) ran anyway,
+      // producing: error(line_too_long) → exit(code=-15) → close(1008).
+      // The exit frame between the error and close contradicts the protocol
+      // and could confuse K8sBackend.  After the fix the sequence must be:
+      //   error(line_too_long) → close(1008)  [no exit frame]
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const donePromise = collectUntilClose(ws, 3000)
+
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 10))
+
+        // Trigger the line cap.
+        mock.child.stdout.write(Buffer.from('X'.repeat(17)))
+
+        // Let the child 'close' event fire (simulates SIGTERM completing).
+        await new Promise((r) => setTimeout(r, 30))
+        mock.child.emit('close', -15)
+
+        const { messages, closeCode } = await donePromise
+
+        const errFrame = messages.find((m) => m.type === 'error' && m.code === 'line_too_long')
+        assert.ok(errFrame, `expected error frame with code=line_too_long, got: ${JSON.stringify(messages)}`)
+
+        const exitFrame = messages.find((m) => m.type === 'exit')
+        assert.equal(exitFrame, undefined,
+          `spurious exit frame must not follow line_too_long error, got: ${JSON.stringify(messages)}`)
+
+        assert.equal(closeCode, 1008,
+          `WS must close with 1008 after line_too_long, got ${closeCode}`)
+      } finally {
+        await agent.close()
+      }
     })
   })
 })

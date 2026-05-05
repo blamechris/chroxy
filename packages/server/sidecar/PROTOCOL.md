@@ -245,15 +245,18 @@ Response to a client `ping`.
 
 #### `error`
 
-Protocol or runtime error.
+Protocol or runtime error.  There are two categories:
+
+**Connection-scoped** errors are emitted before a session is established (e.g.
+auth failures, bad request format) and carry no `seq` field:
 
 ```json
 { "type": "error", "message": "spawn: cmd is required" }
 ```
 
-When a child process stdout line exceeds the NDJSON line length cap (see
-[NDJSON Line Length Limit](#ndjson-line-length-limit) below), the error frame
-includes an additional `code` field:
+**Session-scoped** errors are emitted through the session frame pipeline (via
+`_emitSessionFrame`) and therefore carry a `seq` counter, just like `event` and
+`exit` frames from the same session:
 
 ```json
 {
@@ -264,8 +267,13 @@ includes an additional `code` field:
 }
 ```
 
-The child is killed and the WS is closed with code `1000` within 50 ms of this
-frame.
+When a child process stdout line exceeds the NDJSON line length cap (see
+[NDJSON Line Length Limit](#ndjson-line-length-limit) below), the error frame
+includes an additional `code` field as shown above.
+
+The child is killed and the WS is closed with code `1008` within 50 ms of this
+frame.  No `exit` frame follows — the `error` frame is the terminal event for
+the session.
 
 ---
 
