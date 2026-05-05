@@ -218,3 +218,38 @@
  * @returns {Promise<string>} The full container ID of the newly-started container
  * @throws {Error} If the container fails to start
  */
+
+/**
+ * Spawn a long-lived CLI process inside a running environment and return a
+ * ChildProcess-shaped handle for streaming I/O.
+ *
+ * Used by session layers (e.g. DockerSdkSession, K8sSdkSession) as the
+ * `spawnClaudeCodeProcess` callback passed to the Agent SDK's `query()`.
+ * The return value must satisfy the SpawnedProcess interface that the SDK
+ * expects: readable `stdout` and `stderr` streams, a writable `stdin` stream,
+ * and an `'exit'` event emitted with `(code)` when the process terminates.
+ *
+ * Node's `ChildProcess` (returned by `child_process.spawn`) satisfies this
+ * contract natively for DockerBackend.  K8sBackend returns a thin EventEmitter
+ * wrapper that bridges the sidecar WebSocket protocol to the same surface.
+ *
+ * Unlike `execInEnvironment` (which buffers output and resolves on exit),
+ * `streamCliInEnvironment` is intended for long-running interactive processes
+ * whose stdout is consumed incrementally by the SDK.
+ *
+ * @function streamCliInEnvironment
+ * @memberof Backend
+ * @param {string} handle - Environment handle (container ID for Docker, Pod name for K8s)
+ * @param {Object} opts
+ * @param {string}   opts.cmd            - Binary to execute (e.g. 'node')
+ * @param {string[]} [opts.args]         - Argument list (default [])
+ * @param {Object}   [opts.env]          - Extra environment variables (merged on top of container env)
+ * @param {string}   [opts.cwd]          - Working directory inside the environment
+ * @param {AbortSignal} [opts.signal]    - Abort signal; triggers SIGTERM on the child when fired
+ * @returns {object} SpawnedProcess-like handle with:
+ *   - `stdout` {stream.Readable}   — child process stdout
+ *   - `stderr` {stream.Readable}   — child process stderr
+ *   - `stdin`  {stream.Writable}   — child process stdin
+ *   - `'exit'` event `(code: number|null)` — emitted when the child exits
+ * @throws {Error} If the environment is not reachable or the spawn fails synchronously
+ */

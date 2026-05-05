@@ -47,6 +47,7 @@ function createMockBackend(overrides = {}) {
     commitEnvironment: spy('sha256:mock-commit'),
     renameEnvironment: spy(undefined),
     restoreEnvironment: spy('mock-restore-ctr'),
+    streamCliInEnvironment: spy(null),
     ...overrides,
   }
 }
@@ -487,5 +488,85 @@ describe('EnvironmentManager.reconcile() → backend.listEnvironments() + destro
     // Must not throw
     await assert.doesNotReject(() => manager.reconcile())
     assert.equal(backend.destroyEnvironment.callCount(), 0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backend contract: streamCliInEnvironment — mock backend satisfies the interface
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Backend contract: streamCliInEnvironment interface', () => {
+  /**
+   * Verify that a Backend implementation exposes streamCliInEnvironment and
+   * that the returned handle has the required ChildProcess-shaped surface
+   * (stdout, stderr, stdin streams + exit event).
+   *
+   * This test runs against the mock backend to verify the interface contract
+   * independently of any real backend implementation.
+   */
+  it('mock backend exposes streamCliInEnvironment method', () => {
+    const backend = createMockBackend()
+    assert.equal(typeof backend.streamCliInEnvironment, 'function',
+      'streamCliInEnvironment must be a function on the Backend')
+  })
+
+  it('DockerBackend satisfies streamCliInEnvironment contract (spawn shape)', async () => {
+    const { DockerBackend } = await import('../../../src/environments/backends/docker.js')
+    const { EventEmitter } = await import('events')
+    const { PassThrough } = await import('stream')
+
+    let spawnCalled = false
+    const fakeChild = new EventEmitter()
+    fakeChild.stdout = new PassThrough()
+    fakeChild.stderr = new PassThrough()
+    fakeChild.stdin = new PassThrough()
+    fakeChild.killed = false
+    fakeChild.kill = () => {}
+
+    const backend = new DockerBackend({
+      _spawn: (_cmd, _args, _opts) => {
+        spawnCalled = true
+        return fakeChild
+      },
+    })
+
+    const proc = backend.streamCliInEnvironment('ctr-123', {
+      cmd: 'node', args: ['cli.js'], env: { X: '1' }, cwd: '/workspace',
+    })
+
+    assert.ok(spawnCalled, 'DockerBackend.streamCliInEnvironment must call spawn')
+    assert.ok(proc.stdout, 'returned handle must have stdout')
+    assert.ok(proc.stderr, 'returned handle must have stderr')
+    assert.ok(proc.stdin, 'returned handle must have stdin')
+    assert.equal(typeof proc.on, 'function', 'returned handle must be an EventEmitter')
+  })
+
+  it('K8sBackend satisfies streamCliInEnvironment contract (WS bridge shape)', async () => {
+    const { K8sBackend } = await import('../../../src/environments/backends/k8s.js')
+    const { EventEmitter } = await import('events')
+    const { PassThrough } = await import('stream')
+
+    const fakeWs = new EventEmitter()
+    fakeWs.readyState = 1 // OPEN
+    fakeWs.send = () => {}
+    fakeWs.close = () => {}
+    fakeWs.once = (ev, fn) => EventEmitter.prototype.once.call(fakeWs, ev, fn)
+    fakeWs.on = (ev, fn) => EventEmitter.prototype.on.call(fakeWs, ev, fn)
+
+    const backend = new K8sBackend({
+      _coreV1Api: {},
+      _dialWs: () => Promise.resolve(fakeWs),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node', args: ['cli.js'], agentToken: 'test-token',
+    })
+
+    // Handle must expose the required surface
+    assert.ok(proc.stdout, 'K8sBackend proc must have stdout')
+    assert.ok(proc.stderr, 'K8sBackend proc must have stderr')
+    assert.ok(proc.stdin, 'K8sBackend proc must have stdin')
+    assert.equal(typeof proc.on, 'function', 'K8sBackend proc must be an EventEmitter')
+    assert.equal(typeof proc.kill, 'function', 'K8sBackend proc must expose kill()')
   })
 })

@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { createLogger } from '../../logger.js'
 
 const log = createLogger('docker-backend')
@@ -18,8 +18,9 @@ const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/cl
  * changes.
  */
 export class DockerBackend {
-  constructor({ _execFile: injectedExecFile } = {}) {
+  constructor({ _execFile: injectedExecFile, _spawn: injectedSpawn } = {}) {
     this._execFile = injectedExecFile || execFile
+    this._spawn = injectedSpawn || spawn
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -136,6 +137,53 @@ export class DockerBackend {
         else resolve({ stdout: stdout || '', stderr: stderr || '' })
       })
     })
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // streamCliInEnvironment — spawn a long-lived process, return ChildProcess
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Spawn a process inside the container via `docker exec -i` and return the
+   * ChildProcess directly.  Node's ChildProcess satisfies the SpawnedProcess
+   * interface (stdout/stderr/stdin streams + 'exit' event) that the SDK expects.
+   *
+   * @param {string} containerId
+   * @param {Object} opts  - See Backend interface in types.js
+   * @returns {import('child_process').ChildProcess}
+   */
+  streamCliInEnvironment(containerId, { cmd, args = [], env, cwd, signal } = {}) {
+    const dockerArgs = ['exec', '-i']
+
+    if (cwd) {
+      dockerArgs.push('--workdir', cwd)
+    }
+
+    if (env) {
+      for (const [key, value] of Object.entries(env)) {
+        dockerArgs.push('--env', `${key}=${value}`)
+      }
+    }
+
+    dockerArgs.push(containerId, cmd, ...args)
+
+    log.info(`docker exec stream: ${containerId.slice(0, 12)} ${cmd} ${args.slice(0, 2).join(' ')}`)
+
+    const child = (this._spawn || spawn)('docker', dockerArgs, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+
+    if (signal) {
+      if (signal.aborted) {
+        child.kill('SIGTERM')
+      } else {
+        signal.addEventListener('abort', () => {
+          if (!child.killed) child.kill('SIGTERM')
+        }, { once: true })
+      }
+    }
+
+    return child
   }
 
   // ─────────────────────────────────────────────────────────────────────────
