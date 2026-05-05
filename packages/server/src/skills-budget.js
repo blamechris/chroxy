@@ -73,7 +73,7 @@ export function _compareByPriorityThenName(a, b) {
 /**
  * Apply the global skills budget (#3202). Skills are sorted by priority
  * descending (higher priority kept first), with alphabetical name as the
- * tiebreaker — same direction as the existing top-level sort. We then walk
+ * tiebreaker — same order enforced by `_compareByPriorityThenName`. We then walk
  * the list, accumulating bytes until we'd exceed the cap; the first skill
  * that wouldn't fit (and every later one) is dropped.
  *
