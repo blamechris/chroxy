@@ -753,7 +753,7 @@ describe('PodAgent', () => {
 
       const startedFrame = ws1Msgs.find((m) => m.type === 'session_started')
       assert.ok(startedFrame)
-      const sessionId = startedFrame.sessionId
+      assert.ok(startedFrame.sessionId)
 
       // ws1 is still open. Try to resume from a second connection — should be
       // rejected because ws1 is the active client (enforced by the single-client
