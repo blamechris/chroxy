@@ -12,7 +12,7 @@
 import { createServer } from 'node:http'
 import { createInterface } from 'node:readline'
 import { spawn as nodeSpawn } from 'node:child_process'
-import { timingSafeEqual } from 'node:crypto'
+import { timingSafeEqual, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -29,6 +29,16 @@ const PORT = parseInt(process.env.PORT ?? '7681', 10)
 // disconnected. Long enough for claude to flush; short enough that a stuck
 // child does not pin pod memory.
 const KILL_GRACE_MS = 5_000
+
+// Ring-buffer capacity: number of output frames retained per session for
+// replay on resume. Tunable at startup via CHROXY_AGENT_BUFFER_SIZE.
+// Reject non-positive / NaN values so an invalid env var cannot disable
+// eviction (NaN >= length is always false → unbounded buffer growth).
+const FALLBACK_BUFFER_SIZE = 1000
+const _PARSED_BUFFER_SIZE = parseInt(process.env.CHROXY_AGENT_BUFFER_SIZE ?? `${FALLBACK_BUFFER_SIZE}`, 10)
+const DEFAULT_BUFFER_SIZE = Number.isFinite(_PARSED_BUFFER_SIZE) && _PARSED_BUFFER_SIZE > 0
+  ? _PARSED_BUFFER_SIZE
+  : FALLBACK_BUFFER_SIZE
 
 // --- Auth token -----------------------------------------------------------------
 // Read once at boot. If unset we stay up (dev convenience) but reject all WS
@@ -67,11 +77,19 @@ export class PodAgent {
    * @param {Function} [opts.spawnFn]      Override child_process.spawn for tests.
    * @param {string}   [opts.token]        Override CHROXY_AGENT_TOKEN for tests.
    * @param {number}   [opts.killGraceMs]  Override SIGTERM→SIGKILL grace (tests).
+   * @param {number}   [opts.bufferSize]   Override ring-buffer capacity per session (tests).
    */
-  constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS } = {}) {
+  constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS,
+    bufferSize = DEFAULT_BUFFER_SIZE } = {}) {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
+    // Validate bufferSize defensively — a NaN or non-positive value would
+    // disable eviction (NaN >= length is always false) and let the buffer
+    // grow without bound.
+    this._bufferSize = Number.isFinite(bufferSize) && bufferSize > 0
+      ? bufferSize
+      : FALLBACK_BUFFER_SIZE
 
     // Fail-secure warning. Emitted from the constructor (not module-load) so
     // tests and embedders that pass an explicit `token` don't see a misleading
@@ -88,6 +106,13 @@ export class PodAgent {
     // clobber the first. K8sBackend is the sole consumer; concurrent connections
     // would indicate a bug in the backend reconnect logic.
     this._activeWs = null
+
+    // Live sessions, keyed by sessionId. A session persists beyond its current
+    // WS connection so that a reconnecting client can resume after a network
+    // blip. Structure:
+    //   { sessionId, child, activeWs, seq, buffer: Array<{seq, frame}> }
+    // `activeWs` is null while disconnected.
+    this._sessions = new Map()
 
     // Ping/pong state mirrors ws-server.js: send ping every 30 s, terminate if
     // no pong received within the next cycle.
@@ -120,8 +145,20 @@ export class PodAgent {
         clearInterval(this._pingInterval)
         this._pingInterval = null
       }
-      // Kill any in-flight child and force-close the active WS so wss.close()
-      // does not hang waiting for the client to disconnect.
+      // Kill children for all live sessions.
+      for (const session of this._sessions.values()) {
+        if (session.child) {
+          this._killChild(session.child)
+          session.child = null
+        }
+        if (session.activeWs) {
+          try { session.activeWs.terminate() } catch {}
+          session.activeWs = null
+        }
+      }
+      this._sessions.clear()
+
+      // Also handle any active WS not yet associated with a session.
       if (this._activeWs) {
         if (this._activeWs._child) {
           this._killChild(this._activeWs._child)
@@ -196,7 +233,7 @@ export class PodAgent {
 
     this._activeWs = ws
     ws._isAlive = true
-    ws._child = null
+    ws._sessionId = null  // set by _handleSpawn / _handleResume
 
     ws.on('pong', () => { ws._isAlive = true })
     ws.on('message', (data) => this._handleMessage(ws, data))
@@ -210,15 +247,25 @@ export class PodAgent {
   }
 
   // ---------------------------------------------------------------------------
-  // Connection cleanup — kill any in-flight child so the pod does not leak
-  // PIDs/memory across reconnect cycles. Idempotent: safe to call from both
-  // 'close' and 'error' handlers, and again from agent.close().
+  // Connection cleanup — detach WS from session (child keeps running for
+  // resume). Kill the child only if the session has no sessionId (pre-spawn
+  // disconnect) because the child was never tracked in _sessions.
+  // Idempotent: safe to call from both 'close' and 'error' handlers.
   // ---------------------------------------------------------------------------
 
   _cleanupConnection(ws) {
-    if (ws._child) {
-      this._killChild(ws._child)
-      ws._child = null
+    const sessionId = ws._sessionId
+    if (sessionId) {
+      const session = this._sessions.get(sessionId)
+      if (session && session.activeWs === ws) {
+        session.activeWs = null
+      }
+    } else {
+      // Pre-spawn connection — no session yet; kill any tracked child directly.
+      if (ws._child) {
+        this._killChild(ws._child)
+        ws._child = null
+      }
     }
     if (this._activeWs === ws) this._activeWs = null
   }
@@ -263,7 +310,10 @@ export class PodAgent {
       return
     }
 
-    // #3321 will add 'resume' handling here for session reconnect support.
+    if (msg.type === 'resume') {
+      this._handleResume(ws, msg)
+      return
+    }
 
     this._send(ws, { type: 'error', message: `unknown message type: ${msg.type}` })
   }
@@ -283,7 +333,13 @@ export class PodAgent {
     // One spawn per connection. K8sBackend (#3320) is the sole consumer and
     // assumes single-child semantics; a second 'spawn' frame indicates a bug
     // upstream rather than a feature.
-    if (ws._child) {
+    //
+    // We reject any second spawn while this WS is already bound to a session,
+    // even if the child has just exited and the session-cleanup timer has not
+    // yet fired (#3328 race window between child 'close' and the 50 ms WS-
+    // close timer). After natural exit the agent closes the WS — clients are
+    // expected to open a fresh connection rather than re-spawn on the same one.
+    if (ws._sessionId && this._sessions.has(ws._sessionId)) {
       this._send(ws, { type: 'error', message: 'spawn: child already running' })
       return
     }
@@ -310,22 +366,43 @@ export class PodAgent {
       return
     }
 
-    // Track the child on the WS so a disconnect can kill it (see _cleanupConnection).
-    ws._child = child
+    // Assign a sessionId and create the session object.
+    const sessionId = randomUUID()
+    const session = {
+      sessionId,
+      child,
+      activeWs: ws,
+      seq: 0,
+      buffer: [],
+    }
+    this._sessions.set(sessionId, session)
+    ws._sessionId = sessionId
+
+    // Notify the client so it can store the sessionId for future resume.
+    this._send(ws, { type: 'session_started', sessionId })
 
     // Handle async spawn failures (ENOENT, EACCES) so an unhandled 'error'
     // event does not crash the agent process. Spawn errors arrive after the
     // synchronous spawn() returns, which is why this can't go in the catch
     // block above.
     child.on('error', (err) => {
-      if (ws._child === child) ws._child = null
-      this._send(ws, { type: 'error', message: `spawn failed: ${err.message}` })
+      if (session.child === child) session.child = null
+      this._emitSessionFrame(session, { type: 'error', message: `spawn failed: ${err.message}` })
+      // Async spawn never produced a child — there will be no 'close' event
+      // to clean up the session. Synthesize an exit and drop the session
+      // entry so the agent does not leak it indefinitely.
+      this._emitSessionFrame(session, { type: 'exit', code: -1 })
+      setTimeout(() => {
+        if (session.activeWs && session.activeWs.readyState === 1) {
+          session.activeWs.close(1000, 'spawn failed')
+        }
+        this._sessions.delete(sessionId)
+      }, 50)
     })
 
     // stdout — read line-by-line; each NDJSON line becomes one 'event' frame.
     const rl = createInterface({ input: child.stdout })
     rl.on('line', (line) => {
-      if (ws.readyState !== 1) return
       let payload
       try {
         payload = JSON.parse(line)
@@ -333,25 +410,105 @@ export class PodAgent {
         // Not valid JSON — forward as raw data inside the payload string.
         payload = line
       }
-      this._send(ws, { type: 'event', payload })
+      this._emitSessionFrame(session, { type: 'event', payload })
     })
 
     // stderr — forward raw text as 'stderr' frames.
     child.stderr.on('data', (chunk) => {
-      if (ws.readyState !== 1) return
-      this._send(ws, { type: 'stderr', data: chunk.toString() })
+      this._emitSessionFrame(session, { type: 'stderr', data: chunk.toString() })
     })
 
     // exit — emit exit code and close the WS. Clear the tracked child so the
     // disconnect handler does not try to kill an already-exited process.
     child.on('close', (code) => {
-      if (ws._child === child) ws._child = null
-      this._send(ws, { type: 'exit', code: code ?? 1 })
+      if (session.child === child) session.child = null
+      const exitFrame = { type: 'exit', code: code ?? 1 }
+      this._emitSessionFrame(session, exitFrame)
       // Small delay so the exit frame is flushed before we close.
       setTimeout(() => {
-        if (ws.readyState === 1) ws.close(1000, 'process exited')
+        if (session.activeWs && session.activeWs.readyState === 1) {
+          session.activeWs.close(1000, 'process exited')
+        }
+        // Remove session from map once the child is gone.
+        this._sessions.delete(sessionId)
       }, 50)
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Resume — re-attach a reconnecting client to an existing session
+  // ---------------------------------------------------------------------------
+
+  _handleResume(ws, msg) {
+    const { sessionId, lastSeq = 0 } = msg
+
+    const session = this._sessions.get(sessionId)
+    if (!session) {
+      this._send(ws, { type: 'session_lost', sessionId, reason: 'unknown_session' })
+      return
+    }
+
+    // Single-client policy: if the session already has a live WS attached,
+    // reject the second connection (same error behaviour as _handleConnection).
+    if (session.activeWs) {
+      this._send(ws, { type: 'error', message: 'another client is already connected' })
+      ws.close(1008, 'already connected')
+      return
+    }
+
+    // Resume-with-gap detection (#3347).
+    // If the oldest seq still in the ring buffer is greater than `lastSeq + 1`,
+    // some events between (lastSeq, oldestSeq) were evicted by buffer overflow.
+    // Silent partial replay would corrupt the client's NDJSON stream — surface
+    // it as session_lost so the consumer can take recovery action (exit -2).
+    if (session.buffer.length > 0 && session.buffer[0].seq > lastSeq + 1) {
+      this._send(ws, { type: 'session_lost', sessionId, reason: 'buffer_overflow' })
+      ws.close(1008, 'resume gap')
+      return
+    }
+
+    // Attach this WS to the session.
+    session.activeWs = ws
+    ws._sessionId = sessionId
+
+    // Replay any buffered frames the client hasn't seen yet (seq > lastSeq).
+    let replayedCount = 0
+    for (const entry of session.buffer) {
+      if (entry.seq > lastSeq) {
+        this._send(ws, entry.frame)
+        replayedCount += 1
+      }
+    }
+
+    // Emit an explicit `resumed` frame so the client can confirm the resume
+    // succeeded and reset its per-blip retry counter (#3348). Without this
+    // frame the client treats `maxRetries` as a lifetime budget rather than
+    // a per-disconnect budget. PROTOCOL.md documents this frame.
+    this._send(ws, {
+      type: 'resumed',
+      sessionId,
+      lastSeq,
+      replayedCount,
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session-scoped frame emission — assigns seq, ring-buffers, and sends
+  // ---------------------------------------------------------------------------
+
+  _emitSessionFrame(session, frame) {
+    session.seq += 1
+    const seqFrame = { ...frame, seq: session.seq }
+
+    // Ring buffer: drop oldest entry when at capacity.
+    if (session.buffer.length >= this._bufferSize) {
+      session.buffer.shift()
+    }
+    session.buffer.push({ seq: session.seq, frame: seqFrame })
+
+    if (session.activeWs) {
+      this._send(session.activeWs, seqFrame)
+    }
   }
 
   // ---------------------------------------------------------------------------

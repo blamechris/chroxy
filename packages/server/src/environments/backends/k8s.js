@@ -10,6 +10,11 @@ const log = createLogger('k8s-backend')
 const POLL_INTERVAL_MS = 1_000
 const DESTROY_TIMEOUT_MS = 30_000
 
+// Reconnect parameters for SidecarProcess WS blip recovery (#3321).
+// These are the defaults; inject overrides via constructor opts for tests.
+const DEFAULT_RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 4_000, 8_000]
+const DEFAULT_MAX_RETRIES = 5
+
 /** Default sidecar image — overridden via constructor option */
 const DEFAULT_SIDECAR_IMAGE = 'chroxy-pod-agent:latest'
 
@@ -72,9 +77,12 @@ export class K8sBackend {
    * @param {object}  [opts._coreV1Api]                 - Injected CoreV1Api for testing
    * @param {object}  [opts._portForward]               - Injected PortForward for testing
    * @param {Function} [opts._dialWs]                   - Injected WS dial factory for testing: (url, token) => WebSocket
+   * @param {number[]} [opts._reconnectDelays]          - Override backoff delays in ms for testing
+   * @param {number}   [opts._maxRetries]               - Override max reconnect retries for testing
    */
   constructor({ namespace, inCluster, kubeconfigPath, sidecarImage,
-    connectMode, _coreV1Api, _portForward, _dialWs, _net } = {}) {
+    connectMode, _coreV1Api, _portForward, _dialWs, _net,
+    _reconnectDelays, _maxRetries } = {}) {
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
     this._connectMode = connectMode || 'portforward'
@@ -118,6 +126,18 @@ export class K8sBackend {
     // interface uniform across backends — callers do not need to thread a
     // K8s-specific agentToken arg through the manager.
     this._agentTokens = new Map()
+
+    // Reconnect backoff config — injectable for deterministic unit tests.
+    // Validate the delay schedule defensively: an empty array (or non-finite
+    // entries) would make `delay` undefined and let `setTimeout` fire on the
+    // next tick, producing a tight reconnect loop.
+    const delays = _reconnectDelays || DEFAULT_RECONNECT_DELAYS
+    const validDelays = Array.isArray(delays) && delays.length > 0 &&
+      delays.every((d) => Number.isFinite(d) && d >= 0)
+    this._reconnectDelays = validDelays ? delays : DEFAULT_RECONNECT_DELAYS
+    this._maxRetries = Number.isFinite(_maxRetries) && _maxRetries >= 0
+      ? _maxRetries
+      : DEFAULT_MAX_RETRIES
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -507,7 +527,12 @@ export class K8sBackend {
         : '/workspace'
     }
 
-    const proc = new SidecarProcess()
+    const { _reconnectDelays: reconnectDelays, _maxRetries: maxRetries } = this
+    const proc = new SidecarProcess({ reconnectDelays, maxRetries })
+
+    // Bind a redial function so the reconnect loop inside _wireWsToProc can
+    // re-dial the same pod without holding a reference to this K8sBackend.
+    proc._redial = () => this._dial(podName, ns, agentToken)
 
     // Dial asynchronously; the returned handle is usable immediately. We
     // capture portforward cleanup callbacks so kill() / exit can tear down
@@ -731,9 +756,18 @@ export class K8sBackend {
  *   - `stderr` {PassThrough} — receives data pushed via `stderr` WS frames
  *   - `stdin`  {PassThrough} — writes here are forwarded to the child (future)
  *   - `'exit'` event (code)  — emitted when the `exit` WS frame arrives or on error
+ *
+ * On unexpected WS disconnect the process attempts to reconnect with exponential
+ * backoff (#3321). The redial function is injected via `proc._redial` after
+ * construction by `K8sBackend.streamCliInEnvironment`.
  */
 class SidecarProcess extends EventEmitter {
-  constructor() {
+  /**
+   * @param {Object} [opts]
+   * @param {number[]} [opts.reconnectDelays] - Backoff delay schedule in ms
+   * @param {number}   [opts.maxRetries]      - Max reconnect attempts before giving up
+   */
+  constructor({ reconnectDelays = DEFAULT_RECONNECT_DELAYS, maxRetries = DEFAULT_MAX_RETRIES } = {}) {
     super()
     this.stdout = new PassThrough()
     this.stderr = new PassThrough()
@@ -742,12 +776,26 @@ class SidecarProcess extends EventEmitter {
     this._exited = false
     this._ws = null
     this._cleanup = null
+
+    // Reconnect state (#3321)
+    this._reconnectDelays = reconnectDelays
+    this._maxRetries = maxRetries
+    this._retryAttempt = 0   // current reconnect attempt count
+    this._retryTimer = null  // pending setTimeout handle for next reconnect
+    this._sessionId = null   // set by _wireWsToProc when session_started arrives
+    this._lastSeq = 0        // last seq number seen from the sidecar
+    this._redial = null      // injected by K8sBackend.streamCliInEnvironment
   }
 
   kill(signal = 'SIGTERM') {
     if (this.killed) return
     this.killed = true
     log.info(`SidecarProcess.kill(${signal}) — closing WS`)
+    // Cancel any pending reconnect timer so we don't re-dial after kill.
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer)
+      this._retryTimer = null
+    }
     if (this._ws) {
       try {
         this._ws.close()
@@ -769,7 +817,17 @@ class SidecarProcess extends EventEmitter {
 
 /**
  * Wire a live WebSocket to a SidecarProcess once the connection is open.
- * Sends the `spawn` frame and routes incoming frames to the proc's streams.
+ * Sends the `spawn` frame (new session) or `resume` frame (reconnect) and
+ * routes incoming frames to the proc's streams.
+ *
+ * On an unexpected WS close or error the function schedules a reconnect with
+ * exponential backoff if the session has been established (session_started
+ * received). On reconnect, a `resume` frame is sent so the agent can replay
+ * any buffered output the client missed.
+ *
+ * Unrecoverable situations (max retries exceeded, session_lost from agent)
+ * emit exit(-2) so upstream consumers can distinguish session loss from a
+ * clean pre-session failure (exit(-1)).
  *
  * @param {WebSocket} ws
  * @param {SidecarProcess} proc
@@ -782,6 +840,9 @@ class SidecarProcess extends EventEmitter {
  * @param {Function} [spawnOpts.cleanup] - Optional teardown for portforward bridge
  */
 function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } = {}) {
+  // Distinguish initial wiring (spawn) from a reconnect (resume).
+  const isReconnect = Boolean(proc._sessionId)
+
   // Attach the WS + cleanup to the proc so kill() can close them
   proc._ws = ws
   if (cleanup) proc._cleanup = cleanup
@@ -795,6 +856,10 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
   const finishWithExit = (code) => {
     if (proc._exited) return
     proc._exited = true
+    if (proc._retryTimer) {
+      clearTimeout(proc._retryTimer)
+      proc._retryTimer = null
+    }
     proc.stdout.push(null)
     proc.stderr.push(null)
     proc.emit('exit', code)
@@ -805,18 +870,80 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     }
   }
 
-  const sendSpawn = () => {
-    const frame = { type: 'spawn', cmd, args }
-    if (env && Object.keys(env).length > 0) frame.env = env
-    if (cwd) frame.cwd = cwd
+  /**
+   * Schedule a reconnect attempt with exponential backoff.
+   * If no session has been established yet (pre-session failure) emit exit(-1).
+   * If max retries are exceeded emit exit(-2) (session unrecoverable).
+   *
+   * Idempotent: WS 'error' and 'close' handlers can both fire for the same
+   * underlying drop; without de-dup we would create two pending timers and
+   * double-step the retry counter. Returning early when a timer is already
+   * pending guarantees one reconnect attempt per drop.
+   */
+  const scheduleReconnect = () => {
+    if (proc._exited || proc.killed) return
+    if (proc._retryTimer) return  // already scheduled — drop duplicate trigger
+    if (!proc._sessionId) {
+      // Failed before the session was acknowledged — treat as connection failure.
+      finishWithExit(-1)
+      return
+    }
+    if (proc._retryAttempt >= proc._maxRetries) {
+      log.warn(`SidecarProcess: max retries (${proc._maxRetries}) exceeded — giving up`)
+      finishWithExit(-2)
+      return
+    }
+    const delay = proc._reconnectDelays[
+      Math.min(proc._retryAttempt, proc._reconnectDelays.length - 1)
+    ]
+    proc._retryAttempt += 1
+    log.info(`SidecarProcess: scheduling reconnect attempt ${proc._retryAttempt} in ${delay}ms`)
+    proc._retryTimer = setTimeout(() => {
+      proc._retryTimer = null
+      if (proc._exited || proc.killed) return
+      proc._redial().then((dialResult) => {
+        if (proc._exited || proc.killed) {
+          // kill() fired during dial — tear down cleanly.
+          const rws = dialResult && dialResult.ws ? dialResult.ws : dialResult
+          try { rws.close() } catch (_) { /* ignore */ }
+          const rCleanup = dialResult && typeof dialResult.cleanup === 'function'
+            ? dialResult.cleanup : null
+          if (rCleanup) { try { rCleanup() } catch (_) { /* ignore */ } }
+          // Caller-initiated cancellation → exit(-1) (matches the synchronous
+          // kill() before-dial path). exit(-2) is reserved for unrecoverable
+          // session loss the consumer cannot mitigate.
+          if (!proc._exited) finishWithExit(-1)
+          return
+        }
+        const rws = dialResult && dialResult.ws ? dialResult.ws : dialResult
+        const rCleanup = dialResult && typeof dialResult.cleanup === 'function'
+          ? dialResult.cleanup : null
+        _wireWsToProc(rws, proc, { cmd, args, env, cwd, signal, cleanup: rCleanup })
+      }).catch((err) => {
+        log.warn(`SidecarProcess: reconnect dial failed: ${err.message}`)
+        scheduleReconnect()
+      })
+    }, delay)
+  }
+
+  const sendFirst = () => {
+    let frame
+    if (isReconnect) {
+      frame = { type: 'resume', sessionId: proc._sessionId, lastSeq: proc._lastSeq }
+      log.info(`Sent resume frame: sessionId=${proc._sessionId} lastSeq=${proc._lastSeq}`)
+    } else {
+      frame = { type: 'spawn', cmd, args }
+      if (env && Object.keys(env).length > 0) frame.env = env
+      if (cwd) frame.cwd = cwd
+      log.info(`Sent spawn frame: ${cmd} ${args.slice(0, 2).join(' ')}`)
+    }
     ws.send(JSON.stringify(frame))
-    log.info(`Sent spawn frame: ${cmd} ${args.slice(0, 2).join(' ')}`)
   }
 
   if (ws.readyState === WebSocket.OPEN) {
-    sendSpawn()
+    sendFirst()
   } else {
-    ws.once('open', sendSpawn)
+    ws.once('open', sendFirst)
   }
 
   ws.on('message', (raw) => {
@@ -828,7 +955,32 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
       return
     }
 
+    // Track the highest seq seen for resume replay (#3321).
+    if (typeof frame.seq === 'number' && frame.seq > proc._lastSeq) {
+      proc._lastSeq = frame.seq
+    }
+
     switch (frame.type) {
+      case 'session_started':
+        // Agent acknowledged the spawn and assigned a sessionId.
+        proc._sessionId = frame.sessionId
+        proc._retryAttempt = 0  // reset retry counter on fresh session
+        log.info(`Sidecar session started: ${frame.sessionId}`)
+        break
+      case 'resumed':
+        // Agent acknowledged a successful resume after replay (#3348). Reset
+        // the retry counter so `maxRetries` is a per-blip budget, not a
+        // session-lifetime budget. PROTOCOL.md documents this frame.
+        proc._retryAttempt = 0
+        log.info(`Sidecar session resumed: ${frame.sessionId} (replayed=${frame.replayedCount ?? 0})`)
+        break
+      case 'session_lost':
+        // Agent does not recognise our sessionId or cannot replay the gap
+        // (buffer overflow). Either way unrecoverable — exit(-2) signals
+        // session loss to the caller.
+        log.warn(`Sidecar session lost: ${frame.sessionId} (reason=${frame.reason || 'unknown'})`)
+        finishWithExit(-2)
+        break
       case 'event': {
         firstFrameSeen = true
         // Each `event` frame carries one parsed stdout NDJSON object (or raw string).
@@ -870,14 +1022,39 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
   ws.on('error', (err) => {
     if (proc._exited) return
     log.warn(`Sidecar WS error for process: ${err.message}`)
-    // #3321 — on WS drop emit exit with code -1 so the session errors cleanly
-    finishWithExit(-1)
+    // Caller asked to stop. Real-world WS errors (TCP reset, DNS, etc.) do
+    // NOT guarantee a follow-up close with code 1000 — emit exit(-1) here
+    // so the consumer's `on('exit')` listener fires regardless of which
+    // event the underlying ws emits. Without this, kill() before a 1006-
+    // shaped drop leaves _exited=false forever (#3346).
+    if (proc.killed || (signal && signal.aborted)) {
+      finishWithExit(-1)
+      return
+    }
+    scheduleReconnect()
   })
 
-  ws.on('close', (code, reason) => {
+  ws.on('close', (code) => {
     if (proc._exited) return
-    log.warn(`Sidecar WS closed unexpectedly (code=${code} reason=${reason})`)
-    finishWithExit(-1)
+    // Caller asked to stop — synthesize exit(-1) immediately, regardless of
+    // the close code. Real WS implementations emit 1006 when the TCP socket
+    // is dropped abruptly (the common case after kill()), and the original
+    // code path fell through to scheduleReconnect() which then bailed on
+    // proc.killed without ever emitting exit (#3346).
+    if (proc.killed || (signal && signal.aborted)) {
+      log.info(`Sidecar WS closed after kill (code=${code})`)
+      finishWithExit(-1)
+      return
+    }
+    // Normal close codes (1000 = normal, 1001 = going away) indicate a
+    // clean shutdown — treat as pre-session failure or natural exit.
+    if (code === 1000 || code === 1001) {
+      log.info(`Sidecar WS closed normally (code=${code})`)
+      finishWithExit(-1)
+      return
+    }
+    log.warn(`Sidecar WS closed unexpectedly (code=${code}) — scheduling reconnect`)
+    scheduleReconnect()
   })
 
   // Abort signal support
