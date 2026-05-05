@@ -73,6 +73,10 @@ export class K8sBackend {
    * @param {boolean} [opts.inCluster]                  - Force in-cluster auth (default: auto-detect via KUBERNETES_SERVICE_HOST)
    * @param {string}  [opts.kubeconfigPath]             - Path to kubeconfig file (overrides default search)
    * @param {string}  [opts.sidecarImage]               - Sidecar image to use in createEnvironment (default: chroxy-pod-agent:latest)
+   * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - imagePullPolicy applied to all
+   *   containers in the Pod spec. When unset the field is omitted and Kubernetes applies its own default
+   *   ('Always' for :latest tags, 'IfNotPresent' otherwise). Set to 'IfNotPresent' for air-gapped
+   *   clusters or local kind-based CI where images are loaded directly into the cluster.
    * @param {'portforward'|'clusterip'} [opts.connectMode='portforward'] - How to reach the sidecar
    * @param {object}  [opts._coreV1Api]                 - Injected CoreV1Api for testing
    * @param {object}  [opts._portForward]               - Injected PortForward for testing
@@ -80,11 +84,12 @@ export class K8sBackend {
    * @param {number[]} [opts._reconnectDelays]          - Override backoff delays in ms for testing
    * @param {number}   [opts._maxRetries]               - Override max reconnect retries for testing
    */
-  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage,
+  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, imagePullPolicy,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries } = {}) {
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
+    this._imagePullPolicy = imagePullPolicy || null
     this._connectMode = connectMode || 'portforward'
 
     if (_coreV1Api) {
@@ -157,6 +162,8 @@ export class K8sBackend {
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
    * @param {Object}   [opts.containerEnv] - Extra environment variables
    * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
+   * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
+   *   container imagePullPolicy. Falls back to the constructor-level option when unset.
    * @returns {Promise<{ containerId: string, containerCliPath: string, agentToken: string, secretName: string }>}
    *   containerId  — the Pod name (used as handle on subsequent calls)
    *   containerCliPath — hardcoded default; sidecar-based discovery is future work
@@ -164,7 +171,7 @@ export class K8sBackend {
    *   secretName   — Secret name (stored by caller so destroyEnvironment can delete it)
    */
   async createEnvironment(opts) {
-    const { envId, containerEnv, namespace } = opts
+    const { envId, containerEnv, namespace, imagePullPolicy: callImagePullPolicy } = opts
     const ns = namespace || this._namespace
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
@@ -218,6 +225,30 @@ export class K8sBackend {
     }
 
     // 4. Create the Pod
+    // Resolve imagePullPolicy: per-call opt > constructor opt > omit (K8s default)
+    const imagePullPolicy = callImagePullPolicy || this._imagePullPolicy
+
+    const containerSpec = {
+      name: 'agent',
+      image: sidecarImage,
+      env,
+      ports: [{ containerPort: AGENT_PORT, name: 'agent' }],
+      livenessProbe: {
+        httpGet: { path: '/healthz', port: AGENT_PORT },
+        initialDelaySeconds: 5,
+        periodSeconds: 10,
+      },
+      readinessProbe: {
+        httpGet: { path: '/healthz', port: AGENT_PORT },
+        initialDelaySeconds: 2,
+        periodSeconds: 5,
+      },
+    }
+
+    if (imagePullPolicy) {
+      containerSpec.imagePullPolicy = imagePullPolicy
+    }
+
     const pod = {
       apiVersion: 'v1',
       kind: 'Pod',
@@ -230,24 +261,7 @@ export class K8sBackend {
       },
       spec: {
         restartPolicy: 'Never',
-        containers: [
-          {
-            name: 'agent',
-            image: sidecarImage,
-            env,
-            ports: [{ containerPort: AGENT_PORT, name: 'agent' }],
-            livenessProbe: {
-              httpGet: { path: '/healthz', port: AGENT_PORT },
-              initialDelaySeconds: 5,
-              periodSeconds: 10,
-            },
-            readinessProbe: {
-              httpGet: { path: '/healthz', port: AGENT_PORT },
-              initialDelaySeconds: 2,
-              periodSeconds: 5,
-            },
-          },
-        ],
+        containers: [containerSpec],
       },
     }
 

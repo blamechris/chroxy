@@ -261,6 +261,59 @@ describe('K8sBackend.createEnvironment()', () => {
       /API server unreachable/
     )
   })
+
+  it('omits imagePullPolicy from the Pod spec when not configured', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-policy', image: 'agent:latest' })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(container, 'imagePullPolicy'),
+      false,
+      'imagePullPolicy must not be present when unspecified (let K8s apply its own default)'
+    )
+  })
+
+  it('sets imagePullPolicy on the container when specified via constructor', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'IfNotPresent' })
+
+    await backend.createEnvironment({ envId: 'ctor-policy', image: 'agent:latest' })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.imagePullPolicy, 'IfNotPresent')
+  })
+
+  it('sets imagePullPolicy on the container when specified via per-call opt', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'call-policy',
+      image: 'agent:latest',
+      imagePullPolicy: 'Never',
+    })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.imagePullPolicy, 'Never')
+  })
+
+  it('per-call imagePullPolicy overrides the constructor-level option', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'Always' })
+
+    await backend.createEnvironment({
+      envId: 'override-policy',
+      image: 'agent:latest',
+      imagePullPolicy: 'IfNotPresent',
+    })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.imagePullPolicy, 'IfNotPresent',
+      'per-call option must take precedence over constructor option')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
