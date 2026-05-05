@@ -48,6 +48,9 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'extension_message',  // extension framework, routed to extension handlers not main switch
   // 'skills_list' removed — dashboard now handles it (#3209)
   // 'skill_changed' removed — dashboard now handles it (#3205)
+  'skill_trust_request',  // PR B server-only emit (#3297); PR C (#3298) adds dashboard handler and moves to PLATFORM_SPECIFIC
+  'skill_trust_granted',  // PR B server-only broadcast (#3297); PR C (#3298) adds dashboard handler and moves to PLATFORM_SPECIFIC
+  'skill_trust_grant_ok', // PR B handler ack (#3297); PR C (#3298) adds dashboard handler and moves to PLATFORM_SPECIFIC
 ])
 
 // ---------------------------------------------------------------------------
