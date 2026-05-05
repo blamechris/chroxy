@@ -731,6 +731,473 @@ describe('K8sBackend.execInEnvironment()', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.streamCliInEnvironment — abort-during-dial leak guard (#3333)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.streamCliInEnvironment() abort-during-dial', () => {
+  it('emits exit(-1) and closes WS when kill() fires before dial resolves', async () => {
+    let resolveDial
+    const dialPromise = new Promise((r) => { resolveDial = r })
+
+    let wsClosed = false
+    const { ws } = createFakeWs()
+    ws.close = () => { wsClosed = true }
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => dialPromise,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    // Kill BEFORE dial resolves (proc._ws is still null)
+    proc.kill('SIGTERM')
+
+    // Dial completes after kill
+    resolveDial(ws)
+    // Allow the .then handler to run
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-1], 'should emit exit(-1) for the killed-during-dial proc')
+    assert.equal(wsClosed, true, 'WS should be closed even though kill happened before dial')
+  })
+
+  it('emits exit(-1) when AbortSignal is pre-aborted before streamCliInEnvironment', async () => {
+    let resolveDial
+    const dialPromise = new Promise((r) => { resolveDial = r })
+
+    let wsClosed = false
+    const { ws } = createFakeWs()
+    ws.close = () => { wsClosed = true }
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => dialPromise,
+    })
+
+    const ac = new AbortController()
+    ac.abort() // pre-abort
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node', args: [], agentToken: 'tok', signal: ac.signal,
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    resolveDial(ws)
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-1], 'pre-aborted signal must drive exit(-1)')
+    assert.equal(wsClosed, true, 'WS opened during dial must be closed when abort already fired')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.streamCliInEnvironment — error-frame termination (#3338)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.streamCliInEnvironment() error frame handling', () => {
+  function makeBackendWithFakeWs() {
+    const { ws, controller } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+    return { backend, ws, controller }
+  }
+
+  it('synthesizes exit(-1) when error frame arrives BEFORE any event/stderr', async () => {
+    const { backend, controller } = makeBackendWithFakeWs()
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: '', args: [], agentToken: 'tok',  // bad cmd → agent will error
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+
+    // Agent sends error frame before any output (per PROTOCOL.md, spawn rejected)
+    controller.receive(JSON.stringify({ type: 'error', message: 'spawn: cmd is required' }))
+
+    assert.deepEqual(exitCodes, [-1],
+      'pre-output error frame must synthesize exit(-1) so consumer does not hang')
+  })
+
+  it('does NOT synthesize exit when error frame arrives AFTER first event/stderr', async () => {
+    const { backend, controller } = makeBackendWithFakeWs()
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+
+    // First an event arrives, then an error frame (mid-stream warning)
+    controller.receive(JSON.stringify({ type: 'event', payload: 'ok\n' }))
+    controller.receive(JSON.stringify({ type: 'error', message: 'transient warning' }))
+
+    assert.deepEqual(exitCodes, [],
+      'mid-stream error frame must NOT terminate — wait for real exit frame')
+  })
+
+  it('execInEnvironment surfaces error-before-output as a rejection', async () => {
+    const { backend, controller } = makeBackendWithFakeWs()
+
+    const execPromise = backend.execInEnvironment('pod-x', {
+      cmd: '', args: [], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    controller.receive(JSON.stringify({ type: 'error', message: 'spawn: cmd is required' }))
+
+    await assert.rejects(execPromise, /sidecar error: spawn: cmd is required|exited with code -1/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.execInEnvironment — timeout actually kills the underlying process (#3335)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.execInEnvironment() timeout cleanup', () => {
+  it('calls proc.kill() and closes WS when timeout fires', async () => {
+    let wsClosed = false
+    const { ws } = createFakeWs()
+    ws.close = () => { wsClosed = true }
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const execPromise = backend.execInEnvironment('pod-x', {
+      cmd: 'sleep', args: ['1000'], agentToken: 'tok', timeout: 50,
+    })
+
+    await assert.rejects(execPromise, /timed out/)
+    assert.equal(wsClosed, true, 'WS must be closed when exec times out so the in-pod child is SIGTERMd')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend agentToken — registered by createEnvironment, looked up automatically (#3337)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend agentToken auto-registration', () => {
+  it('streamCliInEnvironment uses token registered by createEnvironment', async () => {
+    let dialCalledWith = null
+    const api = createMockApi()
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: (_url, token) => { dialCalledWith = token; return Promise.resolve(ws) },
+    })
+
+    const created = await backend.createEnvironment({ envId: 'auto', image: 'ignored' })
+    // Caller does NOT have to thread agentToken through opts
+    backend.streamCliInEnvironment(created.containerId, { cmd: 'node', args: [] })
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(dialCalledWith, created.agentToken,
+      'streamCliInEnvironment must use the token registered by createEnvironment')
+  })
+
+  it('opts.agentToken still wins over the registered token (test seam)', async () => {
+    let dialCalledWith = null
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: (_url, token) => { dialCalledWith = token; return Promise.resolve(ws) },
+    })
+
+    await backend.createEnvironment({ envId: 'auto2', image: 'ignored' })
+    backend.streamCliInEnvironment('chroxy-env-auto2', {
+      cmd: 'node', args: [], agentToken: 'override-token',
+    })
+
+    await new Promise(r => setImmediate(r))
+    assert.equal(dialCalledWith, 'override-token')
+  })
+
+  it('destroyEnvironment removes the registered token', async () => {
+    const api = createMockApi({
+      readPod: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(createFakeWs().ws),
+    })
+
+    const { containerId } = await backend.createEnvironment({ envId: 'gone', image: 'ignored' })
+    await backend.destroyEnvironment(containerId)
+
+    // After destroy, calling streamCliInEnvironment without an explicit token must fail
+    assert.throws(
+      () => backend.streamCliInEnvironment(containerId, { cmd: 'node', args: [] }),
+      /agentToken is required/,
+    )
+  })
+
+  it('destroyEnvironment derives the Secret name from podName when none is passed', async () => {
+    const api = createMockApi({
+      readPod: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.destroyEnvironment('chroxy-env-derived')
+
+    assert.equal(api.calls.deleteSecret.length, 1, 'should delete the derived Secret')
+    assert.equal(api.calls.deleteSecret[0].name, 'chroxy-token-derived',
+      'derived Secret name must follow chroxy-token-<envId>')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — always uses sidecar image (ignores caller image)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() sidecar image policy', () => {
+  it('always uses the constructor sidecarImage and ignores opts.image', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({
+      sidecarImage: 'my-registry/chroxy-pod-agent:v1.2.3',
+      _coreV1Api: api,
+    })
+
+    await backend.createEnvironment({
+      envId: 'sc-img',
+      image: 'node:22-slim',  // user-workspace image — must be IGNORED
+    })
+
+    const podBody = api.calls.create[0].body
+    assert.equal(podBody.spec.containers[0].image, 'my-registry/chroxy-pod-agent:v1.2.3',
+      'sidecar image (not user image) must be used')
+  })
+
+  it('uses default sidecar image when none configured', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'sc-default', image: 'ubuntu:latest' })
+
+    const podBody = api.calls.create[0].body
+    assert.equal(podBody.spec.containers[0].image, 'chroxy-pod-agent:latest',
+      'default sidecar image must be used when none configured')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.streamCliInEnvironment — cli.js path remap (#3334)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.streamCliInEnvironment() cli.js remap', () => {
+  it('remaps host @anthropic-ai/claude-code/cli.js path to containerCliPath', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const containerCliPath = '/opt/installed/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node',
+      args: ['/host/abs/@anthropic-ai/claude-code/cli.js', '-p'],
+      agentToken: 'tok',
+      containerCliPath,
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(ws.sent.length, 1)
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.args[0], containerCliPath, 'cli.js arg must be remapped to container path')
+    assert.equal(frame.args[1], '-p', 'remaining args preserved')
+  })
+
+  it('falls back to default cli path when none provided', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node',
+      args: ['/host/path/@anthropic-ai/claude-code/cli.js'],
+      agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.args[0],
+      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+      'must use default container path when none configured')
+  })
+
+  it('remaps host cwd to /workspace when hostCwd is supplied', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    backend.streamCliInEnvironment('pod-x', {
+      cmd: 'node', args: [],
+      cwd: '/home/user/project/src',
+      hostCwd: '/home/user/project',
+      agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    const frame = JSON.parse(ws.sent[0])
+    assert.equal(frame.cwd, '/workspace/src', 'cwd must be remapped relative to /workspace')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._dialViaPortForward — TCP listener bridge (#3332)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._dialViaPortForward() listener bridge', () => {
+  it('opens a local TCP listener and forwards each connection to AGENT_PORT (7681)', async () => {
+    // Fake net.createServer that captures the listen() callback so we can
+    // synchronously assert the listener was created and would dial localhost.
+    let serverCreated = false
+    let serverListened = false
+    let serverClosed = false
+    let acceptedSocket = null
+    let listenCallback = null
+
+    const fakeServer = {
+      listen: (port, host, cb) => {
+        serverListened = true
+        listenCallback = cb
+      },
+      close: () => { serverClosed = true },
+      address: () => ({ port: 54321 }),
+      on: () => {},
+    }
+
+    const fakeNet = {
+      createServer: (handler) => {
+        serverCreated = true
+        // Simulate an immediate connection so we can verify the bridge
+        // calls portForward with AGENT_PORT, not the local listener port.
+        setImmediate(() => {
+          acceptedSocket = { destroy: () => {} }
+          handler(acceptedSocket)
+        })
+        return fakeServer
+      },
+    }
+
+    let pfCalledWith = null
+    const fakePf = {
+      portForward: (ns, pod, ports, _out, _err, _input, outputPorts) => {
+        pfCalledWith = { ns, pod, ports, outputPorts }
+      },
+    }
+
+    let dialedUrl = null
+    const { ws } = createFakeWs()
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _portForward: fakePf,
+      _net: fakeNet,
+      _dialWs: (url) => { dialedUrl = url; return Promise.resolve(ws) },
+    })
+    // Force portforward mode by removing the directDial flag explicitly
+    backend._directDial = false
+    backend._connectMode = 'portforward'
+
+    const dialPromise = backend._dialViaPortForward('pod-x', 'default', 'tok')
+
+    // Trigger the listen() callback to advance the dial chain
+    assert.equal(serverListened, true, 'should call server.listen()')
+    listenCallback()
+
+    // Wait for the connection handler + dial chain
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    const result = await dialPromise
+
+    assert.equal(serverCreated, true, 'must create a TCP server')
+    assert.equal(dialedUrl, 'ws://127.0.0.1:54321',
+      'must dial the local listener port (not AGENT_PORT directly)')
+    assert.ok(pfCalledWith, 'portForward must be called for each accepted connection')
+    assert.deepEqual(pfCalledWith.ports, [7681],
+      'portForward target port MUST be AGENT_PORT (7681), not the local listener port')
+    assert.equal(pfCalledWith.pod, 'pod-x')
+    assert.equal(pfCalledWith.ns, 'default')
+
+    // Cleanup callback should close the listener
+    assert.equal(typeof result.cleanup, 'function')
+    result.cleanup()
+    assert.equal(serverClosed, true, 'cleanup must close the listener')
+  })
+
+  it('cleanup is invoked on streamCliInEnvironment exit', async () => {
+    let serverClosed = false
+    const fakeServer = {
+      listen: (_port, _host, cb) => { setImmediate(cb) },
+      close: () => { serverClosed = true },
+      address: () => ({ port: 54322 }),
+      on: () => {},
+    }
+    const fakeNet = { createServer: () => fakeServer }
+    const fakePf = { portForward: () => {} }
+
+    const { ws, controller } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _portForward: fakePf,
+      _net: fakeNet,
+      _dialWs: () => Promise.resolve(ws),
+    })
+    // Force the actual portforward path (not direct dial)
+    backend._directDial = false
+    backend._connectMode = 'portforward'
+    // Provide a kubeconfig stub so _dialViaPortForward won't bail
+    backend._kc = {}
+
+    const proc = backend.streamCliInEnvironment('pod-y', {
+      cmd: 'node', args: [], agentToken: 'tok',
+    })
+
+    // Allow listener-listen + dial chain
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    // Exit should trigger cleanup
+    controller.receive(JSON.stringify({ type: 'exit', code: 0 }))
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(serverClosed, true, 'cleanup must run on exit so listener does not leak')
+
+    // Drain proc to avoid lingering handles
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Phase-1 stub methods — must throw NotImplementedError
 // ─────────────────────────────────────────────────────────────────────────────
 

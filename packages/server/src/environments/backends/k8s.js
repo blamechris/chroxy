@@ -16,6 +16,13 @@ const DEFAULT_SIDECAR_IMAGE = 'chroxy-pod-agent:latest'
 /** Port the chroxy-pod-agent sidecar listens on inside the Pod */
 const AGENT_PORT = 7681
 
+/**
+ * Default container CLI path — used to remap the host's absolute cli.js path
+ * (passed by the SDK as args[0]) to a path that exists inside the Pod.
+ * Mirrors DEFAULT_CONTAINER_CLI_PATH in docker.js.
+ */
+const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+
 // Per-method deferral tracking: each stub points to the issue/phase that owns it.
 // Keep this in sync with the Backend interface (types.js) and the K8s phase plan in #3191.
 const NOT_IMPLEMENTED_REASON = {
@@ -67,7 +74,7 @@ export class K8sBackend {
    * @param {Function} [opts._dialWs]                   - Injected WS dial factory for testing: (url, token) => WebSocket
    */
   constructor({ namespace, inCluster, kubeconfigPath, sidecarImage,
-    connectMode, _coreV1Api, _portForward, _dialWs } = {}) {
+    connectMode, _coreV1Api, _portForward, _dialWs, _net } = {}) {
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
     this._connectMode = connectMode || 'portforward'
@@ -91,6 +98,8 @@ export class K8sBackend {
 
     // Allow PortForward injection for unit tests
     this._portForwardImpl = _portForward || null
+    // Allow `net` injection for unit tests of the portforward bridge
+    this._netImpl = _net || null
     // Allow WS dial injection for unit tests.
     // When _dialWs is injected, _dial() calls it directly (bypasses pod-IP
     // lookup and port-forward machinery) — useful in unit tests where there is
@@ -102,6 +111,13 @@ export class K8sBackend {
       this._dialWs = _defaultDialWs
       this._directDial = false
     }
+
+    // Per-Pod agent tokens, keyed by pod name. Populated by createEnvironment()
+    // and consulted by streamCliInEnvironment() / execInEnvironment(). Removed
+    // by destroyEnvironment(). Storing it here keeps the Backend.streamCli...
+    // interface uniform across backends — callers do not need to thread a
+    // K8s-specific agentToken arg through the manager.
+    this._agentTokens = new Map()
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -128,11 +144,15 @@ export class K8sBackend {
    *   secretName   — Secret name (stored by caller so destroyEnvironment can delete it)
    */
   async createEnvironment(opts) {
-    const { envId, image, containerEnv, namespace } = opts
+    const { envId, containerEnv, namespace } = opts
     const ns = namespace || this._namespace
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
-    const sidecarImage = image || this._sidecarImage
+    // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
+    // the env, and the user's workload runs inside it. EnvironmentManager
+    // passes a workspace image (e.g. node:22-slim) which we deliberately
+    // ignore here; only the constructor-configured sidecarImage is used.
+    const sidecarImage = this._sidecarImage
 
     // 1. Generate per-Pod auth token
     const agentToken = randomBytes(32).toString('base64url')
@@ -221,9 +241,13 @@ export class K8sBackend {
       throw err
     }
 
+    // Register the token internally so streamCliInEnvironment() can look it
+    // up by Pod name without callers having to plumb it through.
+    this._agentTokens.set(podName, agentToken)
+
     return {
       containerId: podName,
-      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+      containerCliPath: DEFAULT_CONTAINER_CLI_PATH,
       agentToken,
       secretName,
     }
@@ -235,7 +259,11 @@ export class K8sBackend {
 
   /**
    * Deletes the named Pod and polls until it no longer exists (404).
-   * Also deletes the per-Pod Secret if secretName is provided.
+   * Also deletes the per-Pod Secret.
+   *
+   * `secretName` defaults to `chroxy-token-<envId>` derived from the canonical
+   * `chroxy-env-<envId>` pod name. Callers that created the Pod via
+   * createEnvironment() do not need to plumb the secret name through.
    *
    * Best-effort by design (mirrors `DockerBackend._removeContainer`):
    *   - Idempotent: if the Pod is already gone (404 on delete), resolves immediately.
@@ -248,11 +276,16 @@ export class K8sBackend {
    * @param {string} podName - Pod name (the containerId handle stored by EnvironmentManager)
    * @param {Object} [opts]
    * @param {string} [opts.namespace]   - Overrides the constructor default namespace
-   * @param {string} [opts.secretName]  - Per-Pod Secret to delete alongside the Pod
+   * @param {string} [opts.secretName]  - Per-Pod Secret to delete (default: derived from podName)
    * @returns {Promise<void>}
    */
   async destroyEnvironment(podName, opts = {}) {
     const ns = opts.namespace || this._namespace
+    const secretName = opts.secretName || _deriveSecretName(podName)
+
+    // Always drop the cached token first so a partial failure can't leave
+    // a dangling token in memory.
+    this._agentTokens.delete(podName)
 
     log.info(`Deleting Pod ${podName} in namespace ${ns}`)
 
@@ -262,11 +295,11 @@ export class K8sBackend {
       if (_isNotFound(err)) {
         log.info(`Pod ${podName} already gone`)
         // Still clean up the Secret
-        if (opts.secretName) await this._deleteSecret(opts.secretName, ns)
+        await this._deleteSecret(secretName, ns)
         return
       }
       log.warn(`Failed to delete Pod ${podName}: ${err.message}`)
-      if (opts.secretName) await this._deleteSecret(opts.secretName, ns)
+      await this._deleteSecret(secretName, ns)
       // Best-effort: do not rethrow — mirrors DockerBackend._removeContainer
       return
     }
@@ -281,17 +314,17 @@ export class K8sBackend {
       } catch (err) {
         if (_isNotFound(err)) {
           log.info(`Pod ${podName} terminated`)
-          if (opts.secretName) await this._deleteSecret(opts.secretName, ns)
+          await this._deleteSecret(secretName, ns)
           return
         }
         log.warn(`Error polling Pod ${podName}: ${err.message}`)
-        if (opts.secretName) await this._deleteSecret(opts.secretName, ns)
+        await this._deleteSecret(secretName, ns)
         return
       }
     }
 
     log.warn(`Timed out waiting for Pod ${podName} to terminate`)
-    if (opts.secretName) await this._deleteSecret(opts.secretName, ns)
+    await this._deleteSecret(secretName, ns)
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -338,17 +371,46 @@ export class K8sBackend {
 
     return new Promise((resolve, reject) => {
       let proc
+      let settled = false
+
+      const settleReject = (err) => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        // Drain output streams so PassThroughs never accumulate buffered
+        // data after the consumer has moved on (avoids slow-leak on a
+        // long-running pod-side child after timeout).
+        if (proc) {
+          try { proc.stdout.resume() } catch (_) { /* ignore */ }
+          try { proc.stderr.resume() } catch (_) { /* ignore */ }
+        }
+        reject(err)
+      }
+
+      const settleResolve = (value) => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        resolve(value)
+      }
+
       const timer = timeout > 0
         ? setTimeout(() => {
-          reject(new Error(`execInEnvironment timed out after ${timeout}ms`))
+          // Kill the underlying process so the WS closes and the agent
+          // SIGTERMs the in-pod child (PROTOCOL.md "Lifecycle and Orphan
+          // Prevention"). Otherwise the WS + child + buffered streams
+          // leak past the caller's await point.
+          if (proc && typeof proc.kill === 'function') {
+            try { proc.kill('SIGTERM') } catch (_) { /* ignore */ }
+          }
+          settleReject(new Error(`execInEnvironment timed out after ${timeout}ms`))
         }, timeout)
         : null
 
       try {
         proc = this.streamCliInEnvironment(podName, opts)
       } catch (err) {
-        if (timer) clearTimeout(timer)
-        reject(err)
+        settleReject(err)
         return
       }
 
@@ -359,17 +421,15 @@ export class K8sBackend {
       proc.stderr.on('data', (chunk) => { stderr += chunk.toString() })
 
       proc.on('exit', (code) => {
-        if (timer) clearTimeout(timer)
         if (code === 0 || code === null) {
-          resolve({ stdout, stderr })
+          settleResolve({ stdout, stderr })
         } else {
-          reject(new Error(stderr.trim() || `Command exited with code ${code}`))
+          settleReject(new Error(stderr.trim() || `Command exited with code ${code}`))
         }
       })
 
       proc.on('error', (err) => {
-        if (timer) clearTimeout(timer)
-        reject(err)
+        settleReject(err)
       })
     })
   }
@@ -384,10 +444,19 @@ export class K8sBackend {
    * returns a ChildProcess-shaped EventEmitter that bridges the WS events to the
    * SpawnedProcess interface consumed by the Agent SDK.
    *
-   * Connection is established synchronously (the WS dial is initiated, then the
-   * spawn frame is sent on `open`).  The returned handle immediately exposes
-   * `stdout`, `stderr`, and `stdin` streams so the caller can attach listeners
-   * before the connection completes.
+   * Connection is established asynchronously (the WS dial happens in the
+   * background; the spawn frame is sent on `open`).  The returned handle
+   * immediately exposes `stdout`, `stderr`, and `stdin` streams so the caller
+   * can attach listeners before the connection completes.
+   *
+   * The bearer token used to authenticate with the sidecar is read from the
+   * backend's per-Pod registry (populated by `createEnvironment`). Callers do
+   * not need to thread `agentToken` through opts; for tests / external pods
+   * the token may be passed explicitly via `opts.agentToken`.
+   *
+   * Like DockerBackend.streamCliInEnvironment, this method also remaps the
+   * SDK's host-absolute `cli.js` path (passed as args[0]) to the container's
+   * installed CLI path so the Pod can actually exec it.
    *
    * @param {string} podName
    * @param {Object} opts
@@ -396,26 +465,86 @@ export class K8sBackend {
    * @param {Object}   [opts.env]       - Extra env vars for the child
    * @param {string}   [opts.cwd]       - Working directory for the child
    * @param {AbortSignal} [opts.signal] - Abort → SIGTERM the child (WS close)
-   * @param {string}   opts.agentToken  - Bearer token (from createEnvironment return value)
+   * @param {string}   [opts.agentToken] - Override the registered bearer token (test seam)
+   * @param {string}   [opts.containerCliPath] - Pod-side cli.js path (default fallback)
+   * @param {string}   [opts.hostCwd]   - Host CWD mount root for path remapping
    * @param {string}   [opts.namespace] - Namespace override
    * @returns {SidecarProcess} ChildProcess-shaped handle
    */
   streamCliInEnvironment(podName, opts = {}) {
-    const { cmd, args = [], env, cwd, signal, agentToken, namespace } = opts
+    const {
+      cmd, args = [], env, cwd, signal, namespace,
+      containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
+      hostCwd,
+    } = opts
     const ns = namespace || this._namespace
+    const agentToken = opts.agentToken || this._agentTokens.get(podName)
 
     if (!agentToken) {
-      throw new Error('K8sBackend.streamCliInEnvironment: agentToken is required')
+      // Phrasing kept compatible with the existing /agentToken is required/
+      // assertion. The token is normally registered by createEnvironment();
+      // tests that bypass that path can still pass `opts.agentToken` directly.
+      throw new Error(
+        `K8sBackend.streamCliInEnvironment: agentToken is required for Pod "${podName}" ` +
+        '(register via createEnvironment(), or pass opts.agentToken)'
+      )
+    }
+
+    // Remap host cli.js path to container path, mirroring DockerBackend.
+    const containerArgs = [...args]
+    if (containerArgs.length > 0 &&
+        typeof containerArgs[0] === 'string' &&
+        containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
+      log.info(`Remapped CLI path: ${containerArgs[0]} -> ${containerCliPath}`)
+      containerArgs[0] = containerCliPath
+    }
+
+    // Remap host cwd to /workspace inside the Pod when provided.
+    let containerCwd = cwd
+    if (cwd && hostCwd) {
+      containerCwd = cwd.startsWith(hostCwd)
+        ? '/workspace' + cwd.slice(hostCwd.length)
+        : '/workspace'
     }
 
     const proc = new SidecarProcess()
 
-    // Dial asynchronously; the returned handle is usable immediately
-    this._dial(podName, ns, agentToken).then((ws) => {
-      _wireWsToProc(ws, proc, { cmd, args, env, cwd, signal })
+    // Dial asynchronously; the returned handle is usable immediately. We
+    // capture portforward cleanup callbacks so kill() / exit can tear down
+    // the local TCP listener even if dial completes after kill is called.
+    this._dial(podName, ns, agentToken).then((dialResult) => {
+      // dialResult is either { ws, cleanup? } (portforward bridge) or a bare
+      // ws (clusterip / direct dial). Normalize.
+      const ws = dialResult && dialResult.ws ? dialResult.ws : dialResult
+      const cleanup = dialResult && typeof dialResult.cleanup === 'function'
+        ? dialResult.cleanup : null
+
+      // Race: kill() / abort may have fired before dial resolved. In that
+      // case `proc.killed` is set but `_ws` is null, so the synchronous
+      // kill() call did nothing. Detect that here and tear down cleanly.
+      if (proc.killed || (signal && signal.aborted)) {
+        try { ws.close() } catch (_) { /* ignore */ }
+        if (cleanup) { try { cleanup() } catch (_) { /* ignore */ } }
+        if (!proc._exited) {
+          proc._exited = true
+          proc.stdout.push(null)
+          proc.stderr.push(null)
+          proc.emit('exit', -1)
+        }
+        return
+      }
+
+      _wireWsToProc(ws, proc, {
+        cmd, args: containerArgs, env, cwd: containerCwd, signal, cleanup,
+      })
     }).catch((err) => {
       log.warn(`streamCliInEnvironment dial failed for ${podName}: ${err.message}`)
-      proc.emit('exit', -1)
+      if (!proc._exited) {
+        proc._exited = true
+        proc.stdout.push(null)
+        proc.stderr.push(null)
+        proc.emit('exit', -1)
+      }
     })
 
     return proc
@@ -460,8 +589,9 @@ export class K8sBackend {
   /**
    * Resolve the WebSocket URL for the sidecar and open a connection.
    * Mode 'clusterip': dial pod-ip:AGENT_PORT directly.
-   * Mode 'portforward': allocate a local port, set up kubectl port-forward,
-   *   then dial localhost:localPort.
+   * Mode 'portforward': open a local TCP listener and bridge each connection
+   *   through @kubernetes/client-node `PortForward` to the Pod's AGENT_PORT,
+   *   then dial localhost:<listenerPort>.
    *
    * When `_dialWs` was injected at construction time (test mode) the lookup
    * and port-forward machinery is skipped and `_dialWs` is called directly
@@ -470,7 +600,11 @@ export class K8sBackend {
    * @param {string} podName
    * @param {string} ns
    * @param {string} token
-   * @returns {Promise<WebSocket>}
+   * @returns {Promise<WebSocket | { ws: WebSocket, cleanup: Function }>}
+   *   Returns either a bare WebSocket (clusterip / direct dial) or a dial
+   *   result object that includes a `cleanup` callback for tearing down the
+   *   local TCP listener (portforward mode). The caller is expected to invoke
+   *   `cleanup` on exit/error so listeners do not leak.
    */
   async _dial(podName, ns, token) {
     if (this._directDial) {
@@ -503,61 +637,69 @@ export class K8sBackend {
   }
 
   /**
-   * Set up a kubectl port-forward via @kubernetes/client-node PortForward,
-   * then dial the sidecar over the local tunnel.
+   * Set up a localhost TCP listener that bridges each incoming connection
+   * through `PortForward.portForward` to the Pod's AGENT_PORT, then dial
+   * `ws://127.0.0.1:<listenerPort>` and return both the WS and a cleanup
+   * callback that closes the listener.
+   *
+   * The `@kubernetes/client-node` `PortForward` API is per-connection: it
+   * does NOT bind a local TCP listener — the caller does. Each call to
+   * `pf.portForward(ns, pod, [TARGET_POD_PORT], stream, errStream, input,
+   * [TARGET_POD_PORT])` proxies a single duplex stream pair to the pod's
+   * `TARGET_POD_PORT`. We wire the local TCP socket as that stream pair so
+   * an HTTP/WS client connecting to the listener appears at the pod's port
+   * 7681 (AGENT_PORT) end-to-end.
    *
    * @param {string} podName
    * @param {string} ns
    * @param {string} token
-   * @returns {Promise<WebSocket>}
+   * @returns {Promise<{ ws: WebSocket, cleanup: Function }>}
    */
   async _dialViaPortForward(podName, ns, token) {
-    const { createServer } = await import('net')
-
-    return new Promise((resolve, reject) => {
-      // Bind a TCP server on port 0 to get a free OS port, then immediately
-      // close it.  The risk of a race is small and acceptable for dev/test use.
-      const probe = createServer()
-      probe.listen(0, '127.0.0.1', () => {
-        const localPort = probe.address().port
-        probe.close(async () => {
-          try {
-            await this._startPortForward(podName, ns, localPort)
-            const url = `ws://127.0.0.1:${localPort}`
-            log.info(`Dialing sidecar ${podName} via port-forward on port ${localPort}`)
-            const ws = await this._dialWs(url, token)
-            resolve(ws)
-          } catch (err) {
-            reject(err)
-          }
-        })
-      })
-      probe.on('error', reject)
-    })
-  }
-
-  /**
-   * Start a PortForward tunnel from localhost:localPort to Pod:AGENT_PORT.
-   *
-   * @param {string} podName
-   * @param {string} ns
-   * @param {number} localPort
-   * @returns {Promise<void>} resolves once the tunnel is established
-   */
-  async _startPortForward(podName, ns, localPort) {
+    const net = this._netImpl || (await import('net'))
     const pf = this._portForwardImpl || (this._kc ? new PortForward(this._kc) : null)
     if (!pf) {
       throw new Error('PortForward not available — no KubeConfig (was _coreV1Api injected in tests?)')
     }
 
-    const { PassThrough: PT } = await import('stream')
-    const output = new PT()
-    const errStream = new PT()
-    const input = new PT()
+    return new Promise((resolve, reject) => {
+      // Bridge each accepted local TCP connection through the K8s
+      // portforward subresource to the Pod's fixed AGENT_PORT.
+      const server = net.createServer((socket) => {
+        try {
+          // Per @kubernetes/client-node API:
+          //   portForward(ns, podName, targetPorts, output, error, input, [outputPorts])
+          // The target/output port array contains the POD-side port, not the
+          // local listener port.
+          pf.portForward(ns, podName, [AGENT_PORT], socket, socket, socket, [AGENT_PORT])
+        } catch (err) {
+          log.warn(`portForward bridge error for ${podName}: ${err.message}`)
+          try { socket.destroy() } catch (_) { /* ignore */ }
+        }
+      })
 
-    // portForward sets up the K8s SPDY/WS tunnel; once the promise resolves
-    // the tunnel is active and connections to localPort will be forwarded.
-    await pf.portForward(ns, podName, [localPort], output, errStream, input)
+      server.on('error', (err) => {
+        log.warn(`portforward listener error for ${podName}: ${err.message}`)
+      })
+
+      server.listen(0, '127.0.0.1', async () => {
+        const localPort = server.address().port
+        const url = `ws://127.0.0.1:${localPort}`
+        log.info(`Dialing sidecar ${podName} via port-forward listener on port ${localPort}`)
+
+        const cleanup = () => {
+          try { server.close() } catch (_) { /* ignore */ }
+        }
+
+        try {
+          const ws = await this._dialWs(url, token)
+          resolve({ ws, cleanup })
+        } catch (err) {
+          cleanup()
+          reject(err)
+        }
+      })
+    })
   }
 
   /**
@@ -598,6 +740,8 @@ class SidecarProcess extends EventEmitter {
     this.stdin = new PassThrough()
     this.killed = false
     this._exited = false
+    this._ws = null
+    this._cleanup = null
   }
 
   kill(signal = 'SIGTERM') {
@@ -611,6 +755,13 @@ class SidecarProcess extends EventEmitter {
         // ignore
       }
     }
+    if (this._cleanup) {
+      try { this._cleanup() } catch (_) { /* ignore */ }
+      this._cleanup = null
+    }
+    // If the WS was never wired (kill called before dial resolved), there
+    // will be no `close` event to drive the exit. The post-dial wiring path
+    // checks `proc.killed` and synthesizes exit(-1) in that case.
   }
 }
 
@@ -622,11 +773,37 @@ class SidecarProcess extends EventEmitter {
  *
  * @param {WebSocket} ws
  * @param {SidecarProcess} proc
- * @param {Object} spawnOpts - { cmd, args, env, cwd, signal }
+ * @param {Object} spawnOpts
+ * @param {string}    spawnOpts.cmd
+ * @param {string[]} [spawnOpts.args]
+ * @param {Object}   [spawnOpts.env]
+ * @param {string}   [spawnOpts.cwd]
+ * @param {AbortSignal} [spawnOpts.signal]
+ * @param {Function} [spawnOpts.cleanup] - Optional teardown for portforward bridge
  */
-function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal } = {}) {
-  // Attach the WS to the proc so kill() can close it
+function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } = {}) {
+  // Attach the WS + cleanup to the proc so kill() can close them
   proc._ws = ws
+  if (cleanup) proc._cleanup = cleanup
+
+  // Tracks whether the agent has produced any output yet. An `error` frame
+  // that arrives BEFORE any event/stderr means the spawn was rejected — per
+  // PROTOCOL.md the WS stays open in that case, but the consumer's `exit`
+  // listener must still fire or `execInEnvironment` will hang until timeout.
+  let firstFrameSeen = false
+
+  const finishWithExit = (code) => {
+    if (proc._exited) return
+    proc._exited = true
+    proc.stdout.push(null)
+    proc.stderr.push(null)
+    proc.emit('exit', code)
+    try { ws.close() } catch (_) { /* ignore */ }
+    if (proc._cleanup) {
+      try { proc._cleanup() } catch (_) { /* ignore */ }
+      proc._cleanup = null
+    }
+  }
 
   const sendSpawn = () => {
     const frame = { type: 'spawn', cmd, args }
@@ -653,6 +830,7 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal } = {}) {
 
     switch (frame.type) {
       case 'event': {
+        firstFrameSeen = true
         // Each `event` frame carries one parsed stdout NDJSON object (or raw string).
         // Re-serialize to NDJSON so the SDK's readline reader sees complete lines.
         const line = typeof frame.payload === 'string'
@@ -662,18 +840,24 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal } = {}) {
         break
       }
       case 'stderr':
+        firstFrameSeen = true
         proc.stderr.push(frame.data)
         break
       case 'exit':
-        proc._exited = true
-        proc.stdout.push(null)   // EOF
-        proc.stderr.push(null)
-        proc.emit('exit', frame.code ?? 0)
-        ws.close()
+        finishWithExit(frame.code ?? 0)
         break
       case 'error':
         log.warn(`Sidecar error frame: ${frame.message}`)
         proc.stderr.push(`sidecar error: ${frame.message}\n`)
+        // Per PROTOCOL.md the agent leaves the connection open after most
+        // error frames. But spawn-rejection errors arrive BEFORE any
+        // event/stderr (because the child never started) and the agent
+        // will not emit a follow-up `exit`. Without a synthetic exit the
+        // consumer hangs until its timeout. Treat any error-before-first-
+        // frame as fatal and synthesize exit(-1) to terminate the wait.
+        if (!firstFrameSeen) {
+          finishWithExit(-1)
+        }
         break
       case 'pong':
         // no-op
@@ -685,21 +869,15 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal } = {}) {
 
   ws.on('error', (err) => {
     if (proc._exited) return
-    proc._exited = true
     log.warn(`Sidecar WS error for process: ${err.message}`)
-    proc.stdout.push(null)
-    proc.stderr.push(null)
     // #3321 — on WS drop emit exit with code -1 so the session errors cleanly
-    proc.emit('exit', -1)
+    finishWithExit(-1)
   })
 
   ws.on('close', (code, reason) => {
     if (proc._exited) return
-    proc._exited = true
     log.warn(`Sidecar WS closed unexpectedly (code=${code} reason=${reason})`)
-    proc.stdout.push(null)
-    proc.stderr.push(null)
-    proc.emit('exit', -1)
+    finishWithExit(-1)
   })
 
   // Abort signal support
@@ -750,4 +928,17 @@ function _isNotFound(err) {
 
 function _sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Derive a per-Pod Secret name from the canonical Pod name.
+ * createEnvironment() names pods `chroxy-env-<envId>` and secrets
+ * `chroxy-token-<envId>`; given the former, return the latter.
+ */
+function _deriveSecretName(podName) {
+  if (typeof podName === 'string' && podName.startsWith('chroxy-env-')) {
+    return 'chroxy-token-' + podName.slice('chroxy-env-'.length)
+  }
+  // Fallback: best-effort token cleanup name based on the pod name itself.
+  return `chroxy-token-${podName}`
 }
