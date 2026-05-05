@@ -35,9 +35,10 @@ const KILL_GRACE_MS = 5_000
 // upgrades so the agent is fail-secure in production.
 const AGENT_TOKEN = process.env.CHROXY_AGENT_TOKEN ?? null
 
-if (!AGENT_TOKEN) {
-  console.warn('[chroxy-pod-agent] WARNING: CHROXY_AGENT_TOKEN is not set — all WS upgrades will be rejected')
-}
+// Token-bearing env var names that must NOT leak into the spawned child's
+// environment. The child is the user-facing CLI; agent-internal credentials
+// have no business being readable from inside it.
+const AGENT_SECRET_ENV_KEYS = ['CHROXY_AGENT_TOKEN']
 
 // Constant-time token comparison — adapted from token-compare.js in the main server.
 function safeTokenCompare(a, b) {
@@ -71,6 +72,13 @@ export class PodAgent {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
+
+    // Fail-secure warning. Emitted from the constructor (not module-load) so
+    // tests and embedders that pass an explicit `token` don't see a misleading
+    // log line, and the message reflects the actual configured behaviour.
+    if (!this._token) {
+      console.warn('[chroxy-pod-agent] WARNING: no auth token configured — all WS upgrades will be rejected')
+    }
 
     this.httpServer = createServer((req, res) => this._handleHttp(req, res))
     this.wss = new WebSocketServer({ noServer: true })
@@ -280,9 +288,17 @@ export class PodAgent {
       return
     }
 
+    // Build the child env: start from the agent's env, strip agent-only
+    // secrets, then layer the per-spawn env on top. This prevents the auth
+    // token (and any future agent-internal credentials) from leaking into
+    // the user-facing CLI process.
+    const sanitizedAgentEnv = { ...process.env }
+    for (const key of AGENT_SECRET_ENV_KEYS) {
+      delete sanitizedAgentEnv[key]
+    }
     const spawnOpts = {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...env },
+      env: { ...sanitizedAgentEnv, ...env },
     }
     if (cwd) spawnOpts.cwd = cwd
 
@@ -296,6 +312,15 @@ export class PodAgent {
 
     // Track the child on the WS so a disconnect can kill it (see _cleanupConnection).
     ws._child = child
+
+    // Handle async spawn failures (ENOENT, EACCES) so an unhandled 'error'
+    // event does not crash the agent process. Spawn errors arrive after the
+    // synchronous spawn() returns, which is why this can't go in the catch
+    // block above.
+    child.on('error', (err) => {
+      if (ws._child === child) ws._child = null
+      this._send(ws, { type: 'error', message: `spawn failed: ${err.message}` })
+    })
 
     // stdout — read line-by-line; each NDJSON line becomes one 'event' frame.
     const rl = createInterface({ input: child.stdout })

@@ -467,6 +467,100 @@ describe('PodAgent', () => {
     })
   })
 
+  describe('child env sanitization', () => {
+    let agent, port, capturedEnv
+
+    beforeEach(async () => {
+      const child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = () => true
+      const spawnFn = (_cmd, _args, opts) => {
+        capturedEnv = opts.env
+        return child
+      }
+      ;({ agent, port } = await startAgent({ spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('strips CHROXY_AGENT_TOKEN from the spawned child env', async () => {
+      // Force the agent process to advertise a token in its env so we can
+      // assert it is removed before forwarding to the child.
+      const originalToken = process.env.CHROXY_AGENT_TOKEN
+      process.env.CHROXY_AGENT_TOKEN = 'agent-only-secret-must-not-leak'
+
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        assert.ok(capturedEnv, 'spawn should have been called with env')
+        assert.equal(
+          capturedEnv.CHROXY_AGENT_TOKEN,
+          undefined,
+          'CHROXY_AGENT_TOKEN must NOT be forwarded to the child',
+        )
+
+        ws.close()
+      } finally {
+        if (originalToken === undefined) delete process.env.CHROXY_AGENT_TOKEN
+        else process.env.CHROXY_AGENT_TOKEN = originalToken
+      }
+    })
+
+    it('per-spawn env values still take effect', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({
+        type: 'spawn',
+        cmd: 'claude',
+        args: [],
+        env: { CLAUDE_HEADLESS: '1' },
+      }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.equal(capturedEnv.CLAUDE_HEADLESS, '1')
+      ws.close()
+    })
+  })
+
+  describe('async spawn errors', () => {
+    let agent, port, child
+
+    beforeEach(async () => {
+      child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = () => true
+      const spawnFn = () => child
+      ;({ agent, port } = await startAgent({ spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('forwards async spawn errors as error frames without crashing', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'nonexistent-bin', args: [] }))
+
+      // Simulate the async ENOENT-style error Node would emit a tick after spawn.
+      setTimeout(() => child.emit('error', Object.assign(new Error('ENOENT'), { code: 'ENOENT' })), 10)
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'error')
+      assert.match(msgs[0].message, /spawn failed/)
+      assert.match(msgs[0].message, /ENOENT/)
+
+      ws.close()
+    })
+  })
+
   describe('multi-spawn guard', () => {
     let agent, port, controller
 
