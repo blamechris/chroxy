@@ -1230,3 +1230,229 @@ describe('K8sBackend Phase-1 stubs', () => {
     })
   }
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.streamCliInEnvironment() reconnect loop (#3321)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
+  /**
+   * Build a K8sBackend whose _dialWs is driven by a pre-defined sequence of
+   * fake WS + controller pairs.  Each call to _dialWs pops the next item from
+   * the sequence.
+   *
+   * Returns { backend, dials } where dials[i] = { ws, controller }.
+   */
+  function makeBackendWithDials(count) {
+    let callIndex = 0
+    const dials = Array.from({ length: count }, () => createFakeWs())
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        const d = dials[callIndex]
+        callIndex += 1
+        if (!d) throw new Error(`unexpected extra dial (${callIndex - 1})`)
+        return Promise.resolve(d.ws)
+      },
+      _reconnectDelays: [10],  // 10ms for tests (setImmediate-safe)
+      _maxRetries: 5,
+    })
+
+    return { backend, dials }
+  }
+
+  /** Yield enough event-loop ticks to let a 10ms timer fire and a promise chain resolve. */
+  async function waitTicks() {
+    await new Promise(r => setTimeout(r, 30))
+  }
+
+  it('retries after unexpected WS close, sends resume with correct lastSeq', async () => {
+    const { backend, dials } = makeBackendWithDials(2)
+    const [dial1, dial2] = dials
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    // Allow first dial + spawn send
+    await new Promise(r => setImmediate(r))
+
+    // Agent acknowledges session and sends one event with seq=1
+    dial1.controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-1' }))
+    dial1.controller.receive(JSON.stringify({ type: 'event', payload: 'hi', seq: 1 }))
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc._sessionId, 'sess-1')
+    assert.equal(proc._lastSeq, 1)
+
+    // Unexpected close (code 1006 — abnormal closure)
+    dial1.controller.triggerClose(1006)
+    // Allow reconnect timer (10ms) to fire and second dial to complete
+    await waitTicks()
+
+    // Second connection should send a resume frame with lastSeq=1
+    const sent2 = dial2.ws.sent
+    assert.ok(sent2.length > 0, 'second dial must send a frame')
+    const resumeFrame = JSON.parse(sent2[sent2.length - 1])
+    assert.equal(resumeFrame.type, 'resume', 'must send resume frame on reconnect')
+    assert.equal(resumeFrame.sessionId, 'sess-1')
+    assert.equal(resumeFrame.lastSeq, 1)
+
+    assert.deepEqual(exitCodes, [], 'must not exit on transient reconnect')
+
+    // Clean up: send exit from second connection
+    dial2.controller.receive(JSON.stringify({ type: 'exit', code: 0 }))
+    await new Promise(r => setImmediate(r))
+    assert.deepEqual(exitCodes, [0])
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('gives up after max retries and emits exit(-2)', async () => {
+    // 1 initial dial + 5 reconnect dials = 6 total; _maxRetries=3 so we need 4
+    let callIndex = 0
+    const dials = Array.from({ length: 4 }, () => createFakeWs())
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        const d = dials[callIndex]
+        callIndex += 1
+        if (!d) throw new Error(`unexpected extra dial (${callIndex - 1})`)
+        return Promise.resolve(d.ws)
+      },
+      _reconnectDelays: [10],
+      _maxRetries: 3,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+
+    // Acknowledge session on first dial
+    dials[0].controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-2' }))
+    await new Promise(r => setImmediate(r))
+
+    // Trigger 3 successive unexpected closes (matching _maxRetries)
+    for (let i = 0; i < 3; i++) {
+      dials[i].controller.triggerClose(1006)
+      await waitTicks()
+    }
+
+    // After 3 reconnect attempts dials[3] is open; closing it should exceed max
+    dials[3].controller.triggerClose(1006)
+    await waitTicks()
+
+    assert.deepEqual(exitCodes, [-2],
+      `expected exit(-2) after max retries, got ${JSON.stringify(exitCodes)}`)
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('emits exit(-2) on session_lost frame', async () => {
+    const { backend, dials } = makeBackendWithDials(1)
+    const [dial1] = dials
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+
+    // Establish session then simulate agent reporting session_lost (e.g. pod restart)
+    dial1.controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-3' }))
+    await new Promise(r => setImmediate(r))
+
+    dial1.controller.receive(JSON.stringify({ type: 'session_lost', sessionId: 'sess-3' }))
+    await new Promise(r => setImmediate(r))
+
+    assert.deepEqual(exitCodes, [-2],
+      `expected exit(-2) on session_lost, got ${JSON.stringify(exitCodes)}`)
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('does not reconnect when kill() is called before unexpected close', async () => {
+    const { backend, dials } = makeBackendWithDials(1)
+    const [dial1] = dials
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    // Establish session
+    dial1.controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-4' }))
+    await new Promise(r => setImmediate(r))
+
+    // Kill proc — sets proc.killed = true and cancels retry timer
+    proc.kill()
+
+    // Unexpected close should not trigger reconnect because proc.killed is true
+    dial1.controller.triggerClose(1006)
+    await waitTicks()
+
+    // dials only has 1 entry — if a second dial were attempted, the test would
+    // throw "unexpected extra dial".
+    assert.equal(dials.length, 1, 'only one dial should have been made')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('resets retry count on fresh session_started after successful reconnect', async () => {
+    const { backend, dials } = makeBackendWithDials(2)
+    const [dial1, dial2] = dials
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setImmediate(r))
+
+    // First session
+    dial1.controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-5' }))
+    await new Promise(r => setImmediate(r))
+
+    // Simulate prior failures so retry count > 0
+    proc._retryAttempt = 2
+
+    // Disconnect and reconnect
+    dial1.controller.triggerClose(1006)
+    await waitTicks()
+
+    // Second dial should have sent a resume frame
+    const sent2 = dial2.ws.sent
+    assert.ok(sent2.length > 0, 'second dial must have sent a frame')
+    const resumeFrame = JSON.parse(sent2[sent2.length - 1])
+    assert.equal(resumeFrame.type, 'resume')
+
+    // Agent sends session_started on resume — should reset retry counter
+    dial2.controller.receive(JSON.stringify({ type: 'session_started', sessionId: 'sess-5' }))
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc._retryAttempt, 0,
+      `retry count should be reset to 0 after session_started on reconnect, got ${proc._retryAttempt}`)
+
+    // Clean up
+    dial2.controller.receive(JSON.stringify({ type: 'exit', code: 0 }))
+    await new Promise(r => setImmediate(r))
+    assert.deepEqual(exitCodes, [0])
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})

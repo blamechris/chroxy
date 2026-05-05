@@ -88,6 +88,40 @@ function waitForMessages(ws, count, timeoutMs = 2000) {
   })
 }
 
+/**
+ * Like waitForMessages but skips `session_started` frames and returns N
+ * non-session_started frames.  Use in spawn tests that don't care about the
+ * session_started acknowledgement.
+ */
+function waitForDataMessages(ws, count, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const messages = []
+    const timer = setTimeout(
+      () => reject(new Error(`timeout waiting for ${count} data messages (got ${messages.length})`)),
+      timeoutMs,
+    )
+    function onMsg(data) {
+      let msg
+      try { msg = JSON.parse(data.toString()) } catch { return }
+      if (msg.type === 'session_started') return
+      messages.push(msg)
+      if (messages.length >= count) {
+        clearTimeout(timer)
+        ws.off('message', onMsg)
+        ws.off('close', onClose)
+        resolve(messages)
+      }
+    }
+    function onClose() {
+      clearTimeout(timer)
+      ws.off('message', onMsg)
+      resolve(messages)
+    }
+    ws.on('message', onMsg)
+    ws.on('close', onClose)
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Mock spawn helper
 // ---------------------------------------------------------------------------
@@ -247,7 +281,7 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      const msgsPromise = waitForMessages(ws, 1)
+      const msgsPromise = waitForDataMessages(ws, 1)
 
       ws.send(JSON.stringify({
         type: 'spawn',
@@ -273,7 +307,7 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      const msgsPromise = waitForMessages(ws, 1)
+      const msgsPromise = waitForDataMessages(ws, 1)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
 
@@ -299,9 +333,9 @@ describe('PodAgent', () => {
       setTimeout(() => controller.exit(0), 10)
 
       const { messages, closeCode } = await donePromise
-      assert.ok(messages.length >= 1, `expected exit frame (got ${messages.length})`)
-      assert.equal(messages[0].type, 'exit')
-      assert.equal(messages[0].code, 0)
+      const exitFrames = messages.filter((m) => m.type === 'exit')
+      assert.ok(exitFrames.length >= 1, `expected exit frame (got ${JSON.stringify(messages)})`)
+      assert.equal(exitFrames[0].code, 0)
       assert.equal(closeCode, 1000)
     })
 
@@ -351,12 +385,13 @@ describe('PodAgent', () => {
     })
     after(() => agent.close())
 
-    it('returns error frame for unknown type', async () => {
+    it('returns error frame for unknown message type', async () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
       const msgsPromise = waitForMessages(ws, 1)
-      ws.send(JSON.stringify({ type: 'unknown_cmd' }))
+      ws.send(JSON.stringify({ type: 'completely_unknown' }))
+
       const msgs = await msgsPromise
       assert.ok(msgs.length >= 1)
       assert.equal(msgs[0].type, 'error')
@@ -379,58 +414,23 @@ describe('PodAgent', () => {
 
     afterEach(() => agent.close())
 
-    it('sends SIGTERM to running child when client closes WS mid-spawn', async () => {
+    it('child is NOT killed when client closes WS mid-spawn (session persists for resume)', async () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      // Yield so _handleSpawn has run and ws._child is wired up.
+      // Yield so _handleSpawn has run and the session is registered.
       await new Promise((r) => setTimeout(r, 10))
 
       ws.close()
       // Wait for the close event to propagate server-side.
-      await new Promise((r) => setTimeout(r, 20))
+      await new Promise((r) => setTimeout(r, 30))
 
-      assert.ok(
-        child.killSignals.includes('SIGTERM'),
-        `expected SIGTERM, got ${JSON.stringify(child.killSignals)}`,
-      )
-    })
-
-    it('escalates to SIGKILL after grace period if child does not exit', async () => {
-      const ws = connect(port, TOKEN)
-      await waitOpen(ws)
-
-      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
-
-      ws.close()
-      // Wait past the 25 ms grace configured above.
-      await new Promise((r) => setTimeout(r, 80))
-
-      assert.ok(child.killSignals.includes('SIGTERM'), 'expected SIGTERM first')
-      assert.ok(child.killSignals.includes('SIGKILL'), 'expected SIGKILL after grace')
-    })
-
-    it('does NOT escalate to SIGKILL if child exits within grace', async () => {
-      const ws = connect(port, TOKEN)
-      await waitOpen(ws)
-
-      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
-
-      ws.close()
-      // Simulate the child responding to SIGTERM well within the grace window.
-      await new Promise((r) => setTimeout(r, 5))
-      controller.exit(143)
-
-      // Wait past the original grace deadline.
-      await new Promise((r) => setTimeout(r, 80))
-
-      assert.ok(child.killSignals.includes('SIGTERM'), 'expected SIGTERM')
-      assert.ok(
-        !child.killSignals.includes('SIGKILL'),
-        `expected no SIGKILL, got ${JSON.stringify(child.killSignals)}`,
+      // With resume semantics, the child should NOT be killed on WS disconnect —
+      // it stays alive so a reconnecting client can resume the session.
+      assert.equal(
+        child.killSignals.length, 0,
+        `child should not be killed on WS disconnect (got ${JSON.stringify(child.killSignals)})`,
       )
     })
 
@@ -519,11 +519,13 @@ describe('PodAgent', () => {
         type: 'spawn',
         cmd: 'claude',
         args: [],
-        env: { CLAUDE_HEADLESS: '1' },
+        env: { MY_CUSTOM_VAR: 'hello' },
       }))
       await new Promise((r) => setTimeout(r, 20))
 
-      assert.equal(capturedEnv.CLAUDE_HEADLESS, '1')
+      assert.ok(capturedEnv, 'spawn should have been called with env')
+      assert.equal(capturedEnv.MY_CUSTOM_VAR, 'hello', 'per-spawn env must be forwarded')
+
       ws.close()
     })
   })
@@ -546,7 +548,7 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      const msgsPromise = waitForMessages(ws, 1)
+      const msgsPromise = waitForDataMessages(ws, 1)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'nonexistent-bin', args: [] }))
 
       // Simulate the async ENOENT-style error Node would emit a tick after spawn.
@@ -576,21 +578,262 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
-      // First spawn — ack via stdout line.
-      const firstAck = waitForMessages(ws, 1)
+      // First spawn — ack via stdout line (skip session_started).
+      const firstAck = waitForDataMessages(ws, 1)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
       setTimeout(() => controller.writeStdout(JSON.stringify({ type: 'assistant' })), 10)
       const firstMsgs = await firstAck
       assert.equal(firstMsgs[0].type, 'event')
 
       // Second spawn — must be rejected with an error frame, first child untouched.
-      const secondAck = waitForMessages(ws, 1)
+      const secondAck = waitForDataMessages(ws, 1)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
       const secondMsgs = await secondAck
       assert.equal(secondMsgs[0].type, 'error')
       assert.match(secondMsgs[0].message, /child already running/)
 
       ws.close()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // session_started and seq numbering (#3321)
+  // ---------------------------------------------------------------------------
+
+  describe('session_started and seq numbering', () => {
+    let agent, port, controller
+
+    beforeEach(async () => {
+      const mock = createMockSpawn()
+      controller = mock.controller
+      ;({ agent, port } = await startAgent({ spawnFn: mock.spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('sends session_started frame immediately after spawn is accepted', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'session_started')
+      assert.ok(typeof msgs[0].sessionId === 'string' && msgs[0].sessionId.length > 0,
+        'session_started must carry a non-empty sessionId')
+
+      ws.close()
+    })
+
+    it('adds seq to event, stderr, and exit frames', async () => {
+      const ws = connect(port, TOKEN)
+      const donePromise = collectUntilClose(ws)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      controller.writeStdout(JSON.stringify({ type: 'assistant' }))
+      controller.writeStderr('err\n')
+      await new Promise((r) => setTimeout(r, 10))
+      controller.exit(0)
+
+      const { messages } = await donePromise
+      const data = messages.filter((m) => m.type !== 'session_started')
+      for (const frame of data) {
+        assert.ok(typeof frame.seq === 'number' && frame.seq > 0,
+          `frame ${frame.type} should have a positive seq, got ${frame.seq}`)
+      }
+      // seq values must be monotonically increasing across all data frames.
+      const seqs = data.map((m) => m.seq)
+      for (let i = 1; i < seqs.length; i++) {
+        assert.ok(seqs[i] > seqs[i - 1], `seq must increase: ${seqs[i - 1]} -> ${seqs[i]}`)
+      }
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // resume (#3321)
+  // ---------------------------------------------------------------------------
+
+  describe('resume', () => {
+    let agent, port, controller
+
+    beforeEach(async () => {
+      const mock = createMockSpawn()
+      controller = mock.controller
+      ;({ agent, port } = await startAgent({ spawnFn: mock.spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('replays buffered events with seq > lastSeq on resume', async () => {
+      // ── First connection: spawn and get some frames ───────────────────────
+      const ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+
+      // Collect all frames from ws1
+      const ws1Msgs = []
+      ws1.on('message', (d) => {
+        try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Emit 3 stdout events
+      controller.writeStdout(JSON.stringify({ type: 'a' }))
+      controller.writeStdout(JSON.stringify({ type: 'b' }))
+      controller.writeStdout(JSON.stringify({ type: 'c' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Extract sessionId and seq from what ws1 received
+      const startedFrame = ws1Msgs.find((m) => m.type === 'session_started')
+      assert.ok(startedFrame, 'must have received session_started')
+      const sessionId = startedFrame.sessionId
+
+      const eventFrames = ws1Msgs.filter((m) => m.type === 'event')
+      assert.ok(eventFrames.length >= 2, `expected at least 2 event frames, got ${eventFrames.length}`)
+
+      // Pretend the client has seen the first 2 frames but missed the 3rd.
+      const resumeAfterSeq = eventFrames[1].seq
+
+      // ── Disconnect ws1 ────────────────────────────────────────────────────
+      ws1.close()
+      await new Promise((r) => setTimeout(r, 20))
+
+      // ── Second connection: resume ─────────────────────────────────────────
+      const ws2 = connect(port, TOKEN)
+      await waitOpen(ws2)
+
+      const ws2Msgs = []
+      ws2.on('message', (d) => {
+        try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: resumeAfterSeq }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Should have replayed only frames with seq > resumeAfterSeq
+      const replayed = ws2Msgs.filter((m) => m.seq !== undefined)
+      assert.ok(replayed.every((m) => m.seq > resumeAfterSeq),
+        `all replayed frames must have seq > ${resumeAfterSeq}, got ${JSON.stringify(replayed.map((m) => m.seq))}`)
+      assert.ok(replayed.length >= 1, 'must have replayed at least one frame')
+
+      ws2.close()
+    })
+
+    it('sends session_lost when sessionId is unknown', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'resume', sessionId: 'does-not-exist', lastSeq: 0 }))
+
+      const msgs = await msgsPromise
+      assert.equal(msgs[0].type, 'session_lost')
+      assert.equal(msgs[0].sessionId, 'does-not-exist')
+
+      ws.close()
+    })
+
+    it('rejects resume when session already has an active client', async () => {
+      // First: spawn a session and keep the connection open.
+      const ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+
+      const ws1Msgs = []
+      ws1.on('message', (d) => {
+        try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      const startedFrame = ws1Msgs.find((m) => m.type === 'session_started')
+      assert.ok(startedFrame)
+      const sessionId = startedFrame.sessionId
+
+      // ws1 is still open. Try to resume from a second connection — should be
+      // rejected because ws1 is the active client (enforced by the single-client
+      // policy in _handleResume).
+      // However, the second concurrent connection is rejected at _handleConnection
+      // level first ("another client is already connected").
+      const ws2 = connect(port, TOKEN)
+      const ws2Result = collectUntilClose(ws2)
+
+      const { messages, closeCode } = await ws2Result
+      assert.equal(closeCode, 1008)
+      assert.ok(messages.some((m) => m.type === 'error' && /already connected/.test(m.message)))
+
+      ws1.close()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // buffer overflow (#3321)
+  // ---------------------------------------------------------------------------
+
+  describe('buffer overflow', () => {
+    let agent, port, controller
+
+    beforeEach(async () => {
+      const mock = createMockSpawn()
+      controller = mock.controller
+      // Small buffer so the overflow test runs quickly.
+      ;({ agent, port } = await startAgent({ spawnFn: mock.spawnFn, bufferSize: 3 }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('drops oldest events when buffer overflows', async () => {
+      const ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+
+      const ws1Msgs = []
+      ws1.on('message', (d) => {
+        try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Push 5 events into a buffer of size 3; oldest 2 should be evicted.
+      for (let i = 0; i < 5; i++) {
+        controller.writeStdout(JSON.stringify({ idx: i }))
+      }
+      await new Promise((r) => setTimeout(r, 30))
+
+      const allEvents = ws1Msgs.filter((m) => m.type === 'event')
+      assert.ok(allEvents.length === 5, `ws1 should see all 5 events live (got ${allEvents.length})`)
+
+      // Disconnect then reconnect with lastSeq=0 (asking for full replay).
+      const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+      ws1.close()
+      await new Promise((r) => setTimeout(r, 20))
+
+      const ws2 = connect(port, TOKEN)
+      await waitOpen(ws2)
+
+      const ws2Msgs = []
+      ws2.on('message', (d) => {
+        try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
+      })
+
+      ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
+      await new Promise((r) => setTimeout(r, 30))
+
+      // With bufferSize=3, only the last 3 events should be replayed.
+      const replayed = ws2Msgs.filter((m) => m.type === 'event')
+      assert.equal(replayed.length, 3,
+        `expected 3 replayed events (buffer=3), got ${replayed.length}: ${JSON.stringify(replayed)}`)
+
+      // The replayed events should correspond to idx 2, 3, 4 (the most recent 3).
+      const replayedIdx = replayed.map((m) => m.payload.idx)
+      assert.deepEqual(replayedIdx, [2, 3, 4])
+
+      ws2.close()
     })
   })
 })

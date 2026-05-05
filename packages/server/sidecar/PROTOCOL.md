@@ -33,7 +33,9 @@ probes cannot carry headers).
 
 ---
 
-## Handshake Sequence
+## Handshake Sequences
+
+### New Session
 
 ```
 K8sBackend                       chroxy-pod-agent
@@ -45,10 +47,38 @@ K8sBackend                       chroxy-pod-agent
      │                                  │   accept → WS connection open
      │                                  │
      │── { type: 'spawn', ... } ────────▶
-     │                                  │── { type: 'event', payload: <object|string> }
-     │                                  │── { type: 'stderr', data: '...' }
-     │                                  │── { type: 'exit', code: 0 }
+     │◀─ { type: 'session_started', sessionId }
+     │◀─ { type: 'event', payload: <object|string>, seq: N }
+     │◀─ { type: 'stderr', data: '...', seq: N }
+     │◀─ { type: 'exit', code: 0, seq: N }
      │                                  │   (WS close follows within 50 ms)
+```
+
+### Resume After Reconnect
+
+```
+K8sBackend                       chroxy-pod-agent
+     │                                  │
+     │── WS Upgrade (Authorization: Bearer <token>) ──▶
+     │                                  │   accept → WS connection open
+     │                                  │
+     │── { type: 'resume', sessionId, lastSeq } ──▶
+     │◀─ { type: 'event', ..., seq: N+1 }   (buffered frames replayed)
+     │◀─ ...
+     │◀─ { type: 'exit', code: 0, seq: M }
+     │                                  │   (WS close follows within 50 ms)
+```
+
+### Session Lost After Agent Restart
+
+```
+K8sBackend                       chroxy-pod-agent
+     │                                  │
+     │── WS Upgrade ───────────────────▶
+     │                                  │
+     │── { type: 'resume', sessionId } ─▶
+     │◀─ { type: 'session_lost', sessionId }
+     │                                  │   (connection stays open for a new spawn)
 ```
 
 ---
@@ -78,6 +108,19 @@ Start a child process inside the pod.
 | `env`  | object (strings)  | no       | Extra env vars merged on top of the agent's env    |
 | `cwd`  | string            | no       | Working directory for the child process             |
 
+#### `resume`
+
+Reconnect to an existing in-flight session after a network blip.
+
+```json
+{ "type": "resume", "sessionId": "<uuid>", "lastSeq": 42 }
+```
+
+| Field       | Type    | Required | Description                                           |
+|-------------|---------|----------|-------------------------------------------------------|
+| `sessionId` | string  | yes      | The session UUID received in the prior `session_started` frame |
+| `lastSeq`   | number  | no       | Highest `seq` the client has processed (default `0`). Frames with `seq > lastSeq` are replayed. |
+
 #### `ping`
 
 Client-side heartbeat.  Agent replies with `{ type: 'pong' }`.
@@ -90,13 +133,23 @@ Client-side heartbeat.  Agent replies with `{ type: 'pong' }`.
 
 ### Agent → Client
 
+#### `session_started`
+
+Sent immediately after `spawn` is accepted, before any output frames.
+The client must store `sessionId` to send a `resume` frame if it needs to
+reconnect.
+
+```json
+{ "type": "session_started", "sessionId": "550e8400-e29b-41d4-a716-446655440000" }
+```
+
 #### `event`
 
 One NDJSON line from the child process's stdout, parsed into `payload`.  If
 the line is not valid JSON the raw string is forwarded as `payload`.
 
 ```json
-{ "type": "event", "payload": { ...claude-sdk-event... } }
+{ "type": "event", "payload": { ...claude-sdk-event... }, "seq": 1 }
 ```
 
 #### `stderr`
@@ -104,7 +157,7 @@ the line is not valid JSON the raw string is forwarded as `payload`.
 A chunk of raw text from the child process's stderr stream.
 
 ```json
-{ "type": "stderr", "data": "some error text\n" }
+{ "type": "stderr", "data": "some error text\n", "seq": 2 }
 ```
 
 #### `exit`
@@ -113,7 +166,18 @@ Child process exited.  The WS connection is closed by the agent within 50 ms
 of sending this frame.
 
 ```json
-{ "type": "exit", "code": 0 }
+{ "type": "exit", "code": 0, "seq": 3 }
+```
+
+#### `session_lost`
+
+Sent in response to a `resume` frame when the agent has no record of the
+given `sessionId` (e.g. the agent process restarted and lost all session
+state).  The connection stays open; the client may open a new session with
+`spawn` or simply close.
+
+```json
+{ "type": "session_lost", "sessionId": "550e8400-e29b-41d4-a716-446655440000" }
 ```
 
 #### `pong`
@@ -163,17 +227,47 @@ not part of this protocol.
 
 ---
 
-## Lifecycle and Orphan Prevention
+## Session Lifecycle and Resume Semantics
 
-When the WS connection closes — for any reason: client `ws.close()`,
-client-side disconnect, ping-timeout `terminate()`, or agent shutdown — any
-running child for that connection is killed.  The agent sends `SIGTERM` first
-and escalates to `SIGKILL` after a 5 s grace period if the child is still
-alive.  This guarantees that long-lived pods do not leak PIDs/memory across
-reconnect cycles.
+When a `spawn` is accepted the agent assigns a UUID `sessionId` and begins
+buffering output frames (up to `CHROXY_AGENT_BUFFER_SIZE`, default 1000).
+Each frame carries a monotonically increasing `seq` number scoped to the
+session.
 
-Conversely, when the child exits naturally the agent sends an `exit` frame
-and closes the WS within 50 ms.
+When the WS connection closes — for any reason other than a natural child
+exit — the **child process continues running** inside the pod.  This allows
+a reconnecting client to resume the session and receive replayed output.
+
+When the client reconnects it sends `{ type: 'resume', sessionId, lastSeq }`.
+The agent replays any buffered frames with `seq > lastSeq` and then resumes
+live forwarding.
+
+If the agent has no record of the `sessionId` (e.g. the agent process
+restarted), it sends `{ type: 'session_lost', sessionId }`.  The child process
+is gone in this case; the session is unrecoverable.
+
+### PID 1 Reaping Limitation
+
+This resume mechanism survives **network blips** (transient WS disconnects)
+only.  It does **not** survive agent process restarts.  If the pod is evicted,
+OOM-killed, or the `chroxy-pod-agent` process itself crashes, the in-pod child
+is reaped by PID 1 (the container init process) and all session state is lost.
+The reconnecting K8sBackend will receive `session_lost` and surface `exit(-2)`
+to the caller.
+
+True cross-restart session persistence (disk-backed buffer, NATS, etc.) is
+deferred to a later phase.
+
+---
+
+## Orphan Prevention
+
+When the child exits naturally the agent sends an `exit` frame and closes the
+WS within 50 ms.  If the agent itself is shut down (`SIGTERM`/`SIGINT`), all
+running children are sent `SIGTERM` with a 5 s `SIGKILL` escalation.
+
+In contrast to the pre-#3321 behaviour, a WS disconnect alone **no longer
+kills the child** — it keeps running to support resume.
 
 ---
 
@@ -190,10 +284,13 @@ Frames produced by the agent have the following ordering properties:
   byte written *before* a stdout newline can appear *after* the resulting
   `event` frame on the wire — and vice-versa, a partial stdout line that
   finally completes can flush *after* later stderr writes.
+- **`seq` is cross-stream.**  The `seq` counter increments for every emitted
+  frame regardless of stream (event/stderr/exit), so it provides a total
+  ordering of all output frames within a session.
 
 Consumers that need to interleave the two streams (e.g. for log display) must
-buffer them locally and reconcile by timestamp or sequence — the wire order
-of `event` and `stderr` frames is not authoritative.
+buffer them locally and reconcile by `seq` or timestamp — the wire order of
+`event` and `stderr` frames is not authoritative.
 
 The terminal `exit` frame is always the last frame on the connection, after
 which the WS close handshake follows within 50 ms.
@@ -224,20 +321,26 @@ replies with `{ type: 'pong' }`.
 | Unknown message type                | `error` frame, connection stays open               |
 | Child process spawn failure         | `error` frame, connection stays open               |
 | Invalid JSON frame from client      | `error` frame, connection stays open               |
+| `resume` with unknown sessionId     | `session_lost` frame, connection stays open        |
+| `resume` while session has active client | `error` frame + close `1008`                  |
 
 ---
 
 ## Future Work
 
-**#3321 — Session resume / reconnect**
+**Disk-backed session buffer**
 
-A `resume` frame type and `sessionId` / `seq` fields will be added to support
-reconnecting to an in-flight claude process after a network disruption.  The
-hook point is marked in `agent.js` with a `#3321` comment.
+The current in-memory ring buffer is lost when the agent process exits.  A
+disk-backed buffer (e.g. append-only log file per session) would allow
+recovery from agent restarts, not just network blips.
 
-Planned additions:
-- Client → agent: `{ type: 'resume', sessionId: string, seq: number }` — resume
-  an existing process, replaying any buffered output since `seq`
-- `event` frames will gain an optional `seq` field (monotonic counter per session)
-- `spawn` may gain an optional `sessionId` field to pre-assign an ID for later
-  resume
+**Multi-client session**
+
+The single-client policy is intentional for Phase 1.  Future work could allow
+multiple observers to attach to a session (e.g. a monitoring dashboard and the
+active K8sBackend).
+
+**Cross-Pod session migration**
+
+A session that survives pod rescheduling would require distributed session
+state (e.g. Redis or a shared volume).  Not planned in the near term.
