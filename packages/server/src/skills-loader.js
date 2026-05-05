@@ -344,26 +344,17 @@ export function loadActiveSkills(dir, opts = {}) {
 
     // Sort by priority desc, name asc for deterministic tiebreaking.
     // _compareByPriorityThenName expects { name, metadata: { priority } };
-    // we construct an adapter object from the candidate descriptor — the
-    // comparator only reads `name` and `metadata.priority`, so wrapping
-    // the descriptor's raw priority value is sufficient and avoids having
-    // to thread a full frontmatter object through _collectCandidates.
-    candidates.sort((a, b) => {
-      // Strip the extension from the candidate's filename so the
-      // alphabetical tiebreak uses the same extension-free name that every
-      // downstream code path (and _compareByPriorityThenName's callers on
-      // the single-pass path) operates on. Without this, "a-b.md" would
-      // sort before "a.md" because '-' (0x2D) < '.' (0x2E), diverging from
-      // how skills are sorted everywhere else.
-      const extA = a.entry.slice(a.entry.lastIndexOf('.') + 1).toLowerCase()
-      const extB = b.entry.slice(b.entry.lastIndexOf('.') + 1).toLowerCase()
-      const nameA = a.entry.slice(0, -(extA.length + 1))
-      const nameB = b.entry.slice(0, -(extB.length + 1))
-      return _compareByPriorityThenName(
-        { name: nameA, metadata: { priority: a.priority } },
-        { name: nameB, metadata: { priority: b.priority } },
-      )
-    })
+    // candidate.name is the pre-computed stem (without extension) so the
+    // alphabetical tiebreak matches _enforceTotalBudget exactly. Using the
+    // stem (rather than the full entry filename) avoids the '.' vs '-' ASCII
+    // ordering inversion: "abc-extra.md" < "abc.md" by full filename (since
+    // '-' 0x2D < '.' 0x2E), but "abc" < "abc-extra" by stem — same pair,
+    // opposite winner. Storing the stem on the descriptor in _collectCandidates
+    // keeps both sort sites in sync with a single source of truth.
+    candidates.sort((a, b) => _compareByPriorityThenName(
+      { name: a.name, metadata: { priority: a.priority } },
+      { name: b.name, metadata: { priority: b.priority } },
+    ))
     // Micro-optimization (deferred): when sum(fstat.size) <= tierBudget we
     // know all candidates fit and the priority sort above is wasted work.
     // Worth ~5ms cold-start on a 50-skill directory. Deferred until
@@ -374,8 +365,7 @@ export function loadActiveSkills(dir, opts = {}) {
     let tierTotalBytes = 0
 
     for (const candidate of candidates) {
-      const { entry, fullPath, label, realPath, fstat: fstatSnap, cachedFrontmatter } = candidate
-      const ext = entry.slice(entry.lastIndexOf('.') + 1).toLowerCase()
+      const { name, fullPath, label, realPath, fstat: fstatSnap, cachedFrontmatter } = candidate
 
       // Pre-read tier budget check. `continue` (not `break`) so smaller
       // lower-priority skills can still fit if they come after a large one.
@@ -388,7 +378,6 @@ export function loadActiveSkills(dir, opts = {}) {
       // Cache fast path: if pass 1 recorded a fresh cache hit, we can skip
       // re-opening the file entirely and use all cached parse fields.
       if (cachedFrontmatter) {
-        const name = entry.slice(0, -(ext.length + 1))
         const { frontmatter, finalBody, description } = cachedFrontmatter
 
         if (!includeAllProviders && !_skillMatchesProvider(frontmatter, provider)) continue
@@ -518,8 +507,6 @@ export function loadActiveSkills(dir, opts = {}) {
           log.debug(`skill ${label} full path: ${fullPath} pass1 ino=${fstatSnap.ino} pass2 ino=${fstat2.ino}`)
           continue
         }
-
-        const name = entry.slice(0, -(ext.length + 1))
 
         let body
         let frontmatter
@@ -985,8 +972,13 @@ export function loadActiveSkills(dir, opts = {}) {
  * entry so pass 1 never holds more than one fd open at a time.
  *
  * Returns an array of lightweight candidate descriptors:
- *   { entry, fullPath, label, realPath, fstat: { size, mtimeMs, dev, ino },
+ *   { entry, name, fullPath, label, realPath, fstat: { size, mtimeMs, dev, ino },
  *     priority, cachedFrontmatter }
+ *
+ * `name` is the pre-computed stem (entry without extension). Storing it on the
+ * descriptor ensures the pass-1 sort adapter and _enforceTotalBudget use the
+ * same extension-free comparand — avoids the '.' vs '-' ASCII flip that occurs
+ * when comparing full filenames for equal-priority prefix pairs (#3287).
  *
  * `cachedFrontmatter` is set when a parseCache hit matched on mtimeMs+size —
  * pass 2 can skip the partial read and use the cached frontmatter directly,
@@ -1126,6 +1118,7 @@ function _collectCandidates(entries, dir, dirReal, allowedRoots, allowedExtensio
 
       candidates.push({
         entry,
+        name: entry.slice(0, -(ext.length + 1)),
         fullPath,
         label,
         realPath,

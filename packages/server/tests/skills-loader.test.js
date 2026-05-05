@@ -2464,4 +2464,45 @@ describe('skills-loader', () => {
         'stale cache miss falls through to partial read; real on-disk priority 999 wins')
     })
   })
+
+  // #3287: sort tiebreak consistency between pass-1 and _enforceTotalBudget.
+  // -----------------------------------------------------------------------
+
+  describe('sort tiebreak consistency (#3287)', () => {
+    let p3287Dir
+
+    beforeEach(() => {
+      p3287Dir = mkdtempSync(join(tmpdir(), 'chroxy-3287-'))
+    })
+
+    afterEach(() => {
+      rmSync(p3287Dir, { recursive: true, force: true })
+    })
+
+    it('pass-1 tiebreak and _enforceTotalBudget agree for prefix-pair filenames', () => {
+      // Regression for #3287: "abc-extra.md" < "abc.md" by full filename
+      // (ASCII '-' 0x2D < '.' 0x2E) but "abc" < "abc-extra" by stem.
+      // Without the fix (pre-computed stem on candidate descriptor), the pass-1
+      // sort used the full filename and picked abc-extra, while _enforceTotalBudget
+      // (which always uses the stem via skill.name) would have picked abc — same
+      // pair, opposite winner depending on which sort ran.
+      //
+      // With the fix, pass-1 uses the pre-computed stem too, so both sites agree:
+      // abc (stem "abc") sorts before abc-extra (stem "abc-extra"), and abc wins.
+      const body = 'X'.repeat(1000) // ~1KB each
+      writeFileSync(join(p3287Dir, 'abc.md'), `---\npriority: 100\n---\n${body}`)
+      writeFileSync(join(p3287Dir, 'abc-extra.md'), `---\npriority: 100\n---\n${body}`)
+
+      // Budget: fits exactly one (~1KB body + ~30 bytes frontmatter).
+      // Both skills are equal-priority, so the tiebreak (stem order) determines
+      // the winner. Stem "abc" < "abc-extra", so abc.md must be kept.
+      const skills = loadActiveSkills(p3287Dir, {
+        maxSkillBytes: 4 * 1024,
+        maxTotalBytes: 1100, // fits one ~1KB skill, not two
+      })
+      assert.equal(skills.length, 1, 'exactly one skill should fit under the budget')
+      assert.equal(skills[0].name, 'abc',
+        'stem tiebreak: "abc" < "abc-extra" — abc.md must win (not abc-extra.md)')
+    })
+  })
 })
