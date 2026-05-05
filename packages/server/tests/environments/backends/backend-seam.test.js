@@ -544,7 +544,6 @@ describe('Backend contract: streamCliInEnvironment interface', () => {
   it('K8sBackend satisfies streamCliInEnvironment contract (WS bridge shape)', async () => {
     const { K8sBackend } = await import('../../../src/environments/backends/k8s.js')
     const { EventEmitter } = await import('events')
-    const { PassThrough } = await import('stream')
 
     const fakeWs = new EventEmitter()
     fakeWs.readyState = 1 // OPEN

@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { PassThrough } from 'stream'
 import { K8sBackend } from '../../../src/environments/backends/k8s.js'
 
 // ─── Mock CoreV1Api factory ───────────────────────────────────────────────────
@@ -125,8 +124,8 @@ describe('K8sBackend.createEnvironment()', () => {
     const callOrder = []
 
     const api = createMockApi({
-      createSecret: async (args) => { callOrder.push('secret'); return {} },
-      createPod: async (args) => { callOrder.push('pod'); return {} },
+      createSecret: async () => { callOrder.push('secret'); return {} },
+      createPod: async () => { callOrder.push('pod'); return {} },
     })
     const backend = new K8sBackend({ _coreV1Api: api })
 
@@ -649,7 +648,7 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
 
   it('kills by closing WS when abort signal fires', async () => {
     let wsClosed = false
-    const { ws, controller } = createFakeWs()
+    const { ws } = createFakeWs()
     ws.close = () => { wsClosed = true }
 
     const api = createMockApi()
@@ -659,7 +658,7 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
     })
 
     const ac = new AbortController()
-    const proc = backend.streamCliInEnvironment('pod-x', {
+    backend.streamCliInEnvironment('pod-x', {
       cmd: 'node', args: [], agentToken: 'tok', signal: ac.signal,
     })
 
