@@ -24,9 +24,19 @@ const __dirname = dirname(__filename)
 
 const SHOULD_RUN = process.env.RUN_K8S_INTEGRATION === '1'
 
-const KIND_AVAILABLE = (() => {
-  try { execSync('kind version', { stdio: 'pipe' }); return true } catch { return false }
-})()
+// Only probe for `kind` when actually running — avoids spawning a child process
+// during the default `npm test` glob. Bound the probe with a short timeout so a
+// hung `kind` binary cannot stall test discovery.
+const KIND_AVAILABLE = SHOULD_RUN
+  ? (() => {
+      try {
+        execSync('kind version', { stdio: 'pipe', timeout: 5_000 })
+        return true
+      } catch {
+        return false
+      }
+    })()
+  : false
 
 if (!SHOULD_RUN || !KIND_AVAILABLE) {
   console.log('[k8s-integration] Skipped — set RUN_K8S_INTEGRATION=1 and install kind to run')
@@ -97,7 +107,7 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
 
   // ─── test suite ────────────────────────────────────────────────────────────
 
-  describe('K8s sidecar roundtrip (integration)', () => {
+  describe('K8s sidecar roundtrip (integration)', { timeout: CLUSTER_BOOT_TIMEOUT + 180_000 }, () => {
 
     /** The backend under test, created once per suite. */
     let backend
@@ -150,7 +160,7 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
         return realCreate({ namespace, body })
       }
 
-    }, CLUSTER_BOOT_TIMEOUT + 180_000)
+    })
 
     // ── after: cleanup unconditionally ─────────────────────────────────────
 
@@ -164,6 +174,17 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
       }
 
       await deleteCluster()
+
+      // Best-effort host image cleanup — kind loads the image into its own
+      // node container, so the host copy is no longer needed once the cluster
+      // is gone. Re-runs rebuild from cache anyway.
+      try {
+        execFileSync('docker', ['rmi', SIDECAR_IMAGE], {
+          stdio: 'pipe', timeout: 10_000,
+        })
+      } catch {
+        // Image may already be gone or in use — ignore
+      }
     })
 
     // ── test 1: createEnvironment creates a Running Pod ────────────────────
