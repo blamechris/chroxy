@@ -23,7 +23,7 @@ packages/app/src/components/xterm-bundle.generated.ts
 *.swo
 .DS_Store
 
-# Claude runtime state
+# Local agent runtime state
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 
