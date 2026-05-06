@@ -10,7 +10,7 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
-import type { DirectoryListing, DirectoryEntry } from '../store/types'
+import type { DirectoryListing, DirectoryEntry, ModelInfo } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 
 export interface CreateSessionData {
@@ -64,6 +64,7 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 }
 
 const EMPTY_STRINGS: string[] = []
+const EMPTY_MODELS: ModelInfo[] = []
 
 /** Billing context per provider — helps users understand cost implications. */
 const PROVIDER_BILLING: Record<string, string> = {
@@ -83,9 +84,27 @@ const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, s
   ['terminal', 'Terminal'],
 ]
 
+export function resolveCreateSessionModel(
+  provider: string,
+  defaultModel: string | null | undefined,
+  availableModels: ModelInfo[],
+  availableModelsProvider: string | null,
+): string | undefined {
+  const model = typeof defaultModel === 'string' ? defaultModel.trim() : ''
+  if (!model) return undefined
+  // The dashboard default model is not yet provider-scoped. Only apply it when
+  // the current provider-scoped catalog proves the selected provider accepts it.
+  if (availableModelsProvider !== provider) return undefined
+  return availableModels.some(m => m.id === model || m.fullId === model)
+    ? model
+    : undefined
+}
+
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const defaultModel = useConnectionStore(s => s.defaultModel)
+  const availableModels = useConnectionStore(s => s.availableModels) || EMPTY_MODELS
+  const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
   const availableProviders = useConnectionStore(s => s.availableProviders)
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
@@ -182,8 +201,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       flushSync(() => setNameError('Session name is required'))
       return
     }
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model: defaultModel || undefined, worktree: worktree || undefined, environmentId: environmentId || undefined })
-  }, [onCreate, provider, permissionMode, defaultModel, worktree, environmentId])
+    const model = resolveCreateSessionModel(provider, defaultModel, availableModels, availableModelsProvider)
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined })
+  }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)

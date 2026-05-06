@@ -43,6 +43,22 @@ describe('waitForTunnel', () => {
     assert.equal(globalThis.fetch.mock.calls.length, 2)
   })
 
+  it('includes DNS failure details in the final error', async () => {
+    mock.method(globalThis, 'fetch', async () => {
+      const cause = Object.assign(new Error('getaddrinfo ENOTFOUND example.trycloudflare.com'), { code: 'ENOTFOUND' })
+      throw new TypeError('fetch failed', { cause })
+    })
+
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
+      (err) => {
+        assert.equal(err.code, 'TUNNEL_NOT_ROUTABLE')
+        assert.ok(err.message.includes('Last failure: ENOTFOUND: fetch failed'))
+        return true
+      }
+    )
+  })
+
   it('throws TUNNEL_NOT_ROUTABLE when all responses are non-ok', async () => {
     mock.method(globalThis, 'fetch', async () => ({ ok: false }))
     await assert.rejects(

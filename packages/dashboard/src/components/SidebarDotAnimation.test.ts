@@ -1,5 +1,5 @@
 /**
- * Sidebar dot animation tests — verify idle dots have breathing animation.
+ * Sidebar dot animation tests — verify only working dots pulse.
  */
 import { describe, test, expect } from 'vitest'
 import * as fs from 'fs'
@@ -16,24 +16,25 @@ const globalCss = fs.readFileSync(
 )
 
 describe('Sidebar dot animations (#1675)', () => {
-  test('idle dot has dotBreathe animation', () => {
-    expect(componentsCss).toMatch(/sidebar-idle-dot[\s\S]*?animation:\s*dotBreathe/)
+  test('idle dot is static', () => {
+    expect(componentsCss).toMatch(/sidebar-session-dot\.status-idle\s*\{[^}]*background:\s*var\(--accent-blue\)/)
+    expect(componentsCss).not.toMatch(/sidebar-session-dot\.status-idle\s*\{[^}]*animation:/)
   })
 
-  test('busy dot has dotPulse animation', () => {
-    expect(componentsCss).toMatch(/sidebar-busy-dot[\s\S]*?animation:\s*dotPulse/)
+  test('working dot has dotPulse animation', () => {
+    expect(componentsCss).toMatch(/sidebar-session-dot\.status-working\s*\{[^}]*animation:\s*dotPulse/)
   })
 
-  test('dotBreathe keyframes exist in global.css', () => {
-    expect(globalCss).toMatch(/@keyframes dotBreathe/)
+  test('stale dot is static warning color', () => {
+    expect(componentsCss).toMatch(/sidebar-session-dot\.status-stale\s*\{[^}]*background:\s*var\(--warning-fg/)
+    expect(componentsCss).not.toMatch(/sidebar-session-dot\.status-stale\s*\{[^}]*animation:/)
   })
 
-  test('dotBreathe is slower than dotPulse (3s vs 1.5s)', () => {
-    expect(componentsCss).toMatch(/sidebar-idle-dot[\s\S]*?animation:\s*dotBreathe\s+3s/)
-    expect(componentsCss).toMatch(/sidebar-busy-dot[\s\S]*?animation:\s*dotPulse\s+1\.5s/)
+  test('dotPulse keyframes exist in global.css', () => {
+    expect(globalCss).toMatch(/@keyframes dotPulse/)
   })
 
-  test('idle dot animation respects prefers-reduced-motion', () => {
-    expect(componentsCss).toMatch(/prefers-reduced-motion[\s\S]*?sidebar-idle-dot/)
+  test('working dot animation respects prefers-reduced-motion', () => {
+    expect(componentsCss).toMatch(/prefers-reduced-motion[\s\S]*?sidebar-session-dot/)
   })
 })
