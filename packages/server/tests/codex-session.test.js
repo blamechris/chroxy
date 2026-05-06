@@ -1111,6 +1111,7 @@ describe('CodexSession', () => {
 
       await session.sendMessage('hello')
       await waitFor(() => results.length >= 1, { label: 'result after stdin EOF' })
+      await waitFor(() => !session.isRunning, { label: 'isRunning cleared after stdin EOF' })
 
       assert.equal(deltas[0]?.delta, 'stdin closed')
       assert.equal(session.isRunning, false, 'session should not remain busy waiting for stdin')

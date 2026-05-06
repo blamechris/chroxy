@@ -202,8 +202,14 @@ describe('SessionManager.createSession — preflight', () => {
   })
 
   it('rejects stale Claude SDK model before constructing the session', () => {
+    const noBinaryPreflightMgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      skipPreflight: true,
+    })
     assert.throws(
-      () => mgr.createSession({ provider: 'claude-sdk', model: 'opus-4-6', skipPersist: true }),
+      () => noBinaryPreflightMgr.createSession({ provider: 'claude-sdk', model: 'opus-4-6', skipPersist: true }),
       (err) => {
         assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
         assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
@@ -216,12 +222,18 @@ describe('SessionManager.createSession — preflight', () => {
         return true
       },
     )
-    assert.equal(mgr.listSessions().length, 0)
+    assert.equal(noBinaryPreflightMgr.listSessions().length, 0)
   })
 
   it('rejects stale Claude CLI model before constructing the session', () => {
+    const noBinaryPreflightMgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      skipPreflight: true,
+    })
     assert.throws(
-      () => mgr.createSession({ provider: 'claude-cli', model: 'opus-4-6', skipPersist: true }),
+      () => noBinaryPreflightMgr.createSession({ provider: 'claude-cli', model: 'opus-4-6', skipPersist: true }),
       (err) => {
         assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
         assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
@@ -233,7 +245,7 @@ describe('SessionManager.createSession — preflight', () => {
         return true
       },
     )
-    assert.equal(mgr.listSessions().length, 0)
+    assert.equal(noBinaryPreflightMgr.listSessions().length, 0)
   })
 
   it('proceeds when initial model is valid for the provider', () => {
