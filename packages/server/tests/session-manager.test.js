@@ -108,6 +108,30 @@ describe('SessionManager.serializeState', () => {
     assert.equal(fileContents.sessions.length, 2)
   })
 
+  it('persists lastActivityAt for visual session status', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      type: 'cli',
+      name: 'Activity Test',
+      cwd: '/tmp',
+      createdAt: 1_000,
+    })
+    mgr._sessionLastActivityAt.set('s1', 2_000)
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].lastActivityAt, 2_000)
+
+    const fileContents = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(fileContents.sessions[0].lastActivityAt, 2_000)
+  })
+
   it('includes version field', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
     const state = mgr.serializeState()
@@ -325,6 +349,25 @@ describe('SessionManager.restoreState', () => {
 
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 2, 'Should have 2 restored sessions')
+
+    mgr.destroyAll()
+  })
+
+  it('restores lastActivityAt from state file', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: 12_345 },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 1)
+    assert.equal(sessions[0].lastActivityAt, 12_345)
 
     mgr.destroyAll()
   })

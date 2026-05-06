@@ -258,6 +258,7 @@ export class SessionManager extends EventEmitter {
 
     // Internal state
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
@@ -317,6 +318,7 @@ export class SessionManager extends EventEmitter {
    */
   _cleanupSessionMaps(sessionId) {
     this._sessions.delete(sessionId)
+    this._sessionLastActivityAt.delete(sessionId)
     this._timeoutManager.removeSession(sessionId)
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
@@ -499,7 +501,7 @@ export class SessionManager extends EventEmitter {
 
     this._sessions.set(sessionId, entry)
     metrics.inc('sessions.created')
-    this._timeoutManager.touchActivity(sessionId)
+    this.touchActivity(sessionId)
     this._wireSessionEvents(sessionId, session)
 
     try {
@@ -579,7 +581,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * List all sessions with summary info.
-   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt }>}
+   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt }>}
    */
   listSessions() {
     const list = []
@@ -594,6 +596,7 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
+        lastActivityAt: this._sessionLastActivityAt.get(sessionId) || entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
         provider: entry.provider || this._providerType,
         capabilities: ProviderClass.capabilities || {},
@@ -804,6 +807,7 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
         name: entry.name,
+        lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
         // #3185: persist promptEvaluator so reconnects across restarts
         // preserve the user's toggle state. Strict-boolean coerce so
@@ -880,6 +884,9 @@ export class SessionManager extends EventEmitter {
         // Restore message history if present (v1+)
         if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
           this._history.setHistory(sessionId, saved.history)
+        }
+        if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
+          this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
         }
         if (!firstId) firstId = sessionId
         log.info(`Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
@@ -1124,7 +1131,7 @@ export class SessionManager extends EventEmitter {
     const LOGGED_EVENTS = new Set(['ready', 'stream_start', 'stream_end', 'result', 'error'])
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
-        if (ACTIVITY_EVENTS.has(event)) this._timeoutManager.touchActivity(sessionId)
+        if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
         if (LOGGED_EVENTS.has(event)) {
@@ -1190,6 +1197,7 @@ export class SessionManager extends EventEmitter {
    * Called internally on relevant events, and publicly by WsServer on user input.
    */
   touchActivity(sessionId) {
+    this._sessionLastActivityAt.set(sessionId, Date.now())
     this._timeoutManager.touchActivity(sessionId)
   }
 
