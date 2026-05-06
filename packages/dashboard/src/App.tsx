@@ -6,7 +6,7 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core'
+import { DEFAULT_CONTEXT_WINDOW, deriveSessionVisualStatus, type SessionInfo } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
 import type { ChatViewMessage } from './components/ChatView'
@@ -220,6 +220,7 @@ export function App() {
   const sessionCwd = useConnectionStore(s => s.sessionCwd)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
+  const sessionStates = useConnectionStore(s => s.sessionStates)
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const viewMode = useConnectionStore(s => s.viewMode)
   const availableModels = useConnectionStore(s => s.availableModels)
@@ -644,18 +645,28 @@ export function App() {
     }
   }, [viewMode, systemMessages.length, activeSessionId])
 
-  // Map sessions to SessionTabData[] with status indicators (#2091)
+  const [sessionActivityNow, setSessionActivityNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setSessionActivityNow(Date.now()), 60_000)
+    return () => window.clearInterval(intervalId)
+  }, [])
+
+  const getSessionVisualStatus = useCallback((session: SessionInfo): SessionStatus => {
+    const state = sessionStates[session.sessionId]
+    return deriveSessionVisualStatus({
+      isBusy: session.isBusy,
+      isIdle: state?.isIdle,
+      streamingMessageId: state?.streamingMessageId,
+      activeAgentCount: state?.activeAgents.length ?? 0,
+      lastActivityAt: session.lastActivityAt ?? session.createdAt,
+      now: sessionActivityNow,
+    })
+  }, [sessionStates, sessionActivityNow])
+
+  // Map sessions to SessionTabData[] with unified status indicators.
   const sessionTabs: SessionTabData[] = useMemo(
     () => sessions.map(s => {
-      let status: SessionStatus = 'idle'
-      const hasNotification = sessionNotifications.some(
-        n => n.sessionId === s.sessionId && (n.eventType === 'permission' || n.eventType === 'question' || n.eventType === 'error'),
-      )
-      if (hasNotification) {
-        status = 'needs-attention'
-      } else if (s.isBusy) {
-        status = 'busy'
-      }
       return {
         sessionId: s.sessionId,
         name: s.name,
@@ -664,10 +675,10 @@ export function App() {
         cwd: s.cwd,
         model: s.model ?? undefined,
         provider: s.provider,
-        status,
+        status: getSessionVisualStatus(s),
       }
     }),
-    [sessions, activeSessionId, sessionNotifications],
+    [sessions, activeSessionId, getSessionVisualStatus],
   )
 
   // Derive sidebar repo tree from sessions
@@ -683,7 +694,14 @@ export function App() {
         repo = { path: s.cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
         repoMap.set(s.cwd, repo)
       }
-      repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy, provider: s.provider, worktree: s.worktree })
+      repo.activeSessions.push({
+        sessionId: s.sessionId,
+        name: s.name,
+        isBusy: s.isBusy,
+        provider: s.provider,
+        worktree: s.worktree,
+        status: getSessionVisualStatus(s),
+      })
     }
 
     // If no repos from sessions, create a default
@@ -692,7 +710,7 @@ export function App() {
     }
 
     return [...repoMap.values()]
-  }, [sessions])
+  }, [sessions, getSessionVisualStatus])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
