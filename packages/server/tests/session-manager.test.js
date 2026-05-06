@@ -108,6 +108,30 @@ describe('SessionManager.serializeState', () => {
     assert.equal(fileContents.sessions.length, 2)
   })
 
+  it('persists lastActivityAt for visual session status', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      type: 'cli',
+      name: 'Activity Test',
+      cwd: '/tmp',
+      createdAt: 1_000,
+    })
+    mgr._sessionLastActivityAt.set('s1', 2_000)
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].lastActivityAt, 2_000)
+
+    const fileContents = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(fileContents.sessions[0].lastActivityAt, 2_000)
+  })
+
   it('includes version field', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
     const state = mgr.serializeState()
@@ -329,6 +353,25 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
+  it('restores lastActivityAt from state file', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: 12_345 },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 1)
+    assert.equal(sessions[0].lastActivityAt, 12_345)
+
+    mgr.destroyAll()
+  })
+
   // #3185: promptEvaluator round-trips. A state file written with the
   // toggle on must restore with the toggle still on; pre-#3185 state
   // files (no field) restore as `false` so older state files don't
@@ -496,10 +539,14 @@ describe('SessionManager.restoreState', () => {
     const ev = failureEvents[0]
     assert.equal(ev.name, 'Gemini Bad')
     assert.equal(ev.provider, 'gemini-cli')
+    assert.equal(ev.cwd, '/nonexistent/path/that/does/not/exist')
+    assert.equal(ev.model, null)
+    assert.equal(ev.permissionMode, 'approve')
     assert.ok(typeof ev.sessionId === 'string' && ev.sessionId.length > 0, 'Failed event should carry a sessionId')
     assert.ok(typeof ev.errorMessage === 'string' && ev.errorMessage.length > 0, 'Failed event should carry errorMessage')
     assert.ok(typeof ev.errorCode === 'string', 'Failed event should carry errorCode (even if generic)')
     assert.equal(ev.originalHistoryPreserved, true, 'history must be preserved on disk')
+    assert.equal(ev.historyLength, savedHistory.length)
 
     mgr.destroyAll()
   })

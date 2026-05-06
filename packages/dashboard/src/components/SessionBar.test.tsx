@@ -57,7 +57,7 @@ describe('SessionBar', () => {
     )
     const busyTab = screen.getByTestId('session-tab-s2')
     expect(within(busyTab).getByTestId('status-dot')).toBeInTheDocument()
-    expect(within(busyTab).getByTestId('status-dot')).toHaveClass('status-busy')
+    expect(within(busyTab).getByTestId('status-dot')).toHaveClass('status-working')
   })
 
   it('calls onSwitch when clicking inactive tab', () => {
@@ -288,29 +288,29 @@ describe('SessionBar', () => {
   })
 
   describe('session status indicators (#2091)', () => {
-    it('shows yellow status dot for busy sessions', () => {
+    it('shows working status dot for active sessions', () => {
       const sessions: SessionTabData[] = [
-        { sessionId: 's1', name: 'Active', isBusy: true, isActive: true, status: 'busy' },
+        { sessionId: 's1', name: 'Active', isBusy: true, isActive: true, status: 'working' },
       ]
       render(
         <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
       )
       const dot = within(screen.getByTestId('session-tab-s1')).getByTestId('status-dot')
-      expect(dot).toHaveClass('status-busy')
+      expect(dot).toHaveClass('status-working')
     })
 
-    it('shows red status dot for needs-attention sessions', () => {
+    it('shows stale status dot for long-idle sessions', () => {
       const sessions: SessionTabData[] = [
-        { sessionId: 's1', name: 'Pending', isBusy: false, isActive: false, status: 'needs-attention' },
+        { sessionId: 's1', name: 'Pending', isBusy: false, isActive: false, status: 'stale' },
       ]
       render(
         <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
       )
       const dot = within(screen.getByTestId('session-tab-s1')).getByTestId('status-dot')
-      expect(dot).toHaveClass('status-needs-attention')
+      expect(dot).toHaveClass('status-stale')
     })
 
-    it('shows green status dot for idle sessions', () => {
+    it('shows idle status dot for ready sessions', () => {
       const sessions: SessionTabData[] = [
         { sessionId: 's1', name: 'Idle', isBusy: false, isActive: true, status: 'idle' },
       ]
@@ -321,7 +321,7 @@ describe('SessionBar', () => {
       expect(dot).toHaveClass('status-idle')
     })
 
-    it('falls back to busy dot when status is not provided (backwards compat)', () => {
+    it('falls back to working dot when status is not provided for busy sessions', () => {
       const sessions: SessionTabData[] = [
         { sessionId: 's1', name: 'Legacy', isBusy: true, isActive: false },
       ]
@@ -330,10 +330,10 @@ describe('SessionBar', () => {
       )
       const tab = screen.getByTestId('session-tab-s1')
       const dot = within(tab).getByTestId('status-dot')
-      expect(dot).toHaveClass('status-busy')
+      expect(dot).toHaveClass('status-working')
     })
 
-    it('hides status dot when idle and status not provided', () => {
+    it('falls back to idle dot when status is not provided for idle sessions', () => {
       const sessions: SessionTabData[] = [
         { sessionId: 's1', name: 'Quiet', isBusy: false, isActive: true },
       ]
@@ -341,7 +341,8 @@ describe('SessionBar', () => {
         <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
       )
       const tab = screen.getByTestId('session-tab-s1')
-      expect(within(tab).queryByTestId('status-dot')).not.toBeInTheDocument()
+      const dot = within(tab).getByTestId('status-dot')
+      expect(dot).toHaveClass('status-idle')
     })
   })
 })

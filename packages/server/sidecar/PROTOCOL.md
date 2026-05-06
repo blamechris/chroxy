@@ -438,6 +438,23 @@ default).
 
 ---
 
+## claude-code Version Pinning
+
+The `Dockerfile` installs `@anthropic-ai/claude-code` at a fixed version via
+the `CLAUDE_CODE_VERSION` build ARG (default: `2.1.128`).
+
+**Override at build time:**
+```sh
+docker build --build-arg CLAUDE_CODE_VERSION=2.2.0 .
+```
+
+**Bump cadence:** update the ARG default in `Dockerfile` via a regular PR
+whenever you need a newer release.  There is no automated renovation yet — the
+upgrade is intentionally manual so that breaking changes in claude-code surface
+at review time, not silently in CI.
+
+---
+
 ## Future Work
 
 **Disk-backed session buffer**
