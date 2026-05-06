@@ -362,6 +362,8 @@ export interface ConnectionState {
 
   // Available models from server (CLI mode)
   availableModels: ModelInfo[];
+  // Provider that sourced the current availableModels list.
+  availableModelsProvider: string | null;
   // Server-reported default model short id (from SDK)
   defaultModelId: string | null;
 

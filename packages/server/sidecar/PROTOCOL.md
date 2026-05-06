@@ -245,11 +245,35 @@ Response to a client `ping`.
 
 #### `error`
 
-Protocol or runtime error.
+Protocol or runtime error.  There are two categories:
+
+**Connection-scoped** errors are emitted before a session is established (e.g.
+auth failures, bad request format) and carry no `seq` field:
 
 ```json
 { "type": "error", "message": "spawn: cmd is required" }
 ```
+
+**Session-scoped** errors are emitted through the session frame pipeline (via
+`_emitSessionFrame`) and therefore carry a `seq` counter, just like `event` and
+`exit` frames from the same session:
+
+```json
+{
+  "type": "error",
+  "code": "line_too_long",
+  "message": "stdout line exceeded max length (1048576 bytes) — child killed",
+  "seq": 3
+}
+```
+
+When a child process stdout line exceeds the NDJSON line length cap (see
+[NDJSON Line Length Limit](#ndjson-line-length-limit) below), the error frame
+includes an additional `code` field as shown above.
+
+The child is killed and the WS is closed with code `1008` within 50 ms of this
+frame.  No `exit` frame follows — the `error` frame is the terminal event for
+the session.
 
 ---
 
@@ -388,6 +412,46 @@ replies with `{ type: 'pong' }`.
 | `resume` with unknown sessionId     | `session_lost` frame (`reason: unknown_session`), connection stays open |
 | `resume` with stale lastSeq (gap)   | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
 | `resume` while session has active client | `error` frame + close `1008`                  |
+| stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1000` |
+
+---
+
+## NDJSON Line Length Limit
+
+Node's `readline` buffers raw bytes until a newline arrives.  A runaway tool
+result or streaming bug in the child process that never writes a newline would
+grow that buffer without bound and eventually OOM the pod.
+
+To prevent this the agent inserts a `LineLimitTransform` between `child.stdout`
+and `readline`.  The transform counts bytes per line (resetting on each `\n`);
+if a line exceeds the cap before a newline arrives it:
+
+1. Emits `{ type: 'error', code: 'line_too_long', message: '...', seq: N }`.
+2. Sends `SIGTERM` to the child (with a `SIGKILL` escalation after 5 s).
+3. Closes the WS with code `1000` within 50 ms.
+
+**Default cap:** 1 MiB (`1 048 576` bytes) — far above any normal SDK event.
+
+**Override:** set `CHROXY_AGENT_MAX_LINE_BYTES` in the pod environment (parsed
+as a base-10 integer; non-positive / NaN values fall back to the 1 MiB
+default).
+
+---
+
+## claude-code Version Pinning
+
+The `Dockerfile` installs `@anthropic-ai/claude-code` at a fixed version via
+the `CLAUDE_CODE_VERSION` build ARG (default: `2.1.128`).
+
+**Override at build time:**
+```sh
+docker build --build-arg CLAUDE_CODE_VERSION=2.2.0 .
+```
+
+**Bump cadence:** update the ARG default in `Dockerfile` via a regular PR
+whenever you need a newer release.  There is no automated renovation yet — the
+upgrade is intentionally manual so that breaking changes in claude-code surface
+at review time, not silently in CI.
 
 ---
 

@@ -1970,7 +1970,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'available_models': {
       if (Array.isArray(msg.models)) {
         const { models, defaultModelId } = sharedAvailableModels(msg);
-        set({ availableModels: models, defaultModelId });
+        const availableModelsProvider = typeof msg.provider === 'string' ? msg.provider : null;
+        set({ availableModels: models, availableModelsProvider, defaultModelId });
       }
       break;
     }
@@ -2315,15 +2316,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'session_restore_failed': {
       // Server couldn't restart a persisted session (e.g. missing API key).
-      // History is preserved on disk. Full UI is a follow-up; log for now.
+      // History is preserved on disk; surface this visibly instead of making
+      // the saved session look like it silently disappeared after restart.
       const restoreFailed = sharedSessionRestoreFailed(msg);
+      get().addServerError(restoreFailed.systemMessage.content);
       // eslint-disable-next-line no-console
       console.warn('[session_restore_failed]', {
         sessionId: restoreFailed.sessionId,
         name: restoreFailed.name,
         provider: restoreFailed.provider,
+        cwd: restoreFailed.cwd,
+        model: restoreFailed.model,
+        permissionMode: restoreFailed.permissionMode,
         errorCode: restoreFailed.errorCode,
         errorMessage: restoreFailed.errorMessage,
+        historyLength: restoreFailed.historyLength,
       });
       break;
     }

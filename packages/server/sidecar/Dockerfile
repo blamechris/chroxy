@@ -2,10 +2,17 @@ FROM node:22-slim
 
 LABEL org.opencontainers.image.source=https://github.com/blamechris/chroxy
 
+# Version of @anthropic-ai/claude-code to install globally.  Pin to an exact
+# version so image builds are reproducible.  Override at build time with:
+#   docker build --build-arg CLAUDE_CODE_VERSION=x.y.z .
+# Bump this ARG when upgrading claude-code; keep it in sync with the version
+# used by the rest of the server package.
+ARG CLAUDE_CODE_VERSION=2.1.128
+
 # Install claude-code globally so the sidecar can spawn it when K8sBackend
 # sends a spawn frame.  This is the only external npm dependency the image
 # needs at runtime; the rest (ws) lives in the sidecar package.json below.
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 WORKDIR /app
 

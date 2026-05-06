@@ -16,6 +16,7 @@ import { timingSafeEqual, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { Transform } from 'node:stream'
 import { WebSocketServer } from 'ws'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -39,6 +40,17 @@ const _PARSED_BUFFER_SIZE = parseInt(process.env.CHROXY_AGENT_BUFFER_SIZE ?? `${
 const DEFAULT_BUFFER_SIZE = Number.isFinite(_PARSED_BUFFER_SIZE) && _PARSED_BUFFER_SIZE > 0
   ? _PARSED_BUFFER_SIZE
   : FALLBACK_BUFFER_SIZE
+
+// Maximum bytes buffered for a single NDJSON line on stdout.  If a line
+// grows beyond this the child is killed, an error frame is emitted, and the
+// WS is closed cleanly.  1 MiB is far above any normal SDK event but tight
+// enough to prevent unbounded memory growth in constrained pods.
+// Override at pod startup via CHROXY_AGENT_MAX_LINE_BYTES.
+const FALLBACK_MAX_LINE_BYTES = 1024 * 1024  // 1 MiB
+const _PARSED_MAX_LINE_BYTES = parseInt(process.env.CHROXY_AGENT_MAX_LINE_BYTES ?? `${FALLBACK_MAX_LINE_BYTES}`, 10)
+export const DEFAULT_MAX_LINE_BYTES = Number.isFinite(_PARSED_MAX_LINE_BYTES) && _PARSED_MAX_LINE_BYTES > 0
+  ? _PARSED_MAX_LINE_BYTES
+  : FALLBACK_MAX_LINE_BYTES
 
 // --- Auth token -----------------------------------------------------------------
 // Read once at boot. If unset we stay up (dev convenience) but reject all WS
@@ -69,18 +81,81 @@ function safeTokenCompare(a, b) {
   return valid && timingSafeEqual(paddedA, paddedB) && bufA.length === bufB.length
 }
 
+// ---------------------------------------------------------------------------
+// LineLimitTransform — guards readline from unbounded line growth.
+//
+// Sits between child.stdout and readline.createInterface.  Counts raw bytes
+// in the current (not-yet-newline-terminated) fragment; if the running total
+// exceeds maxBytes it emits an 'oversized_line' event on the transform
+// instance and drops all further data so readline never buffers the overrun.
+// The caller is responsible for killing the child and closing the WS.
+// ---------------------------------------------------------------------------
+
+export class LineLimitTransform extends Transform {
+  /**
+   * @param {object} opts
+   * @param {number} opts.maxBytes  Maximum bytes per line before firing the
+   *                                'oversized_line' event.  Must be a finite
+   *                                positive number; falls back to
+   *                                DEFAULT_MAX_LINE_BYTES if invalid.
+   */
+  constructor({ maxBytes, ...streamOpts } = {}) {
+    super(streamOpts)
+    this._maxBytes = Number.isFinite(maxBytes) && maxBytes > 0
+      ? maxBytes
+      : DEFAULT_MAX_LINE_BYTES
+    this._pending = 0   // bytes counted in the current un-terminated line
+    this._fired = false // emit the event at most once per instance
+  }
+
+  _transform(chunk, _encoding, callback) {
+    if (this._fired) {
+      // Already tripped — drop all further data so readline never sees it.
+      callback()
+      return
+    }
+
+    let offset = 0
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk[i] === 0x0a /* '\n' */) {
+        // Newline resets the pending counter for the next line.
+        this._pending = 0
+        offset = i + 1
+      } else {
+        this._pending += 1
+        if (this._pending > this._maxBytes) {
+          this._fired = true
+          // Pass through whatever bytes came before this overrun so readline
+          // can flush any complete lines already buffered.
+          this.push(chunk.slice(0, offset))
+          this.emit('oversized_line')
+          callback()
+          return
+        }
+      }
+    }
+    this.push(chunk)
+    callback()
+  }
+
+  _flush(callback) {
+    callback()
+  }
+}
+
 // --- PodAgent class -------------------------------------------------------------
 
 export class PodAgent {
   /**
    * @param {object} opts
-   * @param {Function} [opts.spawnFn]      Override child_process.spawn for tests.
-   * @param {string}   [opts.token]        Override CHROXY_AGENT_TOKEN for tests.
-   * @param {number}   [opts.killGraceMs]  Override SIGTERM→SIGKILL grace (tests).
-   * @param {number}   [opts.bufferSize]   Override ring-buffer capacity per session (tests).
+   * @param {Function} [opts.spawnFn]       Override child_process.spawn for tests.
+   * @param {string}   [opts.token]         Override CHROXY_AGENT_TOKEN for tests.
+   * @param {number}   [opts.killGraceMs]   Override SIGTERM→SIGKILL grace (tests).
+   * @param {number}   [opts.bufferSize]    Override ring-buffer capacity per session (tests).
+   * @param {number}   [opts.maxLineBytes]  Override NDJSON line length cap (tests).
    */
   constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS,
-    bufferSize = DEFAULT_BUFFER_SIZE } = {}) {
+    bufferSize = DEFAULT_BUFFER_SIZE, maxLineBytes = DEFAULT_MAX_LINE_BYTES } = {}) {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
@@ -90,6 +165,9 @@ export class PodAgent {
     this._bufferSize = Number.isFinite(bufferSize) && bufferSize > 0
       ? bufferSize
       : FALLBACK_BUFFER_SIZE
+    this._maxLineBytes = Number.isFinite(maxLineBytes) && maxLineBytes > 0
+      ? maxLineBytes
+      : FALLBACK_MAX_LINE_BYTES
 
     // Fail-secure warning. Emitted from the constructor (not module-load) so
     // tests and embedders that pass an explicit `token` don't see a misleading
@@ -401,7 +479,36 @@ export class PodAgent {
     })
 
     // stdout — read line-by-line; each NDJSON line becomes one 'event' frame.
-    const rl = createInterface({ input: child.stdout })
+    //
+    // A LineLimitTransform sits upstream of readline and counts raw bytes per
+    // line.  If a line exceeds _maxLineBytes (default 1 MiB) before a newline
+    // arrives the transform fires 'oversized_line', the child is killed, an
+    // error frame is emitted, and the WS is closed cleanly.  This prevents a
+    // runaway tool result or streaming bug from growing the readline internal
+    // buffer without bound and OOM-ing the pod.
+    const lineGuard = new LineLimitTransform({ maxBytes: this._maxLineBytes })
+    lineGuard.once('oversized_line', () => {
+      console.error(`[chroxy-pod-agent] stdout line exceeded ${this._maxLineBytes} bytes — killing child`)
+      session._oversized = true
+      if (session.child === child) {
+        this._killChild(child)
+        session.child = null
+      }
+      this._emitSessionFrame(session, {
+        type: 'error',
+        code: 'line_too_long',
+        message: `stdout line exceeded max length (${this._maxLineBytes} bytes) — child killed`,
+      })
+      setTimeout(() => {
+        if (session.activeWs && session.activeWs.readyState === 1) {
+          session.activeWs.close(1008, 'line_too_long')
+        }
+        this._sessions.delete(sessionId)
+      }, 50)
+    })
+    child.stdout.pipe(lineGuard)
+
+    const rl = createInterface({ input: lineGuard })
     rl.on('line', (line) => {
       let payload
       try {
@@ -420,8 +527,14 @@ export class PodAgent {
 
     // exit — emit exit code and close the WS. Clear the tracked child so the
     // disconnect handler does not try to kill an already-exited process.
+    //
+    // If the session was terminated by the oversized-line guard, the error
+    // frame and WS close are already handled there.  Emitting a spurious exit
+    // frame here would contradict the protocol (client already received
+    // error+close(1008)) and could confuse K8sBackend.  Skip the exit path.
     child.on('close', (code) => {
       if (session.child === child) session.child = null
+      if (session._oversized) return
       const exitFrame = { type: 'exit', code: code ?? 1 }
       this._emitSessionFrame(session, exitFrame)
       // Small delay so the exit frame is flushed before we close.
