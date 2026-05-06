@@ -190,11 +190,31 @@
  * Failures are swallowed (logged only) because the rename is best-effort and
  * the restore can proceed without it.
  *
+ * **Docker-only concept — non-Docker backends MUST implement this as a no-op.**
+ *
+ * Docker containers have mutable, reusable names: the canonical
+ * `chroxy-env-{envId}` name must be freed before the replacement container can
+ * claim it.  K8s pods are immutable and have unique names by design — there is
+ * no canonical name slot to free — so K8sBackend (and any future backend that
+ * does not rely on mutable container names) MUST resolve the returned Promise
+ * immediately without performing any I/O.  The restore flow in
+ * EnvironmentManager tolerates a no-op here because the old resource is
+ * destroyed after the new container passes its health check, regardless of
+ * whether a rename occurred.
+ *
+ * Implementation guidance per backend:
+ *  - **DockerBackend** — calls `docker rename <containerId> <newName>`; failures
+ *    are logged and swallowed (best-effort).
+ *  - **K8sBackend** — no-op; `return Promise.resolve()`.  Do NOT throw
+ *    `NotImplementedError` — the restore flow calls this unconditionally and a
+ *    rejection will abort the restore.
+ *
  * @function renameEnvironment
  * @memberof Backend
- * @param {string} containerId - Container to rename
- * @param {string} newName     - New name
- * @returns {Promise<void>} Resolves regardless of success — rename failures are logged only
+ * @param {string} containerId - Container to rename (Docker) or ignored (K8s / no-op backends)
+ * @param {string} newName     - New name (Docker) or ignored (K8s / no-op backends)
+ * @returns {Promise<void>} Resolves regardless of success — rename failures are logged only;
+ *                          non-Docker backends resolve immediately without any I/O
  */
 
 /**

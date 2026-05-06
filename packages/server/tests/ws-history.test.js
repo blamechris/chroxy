@@ -330,8 +330,12 @@ describe('sendPostAuthInfo — multi-session mode', () => {
         sessionId: 'bad-sess',
         name: 'Gemini',
         provider: 'gemini-cli',
+        cwd: '/bad',
+        model: null,
+        permissionMode: 'approve',
         errorCode: 'RESTORE_FAILED',
         errorMessage: 'GEMINI_API_KEY environment variable is not set',
+        historyLength: 2,
       },
     ]
     const ws = makeFakeWs()
@@ -344,9 +348,13 @@ describe('sendPostAuthInfo — multi-session mode', () => {
     assert.equal(failedMsg.sessionId, 'bad-sess')
     assert.equal(failedMsg.name, 'Gemini')
     assert.equal(failedMsg.provider, 'gemini-cli')
+    assert.equal(failedMsg.cwd, '/bad')
+    assert.equal(failedMsg.model, null)
+    assert.equal(failedMsg.permissionMode, 'approve')
     assert.equal(failedMsg.errorCode, 'RESTORE_FAILED')
     assert.equal(failedMsg.errorMessage, 'GEMINI_API_KEY environment variable is not set')
     assert.equal(failedMsg.originalHistoryPreserved, true)
+    assert.equal(failedMsg.historyLength, 2)
   })
 
   it('omits session_restore_failed when sessionManager has no getFailedRestores (backward compat)', () => {

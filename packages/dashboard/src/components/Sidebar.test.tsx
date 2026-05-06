@@ -88,7 +88,7 @@ describe('Sidebar', () => {
   it('marks busy sessions with indicator', () => {
     renderSidebar()
     const busyItem = screen.getByTestId('session-item-s1')
-    expect(busyItem.querySelector('.sidebar-busy-dot')).toBeInTheDocument()
+    expect(busyItem.querySelector('.sidebar-session-dot.status-working')).toBeInTheDocument()
   })
 
   it('marks active session with highlight', () => {
