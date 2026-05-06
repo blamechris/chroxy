@@ -194,9 +194,13 @@ export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     name: z.ZodString;
     provider: z.ZodString;
+    cwd: z.ZodOptional<z.ZodString>;
+    model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    permissionMode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     errorCode: z.ZodString;
     errorMessage: z.ZodString;
     originalHistoryPreserved: z.ZodBoolean;
+    historyLength: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerProviderListSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_list">;
@@ -282,6 +286,13 @@ export declare const ServerSkillTrustRequestSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerSkillTrustGrantedSchema: z.ZodObject<{
     type: z.ZodLiteral<"skill_trust_granted">;
+    sessionId: z.ZodString;
+    skillName: z.ZodString;
+    author: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerSkillTrustGrantOkSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skill_trust_grant_ok">;
+    requestId: z.ZodNullable<z.ZodString>;
     sessionId: z.ZodString;
     skillName: z.ZodString;
     author: z.ZodString;
@@ -455,3 +466,4 @@ export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;
+export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>;

@@ -125,6 +125,16 @@ export {
 } from './utils'
 
 export type {
+  SessionVisualStatus,
+  SessionVisualStatusInput,
+} from './session-visual-status'
+
+export {
+  SESSION_STALE_AFTER_MS,
+  deriveSessionVisualStatus,
+} from './session-visual-status'
+
+export type {
   StreamIdResult,
 } from './stream-id'
 
