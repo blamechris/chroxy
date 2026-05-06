@@ -264,7 +264,10 @@ export class JsonlSubprocessSession extends BaseSession {
     try {
       proc = spawn(Klass.resolvedBinary, args, {
         cwd: this.cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // We pass the prompt as argv, not stdin. Some CLIs, notably
+        // `codex exec`, treat an open stdin pipe as extra prompt input and
+        // wait for EOF forever, leaving the session stuck busy.
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: this._buildChildEnv(),
       })
     } catch (err) {

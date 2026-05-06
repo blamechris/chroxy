@@ -1,7 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { join } from 'path'
 import { homedir } from 'os'
-import { updateModels, saveModelsCache, updateContextWindow, getModels, FALLBACK_MODELS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { updateModels, saveModelsCache, updateContextWindow, getModels, FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -126,6 +126,10 @@ export class SdkSession extends BaseSession {
    */
   static getFallbackModels() {
     return FALLBACK_MODELS
+  }
+
+  static getAllowedModels() {
+    return [...ALLOWED_MODEL_IDS]
   }
 
   /**

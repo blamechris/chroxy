@@ -65,6 +65,22 @@ export class WorktreeError extends SessionError {
 }
 
 /**
+ * Thrown when an initial session model is not valid for the selected provider.
+ */
+export class ProviderModelNotSupportedError extends SessionError {
+  constructor({ provider, model, supported }) {
+    const suffix = Array.isArray(supported) && supported.length > 0
+      ? ` Supported models: ${supported.join(', ')}.`
+      : ''
+    super(`Model '${model}' is not supported by provider '${provider}'.${suffix}`, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+    this.name = 'ProviderModelNotSupportedError'
+    this.provider = provider
+    this.model = model
+    this.supported = supported || []
+  }
+}
+
+/**
  * Default base directory for session worktrees.
  * @type {string}
  */
@@ -81,7 +97,7 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
  *   session_updated   { sessionId, name }
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
- *   session_restore_failed { sessionId, name, provider, errorCode, errorMessage, originalHistoryPreserved }
+ *   session_restore_failed { sessionId, name, provider, cwd, model, permissionMode, errorCode, errorMessage, originalHistoryPreserved, historyLength }
  *     — emitted when a session in the persisted state file fails to restore (e.g. missing env var).
  *       History on disk is preserved so the user can retry after fixing the underlying issue.
  */
@@ -360,6 +376,22 @@ export class SessionManager extends EventEmitter {
     const PreflightProviderClass = getProvider(resolvedProviderType)
     if (!this._skipPreflight) {
       runProviderPreflight(PreflightProviderClass)
+    }
+    if (resolvedModel && typeof PreflightProviderClass.getAllowedModels === 'function') {
+      let providerAllowedModels = null
+      try {
+        const list = PreflightProviderClass.getAllowedModels()
+        providerAllowedModels = Array.isArray(list) ? list : null
+      } catch {
+        providerAllowedModels = null
+      }
+      if (providerAllowedModels && providerAllowedModels.length > 0 && !providerAllowedModels.includes(resolvedModel)) {
+        throw new ProviderModelNotSupportedError({
+          provider: resolvedProviderType,
+          model: resolvedModel,
+          supported: providerAllowedModels,
+        })
+      }
     }
 
     // Worktree isolation — create a detached git worktree for this session
@@ -872,9 +904,13 @@ export class SessionManager extends EventEmitter {
           sessionId: failedId,
           name: saved.name,
           provider: saved.provider || this._providerType,
+          cwd: saved.cwd,
+          model: saved.model || null,
+          permissionMode: saved.permissionMode || null,
           errorCode: err?.code || 'RESTORE_FAILED',
           errorMessage: err?.message || String(err),
           originalHistoryPreserved: true,
+          historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
         })
       }
     }

@@ -27,6 +27,8 @@ function setStoreState(overrides: Record<string, unknown> = {}) {
   storeState = {
     defaultProvider: 'claude-sdk',
     defaultModel: null,
+    availableModels: [],
+    availableModelsProvider: null,
     availableProviders: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
@@ -148,5 +150,111 @@ describe('CreateSessionModal fresh-open guard (#2679)', () => {
 
     // Provider should fall back to first available
     expect(screen.getByLabelText(/select provider/i)).toHaveValue('claude-sdk')
+  })
+
+  it('does not pass the persisted Claude default model when creating a Codex session', () => {
+    setStoreState({
+      defaultProvider: 'codex',
+      defaultModel: 'opus-4-6',
+      availableProviders: [
+        { name: 'claude-sdk', capabilities: {} },
+        { name: 'codex', capabilities: {} },
+      ],
+    })
+    const onCreate = vi.fn()
+    render(
+      <CreateSessionModal
+        open={true}
+        onClose={vi.fn()}
+        onCreate={onCreate}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText(/session name/i), { target: { value: 'Codex Test' } })
+    fireEvent.click(screen.getByText('Create'))
+
+    expect(onCreate).toHaveBeenCalledWith({
+      name: 'Codex Test',
+      cwd: '',
+      provider: 'codex',
+      model: undefined,
+      permissionMode: undefined,
+      worktree: undefined,
+      environmentId: undefined,
+    })
+  })
+
+  it('does not pass a stale persisted default model when creating a Claude-family session', () => {
+    setStoreState({
+      defaultProvider: 'claude-sdk',
+      defaultModel: 'opus-4-6',
+      availableModelsProvider: 'claude-sdk',
+      availableModels: [
+        { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6' },
+        { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7' },
+      ],
+      availableProviders: [
+        { name: 'claude-sdk', capabilities: {} },
+        { name: 'codex', capabilities: {} },
+      ],
+    })
+    const onCreate = vi.fn()
+    render(
+      <CreateSessionModal
+        open={true}
+        onClose={vi.fn()}
+        onCreate={onCreate}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText(/session name/i), { target: { value: 'Claude Test' } })
+    fireEvent.click(screen.getByText('Create'))
+
+    expect(onCreate).toHaveBeenCalledWith({
+      name: 'Claude Test',
+      cwd: '',
+      provider: 'claude-sdk',
+      model: undefined,
+      permissionMode: undefined,
+      worktree: undefined,
+      environmentId: undefined,
+    })
+  })
+
+  it('passes the persisted default model only when it matches the selected provider catalog', () => {
+    setStoreState({
+      defaultProvider: 'claude-sdk',
+      defaultModel: 'opus',
+      availableModelsProvider: 'claude-sdk',
+      availableModels: [
+        { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6' },
+        { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7' },
+      ],
+      availableProviders: [
+        { name: 'claude-sdk', capabilities: {} },
+        { name: 'codex', capabilities: {} },
+      ],
+    })
+    const onCreate = vi.fn()
+    render(
+      <CreateSessionModal
+        open={true}
+        onClose={vi.fn()}
+        onCreate={onCreate}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText(/session name/i), { target: { value: 'Claude Test' } })
+    fireEvent.click(screen.getByText('Create'))
+
+    expect(onCreate).toHaveBeenCalledWith({
+      name: 'Claude Test',
+      cwd: '',
+      provider: 'claude-sdk',
+      model: 'opus',
+      permissionMode: undefined,
+      worktree: undefined,
+      environmentId: undefined,
+    })
   })
 })

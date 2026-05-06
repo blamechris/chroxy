@@ -198,6 +198,30 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('session_restore_failed dispatch', () => {
+    it('surfaces failed persisted sessions through addServerError', () => {
+      handleMessage(
+        {
+          type: 'session_restore_failed',
+          sessionId: 'sess-bad',
+          name: 'Codex-Test',
+          provider: 'codex',
+          model: 'opus-4-6',
+          errorCode: 'MODEL_NOT_SUPPORTED_BY_PROVIDER',
+          errorMessage: 'Model "opus-4-6" is not supported by provider "codex"',
+          originalHistoryPreserved: true,
+          historyLength: 2,
+        },
+        ctx() as any,
+      )
+
+      const state = store.getState() as any
+      expect(state.serverErrors).toEqual([
+        'Failed to restore Codex-Test: Model "opus-4-6" is not supported by provider "codex"',
+      ])
+    })
+  })
+
   describe('stream_delta dispatch', () => {
     // Fake timers for the 100ms delta batcher — runAllTimers() flushes
     // synchronously instead of waiting on real wall-clock setTimeout(150).
