@@ -97,7 +97,7 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
  *   session_updated   { sessionId, name }
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
- *   session_restore_failed { sessionId, name, provider, errorCode, errorMessage, originalHistoryPreserved }
+ *   session_restore_failed { sessionId, name, provider, cwd, model, permissionMode, errorCode, errorMessage, originalHistoryPreserved, historyLength }
  *     — emitted when a session in the persisted state file fails to restore (e.g. missing env var).
  *       History on disk is preserved so the user can retry after fixing the underlying issue.
  */
