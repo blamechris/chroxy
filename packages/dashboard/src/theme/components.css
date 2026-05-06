@@ -539,22 +539,24 @@
   color: var(--text-primary);
 }
 
-.sidebar-busy-dot {
+.sidebar-session-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-orange);
   flex-shrink: 0;
+}
+
+.sidebar-session-dot.status-idle {
+  background: var(--accent-blue);
+}
+
+.sidebar-session-dot.status-working {
+  background: var(--accent-green);
   animation: dotPulse 1.5s ease-in-out infinite;
 }
 
-.sidebar-idle-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent-green);
-  flex-shrink: 0;
-  animation: dotBreathe 3s ease-in-out infinite;
+.sidebar-session-dot.status-stale {
+  background: var(--warning-fg, #fbbf24);
 }
 
 .sidebar-resumable-dot {
@@ -636,14 +638,21 @@
   border-bottom: 1px solid var(--border-primary);
   gap: 6px;
   flex-shrink: 0;
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .session-tabs {
   display: flex;
   gap: 4px;
   flex: 1;
+  min-width: 0;
   overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.session-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .session-tab {
@@ -693,18 +702,18 @@
 }
 
 .tab-status-dot.status-idle {
-  background: var(--status-connected);
+  background: var(--accent-blue);
   animation: none;
 }
 
-.tab-status-dot.status-busy {
-  background: var(--warning-fg, #fbbf24);
+.tab-status-dot.status-working {
+  background: var(--accent-green);
   animation: pulse 1.5s infinite;
 }
 
-.tab-status-dot.status-needs-attention {
-  background: var(--status-error, #ef4444);
-  animation: pulse 0.8s infinite;
+.tab-status-dot.status-stale {
+  background: var(--warning-fg, #fbbf24);
+  animation: none;
 }
 
 .tab-cwd {
@@ -3981,8 +3990,7 @@
   .tunnel-warming-banner { transition: none; }
 
   .skeleton-line,
-  .sidebar-busy-dot,
-  .sidebar-idle-dot,
+  .sidebar-session-dot,
   .tab-busy-dot,
   .tab-status-dot,
   .busy-indicator,
@@ -3993,8 +4001,7 @@
   }
 
   /* Keep indicators visible with static styling */
-  .sidebar-busy-dot,
-  .sidebar-idle-dot,
+  .sidebar-session-dot,
   .tab-busy-dot,
   .tab-status-dot,
   .busy-indicator {

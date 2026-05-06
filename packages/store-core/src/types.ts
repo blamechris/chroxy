@@ -82,6 +82,11 @@ export interface SessionInfo {
   permissionMode: string | null;
   isBusy: boolean;
   createdAt: number;
+  /**
+   * Timestamp of the last meaningful session activity. This is user/agent
+   * activity, not passive viewing, so clients can derive stale-idle UI state.
+   */
+  lastActivityAt?: number;
   conversationId: string | null;
   provider?: string;
   worktree?: boolean;

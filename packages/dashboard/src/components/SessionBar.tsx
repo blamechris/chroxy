@@ -1,17 +1,18 @@
 /**
  * SessionBar — horizontal tab strip for session management.
  *
- * Features: active highlight, busy dot, close/rename, cwd badge, model badge, provider badge.
+ * Features: active highlight, status dot, close/rename, cwd badge, model badge, provider badge.
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
+import type { SessionVisualStatus } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
 
-export type SessionStatus = 'idle' | 'busy' | 'needs-attention'
+export type SessionStatus = SessionVisualStatus
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
-  idle: 'Session idle',
-  busy: 'Session busy — processing...',
-  'needs-attention': 'Needs attention — action required',
+  idle: 'Session idle — ready for input',
+  working: 'Session working — response, tool, or agent active',
+  stale: 'Session stale — idle for 1 hour or more',
 }
 
 export interface SessionTabData {
@@ -113,8 +114,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             }}
           >
             {(() => {
-              const effectiveStatus = session.status ?? (session.isBusy ? 'busy' : undefined)
-              if (!effectiveStatus || (effectiveStatus === 'idle' && !session.status)) return null
+              const effectiveStatus = session.status ?? (session.isBusy ? 'working' : 'idle')
               return (
                 <span
                   className={`tab-status-dot status-${effectiveStatus}`}

@@ -65,6 +65,22 @@ export class WorktreeError extends SessionError {
 }
 
 /**
+ * Thrown when an initial session model is not valid for the selected provider.
+ */
+export class ProviderModelNotSupportedError extends SessionError {
+  constructor({ provider, model, supported }) {
+    const suffix = Array.isArray(supported) && supported.length > 0
+      ? ` Supported models: ${supported.join(', ')}.`
+      : ''
+    super(`Model '${model}' is not supported by provider '${provider}'.${suffix}`, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+    this.name = 'ProviderModelNotSupportedError'
+    this.provider = provider
+    this.model = model
+    this.supported = supported || []
+  }
+}
+
+/**
  * Default base directory for session worktrees.
  * @type {string}
  */
@@ -81,7 +97,7 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
  *   session_updated   { sessionId, name }
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
- *   session_restore_failed { sessionId, name, provider, errorCode, errorMessage, originalHistoryPreserved }
+ *   session_restore_failed { sessionId, name, provider, cwd, model, permissionMode, errorCode, errorMessage, originalHistoryPreserved, historyLength }
  *     — emitted when a session in the persisted state file fails to restore (e.g. missing env var).
  *       History on disk is preserved so the user can retry after fixing the underlying issue.
  */
@@ -242,6 +258,7 @@ export class SessionManager extends EventEmitter {
 
     // Internal state
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
@@ -301,6 +318,7 @@ export class SessionManager extends EventEmitter {
    */
   _cleanupSessionMaps(sessionId) {
     this._sessions.delete(sessionId)
+    this._sessionLastActivityAt.delete(sessionId)
     this._timeoutManager.removeSession(sessionId)
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
@@ -360,6 +378,22 @@ export class SessionManager extends EventEmitter {
     const PreflightProviderClass = getProvider(resolvedProviderType)
     if (!this._skipPreflight) {
       runProviderPreflight(PreflightProviderClass)
+    }
+    if (resolvedModel && typeof PreflightProviderClass.getAllowedModels === 'function') {
+      let providerAllowedModels = null
+      try {
+        const list = PreflightProviderClass.getAllowedModels()
+        providerAllowedModels = Array.isArray(list) ? list : null
+      } catch {
+        providerAllowedModels = null
+      }
+      if (providerAllowedModels && providerAllowedModels.length > 0 && !providerAllowedModels.includes(resolvedModel)) {
+        throw new ProviderModelNotSupportedError({
+          provider: resolvedProviderType,
+          model: resolvedModel,
+          supported: providerAllowedModels,
+        })
+      }
     }
 
     // Worktree isolation — create a detached git worktree for this session
@@ -467,7 +501,7 @@ export class SessionManager extends EventEmitter {
 
     this._sessions.set(sessionId, entry)
     metrics.inc('sessions.created')
-    this._timeoutManager.touchActivity(sessionId)
+    this.touchActivity(sessionId)
     this._wireSessionEvents(sessionId, session)
 
     try {
@@ -547,7 +581,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * List all sessions with summary info.
-   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt }>}
+   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt }>}
    */
   listSessions() {
     const list = []
@@ -562,6 +596,7 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
+        lastActivityAt: this._sessionLastActivityAt.get(sessionId) || entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
         provider: entry.provider || this._providerType,
         capabilities: ProviderClass.capabilities || {},
@@ -772,6 +807,7 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
         name: entry.name,
+        lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
         // #3185: persist promptEvaluator so reconnects across restarts
         // preserve the user's toggle state. Strict-boolean coerce so
@@ -849,6 +885,9 @@ export class SessionManager extends EventEmitter {
         if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
           this._history.setHistory(sessionId, saved.history)
         }
+        if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
+          this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
+        }
         if (!firstId) firstId = sessionId
         log.info(`Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
       } catch (err) {
@@ -872,9 +911,13 @@ export class SessionManager extends EventEmitter {
           sessionId: failedId,
           name: saved.name,
           provider: saved.provider || this._providerType,
+          cwd: saved.cwd,
+          model: saved.model || null,
+          permissionMode: saved.permissionMode || null,
           errorCode: err?.code || 'RESTORE_FAILED',
           errorMessage: err?.message || String(err),
           originalHistoryPreserved: true,
+          historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
         })
       }
     }
@@ -1088,7 +1131,7 @@ export class SessionManager extends EventEmitter {
     const LOGGED_EVENTS = new Set(['ready', 'stream_start', 'stream_end', 'result', 'error'])
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
-        if (ACTIVITY_EVENTS.has(event)) this._timeoutManager.touchActivity(sessionId)
+        if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
         if (LOGGED_EVENTS.has(event)) {
@@ -1154,6 +1197,7 @@ export class SessionManager extends EventEmitter {
    * Called internally on relevant events, and publicly by WsServer on user input.
    */
   touchActivity(sessionId) {
+    this._sessionLastActivityAt.set(sessionId, Date.now())
     this._timeoutManager.touchActivity(sessionId)
   }
 
