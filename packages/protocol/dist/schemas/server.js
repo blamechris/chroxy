@@ -201,9 +201,13 @@ export const ServerSessionRestoreFailedSchema = z.object({
     sessionId: z.string(),
     name: z.string(),
     provider: z.string(),
+    cwd: z.string().optional(),
+    model: z.string().nullable().optional(),
+    permissionMode: z.string().nullable().optional(),
     errorCode: z.string(),
     errorMessage: z.string(),
     originalHistoryPreserved: z.boolean(),
+    historyLength: z.number().optional(),
 });
 export const ServerProviderListSchema = z.object({
     type: z.literal('provider_list'),
@@ -320,6 +324,14 @@ export const ServerSkillTrustRequestSchema = z.object({
 // #3297: community skill trust granted by operator.
 export const ServerSkillTrustGrantedSchema = z.object({
     type: z.literal('skill_trust_granted'),
+    sessionId: z.string(),
+    skillName: z.string(),
+    author: z.string(),
+});
+// #3297: ack sent to the requesting client after a successful skill_trust_grant.
+export const ServerSkillTrustGrantOkSchema = z.object({
+    type: z.literal('skill_trust_grant_ok'),
+    requestId: z.string().nullable(),
     sessionId: z.string(),
     skillName: z.string(),
     author: z.string(),

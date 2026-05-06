@@ -69,6 +69,24 @@ describe('provider static metadata hooks', () => {
     assert.equal(meta.fullId, 'claude-opus-4-7')
     assert.equal(meta.id, 'opus-4-7')
   })
+
+  it('Claude SDK provider exposes only current allowed model aliases for create preflight', () => {
+    assert.equal(typeof SdkSession.getAllowedModels, 'function')
+    const allowed = new Set(SdkSession.getAllowedModels())
+    assert.ok(allowed.has('opus'))
+    assert.ok(allowed.has('claude-opus-4-7'))
+    assert.ok(!allowed.has('opus-4-6'))
+    assert.ok(!allowed.has('claude-opus-4-6'))
+  })
+
+  it('Claude CLI provider exposes only current allowed model aliases for create preflight', () => {
+    assert.equal(typeof CliSession.getAllowedModels, 'function')
+    const allowed = new Set(CliSession.getAllowedModels())
+    assert.ok(allowed.has('opus'))
+    assert.ok(allowed.has('claude-opus-4-7'))
+    assert.ok(!allowed.has('opus-4-6'))
+    assert.ok(!allowed.has('claude-opus-4-6'))
+  })
 })
 
 describe('createModelsRegistry(providerHooks)', () => {

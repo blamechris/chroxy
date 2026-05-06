@@ -30,13 +30,13 @@ const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/cl
 
 // Per-method deferral tracking: each stub points to the issue/phase that owns it.
 // Keep this in sync with the Backend interface (types.js) and the K8s phase plan in #3191.
+// Note: renameEnvironment is intentionally absent — it is a documented no-op on K8s (see types.js).
 const NOT_IMPLEMENTED_REASON = {
   createComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   destroyComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   removeImage: 'N/A for K8s — image lifecycle is owned by the cluster registry/CRI',
   listEnvironments: 'deferred to Phase 2',
   commitEnvironment: 'deferred to Phase 2',
-  renameEnvironment: 'no-op pending #3313',
   restoreEnvironment: 'deferred to Phase 2',
 }
 
@@ -632,8 +632,11 @@ export class K8sBackend {
     return Promise.reject(notImplemented('commitEnvironment'))
   }
 
+  // K8s pods have unique names by design — there is no mutable canonical name
+  // slot to free.  The restore flow tolerates a no-op here because the old pod
+  // is destroyed after the new one passes its health check.  See types.js.
   renameEnvironment(_containerId, _newName) {
-    return Promise.reject(notImplemented('renameEnvironment'))
+    return Promise.resolve()
   }
 
   restoreEnvironment(_opts) {
