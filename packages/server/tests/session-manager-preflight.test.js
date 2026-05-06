@@ -8,6 +8,7 @@ import {
   SessionManager,
   ProviderBinaryNotFoundError,
   ProviderCredentialMissingError,
+  ProviderModelNotSupportedError,
 } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
 
@@ -106,11 +107,18 @@ class HappyProvider extends BaseFakeSession {
   }
 }
 
+class ModelLimitedProvider extends BaseFakeSession {
+  static getAllowedModels() {
+    return ['allowed-model']
+  }
+}
+
 // Register once — these are stable test-only provider names that won't clash
 // with built-ins.
 registerProvider('test-missing-binary-2962', MissingBinaryProvider)
 registerProvider('test-missing-credential-2962', MissingCredentialProvider)
 registerProvider('test-happy-2962', HappyProvider)
+registerProvider('test-model-limited-2962', ModelLimitedProvider)
 
 describe('SessionManager.createSession — preflight', () => {
   let mgr
@@ -174,6 +182,65 @@ describe('SessionManager.createSession — preflight', () => {
     process.env.__CHROXY_FAKE_API_KEY_2962__ = 'fake-value'
     const id = mgr.createSession({ provider: 'test-missing-credential-2962', skipPersist: true })
     assert.ok(id)
+    mgr.destroySession(id)
+  })
+
+  it('throws ProviderModelNotSupportedError when initial model is not valid for the provider', () => {
+    assert.throws(
+      () => mgr.createSession({ provider: 'test-model-limited-2962', model: 'claude-opus-4-6', skipPersist: true }),
+      (err) => {
+        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        assert.equal(err.provider, 'test-model-limited-2962')
+        assert.equal(err.model, 'claude-opus-4-6')
+        assert.deepEqual(err.supported, ['allowed-model'])
+        assert.match(err.message, /allowed-model/)
+        return true
+      },
+    )
+    assert.equal(mgr.listSessions().length, 0)
+  })
+
+  it('rejects stale Claude SDK model before constructing the session', () => {
+    assert.throws(
+      () => mgr.createSession({ provider: 'claude-sdk', model: 'opus-4-6', skipPersist: true }),
+      (err) => {
+        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        assert.equal(err.provider, 'claude-sdk')
+        assert.equal(err.model, 'opus-4-6')
+        assert.ok(err.supported.includes('opus'))
+        assert.ok(err.supported.includes('claude-opus-4-7'))
+        assert.ok(!err.supported.includes('opus-4-6'))
+        assert.match(err.message, /opus/)
+        return true
+      },
+    )
+    assert.equal(mgr.listSessions().length, 0)
+  })
+
+  it('rejects stale Claude CLI model before constructing the session', () => {
+    assert.throws(
+      () => mgr.createSession({ provider: 'claude-cli', model: 'opus-4-6', skipPersist: true }),
+      (err) => {
+        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        assert.equal(err.provider, 'claude-cli')
+        assert.equal(err.model, 'opus-4-6')
+        assert.ok(err.supported.includes('opus'))
+        assert.ok(err.supported.includes('claude-opus-4-7'))
+        assert.ok(!err.supported.includes('opus-4-6'))
+        return true
+      },
+    )
+    assert.equal(mgr.listSessions().length, 0)
+  })
+
+  it('proceeds when initial model is valid for the provider', () => {
+    const id = mgr.createSession({ provider: 'test-model-limited-2962', model: 'allowed-model', skipPersist: true })
+    assert.ok(id)
+    const entry = mgr.getSession(id)
+    assert.equal(entry.session.model, 'allowed-model')
     mgr.destroySession(id)
   })
 })

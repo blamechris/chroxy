@@ -1089,6 +1089,33 @@ describe('CodexSession', () => {
       // back to idle.
     })
 
+    it('does not keep stdin open when prompt is passed as argv', async () => {
+      // `codex exec` appends piped stdin to the prompt and waits for EOF. The
+      // base runner must therefore give subprocess providers an ignored stdin
+      // handle instead of an open pipe.
+      writeBaseShim([
+        '#!/usr/bin/env node',
+        'process.stdin.resume()',
+        'process.stdin.on("end", () => {',
+        `  process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stdin closed' } }) + '\\n')`,
+        `  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: {} }) + '\\n')`,
+        '})',
+      ].join('\n'))
+
+      const session = makeSession()
+      session._processReady = true
+      const deltas = []
+      const results = []
+      session.on('stream_delta', (d) => deltas.push(d))
+      session.on('result', (r) => results.push(r))
+
+      await session.sendMessage('hello')
+      await waitFor(() => results.length >= 1, { label: 'result after stdin EOF' })
+
+      assert.equal(deltas[0]?.delta, 'stdin closed')
+      assert.equal(session.isRunning, false, 'session should not remain busy waiting for stdin')
+    })
+
     it('multi-message sequencing: rejects second sendMessage while first is busy', async () => {
       // Long-running first message — stays busy until we let it finish.
       writeBaseShim([

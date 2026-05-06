@@ -6,7 +6,7 @@ import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
-import { FALLBACK_MODELS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -131,6 +131,10 @@ export class CliSession extends BaseSession {
    */
   static getFallbackModels() {
     return FALLBACK_MODELS
+  }
+
+  static getAllowedModels() {
+    return [...ALLOWED_MODEL_IDS]
   }
 
   /**

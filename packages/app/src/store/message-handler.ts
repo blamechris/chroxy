@@ -2156,16 +2156,32 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'session_restore_failed': {
       // Server couldn't restart a persisted session (e.g. missing API key).
-      // History is preserved on disk. Full UI (retry button, needs-attention
-      // marker) is a follow-up; for now just surface via console.
+      // History is preserved on disk; surface this visibly instead of making
+      // the saved session look like it silently disappeared after restart.
       const restoreFailed = sharedSessionRestoreFailed(msg);
+      const serverError: ServerError = {
+        id: nextMessageId('restore'),
+        category: 'session',
+        message: restoreFailed.systemMessage.content,
+        recoverable: true,
+        timestamp: Date.now(),
+        ...(restoreFailed.sessionId ? { sessionId: restoreFailed.sessionId } : {}),
+      };
+      set((state: ConnectionState) => ({
+        serverErrors: [...state.serverErrors, serverError].slice(-10),
+      }));
+      useNotificationStore.getState().addServerError(serverError);
       // eslint-disable-next-line no-console
       console.warn('[session_restore_failed]', {
         sessionId: restoreFailed.sessionId,
         name: restoreFailed.name,
         provider: restoreFailed.provider,
+        cwd: restoreFailed.cwd,
+        model: restoreFailed.model,
+        permissionMode: restoreFailed.permissionMode,
         errorCode: restoreFailed.errorCode,
         errorMessage: restoreFailed.errorMessage,
+        historyLength: restoreFailed.historyLength,
       });
       break;
     }

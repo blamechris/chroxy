@@ -8,7 +8,7 @@ import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from '
 import { homedir } from 'os'
 import { EventEmitter } from 'events'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
-import { waitForTunnel } from './tunnel-check.js'
+import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import QRCode from 'qrcode'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
@@ -111,8 +111,11 @@ export class Supervisor extends EventEmitter {
   }
 
   /** Override point: wait for tunnel to be routable */
-  _waitForTunnel(url) {
-    return waitForTunnel(url)
+  _waitForTunnel(url, mode = this._tunnelMode) {
+    const tunnelArg = parseTunnelArg(mode)
+    return waitForTunnel(url, {
+      initialDelay: tunnelArg?.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
+    })
   }
 
   /** Override point: exit the process */

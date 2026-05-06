@@ -496,10 +496,14 @@ describe('SessionManager.restoreState', () => {
     const ev = failureEvents[0]
     assert.equal(ev.name, 'Gemini Bad')
     assert.equal(ev.provider, 'gemini-cli')
+    assert.equal(ev.cwd, '/nonexistent/path/that/does/not/exist')
+    assert.equal(ev.model, null)
+    assert.equal(ev.permissionMode, 'approve')
     assert.ok(typeof ev.sessionId === 'string' && ev.sessionId.length > 0, 'Failed event should carry a sessionId')
     assert.ok(typeof ev.errorMessage === 'string' && ev.errorMessage.length > 0, 'Failed event should carry errorMessage')
     assert.ok(typeof ev.errorCode === 'string', 'Failed event should carry errorCode (even if generic)')
     assert.equal(ev.originalHistoryPreserved, true, 'history must be preserved on disk')
+    assert.equal(ev.historyLength, savedHistory.length)
 
     mgr.destroyAll()
   })
