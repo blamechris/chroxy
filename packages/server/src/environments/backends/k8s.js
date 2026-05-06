@@ -498,17 +498,14 @@ export class K8sBackend {
       hostCwd,
     } = opts
     const ns = namespace || this._namespace
-    const agentToken = opts.agentToken || this._agentTokens.get(podName)
 
-    if (!agentToken) {
-      // Phrasing kept compatible with the existing /agentToken is required/
-      // assertion. The token is normally registered by createEnvironment();
-      // tests that bypass that path can still pass `opts.agentToken` directly.
-      throw new Error(
-        `K8sBackend.streamCliInEnvironment: agentToken is required for Pod "${podName}" ` +
-        '(register via createEnvironment(), or pass opts.agentToken)'
-      )
-    }
+    // Prefer explicit token (test seam), fall back to the in-memory cache, and
+    // lazily fetch from the K8s Secret when neither is available (e.g. after a
+    // server restart that cleared _agentTokens). The lazy path is async, so we
+    // wrap the entire dial in a Promise and let it proceed in the background.
+    const tokenOrPromise = opts.agentToken
+      || this._agentTokens.get(podName)
+      || this._readAgentToken(podName, ns)
 
     // Remap host cli.js path to container path, mirroring DockerBackend.
     const containerArgs = [...args]
@@ -530,14 +527,27 @@ export class K8sBackend {
     const { _reconnectDelays: reconnectDelays, _maxRetries: maxRetries } = this
     const proc = new SidecarProcess({ reconnectDelays, maxRetries })
 
-    // Bind a redial function so the reconnect loop inside _wireWsToProc can
-    // re-dial the same pod without holding a reference to this K8sBackend.
-    proc._redial = () => this._dial(podName, ns, agentToken)
+    // Resolve the token (synchronous fast path or async Secret fetch), then dial.
+    Promise.resolve(tokenOrPromise).then((agentToken) => {
+      if (!agentToken) {
+        // Phrasing kept compatible with the existing /agentToken is required/
+        // assertion. The token is normally registered by createEnvironment() or
+        // repopulated by reconnect(); tests can still pass opts.agentToken directly.
+        throw new Error(
+          `K8sBackend.streamCliInEnvironment: agentToken is required for Pod "${podName}" ` +
+          '(register via createEnvironment(), reconnect(), or pass opts.agentToken)'
+        )
+      }
 
-    // Dial asynchronously; the returned handle is usable immediately. We
-    // capture portforward cleanup callbacks so kill() / exit can tear down
-    // the local TCP listener even if dial completes after kill is called.
-    this._dial(podName, ns, agentToken).then((dialResult) => {
+      // Bind a redial function so the reconnect loop inside _wireWsToProc can
+      // re-dial the same pod without holding a reference to this K8sBackend.
+      proc._redial = () => this._dial(podName, ns, agentToken)
+
+      // Dial asynchronously; the returned handle is usable immediately. We
+      // capture portforward cleanup callbacks so kill() / exit can tear down
+      // the local TCP listener even if dial completes after kill is called.
+      return this._dial(podName, ns, agentToken)
+    }).then((dialResult) => {
       // dialResult is either { ws, cleanup? } (portforward bridge) or a bare
       // ws (clusterip / direct dial). Normalize.
       const ws = dialResult && dialResult.ws ? dialResult.ws : dialResult
@@ -573,6 +583,29 @@ export class K8sBackend {
     })
 
     return proc
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // reconnectAgentToken — repopulate _agentTokens from the K8s Secret
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Reads the per-Pod Secret and registers the agent token in the in-memory
+   * cache.  Called by EnvironmentManager.reconnect() for K8s-backed
+   * environments so that streamCliInEnvironment() works after a server restart.
+   *
+   * Returns `true` when the token was successfully fetched and cached; `false`
+   * when the Secret no longer exists (Pod was externally garbage-collected).
+   *
+   * @param {string} podName - Pod name (the containerId handle)
+   * @param {Object} [opts]
+   * @param {string} [opts.namespace] - Overrides the constructor default namespace
+   * @returns {Promise<boolean>}
+   */
+  async reconnectAgentToken(podName, opts = {}) {
+    const ns = opts.namespace || this._namespace
+    const token = await this._readAgentToken(podName, ns)
+    return token !== null
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -728,6 +761,53 @@ export class K8sBackend {
         }
       })
     })
+  }
+
+  /**
+   * Read the per-Pod Secret and return the agent token, caching it in
+   * `_agentTokens` for subsequent calls.  Returns `null` when the Secret
+   * does not exist (404) so callers can distinguish "gone" from errors.
+   *
+   * This is the recovery path for server restart: the Secret is the canonical
+   * source of truth for the token; the in-memory map is just a cache.
+   *
+   * @param {string} podName
+   * @param {string} ns
+   * @returns {Promise<string|null>}
+   */
+  async _readAgentToken(podName, ns) {
+    const secretName = _deriveSecretName(podName)
+    try {
+      const secret = await this._api.readNamespacedSecret({ name: secretName, namespace: ns })
+      // The K8s API decodes base64 stringData into `.data` as base64-encoded
+      // strings, but when we store via `stringData` the API may return the
+      // value under either field depending on the client version.  Prefer
+      // `data` (always present on read responses), fall back to `stringData`.
+      const raw = secret?.data?.CHROXY_AGENT_TOKEN
+        || secret?.stringData?.CHROXY_AGENT_TOKEN
+      if (!raw) {
+        log.warn(`Secret ${secretName} exists but has no CHROXY_AGENT_TOKEN — treating as missing`)
+        return null
+      }
+      // K8s stores Secret `.data` values as base64; decode unconditionally.
+      // If the value came via `stringData` it is already plaintext, but a
+      // base64-decode of a base64url-encoded token (no padding) is idempotent
+      // only when the token length is a multiple of 4.  Instead, detect the
+      // encoding: `data` values are padded base64; `stringData` values are not.
+      const token = secret?.data?.CHROXY_AGENT_TOKEN
+        ? Buffer.from(raw, 'base64').toString('utf8')
+        : raw
+      // Cache for subsequent calls so we only hit the API once per pod per process.
+      this._agentTokens.set(podName, token)
+      log.info(`Loaded agentToken for Pod ${podName} from Secret ${secretName}`)
+      return token
+    } catch (err) {
+      if (_isNotFound(err)) {
+        log.warn(`Secret ${secretName} not found — pod may have been externally deleted`)
+        return null
+      }
+      throw err
+    }
   }
 
   /**
