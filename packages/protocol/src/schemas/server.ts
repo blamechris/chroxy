@@ -230,9 +230,13 @@ export const ServerSessionRestoreFailedSchema = z.object({
   sessionId: z.string(),
   name: z.string(),
   provider: z.string(),
+  cwd: z.string().optional(),
+  model: z.string().nullable().optional(),
+  permissionMode: z.string().nullable().optional(),
   errorCode: z.string(),
   errorMessage: z.string(),
   originalHistoryPreserved: z.boolean(),
+  historyLength: z.number().optional(),
 })
 
 export const ServerProviderListSchema = z.object({

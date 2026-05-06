@@ -1037,8 +1037,12 @@ export interface SessionRestoreFailedPayload {
   sessionId: string | null
   name: string | null
   provider: string | null
+  cwd: string | null
+  model: string | null
+  permissionMode: string | null
   errorCode: string | null
   errorMessage: string | null
+  historyLength: number | null
   /** System ChatMessage describing the failure (caller may discard or push to chat). */
   systemMessage: ChatMessage
 }
@@ -1057,16 +1061,24 @@ export function handleSessionRestoreFailed(
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
   const name = typeof msg.name === 'string' ? msg.name : null
   const provider = typeof msg.provider === 'string' ? msg.provider : null
+  const cwd = typeof msg.cwd === 'string' ? msg.cwd : null
+  const model = typeof msg.model === 'string' ? msg.model : null
+  const permissionMode = typeof msg.permissionMode === 'string' ? msg.permissionMode : null
   const errorCode = typeof msg.errorCode === 'string' ? msg.errorCode : null
   const errorMessage = typeof msg.errorMessage === 'string' ? msg.errorMessage : null
+  const historyLength = typeof msg.historyLength === 'number' ? msg.historyLength : null
   const label = name ?? sessionId ?? 'session'
   const reason = errorMessage ?? errorCode ?? 'unknown error'
   return {
     sessionId,
     name,
     provider,
+    cwd,
+    model,
+    permissionMode,
     errorCode,
     errorMessage,
+    historyLength,
     systemMessage: {
       id: nextMessageId('system'),
       type: 'system',

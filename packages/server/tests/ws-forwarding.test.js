@@ -247,9 +247,13 @@ describe('setupForwarding', () => {
         sessionId: 'sess-bad',
         name: 'Gemini',
         provider: 'gemini-cli',
+        cwd: '/bad',
+        model: null,
+        permissionMode: 'approve',
         errorCode: 'RESTORE_FAILED',
         errorMessage: 'GEMINI_API_KEY environment variable is not set',
         originalHistoryPreserved: true,
+        historyLength: 2,
       })
 
       const call = ctx.broadcast.mock.calls.find(c =>
@@ -260,9 +264,13 @@ describe('setupForwarding', () => {
       assert.equal(msg.sessionId, 'sess-bad')
       assert.equal(msg.name, 'Gemini')
       assert.equal(msg.provider, 'gemini-cli')
+      assert.equal(msg.cwd, '/bad')
+      assert.equal(msg.model, null)
+      assert.equal(msg.permissionMode, 'approve')
       assert.equal(msg.errorCode, 'RESTORE_FAILED')
       assert.equal(msg.errorMessage, 'GEMINI_API_KEY environment variable is not set')
       assert.equal(msg.originalHistoryPreserved, true)
+      assert.equal(msg.historyLength, 2)
     })
   })
 

@@ -1,7 +1,7 @@
 import { SessionManager } from './session-manager.js'
 import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
-import { waitForTunnel } from './tunnel-check.js'
+import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
 import { PushManager } from './push.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
@@ -538,7 +538,9 @@ export async function startCliServer(config) {
       log.info(`Tunnel recovered after ${attempt} attempt(s)`)
 
       // Re-verify the new tunnel URL
-      await waitForTunnel(newHttpUrl)
+      await waitForTunnel(newHttpUrl, {
+        initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
+      })
 
       // Only display new QR code if URL actually changed
       if (newWsUrl !== currentWsUrl) {
@@ -566,6 +568,7 @@ export async function startCliServer(config) {
     wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, buildTunnelWarmingStatus({ tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl }))
     try {
       await waitForTunnel(httpUrl, {
+        initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
         onAttempt: (attempt, maxAttempts) => {
           wsServer.broadcastMinProtocolVersion(
             TUNNEL_STATUS_MIN_PROTOCOL_VERSION,
