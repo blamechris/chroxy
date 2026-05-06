@@ -1,0 +1,56 @@
+name: Nightly K8s Integration
+
+on:
+  schedule:
+    # 06:00 UTC daily = previous evening US/Pacific (22:00 PT / 23:00 PDT)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+# Read-only token — the job only reads the repo and talks to GitHub Checks.
+permissions:
+  contents: read
+
+jobs:
+  k8s-sidecar-integration:
+    name: K8s Sidecar Integration
+    runs-on: ubuntu-latest
+    # 15 min: cluster boot (~2 min) + image build/load (~2 min) + test suite
+    # (~3 min) + cleanup (~1 min) + generous headroom for slow runners.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      # helm/kind-action provisions a kind cluster and ensures the `kind` binary
+      # is on PATH.  cluster_name is left as default ("chart-testing") because the
+      # integration test creates its own named cluster (chroxy-test-<pid>) and the
+      # action cluster is never actually used — we only need the kind binary.
+      # Pinned to the most recent stable tag; bump when kind itself requires it.
+      - name: Install kind
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70563a3c # v1.10.0
+        with:
+          install_only: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      # RUN_K8S_INTEGRATION=1 is the opt-in gate checked by the test file.
+      # The script also probes for `kind` on PATH before registering any tests,
+      # so a missing binary produces a clean skip rather than a crash.
+      # NODE_OPTIONS timeout guard is set to 14 min (just under the job ceiling)
+      # to guarantee a clean exit with a diagnostic rather than a hard runner kill.
+      - name: Run K8s sidecar integration test
+        run: npm run test:integration:k8s -w packages/server
+        env:
+          RUN_K8S_INTEGRATION: '1'
+          NODE_OPTIONS: '--test-timeout=840000'
