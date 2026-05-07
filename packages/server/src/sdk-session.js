@@ -678,10 +678,21 @@ export class SdkSession extends BaseSession {
       // #3468: flip read-only diagnostic flag for callers + log once.
       if (this._stdinForwardingDisabled) return
       this._stdinForwardingDisabled = true
-      log.warn(
-        'Sidecar stdin forwarding is disabled — further writes will be ' +
+      const message = 'Sidecar stdin forwarding is disabled — further writes will be ' +
         'silently dropped; reconnect or restart the session to resume'
-      )
+      log.warn(message)
+      // #3502: surface the disabled flag to paired clients via the session
+      // `error` channel.  SessionManager._wireSessionEvents proxies `error`
+      // into the unified `session_event` envelope, so dashboards and the
+      // mobile app receive a structured frame and can render a "stdin lost
+      // — restart this session" banner instead of seeing a hung turn.
+      // Single emit per session: gated by the same _stdinForwardingDisabled
+      // short-circuit above so a flapping sidecar can't spam errors.
+      this.emit('error', {
+        code: 'stdin_disabled',
+        message,
+        recoverable: false,
+      })
     })
   }
 
