@@ -130,6 +130,37 @@ function createFakeClock() {
 /**
  * Fire all pending fake-clock callbacks then yield one event-loop tick so
  * any promise continuations scheduled inside those callbacks can resolve.
+ *
+ * Single-tick assumption
+ * ----------------------
+ * clock.tick() snapshots `pending`, clears the map, then iterates the
+ * snapshot.  If a callback enqueues a *new* timer during that iteration (e.g.
+ * scheduleReconnect → dial fails → .catch handler calls scheduleReconnect
+ * again), the new timer is added to `pending` *after* the snapshot was taken
+ * and is therefore NOT fired by the current tick() call.  The single
+ * setImmediate yield that follows does not drain it either.
+ *
+ * All current tests are unaffected because _dialWs always resolves
+ * successfully, so scheduleReconnect's .catch branch is never entered and no
+ * chained timer is ever queued.
+ *
+ * If a future test exercises a mid-retry dial failure (the .catch path in
+ * scheduleReconnect), it will need to call tickAndFlush() once per chained
+ * failure — or the helper should be extended with a loop that keeps ticking
+ * until pending is empty, guarded by a max-iterations cap to avoid infinite
+ * loops for genuinely self-rescheduling timers:
+ *
+ *   async function tickAndFlushAll(clock, maxIterations = 20) {
+ *     let iterations = 0
+ *     do {
+ *       clock.tick()
+ *       await new Promise(r => setImmediate(r))
+ *       iterations++
+ *       if (iterations >= maxIterations) throw new Error('tickAndFlushAll: max iterations reached')
+ *     } while (clock.hasPending())
+ *   }
+ *
+ * (hasPending() would need to be added to createFakeClock.)
  */
 async function tickAndFlush(clock) {
   clock.tick()
@@ -367,6 +398,100 @@ describe('K8sBackend.createEnvironment()', () => {
     const container = api.calls.create[0].body.spec.containers[0]
     assert.equal(container.imagePullPolicy, 'IfNotPresent',
       'per-call option must take precedence over constructor option')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend imagePullPolicy validation (#3375)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend imagePullPolicy validation (#3375)', () => {
+  it('constructor accepts valid values: Always, IfNotPresent, Never', () => {
+    const api = createMockApi()
+    for (const policy of ['Always', 'IfNotPresent', 'Never']) {
+      assert.doesNotThrow(
+        () => new K8sBackend({ _coreV1Api: api, imagePullPolicy: policy }),
+        `"${policy}" must be accepted`
+      )
+    }
+  })
+
+  it('constructor accepts undefined (omitted)', () => {
+    const api = createMockApi()
+    assert.doesNotThrow(() => new K8sBackend({ _coreV1Api: api }))
+  })
+
+  it('constructor accepts null', () => {
+    const api = createMockApi()
+    assert.doesNotThrow(() => new K8sBackend({ _coreV1Api: api, imagePullPolicy: null }))
+  })
+
+  it('constructor throws TypeError for unrecognised value', () => {
+    const api = createMockApi()
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'IfNotpresent' }),
+      (err) => {
+        assert.ok(err instanceof TypeError, 'must be a TypeError')
+        assert.match(err.message, /invalid imagePullPolicy "IfNotpresent"/)
+        assert.match(err.message, /constructor opts/)
+        assert.match(err.message, /Always, IfNotPresent, Never/)
+        return true
+      }
+    )
+  })
+
+  it('constructor throws TypeError for arbitrary string', () => {
+    const api = createMockApi()
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'always' }),
+      /invalid imagePullPolicy "always"/
+    )
+  })
+
+  it('createEnvironment throws TypeError for unrecognised per-call value', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'bad-policy',
+        image: 'agent:latest',
+        imagePullPolicy: 'IfNotpresent',
+      }),
+      (err) => {
+        assert.ok(err instanceof TypeError, 'must be a TypeError')
+        assert.match(err.message, /invalid imagePullPolicy "IfNotpresent"/)
+        assert.match(err.message, /createEnvironment opts/)
+        assert.match(err.message, /Always, IfNotPresent, Never/)
+        return true
+      }
+    )
+  })
+
+  it('createEnvironment accepts undefined imagePullPolicy (omitted)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.doesNotReject(
+      () => backend.createEnvironment({ envId: 'no-policy-call', image: 'agent:latest' })
+    )
+  })
+
+  it('no Pod is created when createEnvironment validation fails', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'bad-policy-no-pod',
+        image: 'agent:latest',
+        imagePullPolicy: 'invalid',
+      }),
+      TypeError
+    )
+
+    assert.equal(api.calls.createSecret.length, 0, 'Secret must not be created when validation fails synchronously')
+    assert.equal(api.calls.create.length, 0, 'Pod must not be created when validation fails synchronously')
   })
 })
 
@@ -681,6 +806,102 @@ describe('K8sBackend.createEnvironment() — forwardPorts (#3316)', () => {
     assert.equal(ports.length, 1, 'only AGENT_PORT when forwardPorts is absent')
     assert.equal(ports[0].containerPort, 7681)
     assert.equal(ports[0].name, 'agent')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — port range validation (#3386)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — port range validation (#3386)', () => {
+  it('accepts a valid port (e.g. 8080)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'valid-port',
+      image: 'agent:latest',
+      forwardPorts: [8080],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 8080), 'port 8080 must be present')
+  })
+
+  it('silently drops port 0 — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-zero',
+      image: 'agent:latest',
+      forwardPorts: [0],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'port 0 must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops port 65536 — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-overflow',
+      image: 'agent:latest',
+      forwardPorts: [65536],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'port 65536 must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops a negative port — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-negative',
+      image: 'agent:latest',
+      forwardPorts: [-1],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'negative port must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops a non-integer string — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-nan',
+      image: 'agent:latest',
+      forwardPorts: ['abc'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'non-numeric port must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('drops the out-of-range port but keeps a valid sibling port', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-mixed',
+      image: 'agent:latest',
+      forwardPorts: [99999, 3000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 99999), 'port 99999 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 3000), 'port 3000 must be kept')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
 })
 
@@ -2267,7 +2488,7 @@ describe('K8sBackend._readAgentToken()', () => {
     assert.equal(result, null)
   })
 
-  it('caches token so second call does not hit the API', async () => {
+  it('does not short-circuit on sequential calls (no in-flight dedup after resolution)', async () => {
     const token = 'cached-token'
     const encoded = Buffer.from(token).toString('base64')
     let apiCalls = 0
@@ -2278,11 +2499,88 @@ describe('K8sBackend._readAgentToken()', () => {
     const backend = new K8sBackend({ _coreV1Api: api })
 
     await backend._readAgentToken('chroxy-env-cache', 'default')
-    // Manually verify the map is populated so the second call short-circuits
+    // Manually verify the map is populated
     assert.equal(backend._agentTokens.get('chroxy-env-cache'), token)
-    // The method itself does NOT short-circuit — it always reads the Secret.
-    // Caching is used by streamCliInEnvironment (|| tokenOrPromise chain).
+    // Sequential second call starts a fresh fetch (no in-flight entry to coalesce
+    // onto — _pendingAgentTokens was cleared in the finally block).
+    await backend._readAgentToken('chroxy-env-cache', 'default')
+    assert.equal(apiCalls, 2, 'sequential calls each issue their own API request')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._readAgentToken() — concurrent fetch deduplication (#3371)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._readAgentToken() concurrent deduplication (#3371)', () => {
+  it('two concurrent calls hit the API exactly once', async () => {
+    const token = 'dedup-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let apiCalls = 0
+
+    // Use a deferred promise so both callers are in-flight simultaneously
+    let resolveSecret
+    const secretPromise = new Promise((res) => { resolveSecret = res })
+
+    const api = createMockApi({
+      readSecret: async () => {
+        apiCalls++
+        await secretPromise
+        return { data: { CHROXY_AGENT_TOKEN: encoded } }
+      },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    // Fire two concurrent calls before the first has resolved
+    const p1 = backend._readAgentToken('chroxy-env-dedup', 'default')
+    const p2 = backend._readAgentToken('chroxy-env-dedup', 'default')
+
+    // Both should reference the same in-flight promise
+    assert.strictEqual(p1, p2, 'concurrent calls must return the same promise')
+
+    resolveSecret()
+    const [t1, t2] = await Promise.all([p1, p2])
+
+    assert.equal(t1, token, 'first caller gets correct token')
+    assert.equal(t2, token, 'second caller gets correct token')
+    assert.equal(apiCalls, 1, 'API must be called exactly once despite two concurrent callers')
+    assert.equal(backend._agentTokens.get('chroxy-env-dedup'), token,
+      '_agentTokens must be populated after coalesced fetch')
+  })
+
+  it('clears _pendingAgentTokens after resolution so the next call starts fresh', async () => {
+    const token = 'clear-pending-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let apiCalls = 0
+
+    const api = createMockApi({
+      readSecret: async () => { apiCalls++; return { data: { CHROXY_AGENT_TOKEN: encoded } } },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend._readAgentToken('chroxy-env-clear', 'default')
+    assert.equal(backend._pendingAgentTokens.has('chroxy-env-clear'), false,
+      '_pendingAgentTokens must be cleared after promise settles')
     assert.equal(apiCalls, 1)
+
+    // A fresh call after resolution (e.g. reconnect path) starts a new fetch
+    await backend._readAgentToken('chroxy-env-clear', 'default')
+    assert.equal(apiCalls, 2, 'post-resolution call must issue a new API request')
+  })
+
+  it('clears _pendingAgentTokens even when the API throws', async () => {
+    const apiErr = Object.assign(new Error('ServerError'), { code: 500 })
+    const api = createMockApi({
+      readSecret: async () => { throw apiErr },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend._readAgentToken('chroxy-env-err', 'default'),
+      /ServerError/
+    )
+    assert.equal(backend._pendingAgentTokens.has('chroxy-env-err'), false,
+      '_pendingAgentTokens must be cleared even on error')
   })
 })
 

@@ -952,7 +952,8 @@ describe('PodAgent', () => {
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
       await new Promise((r) => setTimeout(r, 10))
 
-      // Push 5 events into a buffer of size 3; oldest 2 should be evicted.
+      // Push 5 events into a buffer of size 3; sentinel (seq=1) + oldest 2
+      // events (seq=2, seq=3) are evicted — 3 frames total, leaving seq=4,5,6.
       for (let i = 0; i < 5; i++) {
         controller.writeStdout(JSON.stringify({ idx: i }))
       }

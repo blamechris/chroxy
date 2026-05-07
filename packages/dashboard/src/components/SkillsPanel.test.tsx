@@ -539,6 +539,104 @@ describe('SkillsPanel (#3209)', () => {
       expect(screen.queryByTestId('skill-pending-path-alice/alice-skill')).toBeNull()
     })
 
+    // #3368: path span must carry .skill-pending-path so CSS can zero the
+    // margin-left (no checkbox in pending rows) and enable overflow truncation.
+    it('path element carries skill-pending-path class for overflow truncation (#3368)', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          path: '/Users/chris/very/long/nested/project/.chroxy/skills/community/alice/skill.md',
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const pathEl = screen.getByTestId('skill-pending-path-alice/alice-skill')
+      expect(pathEl.classList.contains('skill-pending-path')).toBe(true)
+    })
+
+    // #3368: title tooltip must be present so the full path is accessible on
+    // hover even when the text is truncated by overflow: hidden / text-overflow.
+    it('path element has title tooltip with full path (#3368)', () => {
+      const longPath = '/Users/chris/very/long/nested/project/.chroxy/skills/community/alice/skill.md'
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          path: longPath,
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const pathEl = screen.getByTestId('skill-pending-path-alice/alice-skill')
+      expect(pathEl.getAttribute('title')).toBe(longPath)
+    })
+
+    // #3369: combined test — both description AND path present.
+    it('renders both description and path when both are present', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          description: 'Does useful things',
+          path: '/home/user/.chroxy/skills/community/alice/alice-skill.md',
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const desc = screen.getByTestId('skill-pending-description-alice/alice-skill')
+      expect(desc).toBeInTheDocument()
+      expect(desc).toHaveTextContent('Does useful things')
+
+      const pathEl = screen.getByTestId('skill-pending-path-alice/alice-skill')
+      expect(pathEl).toBeInTheDocument()
+      expect(pathEl).toHaveTextContent('/home/user/.chroxy/skills/community/alice/alice-skill.md')
+    })
+
+    // #3369: empty-string + whitespace UI guard
+    it('does not render description element when description is an empty string', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice', description: '' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skill-pending-description-alice/alice-skill')).toBeNull()
+    })
+
+    it('does not render path element when path is an empty string', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice', path: '' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skill-pending-path-alice/alice-skill')).toBeNull()
+    })
+
+    it('does not render description element when description is whitespace-only', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice', description: '   ' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skill-pending-description-alice/alice-skill')).toBeNull()
+    })
+
+    it('does not render path element when path is whitespace-only', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice', path: '   ' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skill-pending-path-alice/alice-skill')).toBeNull()
+    })
+
     it('renders empty state when no skills loaded AND no pending', () => {
       renderPanel({
         skills: [],
