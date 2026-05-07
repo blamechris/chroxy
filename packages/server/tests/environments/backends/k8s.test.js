@@ -903,6 +903,36 @@ describe('K8sBackend.createEnvironment() — port range validation (#3386)', () 
     assert.ok(ports.some(p => p.containerPort === 3000), 'port 3000 must be kept')
     assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
+
+  it('silently drops colon-format with out-of-range container port "9000:65536"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-colon-overflow',
+      image: 'agent:latest',
+      forwardPorts: ['9000:65536'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 65536), 'colon-format port with container port 65536 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
+
+  it('silently drops colon-format with zero container port "9000:0"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-colon-zero',
+      image: 'agent:latest',
+      forwardPorts: ['9000:0'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 0), 'colon-format port with container port 0 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2920,6 +2950,152 @@ describe('SidecarProcess stdin wiring (#3336)', () => {
       'stdin frames must NOT be forwarded on a reconnect WS — resume picks up output only')
 
     proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess pre-dial stdin buffer cap (#3401)
+//
+// Without a cap, a fast producer writing to proc.stdin while the WS dial is
+// hung (slow cluster, DNS failure) would grow `_stdinBuffer` without bound
+// and OOM the server.  The constructor enforces `maxStdinBufferBytes`:
+// over-cap chunks are dropped with a single log.warn for the first drop.
+// kill() also clears the buffer to release memory immediately on the kill
+// path — otherwise it would be held until the proc object is GC'd.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess pre-dial stdin buffer cap (#3401)', () => {
+  /**
+   * Build a backend with a WS stuck in CONNECTING so writes accumulate in the
+   * pre-dial buffer instead of being forwarded.  Returns a { backend, openWs }
+   * pair — call openWs() to flip the WS to OPEN and trigger the spawn frame +
+   * buffer flush.
+   */
+  function makeBackendWithPendingDial({ maxStdinBufferBytes } = {}) {
+    const { ws: realWs } = createFakeWs()
+    const pendingOpenListeners = []
+    const connectingWs = {
+      readyState: 0,  // CONNECTING — never opens unless openWs() is called
+      sent: realWs.sent,
+      send: (data) => realWs.sent.push(data),
+      close: realWs.close,
+      once: (ev, fn) => {
+        if (ev === 'open') {
+          pendingOpenListeners.push(fn)
+        } else {
+          realWs.once(ev, fn)
+        }
+      },
+      on: (ev, fn) => realWs.on(ev, fn),
+    }
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(connectingWs),
+      _maxStdinBufferBytes: maxStdinBufferBytes,
+    })
+    backend._agentTokens.set('pod-x', 'tok')
+
+    const openWs = () => {
+      connectingWs.readyState = 1  // OPEN
+      for (const fn of pendingOpenListeners) fn()
+    }
+
+    return { backend, ws: connectingWs, openWs }
+  }
+
+  it('flushes all writes when buffered total stays within the cap', async () => {
+    // Cap: 100 bytes; three 21-byte writes = 63 total — well under the cap.
+    const { backend, ws, openWs } = makeBackendWithPendingDial({
+      maxStdinBufferBytes: 100,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const chunk = 'x'.repeat(20) + '\n'  // 21 bytes
+    proc.stdin.write(chunk)
+    proc.stdin.write(chunk)
+    proc.stdin.write(chunk)
+
+    await new Promise(r => setImmediate(r))
+    // No frames sent yet — WS is still connecting.
+    assert.equal(ws.sent.length, 0, 'no frames before WS opens')
+
+    openWs()
+    await new Promise(r => setImmediate(r))
+
+    const stdinFrames = ws.sent.map(s => JSON.parse(s)).filter(f => f.type === 'stdin')
+    assert.equal(stdinFrames.length, 3, 'all three under-cap writes must flush')
+    assert.equal(stdinFrames[0].data, chunk)
+    assert.equal(stdinFrames[1].data, chunk)
+    assert.equal(stdinFrames[2].data, chunk)
+  })
+
+  it('drops over-cap writes while preserving the bytes already buffered', async () => {
+    // Cap: 100 bytes.
+    //   write #1 (50 B) — fits  (running total 50).
+    //   write #2 (60 B) — would push to 110 B; dropped entirely (no truncation).
+    //   write #3 (80 B) — would push to 130 B; also dropped.
+    // Buffer should hold only write #1 when the dial finally resolves.
+    const { backend, ws, openWs } = makeBackendWithPendingDial({
+      maxStdinBufferBytes: 100,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const fits = 'a'.repeat(50)
+    const overflowsOnce = 'b'.repeat(60)
+    const overflowsAgain = 'c'.repeat(80)
+    proc.stdin.write(fits)
+    proc.stdin.write(overflowsOnce)
+    proc.stdin.write(overflowsAgain)
+
+    await new Promise(r => setImmediate(r))
+
+    // The proc's internal buffer should hold ONLY the first chunk.
+    assert.equal(proc._stdinBufferBytes, 50,
+      'only the under-cap chunk should be buffered')
+    assert.equal(proc._stdinBuffer.length, 1,
+      'over-cap chunks must be dropped entirely, not truncated')
+    assert.equal(proc._stdinBufferDropped, true,
+      'overflow flag must be set after the first dropped chunk')
+
+    openWs()
+    await new Promise(r => setImmediate(r))
+
+    const stdinFrames = ws.sent.map(s => JSON.parse(s)).filter(f => f.type === 'stdin')
+    assert.equal(stdinFrames.length, 1,
+      'only the buffered (under-cap) chunk should be flushed')
+    assert.equal(stdinFrames[0].data, fits,
+      'flushed chunk must be the original 50-byte payload, not a truncation')
+  })
+
+  it('kill() before dial resolves clears the pre-dial buffer', async () => {
+    const { backend } = makeBackendWithPendingDial({
+      maxStdinBufferBytes: 1024,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    proc.stdin.write('hello\n')
+    proc.stdin.write('world\n')
+
+    await new Promise(r => setImmediate(r))
+    assert.ok(proc._stdinBufferBytes > 0, 'sanity: buffer should hold pre-kill writes')
+    assert.ok(proc._stdinBuffer.length > 0, 'sanity: buffer chunks should be present')
+
+    // kill() before the dial resolves — _wireStdin() will never run, so
+    // without an explicit clear the buffer would be held until GC.
+    proc.kill('SIGTERM')
+
+    assert.equal(proc._stdinBufferBytes, 0, 'kill() must reset the byte counter')
+    assert.equal(proc._stdinBuffer.length, 0, 'kill() must release the buffer chunks')
   })
 })
 
