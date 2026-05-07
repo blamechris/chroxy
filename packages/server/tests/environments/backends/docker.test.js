@@ -746,6 +746,27 @@ describe('DockerBackend.execInEnvironment()', () => {
     assert.ok(execCall.args.indexOf('ctr-abc') > wIdx + 1)
   })
 
+  it('passes --workdir as a single argv element when cwd contains spaces', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'pwd',
+      cwd: '/work space/src',
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const wIdx = execCall.args.indexOf('--workdir')
+    assert.ok(wIdx >= 0, '--workdir flag must be present')
+    // The path with a space must arrive as one unescaped array element — not split
+    // or shell-quoted. This guards against any future refactor that naively joins
+    // args into a shell string before passing to docker exec.
+    assert.equal(execCall.args[wIdx + 1], '/work space/src',
+      'cwd with spaces must be a single unescaped argv element')
+    assert.ok(!execCall.args.includes('/work'), 'path must not be split on the space')
+    assert.ok(!execCall.args.includes('space/src'), 'path must not be split on the space')
+  })
+
   it('passes --env KEY=VAL for each entry in opts.env', async () => {
     const mockExec = createMockExecFile({ results: { exec: '' } })
     const backend = new DockerBackend({ _execFile: mockExec })
@@ -804,6 +825,78 @@ describe('DockerBackend.execInEnvironment()', () => {
       () => backend.execInEnvironment('ctr-abc', { cmd: 'nonexistent' }),
       /bash: no such file/
     )
+  })
+
+  it('filters out entries whose value is null', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      env: { GOOD: 'value', BAD: null },
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const envPairs = []
+    for (let i = 0; i < execCall.args.length - 1; i++) {
+      if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
+    }
+    assert.ok(envPairs.includes('GOOD=value'), 'non-null value must be forwarded')
+    assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'null value must be silently skipped')
+  })
+
+  it('filters out entries whose value is undefined', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      env: { GOOD: 'value', BAD: undefined },
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const envPairs = []
+    for (let i = 0; i < execCall.args.length - 1; i++) {
+      if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
+    }
+    assert.ok(envPairs.includes('GOOD=value'), 'non-undefined value must be forwarded')
+    assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'undefined value must be silently skipped')
+  })
+
+  it('coerces numeric values to string via String()', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      env: { PORT: 3000, TIMEOUT: 0 },
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const envPairs = []
+    for (let i = 0; i < execCall.args.length - 1; i++) {
+      if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
+    }
+    assert.ok(envPairs.includes('PORT=3000'), 'numeric value must be coerced to string')
+    assert.ok(envPairs.includes('TIMEOUT=0'), 'falsy numeric 0 must not be skipped (only null/undefined are)')
+  })
+
+  it('passes string values through unchanged', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      env: { KEY: 'plain-string', EMPTY: '' },
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const envPairs = []
+    for (let i = 0; i < execCall.args.length - 1; i++) {
+      if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
+    }
+    assert.ok(envPairs.includes('KEY=plain-string'), 'plain string must be forwarded as-is')
+    assert.ok(envPairs.includes('EMPTY='), 'empty string must be forwarded (not treated as null)')
   })
 
   it('does not forward process.env — only passes what the caller supplies', async () => {

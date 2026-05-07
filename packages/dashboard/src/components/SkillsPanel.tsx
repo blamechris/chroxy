@@ -219,13 +219,13 @@ export function SkillsPanel({
                     an informed trust decision. Both fields are optional — older
                     servers (pre-#3310) or manually-constructed test fixtures may
                     omit them; the row collapses gracefully. */}
-                {description && (
+                {description?.trim() && (
                   <span
                     className="skill-desc skill-pending-description"
                     data-testid={`skill-pending-description-${author}/${name}`}
                   >{description}</span>
                 )}
-                {path && (
+                {path?.trim() && (
                   <span
                     className="skill-meta skill-pending-path"
                     data-testid={`skill-pending-path-${author}/${name}`}
