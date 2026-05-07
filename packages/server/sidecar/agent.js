@@ -441,8 +441,14 @@ export class PodAgent {
     }
 
     // If the session still has an activeWs at eviction time (e.g. evicted by
-    // the size cap while a connection is live), close it cleanly.
+    // the size cap while a connection is live), send a session_lost frame first
+    // so the consumer can distinguish a forced eviction from a pre-session
+    // connection failure (which K8sBackend also maps to exit(-1) on close(1001)
+    // without a preceding frame).  The frame is sent directly — not through
+    // _emitSessionFrame — because we are mid-eviction and do not want the
+    // frame buffered or seq-stamped as session output.
     if (session.activeWs) {
+      this._send(session.activeWs, { type: 'session_lost', sessionId, reason: 'evicted_by_cap' })
       try { session.activeWs.close(1001, 'session evicted') } catch {}
       session.activeWs = null
     }
