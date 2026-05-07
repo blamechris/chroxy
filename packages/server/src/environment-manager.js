@@ -407,7 +407,9 @@ export class EnvironmentManager extends EventEmitter {
    *   - it has no `containerId`
    *   - `getEnvironmentStatus` reports the container is stopped
    *   - `getEnvironmentStatus` throws (container/handle not found)
-   *   - `reconnectAgentToken` returns `false` (credential source GC'd)
+   *   - `reconnectAgentToken` returns any non-`true` value, e.g. `false`
+   *     (credential source GC'd) or `undefined` / `null` from a misbehaving
+   *     backend (#3495)
    *   - `reconnectAgentToken` throws (transient error treated as same signal)
    */
   async reconnect() {
@@ -452,10 +454,15 @@ export class EnvironmentManager extends EventEmitter {
       // A thrown error is treated as the same unreachable signal as returning
       // false (#3478): the operator cannot rely on the credential, so the
       // environment must be marked error and reconnect() must report failure.
+      //
+      // Defensive (#3495): treat any non-`true` return (including `undefined` /
+      // `null` from a misbehaving or future backend) as the same unreachable
+      // signal. The contract is "strict `=== true` for success" — a missing
+      // credential is just as unusable as `false`.
       if (typeof this._backend.reconnectAgentToken === 'function') {
         try {
           const ok = await this._backend.reconnectAgentToken(env.containerId)
-          if (ok === false) {
+          if (ok !== true) {
             env.status = 'error'
             allHealthy = false
             log.warn(`Environment "${env.name}" (id: ${env.id}) credential source is gone — marking unreachable`)

@@ -786,6 +786,83 @@ describe('EnvironmentManager.reconnect()', () => {
       'reconnect() must return false when getEnvironmentStatus throws')
     assert.equal(manager.get('env-status-throw').status, 'error')
   })
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Defensive hardening for non-true backend returns (#3495)
+  //
+  // The Backend protocol JSDoc only documents `true` / `false` returns from
+  // reconnectAgentToken. A misbehaving or future backend that returns
+  // `undefined` / `null` / any other non-true value should be treated as
+  // failure — a missing credential is just as unusable as `false`.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  it('marks environment unreachable when reconnectAgentToken returns undefined (#3495)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-cred-undef',
+        name: 'cred-undef-env',
+        cwd: '/tmp',
+        image: 'chroxy-pod-agent:latest',
+        containerId: 'pod-cred-undef',
+        containerUser: 'root',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-05-06T00:00:00Z',
+        memoryLimit: null,
+        cpuLimit: null,
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const backend = {
+      async getEnvironmentStatus() { return true },
+      async reconnectAgentToken() { /* returns undefined */ },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    assert.equal(result, false,
+      'reconnect() must return false when reconnectAgentToken returns undefined — non-true is unreachable')
+    assert.equal(manager.get('env-cred-undef').status, 'error',
+      'env should be marked error when token refresh returns undefined')
+  })
+
+  it('marks environment unreachable when reconnectAgentToken returns null (#3495)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-cred-null',
+        name: 'cred-null-env',
+        cwd: '/tmp',
+        image: 'chroxy-pod-agent:latest',
+        containerId: 'pod-cred-null',
+        containerUser: 'root',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-05-06T00:00:00Z',
+        memoryLimit: null,
+        cpuLimit: null,
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const backend = {
+      async getEnvironmentStatus() { return true },
+      async reconnectAgentToken() { return null },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    assert.equal(result, false,
+      'reconnect() must return false when reconnectAgentToken returns null — non-true is unreachable')
+    assert.equal(manager.get('env-cred-null').status, 'error',
+      'env should be marked error when token refresh returns null')
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
