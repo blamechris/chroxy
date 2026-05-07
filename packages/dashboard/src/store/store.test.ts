@@ -1534,4 +1534,128 @@ describe('server_error toast scope filtering', () => {
 
     _testMessageHandler.clearContext();
   });
+
+  // #3588: skill_trust_grant in-flight tracking — the grantCommunitySkillTrust
+  // action records the requestId on the active session's pendingTrustGrants
+  // list so the SkillsPanel can render an in-flight state. The disconnect
+  // path must clear the list so a stale entry doesn't leak across reconnects.
+  describe('grantCommunitySkillTrust pendingTrustGrants tracking (#3588)', () => {
+    it('appends a pendingTrustGrants entry when the WS message is sent', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const sent: string[] = [];
+
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState() },
+        },
+        socket: {
+          send: (data: string) => sent.push(data),
+          readyState: 1,
+        } as unknown as WebSocket,
+      });
+
+      useConnectionStore.getState().grantCommunitySkillTrust('alice-skill', 'alice');
+
+      // WS payload was sent.
+      expect(sent).toHaveLength(1);
+      const wire = JSON.parse(sent[0]!);
+      expect(wire.type).toBe('skill_trust_grant');
+      expect(wire.skillName).toBe('alice-skill');
+      expect(wire.author).toBe('alice');
+      expect(typeof wire.requestId).toBe('string');
+
+      // Pending entry was recorded with the same requestId.
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.pendingTrustGrants).toHaveLength(1);
+      expect(ss.pendingTrustGrants![0]).toEqual({
+        requestId: wire.requestId,
+        skillName: 'alice-skill',
+        author: 'alice',
+      });
+
+      // Cleanup
+      useConnectionStore.setState({
+        sessions: [],
+        activeSessionId: null,
+        sessionStates: {},
+        socket: null,
+      });
+    });
+
+    it('de-dupes per (skillName, author) so a re-click replaces the stale requestId', async () => {
+      // Defensive: if the operator rage-clicks Trust twice before the
+      // first response arrives, we should track only the latest
+      // requestId — otherwise the second response would only clear one
+      // of two entries and the row would stay stuck.
+      const { useConnectionStore } = await import('./connection');
+      const sent: string[] = [];
+
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState() },
+        },
+        socket: {
+          send: (data: string) => sent.push(data),
+          readyState: 1,
+        } as unknown as WebSocket,
+      });
+
+      useConnectionStore.getState().grantCommunitySkillTrust('alice-skill', 'alice');
+      useConnectionStore.getState().grantCommunitySkillTrust('alice-skill', 'alice');
+
+      // Two WS messages went out, but only one pending entry remains —
+      // the latest requestId wins.
+      expect(sent).toHaveLength(2);
+      const wire2 = JSON.parse(sent[1]!);
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.pendingTrustGrants).toHaveLength(1);
+      expect(ss.pendingTrustGrants![0]!.requestId).toBe(wire2.requestId);
+
+      useConnectionStore.setState({
+        sessions: [],
+        activeSessionId: null,
+        sessionStates: {},
+        socket: null,
+      });
+    });
+
+    it('disconnect clears pendingTrustGrants on every session', async () => {
+      const { useConnectionStore } = await import('./connection');
+
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            pendingTrustGrants: [
+              { requestId: 'req-1', skillName: 'alice-skill', author: 'alice' },
+            ],
+          },
+          s2: {
+            ...createEmptySessionState(),
+            pendingTrustGrants: [
+              { requestId: 'req-2', skillName: 'bob-skill', author: 'bob' },
+            ],
+          },
+        },
+        socket: null,
+      });
+
+      useConnectionStore.getState().disconnect();
+
+      const after = useConnectionStore.getState().sessionStates;
+      expect(after.s1!.pendingTrustGrants).toEqual([]);
+      expect(after.s2!.pendingTrustGrants).toEqual([]);
+
+      useConnectionStore.setState({
+        sessions: [],
+        activeSessionId: null,
+        sessionStates: {},
+        userDisconnected: false,
+      });
+    });
+  });
 });

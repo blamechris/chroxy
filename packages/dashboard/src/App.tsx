@@ -264,6 +264,7 @@ export function App() {
     skills: activeSkills,
     mismatchedSkillNames: activeMismatched,
     pendingCommunitySkills: activePendingCommunitySkills,
+    pendingTrustGrants: activePendingTrustGrants,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -1505,6 +1506,7 @@ export function App() {
           pendingCommunitySkills={activePendingCommunitySkills}
           onGrantTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
           capabilities={{ skillTrustGrant: skillTrustGrantSupported }}
+          pendingTrustGrants={activePendingTrustGrants}
           onClose={() => setSkillsPanelOpen(false)}
         />
       )}

@@ -281,6 +281,23 @@ export interface PendingCommunitySkill {
   path?: string;
 }
 
+// #3588: one in-flight `skill_trust_grant` request. Tracked per session
+// so the SkillsPanel "Pending review" row can show an in-flight state
+// (disabled button + spinner) and operators get feedback that their
+// click was processed even when the server returns an error
+// (INVALID_AUTHOR / TRUST_NOT_ENABLED / TRUST_FLUSH_FAILED) instead of
+// the success broadcast. The entry is added when grantCommunitySkillTrust
+// fires the WS message and removed on EITHER skill_trust_grant_ok (success)
+// OR an `error` envelope whose requestId matches.
+export interface PendingTrustGrant {
+  /** WS requestId — used to correlate the ack/error envelope. */
+  requestId: string;
+  /** Community skill name being granted trust for. */
+  skillName: string;
+  /** Community author whose trust is being granted. */
+  author: string;
+}
+
 export interface SessionState extends BaseSessionState {
   terminalRawBuffer: string;
   // Files tab: selected file path (persists across tab switches)
@@ -311,6 +328,15 @@ export interface SessionState extends BaseSessionState {
   // persisted across reconnects — the server re-emits trust_request
   // events each time skills are loaded.
   pendingCommunitySkills?: PendingCommunitySkill[];
+  // #3588: in-flight skill_trust_grant requests. Added by
+  // grantCommunitySkillTrust when it fires the WS message; removed by
+  // skill_trust_grant_ok (success ack) or the matching `error` envelope
+  // (INVALID_AUTHOR / TRUST_NOT_ENABLED / TRUST_FLUSH_FAILED). Drives
+  // the SkillsPanel "Pending review" row's in-flight state (disabled
+  // Trust button + spinner) so operators get feedback even on the
+  // error path. Not persisted across reconnects — the WS request would
+  // be stale anyway, and the disconnect handler clears the field.
+  pendingTrustGrants?: PendingTrustGrant[];
 }
 
 export interface ConnectionState {

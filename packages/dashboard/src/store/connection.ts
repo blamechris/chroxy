@@ -63,6 +63,7 @@ import type {
   ConnectionState,
   ServerEntry,
   SessionInfo,
+  SessionState,
 } from './types';
 import {
   loadServerRegistry,
@@ -745,9 +746,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     // Clear message queue on explicit disconnect
     clearMessageQueue();
+    // #3588: clear in-flight skill_trust_grant requests per session.
+    // The WS request would be stale on reconnect anyway, and a stuck
+    // entry would leave the SkillsPanel "Pending review" Trust button
+    // disabled with no way to retry across the disconnect boundary.
+    const prevSessionStates = get().sessionStates;
+    const cleanedSessionStates: Record<string, SessionState> = {};
+    for (const sid of Object.keys(prevSessionStates)) {
+      const ss = prevSessionStates[sid];
+      if (!ss) continue;
+      if (Array.isArray(ss.pendingTrustGrants) && ss.pendingTrustGrants.length > 0) {
+        cleanedSessionStates[sid] = { ...ss, pendingTrustGrants: [] };
+      } else {
+        cleanedSessionStates[sid] = ss;
+      }
+    }
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',
+      sessionStates: cleanedSessionStates,
       socket: null,
       serverMode: null,
       sessionCwd: null,
@@ -1264,6 +1281,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // BaseSession._loadSkills, reloads skills, and broadcasts
   // skill_trust_granted (removes pending row) + skill_trust_grant_ok
   // (ack to requesting client).
+  // #3588: track the in-flight requestId on the active session's
+  // `pendingTrustGrants` so the SkillsPanel "Pending review" row can
+  // render an in-flight state (disabled Trust button + spinner). The
+  // entry is cleared by the message-handler on EITHER skill_trust_grant_ok
+  // (success) OR an `error` envelope whose requestId matches — without
+  // this, an INVALID_AUTHOR / TRUST_NOT_ENABLED / TRUST_FLUSH_FAILED
+  // response would leave the row stuck "approving" with no way to retry.
   grantCommunitySkillTrust: (skillName: string, author: string) => {
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1277,6 +1301,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       };
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
+      // Track the in-flight grant so the panel can disable the row.
+      // Only track when the message has a session to bind to — otherwise
+      // there's no SkillsPanel surface to show feedback on anyway.
+      if (activeSessionId && get().sessionStates[activeSessionId]) {
+        updateActiveSession((ss) => {
+          const existing = Array.isArray(ss.pendingTrustGrants) ? ss.pendingTrustGrants : [];
+          // Defensive de-dupe: identical (skillName, author) shouldn't
+          // queue twice — collapse to the latest requestId so the
+          // success/error correlation always lands on a live entry.
+          const filtered = existing.filter(
+            g => !(g.skillName === skillName && g.author === author),
+          );
+          return { pendingTrustGrants: [...filtered, { requestId, skillName, author }] };
+        });
+      }
     }
   },
 

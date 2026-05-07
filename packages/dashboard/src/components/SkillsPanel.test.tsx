@@ -736,4 +736,89 @@ describe('SkillsPanel (#3209)', () => {
       expect(screen.getByTestId('skills-panel-pending-section')).toBeInTheDocument()
     })
   })
+
+  // #3588: in-flight skill_trust_grant state. The Trust button reflects
+  // pending requests via the `pendingTrustGrants` prop so the operator
+  // gets feedback that the click landed even when the response is an
+  // error (INVALID_AUTHOR / TRUST_NOT_ENABLED / TRUST_FLUSH_FAILED).
+  describe('in-flight skill_trust_grant state (#3588)', () => {
+    it('disables the Trust button and shows a spinner when a matching grant is pending', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        pendingTrustGrants: [
+          { requestId: 'req-1', skillName: 'alice-skill', author: 'alice' },
+        ],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const btn = screen.getByTestId('skill-grant-trust-alice/alice-skill')
+      expect(btn).toBeDisabled()
+      expect(btn).toHaveAttribute('aria-busy', 'true')
+      expect(screen.getByTestId('skill-grant-trust-spinner-alice/alice-skill')).toBeInTheDocument()
+      // Label flips to "Granting…" so the operator gets explicit text feedback.
+      expect(btn).toHaveTextContent(/granting/i)
+    })
+
+    it('keeps other rows clickable when only one grant is in flight', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [
+          { name: 'alice-skill', author: 'alice' },
+          { name: 'bob-skill', author: 'bob' },
+        ],
+        pendingTrustGrants: [
+          { requestId: 'req-1', skillName: 'alice-skill', author: 'alice' },
+        ],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.getByTestId('skill-grant-trust-alice/alice-skill')).toBeDisabled()
+      const bobBtn = screen.getByTestId('skill-grant-trust-bob/bob-skill')
+      expect(bobBtn).not.toBeDisabled()
+      expect(screen.queryByTestId('skill-grant-trust-spinner-bob/bob-skill')).toBeNull()
+    })
+
+    it('renders the Trust button enabled when pendingTrustGrants is undefined (older callers)', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        // pendingTrustGrants intentionally omitted
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const btn = screen.getByTestId('skill-grant-trust-alice/alice-skill')
+      expect(btn).not.toBeDisabled()
+      expect(screen.queryByTestId('skill-grant-trust-spinner-alice/alice-skill')).toBeNull()
+    })
+
+    it('lifts the in-flight state when pendingTrustGrants no longer contains the entry', () => {
+      const { rerender } = renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        pendingTrustGrants: [
+          { requestId: 'req-1', skillName: 'alice-skill', author: 'alice' },
+        ],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.getByTestId('skill-grant-trust-alice/alice-skill')).toBeDisabled()
+
+      // Simulate the message-handler clearing the entry on error or success.
+      rerender(
+        <SkillsPanel
+          skills={[]}
+          pendingCommunitySkills={[{ name: 'alice-skill', author: 'alice' }]}
+          pendingTrustGrants={[]}
+          onGrantTrust={vi.fn()}
+          capabilities={{ skillTrustGrant: true }}
+          onActivate={vi.fn()}
+          onDeactivate={vi.fn()}
+          onClose={NOOP}
+        />,
+      )
+      expect(screen.getByTestId('skill-grant-trust-alice/alice-skill')).not.toBeDisabled()
+      expect(screen.queryByTestId('skill-grant-trust-spinner-alice/alice-skill')).toBeNull()
+    })
+  })
 })
