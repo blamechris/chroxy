@@ -89,6 +89,30 @@ function waitForMessages(ws, count, timeoutMs = 2000) {
 }
 
 /**
+ * Wait for the next `session_started` frame and resolve with its sessionId.
+ * Attach BEFORE sending `spawn` so the frame is never missed.  Other message
+ * listeners (e.g. message-buffer arrays in cap-eviction tests) can coexist
+ * because this helper detaches itself once the frame arrives.
+ */
+function waitForSessionStarted(ws, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('timeout waiting for session_started frame')),
+      timeoutMs,
+    )
+    function onMsg(data) {
+      let msg
+      try { msg = JSON.parse(data.toString()) } catch { return }
+      if (msg.type !== 'session_started') return
+      clearTimeout(timer)
+      ws.off('message', onMsg)
+      resolve(msg.sessionId)
+    }
+    ws.on('message', onMsg)
+  })
+}
+
+/**
  * Like waitForMessages but skips `session_started` frames and returns N
  * non-session_started frames.  Use in spawn tests that don't care about the
  * session_started acknowledgement.
@@ -1785,11 +1809,9 @@ describe('PodAgent', () => {
         // Session 1 — connect, spawn, then disconnect (goes idle).
         const ws1 = connect(capPort, TOKEN)
         await waitOpen(ws1)
-        const ws1Msgs = []
-        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sid1Promise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const sid1 = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        const sid1 = await sid1Promise
         ws1.close()
         await new Promise((r) => setTimeout(r, 30))
 
@@ -1798,11 +1820,9 @@ describe('PodAgent', () => {
         // Session 2 — connect, spawn, then disconnect (goes idle).
         const ws2 = connect(capPort, TOKEN)
         await waitOpen(ws2)
-        const ws2Msgs = []
-        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sid2Promise = waitForSessionStarted(ws2)
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const sid2 = ws2Msgs.find((m) => m.type === 'session_started').sessionId
+        const sid2 = await sid2Promise
         ws2.close()
         await new Promise((r) => setTimeout(r, 30))
 
@@ -1811,10 +1831,9 @@ describe('PodAgent', () => {
         // Session 3 — spawning this must evict the oldest idle session (session 1).
         const ws3 = connect(capPort, TOKEN)
         await waitOpen(ws3)
-        const ws3Msgs = []
-        ws3.on('message', (d) => { try { ws3Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sid3Promise = waitForSessionStarted(ws3)
         ws3.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await sid3Promise
 
         // After spawn 3: cap evicted session 1, so map has [sid2, sid3].
         assert.equal(capAgent._sessions.size, 2, 'session count stays at cap after eviction')
@@ -1863,11 +1882,9 @@ describe('PodAgent', () => {
         // Session 1 -- connect, spawn, then disconnect (goes idle).
         const ws1 = connect(capPort, TOKEN)
         await waitOpen(ws1)
-        const ws1Msgs = []
-        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sid1Promise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 30))
-        const sid1 = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        const sid1 = await sid1Promise
         ws1.close()
         await new Promise((r) => setTimeout(r, 30))
 
@@ -1923,22 +1940,18 @@ describe('PodAgent', () => {
         // --- Session A ---
         const ws1 = connect(capPort, TOKEN)
         await waitOpen(ws1)
-        const ws1Msgs = []
-        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sidAPromise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const sidA = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        const sidA = await sidAPromise
         ws1.close()
         await new Promise((r) => setTimeout(r, 30))
 
         // --- Session B (spawned after A so its lastActiveAt is naturally newer) ---
         const ws2 = connect(capPort, TOKEN)
         await waitOpen(ws2)
-        const ws2Msgs = []
-        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sidBPromise = waitForSessionStarted(ws2)
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const sidB = ws2Msgs.find((m) => m.type === 'session_started').sessionId
+        const sidB = await sidBPromise
         ws2.close()
         await new Promise((r) => setTimeout(r, 30))
 
@@ -1968,10 +1981,9 @@ describe('PodAgent', () => {
         // --- Session C: cap enforced, must evict session A (oldest active) ---
         const ws3 = connect(capPort, TOKEN)
         await waitOpen(ws3)
-        const ws3Msgs = []
-        ws3.on('message', (d) => { try { ws3Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sidCPromise = waitForSessionStarted(ws3)
         ws3.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await sidCPromise
 
         // Session count must stay at the cap.
         assert.equal(capAgent._sessions.size, 2, 'session count stays at cap after eviction')
@@ -2019,22 +2031,18 @@ describe('PodAgent', () => {
         // --- Session A (will be the oldest) ---
         const ws1 = connect(capPort, TOKEN)
         await waitOpen(ws1)
-        const ws1Msgs = []
-        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sidAPromise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const sidA = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        const sidA = await sidAPromise
         ws1.close()
         await new Promise((r) => setTimeout(r, 30))
 
         // --- Session B (newer) ---
         const ws2 = connect(capPort, TOKEN)
         await waitOpen(ws2)
-        const ws2Msgs = []
-        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const sidBPromise = waitForSessionStarted(ws2)
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const sidB = ws2Msgs.find((m) => m.type === 'session_started').sessionId
+        const sidB = await sidBPromise
         ws2.close()
         await new Promise((r) => setTimeout(r, 30))
 
@@ -2064,8 +2072,9 @@ describe('PodAgent', () => {
         // --- Session C: triggers cap → A is evicted ---
         const ws3 = connect(capPort, TOKEN)
         await waitOpen(ws3)
+        const sidCPromise = waitForSessionStarted(ws3)
         ws3.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await sidCPromise
 
         // Verify frame ordering: session_lost must precede ws.close(1001).
         const sendIdx = callLog.findIndex((e) => e.op === 'send' && e.frame.type === 'session_lost')
