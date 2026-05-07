@@ -297,6 +297,13 @@ export declare const ServerSkillTrustGrantOkSchema: z.ZodObject<{
     skillName: z.ZodString;
     author: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerSkillTrustGrantInvalidAuthorSchema: z.ZodObject<{
+    type: z.ZodLiteral<"error">;
+    requestId: z.ZodNullable<z.ZodString>;
+    code: z.ZodLiteral<"INVALID_AUTHOR">;
+    message: z.ZodString;
+    actualAuthor: z.ZodString;
+}, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"server_error">;
     category: z.ZodOptional<z.ZodString>;
@@ -467,3 +474,4 @@ export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>;
+export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>;

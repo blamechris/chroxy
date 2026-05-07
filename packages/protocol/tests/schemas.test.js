@@ -565,4 +565,70 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(!result.success, 'Discriminated union should reject mixed success+error')
     })
   })
+
+  // #3538: skill_trust_grant INVALID_AUTHOR error must carry actualAuthor as
+  // a structured field on the wire — clients must NOT regex-parse `message`.
+  describe('ServerSkillTrustGrantInvalidAuthorSchema (#3538)', () => {
+    it('validates a well-formed INVALID_AUTHOR payload with actualAuthor', async () => {
+      const { ServerSkillTrustGrantInvalidAuthorSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSkillTrustGrantInvalidAuthorSchema.safeParse({
+        type: 'error',
+        requestId: 'req-1',
+        code: 'INVALID_AUTHOR',
+        message: "Community skill 'foo' is owned by 'alice', not 'bob'.",
+        actualAuthor: 'alice',
+      })
+      assert.ok(result.success, 'Should validate INVALID_AUTHOR error carrying actualAuthor')
+      if (result.success) {
+        assert.equal(result.data.actualAuthor, 'alice')
+      }
+    })
+
+    it('accepts null requestId', async () => {
+      const { ServerSkillTrustGrantInvalidAuthorSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSkillTrustGrantInvalidAuthorSchema.safeParse({
+        type: 'error',
+        requestId: null,
+        code: 'INVALID_AUTHOR',
+        message: 'wrong author',
+        actualAuthor: 'alice',
+      })
+      assert.ok(result.success, 'requestId must accept null')
+    })
+
+    it('rejects payload missing actualAuthor', async () => {
+      const { ServerSkillTrustGrantInvalidAuthorSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSkillTrustGrantInvalidAuthorSchema.safeParse({
+        type: 'error',
+        requestId: 'req-2',
+        code: 'INVALID_AUTHOR',
+        message: 'wrong author',
+      })
+      assert.ok(!result.success, 'actualAuthor is required for the cross-author variants')
+    })
+
+    it('rejects wrong code literal', async () => {
+      const { ServerSkillTrustGrantInvalidAuthorSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSkillTrustGrantInvalidAuthorSchema.safeParse({
+        type: 'error',
+        requestId: 'req-3',
+        code: 'SKILL_NOT_FOUND',
+        message: 'oops',
+        actualAuthor: 'alice',
+      })
+      assert.ok(!result.success, 'Schema must lock code to literal INVALID_AUTHOR')
+    })
+
+    it('rejects wrong type literal', async () => {
+      const { ServerSkillTrustGrantInvalidAuthorSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSkillTrustGrantInvalidAuthorSchema.safeParse({
+        type: 'server_error',
+        requestId: 'req-4',
+        code: 'INVALID_AUTHOR',
+        message: 'oops',
+        actualAuthor: 'alice',
+      })
+      assert.ok(!result.success, 'Schema must lock type to literal "error"')
+    })
+  })
 })

@@ -375,6 +375,24 @@ export const ServerSkillTrustGrantOkSchema = z.object({
   author: z.string(),
 })
 
+// #3538: structured error response for `skill_trust_grant` when the per-author
+// resolve lands on a different community author than the caller claims (the
+// #3307 symlink branch and the #3500 shallow-scan branch). The wire shape is
+// the canonical handler error (`type: 'error'`, `code`, `message`) plus an
+// `actualAuthor` field carrying the real owner so dashboard clients can branch
+// on `code === 'INVALID_AUTHOR'` and read the field directly instead of
+// regex-parsing the human-readable `message` (which is intentionally not
+// stable wording). Other `INVALID_AUTHOR` causes (empty `author` validation)
+// do NOT include `actualAuthor` — the field is only present for the
+// cross-author variants.
+export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
+  type: z.literal('error'),
+  requestId: z.string().nullable(),
+  code: z.literal('INVALID_AUTHOR'),
+  message: z.string(),
+  actualAuthor: z.string(),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),
@@ -574,3 +592,4 @@ export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>
+export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>
