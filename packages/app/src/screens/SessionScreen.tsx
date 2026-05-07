@@ -34,6 +34,7 @@ import { SessionNotificationBanner } from '../components/SessionNotificationBann
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
+import { StdinDisabledBanner } from '../components/StdinDisabledBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -263,6 +264,7 @@ export function SessionScreen() {
   const launchWebTask = useConnectionStore((s) => s.launchWebTask);
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
   const destroySession = useConnectionStore((s) => s.destroySession);
+  const createSession = useConnectionStore((s) => s.createSession);
   const switchSession = useConnectionStore((s) => s.switchSession);
   const latencyMs = useConnectionLifecycleStore((s) => s.latencyMs);
   const connectionQuality = useConnectionLifecycleStore((s) => s.connectionQuality);
@@ -420,6 +422,24 @@ export function SessionScreen() {
   const handleTerminalResize = useCallback((cols: number, rows: number) => {
     useConnectionStore.getState().resize(cols, rows);
   }, []);
+
+  // #3595: dedicated restart handler for the StdinDisabledBanner. Destroys
+  // the broken session and immediately re-creates a fresh one with the same
+  // name / cwd / provider / worktree so the user lands back where they
+  // started. No confirm dialog — destruction is implicit in "restart" and
+  // any in-flight Claude work was already wedged behind the broken stdin
+  // pipe. Mirrors the dashboard's `handleRestartSession` (PR #3593).
+  const handleRestartStdinSession = useCallback((sessionId: string) => {
+    const session = sessions.find((s) => s.sessionId === sessionId);
+    if (!session) return;
+    destroySession(sessionId);
+    createSession(
+      session.name,
+      session.cwd || undefined,
+      session.worktree,
+      session.provider,
+    );
+  }, [sessions, destroySession, createSession]);
 
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -1041,6 +1061,17 @@ export function SessionScreen() {
 
       {/* Background session progress indicators */}
       <BackgroundSessionProgress />
+
+      {/* Stdin forwarding lost banner (#3595) — render the latched
+          `stdinForwardingDisabled` flag from session_list metadata for the
+          currently-active session. The flag persists across server restarts
+          (#3540 / #3564), so this banner appears immediately after a
+          cold-restart reconnect without needing a fresh `error` event. */}
+      <StdinDisabledBanner
+        visible={!!activeSession?.stdinForwardingDisabled}
+        sessionId={activeSessionId}
+        onRestart={handleRestartStdinSession}
+      />
 
       {/* Session timeout warning banner */}
       {timeoutWarning && (
