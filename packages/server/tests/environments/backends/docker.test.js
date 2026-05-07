@@ -746,6 +746,27 @@ describe('DockerBackend.execInEnvironment()', () => {
     assert.ok(execCall.args.indexOf('ctr-abc') > wIdx + 1)
   })
 
+  it('passes --workdir as a single argv element when cwd contains spaces', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'pwd',
+      cwd: '/work space/src',
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const wIdx = execCall.args.indexOf('--workdir')
+    assert.ok(wIdx >= 0, '--workdir flag must be present')
+    // The path with a space must arrive as one unescaped array element — not split
+    // or shell-quoted. This guards against any future refactor that naively joins
+    // args into a shell string before passing to docker exec.
+    assert.equal(execCall.args[wIdx + 1], '/work space/src',
+      'cwd with spaces must be a single unescaped argv element')
+    assert.ok(!execCall.args.includes('/work'), 'path must not be split on the space')
+    assert.ok(!execCall.args.includes('space/src'), 'path must not be split on the space')
+  })
+
   it('passes --env KEY=VAL for each entry in opts.env', async () => {
     const mockExec = createMockExecFile({ results: { exec: '' } })
     const backend = new DockerBackend({ _execFile: mockExec })
