@@ -1815,3 +1815,89 @@ describe('DockerSdkSession stdin_disabled handler (#3468)', () => {
     assert.equal(session._stdinForwardingDisabled, false)
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────────
+// #3507 — DockerSdkSession spawn callback wires _attachSidecarProcessListeners
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession spawn callback wires _attachSidecarProcessListeners (#3507)', () => {
+  it('invokes _attachSidecarProcessListeners with the spawned proc', async (t) => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+
+    // Backend that returns a SidecarProcess-shaped EventEmitter.  Plain
+    // ChildProcess works too — the helper is a no-op on procs without the
+    // sidecar events — but using an emitter mirrors the K8s shape that the
+    // wiring exists to support.
+    const fakeProc = new EventEmitter()
+    fakeProc.stdout = new EventEmitter()
+    fakeProc.stderr = new EventEmitter()
+    fakeProc.stdin = new EventEmitter()
+    const fakeBackend = {
+      streamCliInEnvironment: () => fakeProc,
+    }
+
+    const session = new DockerSdkSession({
+      containerId: 'spawn-wiring-ctr',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    session._backend = fakeBackend
+
+    // Spy on the inherited helper so we can assert the spawn callback wires it.
+    const spy = t.mock.method(session, '_attachSidecarProcessListeners')
+
+    const cb = session._createSpawnCallback()
+    const proc = cb({
+      command: 'node',
+      args: ['/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    assert.equal(spy.mock.callCount(), 1,
+      '_attachSidecarProcessListeners should be called exactly once per spawn')
+    assert.equal(spy.mock.calls[0].arguments[0], proc,
+      'helper should receive the spawned proc returned by the backend')
+    assert.equal(proc, fakeProc,
+      'spawn callback should return the proc the backend produced')
+  })
+
+  it('wires the helper on every spawn (covers re-spawn after backend reset)', async (t) => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+
+    // Each spawn returns a fresh proc so the wiring is exercised independently.
+    const procs = []
+    const fakeBackend = {
+      streamCliInEnvironment: () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.stdin = new EventEmitter()
+        procs.push(proc)
+        return proc
+      },
+    }
+
+    const session = new DockerSdkSession({
+      containerId: 'respawn-ctr',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    session._backend = fakeBackend
+
+    const spy = t.mock.method(session, '_attachSidecarProcessListeners')
+
+    const cb = session._createSpawnCallback()
+    const opts = {
+      command: 'node',
+      args: ['/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'],
+      cwd: '/workspace',
+      env: {},
+    }
+    cb(opts)
+    cb(opts)
+
+    assert.equal(spy.mock.callCount(), 2,
+      'helper should fire once per spawn callback invocation')
+    assert.equal(spy.mock.calls[0].arguments[0], procs[0])
+    assert.equal(spy.mock.calls[1].arguments[0], procs[1])
+  })
+})

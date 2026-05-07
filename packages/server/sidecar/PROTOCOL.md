@@ -595,7 +595,7 @@ replies with `{ type: 'pong' }`.
 | `resume` with unknown sessionId              | `session_lost` frame (`reason: unknown_session`), connection stays open |
 | `resume` with stale lastSeq (gap)            | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
 | `resume` while session has active client     | `error` frame + close `1008`                                     |
-| stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1000` |
+| stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1008` |
 | child stdin does not drain within `CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS` | `error` frame (`code: stdin_drain_stalled`) + child SIGTERM + close `1011` |
 | active session evicted by hard session cap   | `session_lost` frame (`reason: evicted_by_cap`) + child SIGTERM + close `1001` |
 | `stdin` before `spawn`                       | `error` frame (`stdin: no active session (send spawn first)`), connection stays open |
