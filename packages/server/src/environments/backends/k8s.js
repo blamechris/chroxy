@@ -209,15 +209,18 @@ export class K8sBackend {
    *   container.
    *
    *   Most production clusters block `hostPath` via PodSecurity admission —
-   *   PSA `restricted` and `baseline` policies both prohibit it, so this
-   *   backend will fail to schedule Pods on those clusters out of the box.
+   *   PSA `restricted` and `baseline` policies both prohibit it, so Pod
+   *   creation will be rejected by the PSA admission controller (the API
+   *   server returns a 4xx at create time, before the Pod ever reaches the
+   *   scheduler).
    *
    *   **This mode is not safe for shared / multi-tenant clusters.** Operators
    *   running on shared infrastructure should use a PVC-based workspace
    *   strategy (see follow-up #3385) instead of relying on `hostPath`. Use
    *   this backend only on single-tenant clusters where you control every
-   *   workload, or behind PSA `privileged` if `hostPath` is explicitly
-   *   required.
+   *   workload, or on a namespace where Pod Security Admission is enforced
+   *   at the `privileged` level (or with an equivalent policy exemption) so
+   *   that `hostPath` volumes are explicitly permitted.
    *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
