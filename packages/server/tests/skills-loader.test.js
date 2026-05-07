@@ -2932,6 +2932,85 @@ describe('skills-loader', () => {
       assert.equal(inspectCallCount, 1, 'inspect() must run for trusted community skills (two-pass cache-fast-path)')
     })
 
+    it('two-pass path: onCommunityTrustPending fires once with correct payload (cache-miss + cache-fast-path)', () => {
+      // Covers both the cache-miss branch (lines 731–735) on the first call and
+      // the cache-fast-path branch (lines 519–524) on the warm-cache second call.
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'pending.md'), '# Pending skill\n\nBody.\n')
+
+      const warmCache = new Map()
+
+      // First call: cache cold → cache-miss branch fires onCommunityTrustPending
+      const pendingCallsCold = []
+      loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        onCommunityTrustPending: (info) => pendingCallsCold.push(info),
+        includeInactive: true,
+        maxTotalBytes: 1024 * 1024,
+        parseCache: warmCache,
+      })
+
+      assert.equal(pendingCallsCold.length, 1, 'cache-miss: callback must fire exactly once')
+      assert.equal(pendingCallsCold[0].name, 'pending')
+      assert.equal(pendingCallsCold[0].author, 'alice')
+      assert.ok(typeof pendingCallsCold[0].path === 'string', 'path must be a string')
+
+      // Second call: warmCache is now populated → cache-fast-path fires onCommunityTrustPending
+      const pendingCallsWarm = []
+      loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        onCommunityTrustPending: (info) => pendingCallsWarm.push(info),
+        includeInactive: true,
+        maxTotalBytes: 1024 * 1024,
+        parseCache: warmCache,
+      })
+
+      assert.equal(pendingCallsWarm.length, 1, 'cache-fast-path: callback must fire exactly once')
+      assert.equal(pendingCallsWarm[0].name, 'pending')
+      assert.equal(pendingCallsWarm[0].author, 'alice')
+      assert.ok(typeof pendingCallsWarm[0].path === 'string', 'path must be a string')
+    })
+
+    it('two-pass path: includeInactive:true returns pending skill with correct shape', () => {
+      // Test 2 (trustStore.inspect not called) passes includeInactive:true but
+      // never inspects the returned array. This test asserts the full pending shape
+      // so a regression that silently drops the entry or omits a field is caught.
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Pending skill\n\nBody.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        includeInactive: true,
+        maxTotalBytes: 1024 * 1024,
+      })
+
+      assert.equal(skills.length, 1, 'pending skill must be returned when includeInactive:true (two-pass path)')
+      assert.equal(skills[0].name, 'test')
+      assert.equal(skills[0].active, false)
+      assert.equal(skills[0].trustState, 'pending')
+      assert.equal(skills[0].communityAuthor, 'alice')
+    })
+
+    it('two-pass path: fail-open without communityTrustChecker — community skill loads as trusted', () => {
+      // Mirrors the single-pass 'fail-open' test for the two-pass _collectCandidates
+      // path. Without communityTrustChecker the trustedC/trustedM fallback is `true`
+      // (lines 515–517 and 726–728). A regression would cause the skill to be dropped
+      // or tagged pending, which this test would catch.
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Fail-open skill\n\nBody.\n')
+
+      // No communityTrustChecker — trust-disabled / back-compat session
+      const skills = loadActiveSkills(communityDir, {
+        maxTotalBytes: 1024 * 1024,
+      })
+
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'test')
+      assert.equal(skills[0].active, true)
+      assert.equal(skills[0].trustState, 'trusted')
+      assert.equal(skills[0].communityAuthor, 'alice')
+    })
+
     // #3301: walk case-normalisation
     it(
       'walk discovers Community/ (capital C) as community namespace on case-insensitive platforms',
