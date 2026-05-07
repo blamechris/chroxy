@@ -137,8 +137,12 @@ export class LineLimitTransform extends Transform {
 
     let offset = 0
     for (let i = 0; i < chunk.length; i++) {
-      if (chunk[i] === 0x0a /* '\n' */) {
-        // Newline resets the pending counter for the next line.
+      if (chunk[i] === 0x0a /* '\n' */ || chunk[i] === 0x0d /* '\r' */) {
+        // LF resets the line counter.  CR is treated the same so that a CRLF
+        // line of exactly maxBytes content bytes does not false-trip the guard
+        // (without this, the CR byte pushes _pending to maxBytes+1 before the
+        // LF resets it).  readline strips CR from CRLF pairs, so excluding it
+        // from the content count matches readline's semantics.
         this._pending = 0
         offset = i + 1
       } else {
@@ -562,10 +566,6 @@ export class PodAgent {
       return
     }
 
-    // Enforce the concurrent session cap before creating a new session. Evicts
-    // the oldest idle session if needed so the Map never exceeds _maxSessions.
-    this._enforceSessionCap()
-
     // stdin option controls how the child's stdin is set up (#3329):
     //   'pipe'    — (default) writable stdin; client feeds data via stdin frames.
     //               Required for --input-format stream-json workflows.
@@ -597,6 +597,12 @@ export class PodAgent {
       this._send(ws, { type: 'error', message: `spawn failed: ${err.message}` })
       return
     }
+
+    // Spawn succeeded -- now enforce the concurrent session cap. Evicts the
+    // oldest idle session if needed so the Map never exceeds _maxSessions.
+    // Enforcing after spawn ensures a failed spawn (ENOENT, EACCES, etc.)
+    // never evicts an existing session unnecessarily (#3392).
+    this._enforceSessionCap()
 
     // Assign a sessionId and create the session object.
     const sessionId = randomUUID()
