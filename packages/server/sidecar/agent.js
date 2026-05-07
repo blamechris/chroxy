@@ -528,6 +528,13 @@ export class PodAgent {
       `[chroxy-pod-agent] stdin drain stalled for session ${sessionId} (${this._stdinDrainTimeoutMs}ms) — killing wedged child`,
     )
 
+    // Mark the session as having emitted a terminal error frame BEFORE we
+    // kill the child. The subsequent child 'close' event must not re-emit a
+    // generic exit/close 1000 — the client should observe the explicit
+    // stdin_drain_stalled error + close 1011 we send below. Mirrors the
+    // _oversized guard used by the line-too-long path (#3513).
+    session._terminalErrorSent = true
+
     // Clear the draining flag so any late 'drain' event (e.g. once the child
     // is killed) does not try to resume an already-closing WS.
     session._stdinDraining = false
@@ -830,6 +837,12 @@ export class PodAgent {
       // if no 'drain' event arrives within _stdinDrainTimeoutMs and forces a
       // wedged-child recovery (error frame + kill + close 1011).
       _stdinDrainTimer: null,
+      // Terminal-error guard (#3513). Set true by any error path that emits a
+      // terminal error frame and closes the WS itself (e.g. stdin_drain_stalled,
+      // line_too_long via the _oversized flag below). The child 'close' handler
+      // checks this flag and returns early so it cannot race with the terminal
+      // error path and override the close code with a generic exit/1000.
+      _terminalErrorSent: false,
     }
     this._sessions.set(sessionId, session)
     ws._sessionId = sessionId
@@ -889,6 +902,11 @@ export class PodAgent {
     lineGuard.once('oversized_line', () => {
       console.error(`[chroxy-pod-agent] stdout line exceeded ${this._maxLineBytes} bytes — killing child`)
       session._oversized = true
+      // Suppress the child 'close' handler so it cannot race with this
+      // terminal-error path (#3513). _oversized alone already gates that
+      // handler, but setting the unified flag too keeps the invariant
+      // single-sourced for any future terminal-error code.
+      session._terminalErrorSent = true
       if (session.child === child) {
         this._killChild(child)
         session.child = null
@@ -931,13 +949,15 @@ export class PodAgent {
     // exit — emit exit code and close the WS. Clear the tracked child so the
     // disconnect handler does not try to kill an already-exited process.
     //
-    // If the session was terminated by the oversized-line guard, the error
-    // frame and WS close are already handled there.  Emitting a spurious exit
-    // frame here would contradict the protocol (client already received
-    // error+close(1008)) and could confuse K8sBackend.  Skip the exit path.
+    // If the session was already terminated by an error path (oversized line
+    // → close 1008, stdin drain stall → close 1011, or any future terminal-
+    // error path), the error frame and WS close are already handled there.
+    // Emitting a spurious exit frame + close 1000 here would contradict the
+    // protocol (client already received the explicit error + matching close
+    // code) and could confuse K8sBackend. Skip the exit path. (#3380, #3513)
     child.on('close', (code) => {
       if (session.child === child) session.child = null
-      if (session._oversized) return
+      if (session._oversized || session._terminalErrorSent) return
       const exitFrame = { type: 'exit', code: code ?? 1 }
       // Close the WS only after the exit frame has been flushed to the socket
       // buffer to avoid a race that can drop the frame (#3399).
