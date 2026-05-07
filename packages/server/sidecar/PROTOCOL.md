@@ -617,7 +617,7 @@ if a line exceeds the cap before a newline arrives it:
 
 1. Emits `{ type: 'error', code: 'line_too_long', message: '...', seq: N }`.
 2. Sends `SIGTERM` to the child (with a `SIGKILL` escalation after 5 s).
-3. Closes the WS with code `1000` within 50 ms.
+3. Closes the WS with code `1008` within 50 ms.
 
 **Default cap:** 1 MiB (`1 048 576` bytes) — far above any normal SDK event.
 
