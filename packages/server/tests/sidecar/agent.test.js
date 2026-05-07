@@ -1759,6 +1759,91 @@ describe('PodAgent', () => {
         await ttlAgent.close()
       }
     })
+
+    it('closes child.stdin before SIGTERM on idle TTL eviction (#3397)', async () => {
+      // The polite way to terminate a CLI child is to close its stdin first
+      // (so it sees EOF and can exit cleanly) before falling back to signals.
+      // Build a mock child with a real PassThrough stdin so we can assert on
+      // both `stdin.writableEnded` and the `kill` call ordering.
+      const child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.stdin = new PassThrough()
+      child.kill = (signal) => {
+        // Snapshot stdin state at the moment SIGTERM is delivered so the test
+        // can assert ordering even if the real-time SIGTERM grace fires before
+        // the assertion runs.
+        child._sigtermStdinEnded = child.stdin.writableEnded
+        child._sigtermAt = Date.now()
+        child.killSignals = child.killSignals || []
+        child.killSignals.push(signal)
+        return true
+      }
+      child.killSignals = []
+
+      const clock = makeFakeClock()
+      const TTL = 200
+      // Use a real (short) stdin-close grace so we can observe the timing in
+      // wall-clock terms — the fake clock only governs the idle TTL timer.
+      const STDIN_CLOSE_MS = 30
+      const { agent: ttlAgent, port: ttlPort } = await startAgent({
+        spawnFn: (_cmd, _args, _opts) => child,
+        killGraceMs: 25,
+        stdinCloseGraceMs: STDIN_CLOSE_MS,
+        resumeTimeoutMs: TTL,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws = connect(ttlPort, TOKEN)
+        await waitOpen(ws)
+
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Disconnect — arms the idle eviction timer.
+        ws.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // Sanity: stdin is open before eviction fires.
+        assert.equal(child.stdin.writableEnded, false, 'stdin must be open before eviction')
+
+        const stdinEndedPromise = new Promise((resolve) => {
+          child.stdin.once('finish', resolve)
+        })
+
+        // Trigger eviction.
+        clock.advance(TTL + 1)
+
+        // stdin must be closed synchronously by _killChild — the polite EOF
+        // happens BEFORE the SIGTERM grace timer schedules the signal.
+        await stdinEndedPromise
+        assert.equal(child.stdin.writableEnded, true, 'stdin must be ended after eviction')
+
+        // No signals yet — SIGTERM is deferred until stdinCloseGraceMs elapses.
+        assert.equal(
+          child.killSignals.length,
+          0,
+          `no kill signals must be sent before stdin grace elapses, got ${JSON.stringify(child.killSignals)}`,
+        )
+
+        // Wait past the stdin-close grace and confirm SIGTERM fires AFTER the
+        // stdin pipe was already ended.
+        await new Promise((r) => setTimeout(r, STDIN_CLOSE_MS + 30))
+        assert.ok(
+          child.killSignals.includes('SIGTERM'),
+          `SIGTERM must fire after stdin grace, got ${JSON.stringify(child.killSignals)}`,
+        )
+        assert.equal(
+          child._sigtermStdinEnded,
+          true,
+          'stdin must already be ended at the moment SIGTERM is delivered',
+        )
+      } finally {
+        await ttlAgent.close()
+      }
+    })
   })
 
   // ---------------------------------------------------------------------------

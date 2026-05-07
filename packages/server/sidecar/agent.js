@@ -31,6 +31,13 @@ const PORT = parseInt(process.env.PORT ?? '7681', 10)
 // child does not pin pod memory.
 const KILL_GRACE_MS = 5_000
 
+// Grace period between closing the child's stdin (EOF) and sending SIGTERM
+// during eviction. Many CLI processes (including claude --input-format
+// stream-json) exit cleanly when stdin EOFs — closing stdin first is the
+// polite way to terminate before falling back to signals. Short enough that
+// a stuck child still receives SIGTERM promptly. (#3397)
+const STDIN_CLOSE_GRACE_MS = 500
+
 // Ring-buffer capacity: number of output frames retained per session for
 // replay on resume. Tunable at startup via CHROXY_AGENT_BUFFER_SIZE.
 // Reject non-positive / NaN values so an invalid env var cannot disable
@@ -172,17 +179,19 @@ export class LineLimitTransform extends Transform {
 export class PodAgent {
   /**
    * @param {object} opts
-   * @param {Function} [opts.spawnFn]         Override child_process.spawn for tests.
-   * @param {string}   [opts.token]           Override CHROXY_AGENT_TOKEN for tests.
-   * @param {number}   [opts.killGraceMs]     Override SIGTERM→SIGKILL grace (tests).
-   * @param {number}   [opts.bufferSize]      Override ring-buffer capacity per session (tests).
-   * @param {number}   [opts.maxLineBytes]    Override NDJSON line length cap (tests).
-   * @param {number}   [opts.resumeTimeoutMs] Override idle resume window in ms (tests).
-   * @param {number}   [opts.maxSessions]     Override concurrent session cap (tests).
-   * @param {Function} [opts.setTimeoutFn]    Override setTimeout for deterministic timer tests.
-   * @param {Function} [opts.clearTimeoutFn]  Override clearTimeout for deterministic timer tests.
+   * @param {Function} [opts.spawnFn]              Override child_process.spawn for tests.
+   * @param {string}   [opts.token]                Override CHROXY_AGENT_TOKEN for tests.
+   * @param {number}   [opts.killGraceMs]          Override SIGTERM→SIGKILL grace (tests).
+   * @param {number}   [opts.stdinCloseGraceMs]    Override stdin-close→SIGTERM grace (tests).
+   * @param {number}   [opts.bufferSize]           Override ring-buffer capacity per session (tests).
+   * @param {number}   [opts.maxLineBytes]         Override NDJSON line length cap (tests).
+   * @param {number}   [opts.resumeTimeoutMs]      Override idle resume window in ms (tests).
+   * @param {number}   [opts.maxSessions]          Override concurrent session cap (tests).
+   * @param {Function} [opts.setTimeoutFn]         Override setTimeout for deterministic timer tests.
+   * @param {Function} [opts.clearTimeoutFn]       Override clearTimeout for deterministic timer tests.
    */
   constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS,
+    stdinCloseGraceMs = STDIN_CLOSE_GRACE_MS,
     bufferSize = DEFAULT_BUFFER_SIZE,
     maxLineBytes = DEFAULT_MAX_LINE_BYTES,
     resumeTimeoutMs = DEFAULT_RESUME_TIMEOUT_MS,
@@ -192,6 +201,9 @@ export class PodAgent {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
+    this._stdinCloseGraceMs = Number.isFinite(stdinCloseGraceMs) && stdinCloseGraceMs >= 0
+      ? stdinCloseGraceMs
+      : STDIN_CLOSE_GRACE_MS
     // Validate bufferSize defensively — a NaN or non-positive value would
     // disable eviction (NaN >= length is always false) and let the buffer
     // grow without bound.
@@ -489,20 +501,63 @@ export class PodAgent {
   }
 
   // ---------------------------------------------------------------------------
-  // Kill an orphaned child: SIGTERM, then SIGKILL after grace if still alive.
+  // Kill an orphaned child: close stdin (EOF), then SIGTERM after a short
+  // grace, then SIGKILL after a longer grace if still alive.
+  //
+  // Closing stdin first is the polite way to terminate — many CLI processes
+  // (including claude --input-format stream-json) exit cleanly on stdin EOF
+  // without ever needing a signal. The stdin-close grace gives the child a
+  // chance to finish flushing and exit before we escalate. (#3397)
+  //
+  // If child.stdin is null/already-ended (e.g. stdio: 'ignore' or stdin_end
+  // already sent), the stdin-close step is a no-op and SIGTERM still fires
+  // synchronously — preserving the original kill semantics for that path.
   // ---------------------------------------------------------------------------
 
   _killChild(child) {
     if (child._chroxyKilled) return
     child._chroxyKilled = true
-    try { child.kill('SIGTERM') } catch {}
-    const graceTimer = setTimeout(() => {
+
+    // Close stdin so the child sees EOF immediately. Wrapped in try/catch
+    // because stdin may already be ended (idempotent) or in an error state.
+    // Track whether we actually closed an open pipe — when there was no stdin
+    // to close, skip the pre-SIGTERM grace and fire SIGTERM synchronously so
+    // call sites that never piped stdin retain the original kill timing.
+    let stdinClosed = false
+    if (child.stdin && typeof child.stdin.end === 'function' && !child.stdin.writableEnded) {
+      try {
+        child.stdin.end()
+        stdinClosed = true
+      } catch {}
+    }
+
+    let sigtermTimer = null
+    if (stdinClosed) {
+      // SIGTERM after the stdin-close grace. If the child exits cleanly via
+      // EOF the close-listener below cancels both timers before SIGTERM fires.
+      sigtermTimer = setTimeout(() => {
+        try { child.kill('SIGTERM') } catch {}
+      }, this._stdinCloseGraceMs)
+      if (typeof sigtermTimer.unref === 'function') sigtermTimer.unref()
+    } else {
+      // No stdin pipe to close — preserve the original synchronous SIGTERM.
+      try { child.kill('SIGTERM') } catch {}
+    }
+
+    // SIGKILL after SIGTERM has had its own grace to take effect. When stdin
+    // is closed first, the budget extends to stdinCloseGraceMs + killGraceMs.
+    const sigkillDelay = (stdinClosed ? this._stdinCloseGraceMs : 0) + this._killGraceMs
+    const sigkillTimer = setTimeout(() => {
       try { child.kill('SIGKILL') } catch {}
-    }, this._killGraceMs)
-    // Don't keep the process alive just to wait for an unresponsive child.
-    if (typeof graceTimer.unref === 'function') graceTimer.unref()
-    // If the child exits before the grace expires, cancel the SIGKILL timer.
-    child.once('close', () => clearTimeout(graceTimer))
+    }, sigkillDelay)
+    if (typeof sigkillTimer.unref === 'function') sigkillTimer.unref()
+
+    // If the child exits before the timers fire, cancel both — there is no
+    // point signaling a process that has already gone away.
+    child.once('close', () => {
+      if (sigtermTimer) clearTimeout(sigtermTimer)
+      clearTimeout(sigkillTimer)
+    })
   }
 
   // ---------------------------------------------------------------------------
