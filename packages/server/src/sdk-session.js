@@ -699,6 +699,23 @@ export class SdkSession extends BaseSession {
       this._query = null
       // Dequeue any follow-up messages that arrived while busy
       if (this._pendingInput?.length && !this._destroying) {
+        // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.
+        // the PassThrough closed while _callQuery was still streaming), the
+        // entry-gate at the top of sendMessage has already been bypassed
+        // for this turn. Without this short-circuit, we would shift one
+        // follow-up, schedule a process.nextTick recursion, and only then
+        // hit the entry gate — wasting a hop and emitting a per-message
+        // error. Drain the queue at the dequeue site for symmetry with
+        // the entry-gate drain (#3539/PR #3560), log a single warn, and
+        // skip the recursion entirely.
+        if (this._stdinForwardingDisabled) {
+          log.warn(
+            `Discarding ${this._pendingInput.length} queued follow-up message(s) after turn finish — ` +
+            'stdin forwarding is disabled'
+          )
+          this._pendingInput.length = 0
+          return
+        }
         const next = this._pendingInput.shift()
         log.info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
         // Use setImmediate/nextTick to avoid stack depth issues

@@ -697,6 +697,56 @@ describe('SdkSession', () => {
       s.destroy()
     })
 
+    // #3562: short-circuit dequeue in finally when stdin forwarding is disabled.
+    //
+    // PR #3560 (closes #3539) drains _pendingInput at the *entry* of sendMessage
+    // when the flag is set. This handles the case "next caller hits the gate".
+    // But the finally block at sdk-session.js:701-709 still has its own
+    // "shift + process.nextTick(sendMessage)" path. If a turn is mid-flight
+    // when the SidecarProcess emits stdin_disabled, the entry-gate has already
+    // been passed, so the finally path will still schedule a recursive
+    // sendMessage for the queued follow-up — wasting an event-loop hop and
+    // a redundant function call before the entry gate finally rejects it.
+    //
+    // The fix: short-circuit at the dequeue site too. If the flag flips
+    // mid-turn, drain the queue, log a single warn, and skip the recursion.
+    it('short-circuits dequeue in finally when flag flips mid-turn (#3562)', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      let callCount = 0
+      s._callQuery = (_args) => {
+        callCount++
+        return (async function* () {
+          // Simulate the SidecarProcess latching stdin_disabled mid-turn —
+          // the flag flips while _callQuery is still streaming, before the
+          // result event finishes the turn. The finally block runs after
+          // this generator returns and must observe the flipped flag.
+          s._stdinForwardingDisabled = true
+          yield { type: 'result', session_id: 'mid-turn-flip', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      // Pre-queue a follow-up so the dequeue site has work to do.
+      s._pendingInput = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      await s.sendMessage('initial turn')
+
+      // Wait one process.nextTick + a microtask so the dequeue path has had
+      // the opportunity to recurse, if it were going to.
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assert.equal(callCount, 1, '_callQuery must only be invoked for the original turn — no recursive dequeue')
+      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained at the dequeue site')
+      assert.equal(errors.length, 0, 'dequeue-site short-circuit must not emit a per-message error (the warn is enough)')
+
+      s.destroy()
+    })
+
     it('emits an error every time a fresh sendMessage is refused (no one-shot mute)', async () => {
       // The #3502 emit on the stdin_disabled signal is gated by the flag
       // itself (one warn / one error per session). The #3539 refusal at the
