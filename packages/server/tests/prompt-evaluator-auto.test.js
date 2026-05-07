@@ -70,10 +70,13 @@ describe('auto-evaluator decision contract (#3189)', () => {
     it('custom skip pattern OR-d with the default — pattern source is per-session config', () => {
       _resetSkipPatternCache()
       try {
-        // 'sgtm' (sounds good to me) is a session-supplied skip pattern.
-        // shouldSkipEvaluator must consult the session config object.
-        const cfg = { promptEvaluatorSkipPattern: '^sgtm$' }
-        assert.equal(shouldSkipEvaluator('sgtm', cfg), true)
+        // Draft must be >= 20 chars and NOT match the default pattern, so
+        // the only way the test passes is via the session-supplied custom
+        // pattern. Without this, the < 20 length gate would short-circuit
+        // before the custom-pattern branch ever runs (Copilot review on
+        // PR #3650 caught the original test passing for the wrong reason).
+        const cfg = { promptEvaluatorSkipPattern: '^acknowledged for the team$' }
+        assert.equal(shouldSkipEvaluator('acknowledged for the team', cfg), true)
         // Default rules still apply when the custom pattern doesn't match —
         // the substantive message still goes to evaluateDraft.
         assert.equal(shouldSkipEvaluator('this is a substantive draft message', cfg), false)
