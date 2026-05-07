@@ -863,6 +863,48 @@ describe('EnvironmentManager.reconnect()', () => {
     assert.equal(manager.get('env-cred-null').status, 'error',
       'env should be marked error when token refresh returns null')
   })
+
+  // Regression for #3494: previously the no-containerId branch `continue`d past
+  // the `env.sessions = []` cleanup, leaving stale session refs on an env that
+  // is even less reachable than one whose container is merely stopped.
+  it('clears stale sessions on environments with no containerId (#3494)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-no-container',
+        name: 'no-container-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: null,
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: ['stale-1', 'stale-2'],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    // Backend should never be consulted for a no-containerId env — assert by
+    // throwing if it is touched. Reconnect must still mark the env unreachable
+    // and return false.
+    const backend = {
+      async getEnvironmentStatus() { throw new Error('backend should not be called for no-containerId env') },
+      async reconnectAgentToken() { throw new Error('backend should not be called for no-containerId env') },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    const env = manager.get('env-no-container')
+    assert.ok(env)
+    assert.equal(result, false, 'reconnect() must return false when an env has no containerId')
+    assert.equal(env.status, 'error', 'env with no containerId must be marked error')
+    assert.deepEqual(env.sessions, [],
+      'stale sessions on a no-containerId env must be cleared — they cannot survive a server restart')
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
