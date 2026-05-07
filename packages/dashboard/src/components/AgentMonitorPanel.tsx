@@ -12,6 +12,13 @@ import type { AgentInfo } from '../store/types'
 
 const EMPTY_AGENTS: AgentInfo[] = []
 
+// #3619: `startedAt` is a server-issued wall-clock timestamp delivered via
+// the `agent_spawned` WS event. Comparing wall-clock-against-wall-clock is
+// the only coherent path here — switching to `performance.now()` would
+// subtract a process-local monotonic clock from a remote wall clock and
+// produce nonsense. Wall-clock skew between the two machines is the
+// inherent floor on accuracy; the user-visible "X minutes" granularity
+// makes that floor invisible in practice.
 function formatElapsed(startedAt: number): string {
   const diff = Math.max(0, Date.now() - startedAt)
   const secs = Math.floor(diff / 1000)

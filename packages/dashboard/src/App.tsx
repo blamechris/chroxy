@@ -674,6 +674,12 @@ export function App() {
     }
   }, [viewMode, systemMessages.length, activeSessionId])
 
+  // #3619: `sessionActivityNow` is compared against `lastActivityAt` /
+  // `createdAt` from `session_list`, which are server-issued wall-clock
+  // timestamps. Wall-clock-against-wall-clock is the only coherent path
+  // here; `performance.now()` would subtract a process-local monotonic
+  // clock from a remote wall clock. The minute-tick granularity tolerates
+  // any small wall-clock drift between the two machines.
   const [sessionActivityNow, setSessionActivityNow] = useState(() => Date.now())
 
   useEffect(() => {
