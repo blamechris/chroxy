@@ -8,9 +8,18 @@
  * the callback and then dismisses the toast (via the same onDismiss path
  * as the close button) so the operator gets immediate visual confirmation
  * the action was taken.
+ *
+ * #3604: hovering or keyboard-focusing a toast pauses the auto-dismiss
+ * timer; mouseleave/blur resumes it with the *remaining* time (not a
+ * fresh 5s) so the toast dismisses promptly once the operator has
+ * finished reading. This protects the recovery affordance introduced
+ * in #3587 (e.g. INVALID_AUTHOR "Try as <actualAuthor>") which would
+ * otherwise disappear before a slow reader/clicker can act.
  */
 import { useEffect, useRef } from 'react'
 import type { ServerErrorAction } from '@chroxy/store-core'
+
+const AUTO_DISMISS_MS = 5000
 
 // #3587: re-exported as `ToastAction` for ergonomic local imports —
 // the canonical shape lives in `@chroxy/store-core` so the Toast and
@@ -51,8 +60,90 @@ export interface ToastProps {
   onDismiss: (id: string) => void
 }
 
+/**
+ * #3604: per-toast timer state. `timer` is the active setTimeout handle
+ * (or null while paused). `remaining` is the ms left when the timer was
+ * last paused; on resume we restart with that remaining duration so a
+ * brief hover doesn't grant a fresh 5s grace period.
+ *
+ * `pauseReasons` is a set of currently-active pause reasons (hover, focus).
+ * The timer is paused while the set is non-empty and only resumes when
+ * the set becomes empty — so e.g. hover→focus→mouseleave keeps the timer
+ * paused until the operator also blurs. Without this the toast would
+ * resume mid-interaction and dismiss while the user is still reading or
+ * about to click the action button.
+ */
+type PauseReason = 'hover' | 'focus'
+
+interface TimerState {
+  timer: ReturnType<typeof setTimeout> | null
+  remaining: number
+  startedAt: number
+  pauseReasons: Set<PauseReason>
+}
+
 export function Toast({ items, onDismiss }: ToastProps) {
-  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const timersRef = useRef<Map<string, TimerState>>(new Map())
+
+  const startTimer = (id: string, duration: number) => {
+    const timer = setTimeout(() => {
+      onDismiss(id)
+      timersRef.current.delete(id)
+    }, duration)
+    const existing = timersRef.current.get(id)
+    timersRef.current.set(id, {
+      timer,
+      remaining: duration,
+      startedAt: Date.now(),
+      pauseReasons: existing?.pauseReasons ?? new Set(),
+    })
+  }
+
+  const clearActiveTimer = (id: string) => {
+    const state = timersRef.current.get(id)
+    if (state?.timer) {
+      clearTimeout(state.timer)
+    }
+    timersRef.current.delete(id)
+  }
+
+  // #3604: pause auto-dismiss while hovered/focused. Compute remaining
+  // from `startedAt` so subsequent resumes don't re-grant time elapsed
+  // before this pause. The reason is added to `pauseReasons` so we can
+  // tell when *every* pause source has cleared before resuming.
+  const pauseTimer = (id: string, reason: PauseReason) => {
+    const state = timersRef.current.get(id)
+    if (!state) return
+    state.pauseReasons.add(reason)
+    if (!state.timer) return // already paused — just record the new reason
+    clearTimeout(state.timer)
+    const elapsed = Date.now() - state.startedAt
+    const remaining = Math.max(0, state.remaining - elapsed)
+    timersRef.current.set(id, {
+      timer: null,
+      remaining,
+      startedAt: 0,
+      pauseReasons: state.pauseReasons,
+    })
+  }
+
+  // #3604: resume only when *all* pause reasons have cleared. If hover
+  // ends but focus is still active (or vice-versa) the timer stays
+  // paused. If the timer had already elapsed (remaining <= 0) we
+  // dismiss immediately to avoid a stuck toast.
+  const resumeTimer = (id: string, reason: PauseReason) => {
+    const state = timersRef.current.get(id)
+    if (!state) return
+    state.pauseReasons.delete(reason)
+    if (state.timer) return // not paused
+    if (state.pauseReasons.size > 0) return // still paused by another source
+    if (state.remaining <= 0) {
+      onDismiss(id)
+      timersRef.current.delete(id)
+      return
+    }
+    startTimer(id, state.remaining)
+  }
 
   useEffect(() => {
     items.forEach(item => {
@@ -63,26 +154,23 @@ export function Toast({ items, onDismiss }: ToastProps) {
       // it doesn't fire mid-disconnect. When `actionDisabled` flips
       // back to false the effect re-runs and the timer restarts fresh.
       if (item.actionDisabled === true) {
-        if (timersRef.current.has(item.id)) {
-          clearTimeout(timersRef.current.get(item.id)!)
+        const state = timersRef.current.get(item.id)
+        if (state) {
+          if (state.timer) clearTimeout(state.timer)
           timersRef.current.delete(item.id)
         }
         return
       }
       if (!timersRef.current.has(item.id)) {
-        const timer = setTimeout(() => {
-          onDismiss(item.id)
-          timersRef.current.delete(item.id)
-        }, 5000)
-        timersRef.current.set(item.id, timer)
+        startTimer(item.id, AUTO_DISMISS_MS)
       }
     })
 
     // Clean up timers for removed items
     const currentIds = new Set(items.map(i => i.id))
-    for (const [id, timer] of timersRef.current) {
+    for (const [id, state] of timersRef.current) {
       if (!currentIds.has(id)) {
-        clearTimeout(timer)
+        if (state.timer) clearTimeout(state.timer)
         timersRef.current.delete(id)
       }
     }
@@ -90,8 +178,8 @@ export function Toast({ items, onDismiss }: ToastProps) {
 
   useEffect(() => {
     return () => {
-      for (const timer of timersRef.current.values()) {
-        clearTimeout(timer)
+      for (const state of timersRef.current.values()) {
+        if (state.timer) clearTimeout(state.timer)
       }
     }
   }, [])
@@ -99,7 +187,23 @@ export function Toast({ items, onDismiss }: ToastProps) {
   return (
     <div className="toast-container" data-testid="toast-container">
       {items.map(item => (
-        <div key={item.id} className={`toast ${item.level === 'info' ? 'toast-info' : 'toast-error'}`} role={item.level === 'info' ? 'status' : 'alert'} aria-live={item.level === 'info' ? 'polite' : 'assertive'}>
+        <div
+          key={item.id}
+          className={`toast ${item.level === 'info' ? 'toast-info' : 'toast-error'}`}
+          role={item.level === 'info' ? 'status' : 'alert'}
+          aria-live={item.level === 'info' ? 'polite' : 'assertive'}
+          data-testid={`toast-${item.id}`}
+          // #3604: pause auto-dismiss on hover and on keyboard focus
+          // (focus events bubble from descendant buttons to this
+          // container). Hover and focus are tracked as independent
+          // pause reasons — the timer only resumes when *both* have
+          // cleared, so hover→focus→mouseleave keeps the toast visible
+          // until the user also blurs.
+          onMouseEnter={() => pauseTimer(item.id, 'hover')}
+          onMouseLeave={() => resumeTimer(item.id, 'hover')}
+          onFocus={() => pauseTimer(item.id, 'focus')}
+          onBlur={() => resumeTimer(item.id, 'focus')}
+        >
           <span className="toast-msg">{item.message}</span>
           {item.action ? (
             <button
@@ -118,10 +222,7 @@ export function Toast({ items, onDismiss }: ToastProps) {
                 // #3587: clear the auto-dismiss timer first so a slow
                 // click handler doesn't race the 5s timeout into a
                 // double-dismiss.
-                if (timersRef.current.has(item.id)) {
-                  clearTimeout(timersRef.current.get(item.id)!)
-                  timersRef.current.delete(item.id)
-                }
+                clearActiveTimer(item.id)
                 // Swallow handler exceptions so the toast still
                 // dismisses cleanly. The handler is a callback wired
                 // by the parent (e.g. a store action) — if it throws
@@ -145,10 +246,7 @@ export function Toast({ items, onDismiss }: ToastProps) {
             data-testid={`toast-close-${item.id}`}
             aria-label="Close notification"
             onClick={() => {
-              if (timersRef.current.has(item.id)) {
-                clearTimeout(timersRef.current.get(item.id)!)
-                timersRef.current.delete(item.id)
-              }
+              clearActiveTimer(item.id)
               onDismiss(item.id)
             }}
             type="button"
