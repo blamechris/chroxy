@@ -1110,10 +1110,15 @@ describe('settings-handlers', () => {
       }
     })
 
-    it('returns NOT_COMMUNITY_SKILL when skill is not under community/<author>/', () => {
-      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-notcomm-'))
+    // #3500: when community/alice/foo.md exists on disk (no symlink) and the
+    // request claims author 'bob', the handler must scan community/*/ for the
+    // skill name and surface INVALID_AUTHOR (with the real author) instead of
+    // the misleading SKILL_NOT_FOUND. This is the most common operator UX path
+    // — "you asked for bob's skill, but only alice owns one named 'foo'".
+    it('returns INVALID_AUTHOR with actual author when skill exists under a different author (no symlink) (#3500)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-cross-author-'))
       try {
-        // Create community/alice/foo.md but claim author 'bob' — mismatch
+        // community/alice/foo.md exists. No symlink under community/bob/.
         mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
         writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
         const trustStore = makeCommunityTrustStore()
@@ -1126,10 +1131,73 @@ describe('settings-handlers', () => {
         sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
         const ctx = makeCtx(sessions)
         const ws = makeWs()
-        // Claim 'bob' as author but file is under 'alice' — security check should fail
+        // Claim 'bob' as author. Per-author lookup misses, but the cross-author
+        // scan must find alice/foo.md and surface INVALID_AUTHOR.
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.ok(err, 'expected INVALID_AUTHOR when skill exists under a different author')
+        assert.ok(
+          /alice/.test(err.message || ''),
+          `expected error message to surface the real author 'alice', got: ${err.message}`,
+        )
+        const wrong = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.equal(wrong, undefined, 'must not return SKILL_NOT_FOUND when a cross-author match is found')
+        assert.equal(trustStore.grants.length, 0, 'must not grant trust on cross-author mismatch')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3500: cross-author detection must also work when the real skill uses
+    // the .markdown extension (parity with the per-author lookup loop).
+    it('returns INVALID_AUTHOR for cross-author match when real skill has .markdown extension (#3500)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-cross-author-md-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.markdown'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.ok(err, 'expected INVALID_AUTHOR for .markdown cross-author match')
+        assert.ok(/alice/.test(err.message || ''), 'error message must surface real author')
+        assert.equal(trustStore.grants.length, 0)
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3500: dot-prefixed entries under community/ must be ignored by the
+    // shallow scan (mirrors _isCommunityNamespace's hidden-author guard).
+    it('ignores hidden author dirs (.foo) when scanning for cross-author matches (#3500)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-cross-author-hidden-'))
+      try {
+        // Only a hidden dir owns the skill — must NOT trigger INVALID_AUTHOR.
+        mkdirSync(join(skillsDir, 'community', '.hidden'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', '.hidden', 'foo.md'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
         settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
         const err = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
-        assert.ok(err, 'expected SKILL_NOT_FOUND when author does not match directory')
+        assert.ok(err, 'expected SKILL_NOT_FOUND when only a hidden author owns the skill')
+        const wrong = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.equal(wrong, undefined, 'must not return INVALID_AUTHOR for hidden-author matches')
       } finally {
         rmSync(skillsDir, { recursive: true, force: true })
       }
