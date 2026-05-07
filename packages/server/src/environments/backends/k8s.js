@@ -156,6 +156,12 @@ export class K8sBackend {
     // K8s-specific agentToken arg through the manager.
     this._agentTokens = new Map()
 
+    // In-flight _readAgentToken promises, keyed by pod name. Coalesces
+    // concurrent callers so only one K8s API request is made per pod at a time
+    // (deduplicates the race where two streamCliInEnvironment calls arrive
+    // before either has populated _agentTokens).
+    this._pendingAgentTokens = new Map()
+
     // Reconnect backoff config — injectable for deterministic unit tests.
     // Validate the delay schedule defensively: an empty array (or non-finite
     // entries) would make `delay` undefined and let `setTimeout` fire on the
@@ -327,7 +333,11 @@ export class K8sBackend {
       for (const entry of forwardPorts) {
         // Accept bare port number or "hostPort:containerPort" strings.
         const containerPort = _parseContainerPort(entry)
-        if (containerPort && containerPort !== AGENT_PORT) {
+        if (containerPort === null) {
+          log.warn(`createEnvironment: ignoring invalid forwardPorts entry "${entry}" (must be 1-65535)`)
+          continue
+        }
+        if (containerPort !== AGENT_PORT) {
           ports.push({ containerPort })
         }
       }
@@ -336,6 +346,8 @@ export class K8sBackend {
     // 6. Build resource limits/requests.
     //    Convert Docker-style suffixes (g → Gi, m → Mi) to K8s quantity strings.
     //    A plain integer/float string (e.g. "2", "0.5") is already valid K8s CPU syntax.
+    //    Note: the g→Gi / m→Mi mapping errs generous (~7 % / ~5 % over SI).
+    //    See _normaliseMemoryQuantity JSDoc for details.
     const resources = {}
     if (memoryLimit || cpuLimit) {
       const limits = {}
@@ -931,43 +943,63 @@ export class K8sBackend {
    * This is the recovery path for server restart: the Secret is the canonical
    * source of truth for the token; the in-memory map is just a cache.
    *
+   * Concurrent callers for the same pod are coalesced: only one K8s API
+   * request is issued at a time.  The in-flight promise is stored in
+   * `_pendingAgentTokens` and cleared once it settles, so a subsequent call
+   * after resolution starts a fresh fetch (needed for the reconnect path where
+   * the Secret may have been rotated).
+   *
    * @param {string} podName
    * @param {string} ns
    * @returns {Promise<string|null>}
    */
-  async _readAgentToken(podName, ns) {
-    const secretName = _deriveSecretName(podName)
-    try {
-      const secret = await this._api.readNamespacedSecret({ name: secretName, namespace: ns })
-      // The K8s API decodes base64 stringData into `.data` as base64-encoded
-      // strings, but when we store via `stringData` the API may return the
-      // value under either field depending on the client version.  Prefer
-      // `data` (always present on read responses), fall back to `stringData`.
-      const raw = secret?.data?.CHROXY_AGENT_TOKEN
-        || secret?.stringData?.CHROXY_AGENT_TOKEN
-      if (!raw) {
-        log.warn(`Secret ${secretName} exists but has no CHROXY_AGENT_TOKEN — treating as missing`)
-        return null
-      }
-      // K8s stores Secret `.data` values as base64; decode unconditionally.
-      // If the value came via `stringData` it is already plaintext, but a
-      // base64-decode of a base64url-encoded token (no padding) is idempotent
-      // only when the token length is a multiple of 4.  Instead, detect the
-      // encoding: `data` values are padded base64; `stringData` values are not.
-      const token = secret?.data?.CHROXY_AGENT_TOKEN
-        ? Buffer.from(raw, 'base64').toString('utf8')
-        : raw
-      // Cache for subsequent calls so we only hit the API once per pod per process.
-      this._agentTokens.set(podName, token)
-      log.info(`Loaded agentToken for Pod ${podName} from Secret ${secretName}`)
-      return token
-    } catch (err) {
-      if (_isNotFound(err)) {
-        log.warn(`Secret ${secretName} not found — pod may have been externally deleted`)
-        return null
-      }
-      throw err
+  _readAgentToken(podName, ns) {
+    // Return the in-flight promise if one already exists for this pod.
+    if (this._pendingAgentTokens.has(podName)) {
+      return this._pendingAgentTokens.get(podName)
     }
+
+    const secretName = _deriveSecretName(podName)
+    const pending = (async () => {
+      try {
+        const secret = await this._api.readNamespacedSecret({ name: secretName, namespace: ns })
+        // The K8s API decodes base64 stringData into `.data` as base64-encoded
+        // strings, but when we store via `stringData` the API may return the
+        // value under either field depending on the client version.  Prefer
+        // `data` (always present on read responses), fall back to `stringData`.
+        const raw = secret?.data?.CHROXY_AGENT_TOKEN
+          || secret?.stringData?.CHROXY_AGENT_TOKEN
+        if (!raw) {
+          log.warn(`Secret ${secretName} exists but has no CHROXY_AGENT_TOKEN — treating as missing`)
+          return null
+        }
+        // K8s stores Secret `.data` values as base64; decode unconditionally.
+        // If the value came via `stringData` it is already plaintext, but a
+        // base64-decode of a base64url-encoded token (no padding) is idempotent
+        // only when the token length is a multiple of 4.  Instead, detect the
+        // encoding: `data` values are padded base64; `stringData` values are not.
+        const token = secret?.data?.CHROXY_AGENT_TOKEN
+          ? Buffer.from(raw, 'base64').toString('utf8')
+          : raw
+        // Cache for subsequent calls so we only hit the API once per pod per process.
+        this._agentTokens.set(podName, token)
+        log.info(`Loaded agentToken for Pod ${podName} from Secret ${secretName}`)
+        return token
+      } catch (err) {
+        if (_isNotFound(err)) {
+          log.warn(`Secret ${secretName} not found — pod may have been externally deleted`)
+          return null
+        }
+        throw err
+      } finally {
+        // Always clear the in-flight entry so the next caller starts a fresh
+        // fetch (important for the reconnect path where the Secret may rotate).
+        this._pendingAgentTokens.delete(podName)
+      }
+    })()
+
+    this._pendingAgentTokens.set(podName, pending)
+    return pending
   }
 
   /**
@@ -1529,7 +1561,7 @@ function _parseMountString(mountStr) {
  *   - A bare number or numeric string: "8080" → 8080
  *   - A "hostPort:containerPort" string: "9000:8080" → 8080
  *
- * Returns null for non-numeric or zero values.
+ * Returns null for non-numeric, zero, or out-of-range (> 65535) values.
  *
  * @param {string|number} entry
  * @returns {number | null}
@@ -1539,7 +1571,8 @@ function _parseContainerPort(entry) {
   const colonIdx = str.indexOf(':')
   const portStr = colonIdx >= 0 ? str.slice(colonIdx + 1) : str
   const port = parseInt(portStr, 10)
-  return Number.isFinite(port) && port > 0 ? port : null
+  if (!Number.isFinite(port) || port < 1 || port > 65535) return null
+  return port
 }
 
 /**
@@ -1557,6 +1590,20 @@ function _parseContainerPort(entry) {
  *   "1024k"→ "1024Ki"
  *   "2Gi"  → "2Gi"   (already valid)
  *   "1024" → "1024"  (plain bytes, valid K8s quantity)
+ *
+ * **SI vs binary-SI approximation:** Docker's single-letter suffixes use SI
+ * (decimal) units — "g" = 10^9 bytes, "m" = 10^6 bytes, "k" = 10^3 bytes —
+ * while Kubernetes binary suffixes ("Gi", "Mi", "Ki") use powers of two.
+ * The mapping is therefore not lossless:
+ *
+ *   "2g"   → "2Gi"   (~7.4 % over: 2 GiB = 2,147,483,648 B vs 2,000,000,000 B)
+ *   "512m" → "512Mi" (~4.9 % over: 512 MiB = 536,870,912 B vs 512,000,000 B)
+ *
+ * The conversion always **errs generous** — the container receives slightly
+ * more memory than the Docker value would imply.  This is intentional and
+ * safe for the typical use case.  Operators who need exact semantics should
+ * supply a K8s-native quantity string (e.g. "2Gi", "2000000000") which is
+ * passed through unchanged.
  *
  * @param {string} value
  * @returns {string}
