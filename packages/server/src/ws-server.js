@@ -340,6 +340,7 @@ function _isSecureRequest(req) {
  *   { type: 'environment_error', error, environmentId? } — environment operation error
  *   { type: 'evaluate_draft_result', requestId, verdict?, rewritten?, clarification?, reasoning?, error? } — prompt evaluator response (#3068)
  *   { type: 'prompt_evaluator_changed', sessionId, value: boolean } — per-session promptEvaluator toggle changed (#3185)
+ *   { type: 'stdin_dropped_totals', sessionId, bytes, count, reason, escalated } — cumulative SidecarProcess pre-dial-cap drop totals (#3544, transient)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
