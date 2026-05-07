@@ -19,13 +19,12 @@ const DEFAULT_CONTAINER_USER = 'chroxy'
 const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
-/**
- * Statuses that indicate an environment is unreachable after `reconnect()`.
- * Consumed by `server-cli.js#logEnvironmentManagerReconnectResult` to derive
- * the boot-path aggregate-warn count. Kept in sync with every code path in
- * `EnvironmentManager.reconnect()` that flips `allHealthy = false` (#3492).
- */
-export const UNREACHABLE_STATUSES = new Set(['error', 'stopped'])
+// Re-export `UNREACHABLE_STATUSES` from the dedicated constants module so
+// existing importers (tests, future consumers) continue to work. The
+// canonical definition lives in `environment-statuses.js` so `server-cli.js`
+// can pull the set without eagerly loading this module's `DockerBackend`
+// transitive dependency — see the file header in environment-statuses.js.
+export { UNREACHABLE_STATUSES } from './environment-statuses.js'
 
 /**
  * Manages persistent container environments that outlive individual sessions.

@@ -19,7 +19,11 @@ import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { registerDockerProvider, resolveProviderLabel } from './providers.js'
 import { loadModelsCache, getModels } from './models.js'
-import { UNREACHABLE_STATUSES } from './environment-manager.js'
+// Imported from a dedicated constants module rather than environment-manager.js
+// so we don't eagerly pull in DockerBackend when environments are disabled —
+// environment-manager.js itself remains behind the dynamic import below
+// (`if (config?.environments?.enabled)`).
+import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
