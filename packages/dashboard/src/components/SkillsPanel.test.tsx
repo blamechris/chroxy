@@ -266,6 +266,84 @@ describe('SkillsPanel (#3209)', () => {
     })
   })
 
+  // #3444: trim guard on active-skill row descriptions. Mirrors the
+  // pending-row guard from #3441 — `SessionSkillInfo.description` arrives
+  // via the `list_skills` WS message and may be a whitespace-only string;
+  // the panel must suppress the empty <span> rather than render a blank
+  // skill-desc element with layout but no visible text.
+  describe('active-skill description trim guard (#3444)', () => {
+    it('renders the description for an auto skill when present', () => {
+      renderPanel({
+        skills: [{
+          name: 'auto-with-desc',
+          activation: 'auto',
+          active: true,
+          description: 'Does useful things',
+        }],
+      })
+      const desc = screen.getByTestId('skill-desc-auto-with-desc')
+      expect(desc).toBeInTheDocument()
+      expect(desc).toHaveTextContent('Does useful things')
+    })
+
+    it('renders the description for a manual skill when present', () => {
+      renderPanel({
+        skills: [{
+          name: 'manual-with-desc',
+          activation: 'manual',
+          active: false,
+          description: 'Toggle me',
+        }],
+      })
+      const desc = screen.getByTestId('skill-desc-manual-with-desc')
+      expect(desc).toBeInTheDocument()
+      expect(desc).toHaveTextContent('Toggle me')
+    })
+
+    it('does not render description element when description is absent (auto)', () => {
+      renderPanel({
+        skills: [{ name: 'auto-no-desc', activation: 'auto', active: true }],
+      })
+      expect(screen.queryByTestId('skill-desc-auto-no-desc')).toBeNull()
+    })
+
+    it('does not render description element when description is an empty string (auto)', () => {
+      renderPanel({
+        skills: [{
+          name: 'auto-empty-desc',
+          activation: 'auto',
+          active: true,
+          description: '',
+        }],
+      })
+      expect(screen.queryByTestId('skill-desc-auto-empty-desc')).toBeNull()
+    })
+
+    it('does not render description element when description is whitespace-only (auto)', () => {
+      renderPanel({
+        skills: [{
+          name: 'auto-ws-desc',
+          activation: 'auto',
+          active: true,
+          description: '   ',
+        }],
+      })
+      expect(screen.queryByTestId('skill-desc-auto-ws-desc')).toBeNull()
+    })
+
+    it('does not render description element when description is whitespace-only (manual)', () => {
+      renderPanel({
+        skills: [{
+          name: 'manual-ws-desc',
+          activation: 'manual',
+          active: false,
+          description: '\t\n  ',
+        }],
+      })
+      expect(screen.queryByTestId('skill-desc-manual-ws-desc')).toBeNull()
+    })
+  })
+
   // #3270: 'Accept new content' affordance for mismatched skills. Pairs
   // with #3269's `skill_trust_accept` WS message — clicking the button
   // calls the onAcceptTrust prop (which the App wires to the store
