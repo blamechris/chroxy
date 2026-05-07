@@ -12,6 +12,14 @@ import type { AgentInfo } from '../store/types'
 
 const EMPTY_AGENTS: AgentInfo[] = []
 
+// #3619: `startedAt` is a server-issued wall-clock timestamp delivered via
+// the `agent_spawned` WS event. Comparing wall-clock-against-wall-clock is
+// the only coherent path here — switching to `performance.now()` would
+// subtract a process-local monotonic clock from a remote wall clock and
+// produce nonsense. The display is approximate-elapsed (`12s`, `3m 4s`,
+// `1h 2m`); typical NTP-bounded clock skew between dev machine and viewer
+// is sub-second to a few seconds, well below the granularity that any
+// operator actually reads off this card.
 function formatElapsed(startedAt: number): string {
   const diff = Math.max(0, Date.now() - startedAt)
   const secs = Math.floor(diff / 1000)

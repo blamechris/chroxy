@@ -30,6 +30,13 @@ function statusLabel(phase: ConnectionPhase, isActive: boolean): string {
   }
 }
 
+// #3619: relative-time renderers ("X minutes ago") deliberately stay on
+// `Date.now()` because the input timestamp `ts` is itself wall-clock
+// (persisted across browser refreshes / reconnects). Switching to
+// `performance.now()` would compare a process-local monotonic clock
+// against a wall-clock timestamp and produce nonsense. Same rationale
+// applies to the analogous renderers in WelcomeScreen.tsx and
+// CheckpointTimeline.tsx — pinned here as the canonical site.
 function formatLastConnected(ts: number | null): string {
   if (!ts) return 'Never connected'
   const diff = Date.now() - ts

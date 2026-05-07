@@ -41,7 +41,15 @@ function formatCountdown(ms: number): string {
 export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const expiresAtRef = useRef(Date.now() + remainingMs)
+  // #3619: anchor on monotonic `performance.now()` so an NTP sync /
+  // manual wall-clock change doesn't make the countdown snap or drift.
+  // `remainingMs` is a delta computed by the parent against a local
+  // wall-clock receipt-time anchor (the dashboard store sets
+  // `expiresAt = Date.now() + msg.remainingMs` in message-handler.ts on
+  // `permission_request` arrival — see #3619 for the receipt-time
+  // boundary). Only the in-component countdown needs the monotonic
+  // clock; the receipt-time anchor stays on `Date.now()`.
+  const expiresAtRef = useRef(performance.now() + remainingMs)
   // #2852: guard against double-click / key-repeat races. The store-backed
   // `answered` flag only flips after sendPermissionResponse -> markPermissionResolved
   // completes a React render cycle, so rapid clicks or held-Enter can fire
@@ -78,10 +86,10 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     if (remainingMs <= 0 || answered) {
       return
     }
-    expiresAtRef.current = Date.now() + remainingMs
+    expiresAtRef.current = performance.now() + remainingMs
 
     intervalRef.current = setInterval(() => {
-      const left = Math.max(0, expiresAtRef.current - Date.now())
+      const left = Math.max(0, expiresAtRef.current - performance.now())
       setRemaining(left)
       if (left <= 0 && intervalRef.current) {
         clearInterval(intervalRef.current)
