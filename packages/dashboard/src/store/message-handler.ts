@@ -202,6 +202,62 @@ export function rejectAllEvaluatorRequests(reason: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// In-flight skill_trust_grant tracking (#3587)
+// ---------------------------------------------------------------------------
+//
+// The `skill_trust_grant` request carries `{skillName, author, requestId}` but
+// the server's INVALID_AUTHOR error response only echoes `{requestId, code,
+// message, actualAuthor}` — there is no `skillName` on the wire. To offer a
+// one-click "Try as <actualAuthor>" recovery from the resulting toast we
+// remember the original request locally, keyed by `requestId`, and pair it up
+// when the matching error arrives.
+//
+// Entries are cleared when a `skill_trust_grant_ok` ack lands, when an
+// `error` with a matching `requestId` is processed, or via the cleanup
+// helper invoked on disconnect. The map is bounded at TRUST_GRANT_PENDING_CAP
+// (32) entries to defend against a buggy server that never replies — the
+// oldest entry is evicted FIFO via JS Map insertion order when the cap is
+// reached.
+
+interface PendingTrustGrant {
+  skillName: string;
+  author: string;
+}
+
+const _pendingTrustGrants = new Map<string, PendingTrustGrant>();
+const TRUST_GRANT_PENDING_CAP = 32;
+
+export function registerTrustGrantRequest(
+  requestId: string,
+  entry: { skillName: string; author: string },
+): void {
+  // FIFO eviction when the cap is reached. Map iteration order is insertion
+  // order in JS, so the first key is the oldest.
+  if (_pendingTrustGrants.size >= TRUST_GRANT_PENDING_CAP) {
+    const oldestKey = _pendingTrustGrants.keys().next().value;
+    if (oldestKey !== undefined) _pendingTrustGrants.delete(oldestKey);
+  }
+  _pendingTrustGrants.set(requestId, { ...entry });
+}
+
+export function consumePendingTrustGrant(requestId: string): PendingTrustGrant | null {
+  const entry = _pendingTrustGrants.get(requestId);
+  if (!entry) return null;
+  _pendingTrustGrants.delete(requestId);
+  return entry;
+}
+
+/** Clear all pending trust-grant entries — called on WebSocket close. */
+export function clearPendingTrustGrants(): void {
+  _pendingTrustGrants.clear();
+}
+
+/** @internal Exposed for tests so they can inspect the in-flight map. */
+export function _testTrustGrantPendingSize(): number {
+  return _pendingTrustGrants.size;
+}
+
+// ---------------------------------------------------------------------------
 // E2E encryption state — reset on every new connection
 // ---------------------------------------------------------------------------
 let _encryptionState: EncryptionState | null = null;
@@ -880,11 +936,16 @@ function handleSkillTrustGranted(msg: Record<string, unknown>, get: MsgGet, _set
 // skill_trust_granted (broadcast) and a subsequent skills_list refresh.
 // #3588: clear the matching `pendingTrustGrants` entry so the
 // SkillsPanel in-flight state (disabled Trust button + spinner) lifts.
+// #3587: also consume the action-toast pending entry so the Map-based
+// retry registry doesn't accumulate entries on the success path.
 // Idempotent — if the broadcast clears the row before the ack arrives,
 // the entry is already gone and this is a no-op.
 function handleSkillTrustGrantOk(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
   if (!requestId) return;
+  // #3587: consume the action-toast Map entry
+  consumePendingTrustGrant(requestId);
+  // #3588: clear per-session pendingTrustGrants list (SkillsPanel spinner)
   const targetId = resolveSessionId(msg, get().activeSessionId);
   if (!targetId || !get().sessionStates[targetId]) return;
   updateSession(targetId, (state) => {
@@ -2578,20 +2639,51 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // resolve landed on a different community author than the caller
       // claimed. Branch on the structured field instead of regex-parsing
       // the (intentionally unstable) human-readable `message`, so the
-      // user sees a concrete "owned by alice — try the 'Trust alice'
-      // button instead" hint rather than the bare server text. The
-      // pending `skill_trust_request` row for the real owner is still on
-      // the panel — clicking THAT row's Trust button is the recovery
-      // path. Other INVALID_AUTHOR variants (empty `author` validation)
-      // do not include `actualAuthor` and fall through to the plain
-      // message — see schema comment.
+      // user sees a concrete "owned by alice" hint rather than the bare
+      // server text. Other INVALID_AUTHOR variants (empty `author`
+      // validation) do not include `actualAuthor` and fall through to
+      // the plain message — see schema comment.
       const actualAuthor = typeof msg.actualAuthor === 'string' && msg.actualAuthor.length > 0
         ? msg.actualAuthor
         : null;
-      const surfaced = (errCode === 'INVALID_AUTHOR' && actualAuthor !== null)
-        ? `Skill is owned by '${actualAuthor}'. Use the 'Trust ${actualAuthor}' button on the pending entry instead.`
-        : errMsg;
-      get().addServerError(surfaced);
+      // #3587: when the original `skill_trust_grant` request is still
+      // tracked client-side (#3587 registerTrustGrantRequest), pair the
+      // `requestId` with its remembered `skillName` so we can offer a
+      // one-click recovery. The error wire shape carries `requestId` but
+      // NOT `skillName` (per ServerSkillTrustGrantInvalidAuthorSchema),
+      // so this is the only correlation path. Always consume the entry
+      // even if we don't end up rendering an action — the request is
+      // resolved either way and we don't want stale entries piling up.
+      // `requestId` may be null on the wire (per protocol nullable), so
+      // be defensive about the type.
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const pending = requestId !== null ? consumePendingTrustGrant(requestId) : null;
+      let surfaced: string;
+      let action: { label: string; onClick: () => void } | undefined;
+      if (errCode === 'INVALID_AUTHOR' && actualAuthor !== null) {
+        if (pending) {
+          // We know the skillName and the corrected author — render an
+          // actionable toast that re-issues skill_trust_grant on click.
+          // The pending row for the real owner is still on the panel,
+          // but a one-click retry is faster than scanning the list.
+          const skillName = pending.skillName;
+          surfaced = `Skill is owned by '${actualAuthor}', not '${pending.author}'. Try as ${actualAuthor}?`;
+          action = {
+            label: `Try as ${actualAuthor}`,
+            onClick: () => {
+              get().grantCommunitySkillTrust(skillName, actualAuthor);
+            },
+          };
+        } else {
+          // No tracked request (e.g. disconnect+reconnect dropped the
+          // map, or a duplicate error fires after first consume). Fall
+          // back to the #3570 text-only hint.
+          surfaced = `Skill is owned by '${actualAuthor}'. Use the 'Trust ${actualAuthor}' button on the pending entry instead.`;
+        }
+      } else {
+        surfaced = errMsg;
+      }
+      get().addServerError(surfaced, action);
       break;
     }
 

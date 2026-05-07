@@ -26,6 +26,7 @@ export type {
   SessionContext,
   McpServer,
   ServerError,
+  ServerErrorAction,
   DevPreview,
   WebTask,
   WebFeatureStatus,

@@ -32,6 +32,9 @@ import {
   resetReplayFlags,
   registerEvaluatorRequest,
   cancelEvaluatorRequest,
+  registerTrustGrantRequest,
+  clearPendingTrustGrants,
+  _testTrustGrantPendingSize,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
@@ -59,6 +62,11 @@ function createMockSocket(): WebSocket {
 
 function baseState(overrides: Partial<ConnectionState> = {}): Partial<ConnectionState> {
   const serverErrors: unknown[] = []
+  // #3587: capture the optional `action` arg so new tests can assert
+  // an actionable INVALID_AUTHOR toast carries a label + click handler.
+  // Existing tests still read `serverErrors` as the message-string list.
+  const serverErrorActions: Array<unknown> = []
+  const grantCalls: Array<{ skillName: string; author: string }> = []
   const terminalWrites: string[] = []
   return {
     connectionPhase: 'connected',
@@ -73,9 +81,17 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     slashCommands: [],
     connectedClients: [],
     serverErrors,
-    addServerError: (e: unknown) => { serverErrors.push(e) },
+    addServerError: (e: unknown, action?: unknown) => {
+      serverErrors.push(e)
+      serverErrorActions.push(action)
+    },
+    grantCommunitySkillTrust: (skillName: string, author: string) => {
+      grantCalls.push({ skillName, author })
+    },
     appendTerminalData: (d: string) => { terminalWrites.push(d) },
     _terminalWrites: terminalWrites,
+    _serverErrorActions: serverErrorActions,
+    _grantCalls: grantCalls,
     serverProtocolVersion: null,
     ...overrides,
   } as unknown as Partial<ConnectionState>
@@ -97,6 +113,9 @@ describe('dashboard message-handler dispatch', () => {
     localStorage.clear()
     clearDeltaBuffers()
     clearPermissionSplits()
+    // #3587: reset the in-flight skill_trust_grant tracking map between
+    // tests so a leftover entry from one case doesn't leak into another.
+    clearPendingTrustGrants()
     mockSocket = createMockSocket()
     store = createMockStore(baseState())
     setStore(store)
@@ -107,6 +126,9 @@ describe('dashboard message-handler dispatch', () => {
     clearDeltaBuffers()
     clearPermissionSplits()
     resetReplayFlags()
+    // #3587: defensive cleanup so a test that registers a pending
+    // trust-grant entry but doesn't consume it can't poison the next.
+    clearPendingTrustGrants()
   })
 
   describe('auth_ok dispatch', () => {
@@ -237,6 +259,187 @@ describe('dashboard message-handler dispatch', () => {
         )
         const state = store.getState() as any
         expect(state.serverErrors).toEqual(['Author mismatch'])
+      })
+    })
+
+    // #3587: when the dashboard issued the original `skill_trust_grant`
+    // and tracked the requestId locally, the INVALID_AUTHOR error gains
+    // a one-click "Try as <actualAuthor>" recovery action that re-issues
+    // skill_trust_grant against the corrected author.
+    describe('skill_trust_grant INVALID_AUTHOR actionable toast (#3587)', () => {
+      it('attaches a "Try as <actualAuthor>" action when the request was tracked', () => {
+        registerTrustGrantRequest('trust-grant-actionable-1', {
+          skillName: 'pyramid',
+          author: 'bob',
+        })
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'trust-grant-actionable-1',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch — server text',
+            actualAuthor: 'alice',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        // Surfaced toast names BOTH the actual owner and the wrong
+        // author the operator clicked, plus the retry prompt.
+        expect(state.serverErrors).toHaveLength(1)
+        const surfaced = state.serverErrors[0] as string
+        expect(surfaced).toContain("'alice'")
+        expect(surfaced).toContain("'bob'")
+        expect(surfaced.toLowerCase()).toContain('try as alice')
+        // Action is attached.
+        const action = state._serverErrorActions[0] as { label: string; onClick: () => void }
+        expect(action).toBeDefined()
+        expect(action.label).toBe('Try as alice')
+        expect(typeof action.onClick).toBe('function')
+      })
+
+      it('action.onClick re-issues skill_trust_grant with the corrected author', () => {
+        registerTrustGrantRequest('trust-grant-click-1', {
+          skillName: 'mountain',
+          author: 'bob',
+        })
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'trust-grant-click-1',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch',
+            actualAuthor: 'alice',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        const action = state._serverErrorActions[0] as { label: string; onClick: () => void }
+        expect(state._grantCalls).toEqual([])
+        action.onClick()
+        // Round-trip: the click fires grantCommunitySkillTrust with the
+        // ORIGINAL skillName and the ACTUAL (corrected) author.
+        expect(state._grantCalls).toEqual([{ skillName: 'mountain', author: 'alice' }])
+      })
+
+      it('falls back to the #3570 text-only hint when no tracked request matches the requestId', () => {
+        // Disconnect/reconnect drops the in-flight map; a duplicate
+        // INVALID_AUTHOR error after a manual close+reopen would land
+        // here. We must not crash and must still rewrite the message
+        // (no action button possible without the skillName).
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'trust-grant-untracked-1',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch',
+            actualAuthor: 'alice',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        const surfaced = state.serverErrors[0] as string
+        expect(surfaced).toContain("'alice'")
+        expect(surfaced).toContain("Trust alice")
+        // No action — operator must use the pending row.
+        expect(state._serverErrorActions[0]).toBeUndefined()
+      })
+
+      it('falls back to text-only when requestId is null (anonymous error)', () => {
+        // The server schema permits `requestId: null` — we must not
+        // try to consume from the map with a null key.
+        registerTrustGrantRequest('trust-grant-null-1', {
+          skillName: 'river',
+          author: 'bob',
+        })
+        handleMessage(
+          {
+            type: 'error',
+            requestId: null,
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch',
+            actualAuthor: 'alice',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        // Hint rewritten (so operator still sees actualAuthor) but no
+        // action attached.
+        expect(state.serverErrors[0]).toContain("'alice'")
+        expect(state._serverErrorActions[0]).toBeUndefined()
+        // The unrelated registered request is still pending — the null
+        // requestId error doesn't consume an arbitrary entry.
+        expect(_testTrustGrantPendingSize()).toBe(1)
+      })
+
+      it('consumes the pending entry on first error so a duplicate retry has no action', () => {
+        // Defensive: if the server somehow emits two INVALID_AUTHOR
+        // errors for the same requestId (network duplication, future
+        // protocol change), only the first carries the action.
+        registerTrustGrantRequest('trust-grant-dup-1', {
+          skillName: 'tree',
+          author: 'bob',
+        })
+        const errorMsg = {
+          type: 'error',
+          requestId: 'trust-grant-dup-1',
+          code: 'INVALID_AUTHOR',
+          message: 'Author mismatch',
+          actualAuthor: 'alice',
+        }
+        handleMessage(errorMsg, ctx() as any)
+        handleMessage(errorMsg, ctx() as any)
+        const state = store.getState() as any
+        expect(state.serverErrors).toHaveLength(2)
+        expect(state._serverErrorActions[0]).toBeDefined()
+        // Second toast falls back to text-only (no action) because the
+        // tracked request was consumed by the first.
+        expect(state._serverErrorActions[1]).toBeUndefined()
+      })
+
+      it('skill_trust_grant_ok ack clears the pending entry', () => {
+        // On the success path the error never fires — the entry must
+        // still be released so the bounded map doesn't leak.
+        registerTrustGrantRequest('trust-grant-ok-1', {
+          skillName: 'lake',
+          author: 'alice',
+        })
+        expect(_testTrustGrantPendingSize()).toBe(1)
+        handleMessage(
+          {
+            type: 'skill_trust_grant_ok',
+            requestId: 'trust-grant-ok-1',
+            sessionId: 'sess-1',
+            skillName: 'lake',
+            author: 'alice',
+          },
+          ctx() as any,
+        )
+        expect(_testTrustGrantPendingSize()).toBe(0)
+      })
+
+      it('does not attach an action on non-INVALID_AUTHOR errors even with a tracked request', () => {
+        // TRUST_FLUSH_FAILED still resolves the same requestId (the
+        // server's catch block path), so the tracked entry is consumed
+        // — but we never attach a "Try as" action because the right
+        // recovery is "retry as the original author", not "swap author".
+        registerTrustGrantRequest('trust-grant-flush-1', {
+          skillName: 'star',
+          author: 'alice',
+        })
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'trust-grant-flush-1',
+            code: 'TRUST_FLUSH_FAILED',
+            message: 'flush failed',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        expect(state.serverErrors).toEqual(['flush failed'])
+        expect(state._serverErrorActions[0]).toBeUndefined()
+        // Entry consumed (resolved): map is empty.
+        expect(_testTrustGrantPendingSize()).toBe(0)
       })
     })
   })

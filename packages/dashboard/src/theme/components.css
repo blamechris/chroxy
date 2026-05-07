@@ -2818,6 +2818,33 @@
 
 .toast-close:hover { color: #fff; }
 
+/* #3587: inline recovery action button rendered between the message
+ * and the close button. Visual style mirrors the existing "active" UI
+ * affordance — solid white-on-translucent so it reads as the primary
+ * call to action over the colored toast background. */
+.toast-action {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: var(--text-sm, 13px);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.toast-action:hover {
+  background: rgba(255, 255, 255, 0.28);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.toast-action:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+
 .toast-error { background: #dc2626; }
 .toast-info { background: #2563eb; }
 
