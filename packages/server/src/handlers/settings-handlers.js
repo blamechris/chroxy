@@ -8,7 +8,7 @@ import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
-import { realpathSync } from 'fs'
+import { realpathSync, readdirSync, statSync } from 'fs'
 import { createLogger } from '../logger.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
@@ -735,6 +735,67 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
   })
 }
 
+// #3500: shallow scan of community/*/<skillName>.{md,markdown} across the
+// configured skills roots. Returns the first author (other than `claimedAuthor`)
+// that actually owns the skill on disk, or null if no such author exists.
+//
+// Bounded cost: one readdirSync per skills root + one statSync per author dir
+// per extension. Only invoked on the SKILL_NOT_FOUND error path after the
+// per-author realpath lookup has already missed — never on the happy path.
+//
+// Each candidate is gated through `_isCommunityNamespace` against the root's
+// realpath, mirroring the security check the per-author loop applies. That
+// rejects hidden author dirs (.foo), symlinks that escape the root, and any
+// segment shape that doesn't fit `community/<author>/<file>`.
+function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
+  for (const root of skillsRoots) {
+    let rootReal
+    try {
+      rootReal = realpathSync(root)
+    } catch {
+      continue
+    }
+    let authorEntries
+    try {
+      authorEntries = readdirSync(`${rootReal}/community`, { withFileTypes: true })
+    } catch {
+      // No community/ dir under this root — skip.
+      continue
+    }
+    for (const ent of authorEntries) {
+      const authorName = ent.name
+      // Mirror _isCommunityNamespace's hidden-author guard. We also need the
+      // entry to be a directory (or a symlink to one) — readdir's withFileTypes
+      // gives us .isDirectory() / .isSymbolicLink() checks without an extra stat
+      // for the common case.
+      if (!authorName || authorName === '.' || authorName === '..' || authorName.startsWith('.')) continue
+      if (!ent.isDirectory() && !ent.isSymbolicLink()) continue
+      if (authorName === claimedAuthor) continue
+      for (const ext of ['md', 'markdown']) {
+        const candidatePath = `${rootReal}/community/${authorName}/${skillName}.${ext}`
+        let candidateReal
+        try {
+          candidateReal = realpathSync(candidatePath)
+        } catch {
+          continue
+        }
+        // Confirm the resolved path is regular and under community/<author>/.
+        try {
+          const st = statSync(candidateReal)
+          if (!st.isFile()) continue
+        } catch {
+          continue
+        }
+        const { isCommunity, author: actualAuthor } = _isCommunityNamespace(candidateReal, rootReal)
+        if (!isCommunity) continue
+        if (!actualAuthor || actualAuthor === claimedAuthor) continue
+        return actualAuthor
+      }
+    }
+  }
+  return null
+}
+
 /**
  * #3297: grant community trust for a given author/skill. Fired when the
  * dashboard operator accepts the first-activation prompt for a community
@@ -760,7 +821,11 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
  *   - `INVALID_SKILL_NAME` — missing/empty skillName
  *   - `INVALID_AUTHOR` — missing/empty author, OR (#3307) the skill resolves
  *      on disk under a different `community/<author>/` namespace than the
- *      caller claims (e.g. via a symlink that crosses author dirs)
+ *      caller claims (e.g. via a symlink that crosses author dirs), OR (#3500)
+ *      a shallow scan of `community/*\/` finds the skillName under a different
+ *      author when the per-author lookup misses (the common no-symlink case).
+ *      The error message surfaces the real author so clients can suggest
+ *      "did you mean alice?".
  *   - `No active session` (session_error) — no bound session
  *   - `TRUST_NOT_ENABLED` — session has no trust store
  *   - `SKILL_NOT_FOUND` — can't find the skill on disk under any author
@@ -850,6 +915,20 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
         msg?.requestId,
         'INVALID_AUTHOR',
         `Community skill '${msg.skillName}' resolves to a different author than '${msg.author}'.`,
+      )
+      return
+    }
+    // #3500: per-author realpath lookup missed. Before declaring SKILL_NOT_FOUND,
+    // scan community/*/ for the skillName — the common operator path is
+    // `community/alice/foo.md` exists with NO symlink under `community/<msg.author>/`,
+    // and we want to surface "wrong author" rather than "missing".
+    const actualAuthor = _scanCommunityForSkillName(skillsRoots, msg.skillName, msg.author)
+    if (actualAuthor) {
+      sendError(
+        ws,
+        msg?.requestId,
+        'INVALID_AUTHOR',
+        `Community skill '${msg.skillName}' is owned by '${actualAuthor}', not '${msg.author}'.`,
       )
       return
     }
