@@ -62,6 +62,40 @@ describe('SdkSession', () => {
       assert.equal(session._sandbox, null)
     })
 
+    // #3540: the SidecarProcess `stdin_disabled` latch is persisted to
+    // session metadata so a server restart preserves the disabled
+    // state. Restored sessions are constructed with the persisted value
+    // forwarded as the `stdinForwardingDisabled` opt; the constructor
+    // initialises `_stdinForwardingDisabled` from it so listSessions
+    // and the existing _attachSidecarProcessListeners short-circuit
+    // both observe the latched flag immediately.
+    it('defaults _stdinForwardingDisabled to false when not provided (#3540)', () => {
+      assert.equal(session._stdinForwardingDisabled, false,
+        'fresh sessions must start with the latch off so the warn/error fires on the first SidecarProcess signal')
+    })
+
+    it('hydrates _stdinForwardingDisabled from the constructor opt (#3540)', () => {
+      const s = createSession({ stdinForwardingDisabled: true })
+      assert.equal(s._stdinForwardingDisabled, true,
+        'restored sessions must start with the latch on so reconnecting clients see the disabled state in listSessions')
+      s.destroy()
+    })
+
+    it('coerces non-boolean stdinForwardingDisabled values to a strict boolean (#3540)', () => {
+      // Defensive coerce: a stray `null` / numeric / undefined from a
+      // mangled state file must not produce `_stdinForwardingDisabled`
+      // values that fail strict-equality checks downstream (the
+      // `if (this._stdinForwardingDisabled) return` short-circuit in
+      // _attachSidecarProcessListeners depends on truthy semantics, but
+      // listSessions / serializeState round-trip through `!!`).
+      const sNull = createSession({ stdinForwardingDisabled: null })
+      assert.equal(sNull._stdinForwardingDisabled, false)
+      sNull.destroy()
+      const sUndef = createSession({ stdinForwardingDisabled: undefined })
+      assert.equal(sUndef._stdinForwardingDisabled, false)
+      sUndef.destroy()
+    })
+
     // #3209/#3246: SDK is the only provider that rebuilds the system
     // prompt each turn (see _callQuery), so manual-skill toggles
     // propagate to the wire. Subprocess providers inherit
@@ -1555,6 +1589,48 @@ describe('SdkSession', () => {
       // Idempotent — second emission must NOT re-fire the error event.
       proc.emit('stdin_disabled')
       assert.equal(errorEvents.length, 1, 'error event must fire exactly once per session')
+    })
+
+    // #3540: when a session is restored from disk with the latch already
+    // set (the prior process recorded `stdin_disabled` and persisted it),
+    // a fresh SidecarProcess `stdin_disabled` signal MUST stay silenced —
+    // no warn, no error event, no double-banner on the dashboard.  The
+    // existing `if (this._stdinForwardingDisabled) return` short-circuit
+    // already handles this; the test pins the contract so a future
+    // refactor cannot regress.
+    it('does not warn or emit error when the latch was hydrated at construct time (#3540)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      // Construct with the persisted latch already set.
+      const restored = new SdkSession({ cwd: '/tmp', stdinForwardingDisabled: true })
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+      const errorEvents = []
+      restored.on('error', (e) => errorEvents.push(e))
+
+      try {
+        restored._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_disabled')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const disabledWarns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin forwarding is disabled'),
+      )
+      assert.equal(disabledWarns.length, 0,
+        'restored sessions must not re-warn — the user already saw this banner before the restart')
+      assert.equal(errorEvents.length, 0,
+        'restored sessions must not re-emit the error event — metadata field is the canonical signal for cold restart')
+      assert.equal(restored._stdinForwardingDisabled, true,
+        'latch stays on across the (suppressed) signal')
+
+      restored.destroy()
     })
 
     it('is idempotent — repeated calls do not stack listeners', async () => {
