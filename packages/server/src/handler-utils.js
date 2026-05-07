@@ -398,14 +398,31 @@ export function resolveSession(ctx, msg, client) {
  * Use in handler catch blocks so the client can clear loading state
  * and surface a user-facing message instead of silently spinning.
  *
+ * Optionally accepts a `data` object whose own enumerable fields are merged
+ * onto the wire payload alongside the canonical four (#3538). Use this to
+ * attach structured context — e.g. `actualAuthor` on `INVALID_AUTHOR` — so
+ * dashboard clients can branch on `code` and read fields directly instead of
+ * regex-parsing the human-readable `message`. Canonical fields always win:
+ * `data` keys named `type`/`requestId`/`code`/`message` are ignored, so a
+ * misbehaving caller cannot spoof the wire shape.
+ *
  * @param {WebSocket} ws - Target WebSocket connection
  * @param {string|null} requestId - Correlating request ID (may be null)
  * @param {string} code - Machine-readable error code (e.g. 'HANDLER_ERROR')
  * @param {string} message - Human-readable error description
+ * @param {object} [data] - Optional structured fields merged into the payload
  */
-export function sendError(ws, requestId, code, message) {
+export function sendError(ws, requestId, code, message, data) {
   if (!ws || ws.readyState !== 1) return
-  ws.send(JSON.stringify({ type: 'error', requestId: requestId ?? null, code, message }))
+  const payload = { type: 'error', requestId: requestId ?? null, code, message }
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    for (const [key, value] of Object.entries(data)) {
+      // Canonical fields are reserved — never let a caller clobber them.
+      if (key === 'type' || key === 'requestId' || key === 'code' || key === 'message') continue
+      payload[key] = value
+    }
+  }
+  ws.send(JSON.stringify(payload))
 }
 
 // Issue #2912: every handler that rejects with SESSION_TOKEN_MISMATCH used to
