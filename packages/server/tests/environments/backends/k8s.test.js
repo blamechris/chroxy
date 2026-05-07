@@ -371,6 +371,100 @@ describe('K8sBackend.createEnvironment()', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend imagePullPolicy validation (#3375)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend imagePullPolicy validation (#3375)', () => {
+  it('constructor accepts valid values: Always, IfNotPresent, Never', () => {
+    const api = createMockApi()
+    for (const policy of ['Always', 'IfNotPresent', 'Never']) {
+      assert.doesNotThrow(
+        () => new K8sBackend({ _coreV1Api: api, imagePullPolicy: policy }),
+        `"${policy}" must be accepted`
+      )
+    }
+  })
+
+  it('constructor accepts undefined (omitted)', () => {
+    const api = createMockApi()
+    assert.doesNotThrow(() => new K8sBackend({ _coreV1Api: api }))
+  })
+
+  it('constructor accepts null', () => {
+    const api = createMockApi()
+    assert.doesNotThrow(() => new K8sBackend({ _coreV1Api: api, imagePullPolicy: null }))
+  })
+
+  it('constructor throws TypeError for unrecognised value', () => {
+    const api = createMockApi()
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'IfNotpresent' }),
+      (err) => {
+        assert.ok(err instanceof TypeError, 'must be a TypeError')
+        assert.match(err.message, /invalid imagePullPolicy "IfNotpresent"/)
+        assert.match(err.message, /constructor opts/)
+        assert.match(err.message, /Always, IfNotPresent, Never/)
+        return true
+      }
+    )
+  })
+
+  it('constructor throws TypeError for arbitrary string', () => {
+    const api = createMockApi()
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'always' }),
+      /invalid imagePullPolicy "always"/
+    )
+  })
+
+  it('createEnvironment throws TypeError for unrecognised per-call value', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'bad-policy',
+        image: 'agent:latest',
+        imagePullPolicy: 'IfNotpresent',
+      }),
+      (err) => {
+        assert.ok(err instanceof TypeError, 'must be a TypeError')
+        assert.match(err.message, /invalid imagePullPolicy "IfNotpresent"/)
+        assert.match(err.message, /createEnvironment opts/)
+        assert.match(err.message, /Always, IfNotPresent, Never/)
+        return true
+      }
+    )
+  })
+
+  it('createEnvironment accepts undefined imagePullPolicy (omitted)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.doesNotReject(
+      () => backend.createEnvironment({ envId: 'no-policy-call', image: 'agent:latest' })
+    )
+  })
+
+  it('no Pod is created when createEnvironment validation fails', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'bad-policy-no-pod',
+        image: 'agent:latest',
+        imagePullPolicy: 'invalid',
+      }),
+      TypeError
+    )
+
+    assert.equal(api.calls.createSecret.length, 0, 'Secret must not be created when validation fails synchronously')
+    assert.equal(api.calls.create.length, 0, 'Pod must not be created when validation fails synchronously')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — workspace mount (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 

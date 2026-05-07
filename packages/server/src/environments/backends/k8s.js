@@ -47,6 +47,26 @@ function notImplemented(method) {
   return err
 }
 
+/** Valid Kubernetes imagePullPolicy values */
+const VALID_PULL_POLICIES = new Set(['Always', 'IfNotPresent', 'Never'])
+
+/**
+ * Validates an imagePullPolicy value.  Throws TypeError for unrecognised strings.
+ * Passes through null/undefined (meaning: omit the field, let K8s apply its default).
+ *
+ * @param {string|null|undefined} value
+ * @param {string} context - Describes where the value came from (for the error message)
+ */
+function validateImagePullPolicy(value, context) {
+  if (value == null) return
+  if (!VALID_PULL_POLICIES.has(value)) {
+    throw new TypeError(
+      `K8sBackend: invalid imagePullPolicy "${value}" in ${context} — ` +
+      `must be one of: Always, IfNotPresent, Never`
+    )
+  }
+}
+
 /**
  * K8sBackend implements the Backend interface (see types.js) using the
  * Kubernetes API via @kubernetes/client-node.
@@ -90,6 +110,7 @@ export class K8sBackend {
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
+    validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
     this._imagePullPolicy = imagePullPolicy || null
@@ -205,6 +226,7 @@ export class K8sBackend {
       memoryLimit, cpuLimit, forwardPorts, mounts,
       imagePullPolicy: callImagePullPolicy,
     } = opts
+    validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
     const ns = namespace || this._namespace
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
