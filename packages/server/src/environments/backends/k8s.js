@@ -1732,15 +1732,22 @@ function _deriveSecretName(podName) {
  * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
  * @throws {Error} when `mountStr` is recognised as a Windows drive-letter path.
  */
+// Build the Windows-path Error thrown by both _parseMountString guards.
+// Centralised so the message can't drift between the absolute-form regex check
+// and the relative-form post-split check below.
+function _windowsMountPathError(mountStr) {
+  return new Error(
+    `K8s mount string '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths (expected '<host>:<container>[:ro]' with a POSIX host path)`
+  )
+}
+
 function _parseMountString(mountStr) {
   if (typeof mountStr !== 'string') return null
   // Reject Windows drive-letter paths up-front: `C:\…` or `C:/…` would split on
   // `:` into a 1-char hostPath and a corrupted containerPath. K8s nodes only
   // accept POSIX paths, so this can never produce a valid mount.
   if (/^[A-Za-z]:[\\/]/.test(mountStr)) {
-    throw new Error(
-      `K8s mount string '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths (expected '<host>:<container>[:ro]' with a POSIX host path)`
-    )
+    throw _windowsMountPathError(mountStr)
   }
   const parts = mountStr.split(':')
   if (parts.length < 2) return null
@@ -1749,13 +1756,12 @@ function _parseMountString(mountStr) {
   if (!hostPath || !containerPath) return null
   // Defensive second check: a single-character hostPath that is a letter is a
   // Windows *relative* drive path (e.g. `C:foo:/container` → hostPath="C") that
-  // the leading-slash regex above can't catch. No legitimate POSIX mount ever
-  // produces a 1-char hostPath ('/' alone splits to '' and is already rejected
-  // by the !hostPath check), so fail loud with the same Error shape.
+  // the drive-letter prefix regex above can't catch (it requires `\` or `/`
+  // after the colon). No legitimate POSIX mount ever produces a 1-char
+  // hostPath ('/' alone splits to '' and is already rejected by the !hostPath
+  // check), so fail loud with the same Error shape.
   if (hostPath.length === 1 && /^[A-Za-z]$/.test(hostPath)) {
-    throw new Error(
-      `K8s mount string '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths (expected '<host>:<container>[:ro]' with a POSIX host path)`
-    )
+    throw _windowsMountPathError(mountStr)
   }
   const readOnly = parts[2] === 'ro'
   return { hostPath, containerPath, readOnly }
