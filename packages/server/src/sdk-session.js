@@ -42,6 +42,14 @@ const log = createLogger('sdk')
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 
+// Marker stamped on a proc the first time _attachSidecarProcessListeners()
+// wires its default listeners (#3504 review).  Subsequent calls on the same
+// proc short-circuit instead of attaching duplicate listeners — without this
+// guard a re-wiring caller (resume/reconnect path, future K8s session class
+// re-spawning into the same proc) would emit N copies of every warn-log.
+// Symbol-keyed so it cannot collide with consumer code or test stubs.
+const SIDECAR_LISTENERS_ATTACHED = Symbol('sdk-session.sidecarListenersAttached')
+
 export class SdkSession extends BaseSession {
   /**
    * Human-readable label shown in the startup banner and anywhere else the
@@ -635,9 +643,15 @@ export class SdkSession extends BaseSession {
    * listener the user sees a hung turn instead of an error.  This helper
    * provides the "warn log at minimum" guarantee — subclasses or future
    * K8s-aware paths may override to escalate (e.g. emit error, abort the
-   * turn).  Idempotent: safe to call on a non-SidecarProcess proc (the
-   * listeners simply never fire because the events are SidecarProcess-
-   * specific).
+   * turn).
+   *
+   * Idempotent on two axes:
+   *   1. Safe on non-SidecarProcess procs — Node ChildProcess (Docker path)
+   *      never emits these events, so the listeners simply never fire.
+   *   2. Safe on repeat calls — the proc is stamped with a Symbol marker
+   *      after the first wiring; subsequent calls short-circuit so a
+   *      resume/reconnect caller cannot accumulate duplicate listeners
+   *      (and therefore duplicate warn logs) on the same proc.
    *
    * @param {EventEmitter|null|undefined} proc — the spawned process from
    *   `spawnClaudeCodeProcess`.  May be a Node ChildProcess (Docker path)
@@ -645,6 +659,11 @@ export class SdkSession extends BaseSession {
    */
   _attachSidecarProcessListeners(proc) {
     if (!proc || typeof proc.on !== 'function') return
+    // Re-wiring guard (#3504 review): stamp the proc on first attach so
+    // duplicate calls don't pile up listeners.  Symbol-keyed so it can't
+    // collide with consumer code or arbitrary EventEmitters used as stubs.
+    if (proc[SIDECAR_LISTENERS_ATTACHED]) return
+    proc[SIDECAR_LISTENERS_ATTACHED] = true
 
     proc.on('stdin_dropped', (info) => {
       const bytes = info?.bytes ?? 'unknown'

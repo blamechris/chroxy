@@ -1145,5 +1145,49 @@ describe('SdkSession', () => {
       assert.ok(warn.message.includes('unknown bytes'),
         'must report unknown bytes when payload omits the count')
     })
+
+    it('is idempotent — repeated calls do not stack listeners', async () => {
+      // Without the guard, calling _attachSidecarProcessListeners twice on
+      // the same proc would attach two warn-log handlers and emit two log
+      // lines per event.  Verify the Symbol-marker guard short-circuits
+      // the second call (#3504 review).
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        session._attachSidecarProcessListeners(proc)  // second call — must no-op
+        session._attachSidecarProcessListeners(proc)  // third call — must no-op
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+        proc.emit('stdin_disabled')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const droppedWarns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      const disabledWarns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin forwarding is disabled'),
+      )
+      assert.equal(droppedWarns.length, 1,
+        'stdin_dropped warn must fire exactly once even after triple-attach')
+      assert.equal(disabledWarns.length, 1,
+        'stdin_disabled warn must fire exactly once even after triple-attach')
+      // Listener counts on the proc itself should also reflect single-wire.
+      assert.equal(proc.listenerCount('stdin_dropped'), 1,
+        'only one stdin_dropped listener should be attached')
+      assert.equal(proc.listenerCount('stdin_disabled'), 1,
+        'only one stdin_disabled listener should be attached')
+    })
   })
 })

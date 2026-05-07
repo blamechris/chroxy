@@ -292,9 +292,12 @@ export class DockerSdkSession extends SdkSession {
       })
       // Attach default warn-log listeners for SidecarProcess stdin failure
       // signals (#3402, #3468, #3474).  Docker procs are plain ChildProcess
-      // and never fire these events; the helper no-ops on them so this is
-      // safe to wire unconditionally.  Future K8s session class will inherit
-      // the same hook.
+      // and never fire these events; the helper is a no-op on them so this
+      // is safe to wire unconditionally.  Note: a K8s session class (when
+      // it lands) would extend SdkSession directly, not DockerSdkSession,
+      // so it must call `_attachSidecarProcessListeners` from its own
+      // spawn path — the helper lives on SdkSession precisely so any
+      // subclass can reuse it.
       this._attachSidecarProcessListeners(proc)
       return proc
     }
