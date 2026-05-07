@@ -50,7 +50,7 @@
  * @param {string}   opts.memoryLimit     - Docker memory limit string (e.g. "2g")
  * @param {string}   opts.cpuLimit        - Docker CPU limit string (e.g. "2")
  * @param {string}   opts.containerUser   - Non-root username to create inside the container
- * @param {Object}   [opts.containerEnv]  - Extra environment variables to inject (already sanitized)
+ * @param {Object.<string,string>} [opts.containerEnv]  - Extra environment variables to inject (already sanitized)
  * @param {number[]|string[]} [opts.forwardPorts] - Ports to expose from the container
  * @param {string[]} [opts.mounts]        - Additional volume mounts (already validated)
  * @param {string}   [opts.postCreateCommand] - Shell command to run after setup completes
