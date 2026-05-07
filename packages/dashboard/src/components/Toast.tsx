@@ -78,6 +78,13 @@ type PauseReason = 'hover' | 'focus'
 interface TimerState {
   timer: ReturnType<typeof setTimeout> | null
   remaining: number
+  /**
+   * #3612: monotonic `performance.now()` timestamp captured when the
+   * active timer was started. Wall-clock (`Date.now()`) can jump
+   * backwards on NTP sync / manual clock change, so elapsed-time math
+   * uses the monotonic clock to keep the pause→resume remaining
+   * calculation correct regardless of system clock changes.
+   */
   startedAt: number
   pauseReasons: Set<PauseReason>
 }
@@ -94,7 +101,8 @@ export function Toast({ items, onDismiss }: ToastProps) {
     timersRef.current.set(id, {
       timer,
       remaining: duration,
-      startedAt: Date.now(),
+      // #3612: monotonic clock — see TimerState.startedAt.
+      startedAt: performance.now(),
       pauseReasons: existing?.pauseReasons ?? new Set(),
     })
   }
@@ -117,7 +125,8 @@ export function Toast({ items, onDismiss }: ToastProps) {
     state.pauseReasons.add(reason)
     if (!state.timer) return // already paused — just record the new reason
     clearTimeout(state.timer)
-    const elapsed = Date.now() - state.startedAt
+    // #3612: monotonic elapsed — Date.now() can jump on clock change.
+    const elapsed = performance.now() - state.startedAt
     const remaining = Math.max(0, state.remaining - elapsed)
     timersRef.current.set(id, {
       timer: null,
