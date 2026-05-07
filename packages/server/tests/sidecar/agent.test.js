@@ -1765,16 +1765,20 @@ describe('PodAgent', () => {
       // (so it sees EOF and can exit cleanly) before falling back to signals.
       // Build a mock child with a real PassThrough stdin so we can assert on
       // both `stdin.writableEnded` and the `kill` call ordering.
+      //
+      // The fake clock governs both the idle TTL and the stdin-close grace,
+      // so the critical ordering (stdin EOF → grace → SIGTERM) is asserted
+      // deterministically — no wall-clock sleeps gate that observation.
+      // A spawn-hook promise replaces the post-spawn sleep that previous
+      // versions relied on for ordering.
       const child = new EventEmitter()
       child.stdout = new PassThrough()
       child.stderr = new PassThrough()
       child.stdin = new PassThrough()
       child.kill = (signal) => {
         // Snapshot stdin state at the moment SIGTERM is delivered so the test
-        // can assert ordering even if the real-time SIGTERM grace fires before
-        // the assertion runs.
+        // can assert ordering precisely.
         child._sigtermStdinEnded = child.stdin.writableEnded
-        child._sigtermAt = Date.now()
         child.killSignals = child.killSignals || []
         child.killSignals.push(signal)
         return true
@@ -1783,11 +1787,14 @@ describe('PodAgent', () => {
 
       const clock = makeFakeClock()
       const TTL = 200
-      // Use a real (short) stdin-close grace so we can observe the timing in
-      // wall-clock terms — the fake clock only governs the idle TTL timer.
       const STDIN_CLOSE_MS = 30
+      let spawnResolve
+      const spawnedPromise = new Promise((resolve) => { spawnResolve = resolve })
       const { agent: ttlAgent, port: ttlPort } = await startAgent({
-        spawnFn: (_cmd, _args, _opts) => child,
+        spawnFn: (_cmd, _args, _opts) => {
+          spawnResolve()
+          return child
+        },
         killGraceMs: 25,
         stdinCloseGraceMs: STDIN_CLOSE_MS,
         resumeTimeoutMs: TTL,
@@ -1800,9 +1807,15 @@ describe('PodAgent', () => {
         await waitOpen(ws)
 
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
 
-        // Disconnect — arms the idle eviction timer.
+        // Wait deterministically for the spawn hook to fire — confirms the
+        // child is registered before we disconnect and arm the idle timer.
+        await spawnedPromise
+
+        // Disconnect — arms the idle eviction timer. The 30ms wait gives the
+        // server's WS 'close' handler time to run and arm the idle timer; the
+        // critical ordering (stdin-then-SIGTERM) is asserted via the fake
+        // clock below, not via wall-clock sleeps.
         ws.close()
         await new Promise((r) => setTimeout(r, 30))
 
@@ -1813,7 +1826,7 @@ describe('PodAgent', () => {
           child.stdin.once('finish', resolve)
         })
 
-        // Trigger eviction.
+        // Trigger eviction by advancing the fake clock past TTL.
         clock.advance(TTL + 1)
 
         // stdin must be closed synchronously by _killChild — the polite EOF
@@ -1821,16 +1834,18 @@ describe('PodAgent', () => {
         await stdinEndedPromise
         assert.equal(child.stdin.writableEnded, true, 'stdin must be ended after eviction')
 
-        // No signals yet — SIGTERM is deferred until stdinCloseGraceMs elapses.
+        // No signals yet — SIGTERM is deferred until stdinCloseGraceMs elapses
+        // on the (fake) clock. This replaces the previous wall-clock wait,
+        // which was the flaky path under CI load.
         assert.equal(
           child.killSignals.length,
           0,
           `no kill signals must be sent before stdin grace elapses, got ${JSON.stringify(child.killSignals)}`,
         )
 
-        // Wait past the stdin-close grace and confirm SIGTERM fires AFTER the
-        // stdin pipe was already ended.
-        await new Promise((r) => setTimeout(r, STDIN_CLOSE_MS + 30))
+        // Advance the fake clock past the stdin-close grace and confirm
+        // SIGTERM fires AFTER the stdin pipe was already ended.
+        clock.advance(STDIN_CLOSE_MS + 1)
         assert.ok(
           child.killSignals.includes('SIGTERM'),
           `SIGTERM must fire after stdin grace, got ${JSON.stringify(child.killSignals)}`,

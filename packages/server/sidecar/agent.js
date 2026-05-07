@@ -515,6 +515,9 @@ export class PodAgent {
   // If child.stdin is null/already-ended (e.g. stdio: 'ignore' or stdin_end
   // already sent), the stdin-close step is a no-op and SIGTERM still fires
   // synchronously — preserving the original kill semantics for that path.
+  //
+  // When stdinCloseGraceMs is configured to 0, SIGTERM also fires
+  // synchronously (after the stdin EOF), avoiding a deferred setTimeout(0).
   // ---------------------------------------------------------------------------
 
   _killChild(child) {
@@ -534,32 +537,36 @@ export class PodAgent {
       } catch {}
     }
 
+    // Use injected timer functions so deterministic-clock tests can advance
+    // the stdin-close and SIGKILL grace windows without wall-clock waits.
     let sigtermTimer = null
-    if (stdinClosed) {
+    if (stdinClosed && this._stdinCloseGraceMs > 0) {
       // SIGTERM after the stdin-close grace. If the child exits cleanly via
       // EOF the close-listener below cancels both timers before SIGTERM fires.
-      sigtermTimer = setTimeout(() => {
+      sigtermTimer = this._setTimeoutFn(() => {
         try { child.kill('SIGTERM') } catch {}
       }, this._stdinCloseGraceMs)
-      if (typeof sigtermTimer.unref === 'function') sigtermTimer.unref()
+      if (sigtermTimer && typeof sigtermTimer.unref === 'function') sigtermTimer.unref()
     } else {
-      // No stdin pipe to close — preserve the original synchronous SIGTERM.
+      // Either no stdin pipe to close, or grace is 0 — fire SIGTERM
+      // synchronously to preserve the original kill timing for those paths.
       try { child.kill('SIGTERM') } catch {}
     }
 
     // SIGKILL after SIGTERM has had its own grace to take effect. When stdin
-    // is closed first, the budget extends to stdinCloseGraceMs + killGraceMs.
+    // is closed first with a non-zero grace, the budget extends to
+    // stdinCloseGraceMs + killGraceMs.
     const sigkillDelay = (stdinClosed ? this._stdinCloseGraceMs : 0) + this._killGraceMs
-    const sigkillTimer = setTimeout(() => {
+    const sigkillTimer = this._setTimeoutFn(() => {
       try { child.kill('SIGKILL') } catch {}
     }, sigkillDelay)
-    if (typeof sigkillTimer.unref === 'function') sigkillTimer.unref()
+    if (sigkillTimer && typeof sigkillTimer.unref === 'function') sigkillTimer.unref()
 
     // If the child exits before the timers fire, cancel both — there is no
     // point signaling a process that has already gone away.
     child.once('close', () => {
-      if (sigtermTimer) clearTimeout(sigtermTimer)
-      clearTimeout(sigkillTimer)
+      if (sigtermTimer) this._clearTimeoutFn(sigtermTimer)
+      this._clearTimeoutFn(sigkillTimer)
     })
   }
 
