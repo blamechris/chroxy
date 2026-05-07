@@ -1956,6 +1956,72 @@ describe('EnvironmentManager.reconcile()', () => {
     // Should not throw — reconcile is best-effort
     await manager.reconcile()
   })
+
+  // Regression guard for #3314: createEnvironment persists the full 64-char
+  // ID returned by docker run; without --no-trunc, docker ps -q returns the
+  // 12-char prefix, so reconcile()'s exact-string comparison would mark every
+  // known container as orphan and destroy it.
+  //
+  // The mock simulates real `docker ps`: it ONLY returns full-length IDs when
+  // --no-trunc is present in the args; otherwise it returns the truncated
+  // 12-char prefix that real Docker produces. This way the test fails before
+  // the fix and passes after.
+  it('does NOT destroy a known container when docker ps returns IDs (#3314)', async () => {
+    const fullId = 'a'.repeat(64)
+    const truncatedId = fullId.slice(0, 12)
+    const removedContainers = []
+
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+
+      if (args[0] === 'ps') {
+        // Simulate real docker ps behavior: truncates to 12 chars unless --no-trunc.
+        const id = args.includes('--no-trunc') ? fullId : truncatedId
+        cb(null, `${id}\n`, '')
+        return
+      }
+      if (args[0] === 'rm') {
+        removedContainers.push(args[args.length - 1])
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'inspect') {
+        cb(null, 'true\n', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    // Seed state with an environment whose containerId is the full 64-char form
+    // (as returned by `docker run` and persisted by createEnvironment).
+    const { writeFileSync } = await import('fs')
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      environments: [{
+        id: 'env-known',
+        name: 'known-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: fullId,
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }))
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.reconnect()
+    await manager.reconcile()
+
+    assert.equal(removedContainers.length, 0,
+      'known container must NOT be destroyed by reconcile() — ' +
+      'docker ps must return full IDs that match the persisted containerId')
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
