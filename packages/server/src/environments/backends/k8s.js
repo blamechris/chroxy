@@ -314,6 +314,8 @@ export class K8sBackend {
     // 6. Build resource limits/requests.
     //    Convert Docker-style suffixes (g → Gi, m → Mi) to K8s quantity strings.
     //    A plain integer/float string (e.g. "2", "0.5") is already valid K8s CPU syntax.
+    //    Note: the g→Gi / m→Mi mapping errs generous (~7 % / ~5 % over SI).
+    //    See _normaliseMemoryQuantity JSDoc for details.
     const resources = {}
     if (memoryLimit || cpuLimit) {
       const limits = {}
@@ -1535,6 +1537,20 @@ function _parseContainerPort(entry) {
  *   "1024k"→ "1024Ki"
  *   "2Gi"  → "2Gi"   (already valid)
  *   "1024" → "1024"  (plain bytes, valid K8s quantity)
+ *
+ * **SI vs binary-SI approximation:** Docker's single-letter suffixes use SI
+ * (decimal) units — "g" = 10^9 bytes, "m" = 10^6 bytes, "k" = 10^3 bytes —
+ * while Kubernetes binary suffixes ("Gi", "Mi", "Ki") use powers of two.
+ * The mapping is therefore not lossless:
+ *
+ *   "2g"   → "2Gi"   (~7.4 % over: 2 GiB = 2,147,483,648 B vs 2,000,000,000 B)
+ *   "512m" → "512Mi" (~4.9 % over: 512 MiB = 536,870,912 B vs 512,000,000 B)
+ *
+ * The conversion always **errs generous** — the container receives slightly
+ * more memory than the Docker value would imply.  This is intentional and
+ * safe for the typical use case.  Operators who need exact semantics should
+ * supply a K8s-native quantity string (e.g. "2Gi", "2000000000") which is
+ * passed through unchanged.
  *
  * @param {string} value
  * @returns {string}
