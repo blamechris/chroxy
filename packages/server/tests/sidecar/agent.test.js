@@ -2112,6 +2112,16 @@ describe('PodAgent', () => {
           'second backpressured write must not replace the drain timer handle',
         )
 
+        // Mirror the sibling backpressure assertion (#3509): the once-listener
+        // for 'drain' must remain at exactly one. If a refactor of
+        // _armStdinDrainTimer ever drops the _stdinDraining guard around the
+        // listener registration, this catches the leak immediately.
+        assert.equal(
+          fakeStdin.listenerCount('drain'),
+          1,
+          'second backpressured write must not stack a duplicate drain listener',
+        )
+
         ws.close()
       } finally {
         await agent.close()
@@ -2139,22 +2149,30 @@ describe('PodAgent', () => {
       ws.send(JSON.stringify({ type: 'stdin', data: 'x\n' }))
       await new Promise((r) => setTimeout(r, 20))
 
-      const killsBeforeClose = child.killSignals.slice()
+      // Snapshot the live drain-timer handle BEFORE close — agent.close()
+      // clears _sessions, after which there is no way to read it back.
+      const session = agent._sessions.get(agent._activeWs._sessionId)
+      const drainTimer = session._stdinDrainTimer
+      assert.ok(drainTimer, 'backpressured write must arm a drain timer before close')
+      assert.equal(drainTimer._cancelled, false, 'timer must be live before close')
 
       await agent.close()
 
-      // Advancing past the original timeout must NOT trigger any extra kill
-      // signals or re-add a session — the drain timer was cancelled.
+      // The actual cancellation invariant: agent.close() must call
+      // _cancelStdinDrainTimer (which routes through the fake clearTimeout
+      // and flips _cancelled to true). If line 331 of agent.js ever loses
+      // the _cancelStdinDrainTimer(session) call, this assertion fails.
+      assert.equal(
+        drainTimer._cancelled,
+        true,
+        'agent.close() must cancel pending drain timers (drainTimer._cancelled stayed false)',
+      )
+
+      // Belt-and-braces: advancing past the original timeout must not run a
+      // stale callback — clock.advance filters out _cancelled handles.
       const sessionsBeforeAdvance = agent._sessions.size
       assert.doesNotThrow(() => clock.advance(TIMEOUT_MS + 100))
       assert.equal(agent._sessions.size, sessionsBeforeAdvance, 'no session should reappear after close')
-      // _killChild is idempotent (guards on child._chroxyKilled) so even if
-      // the timer leaked a callback, kill list cannot grow from a duplicate
-      // _killChild call. The cancellation invariant is what we really test.
-      assert.ok(
-        child.killSignals.length >= killsBeforeClose.length,
-        'kill signals only grow, never shrink',
-      )
     })
 
     it('env var override: valid CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS is respected', () => {
