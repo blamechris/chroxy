@@ -4,6 +4,7 @@ import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import WebSocket from 'ws'
 import { PodAgent, LineLimitTransform, DEFAULT_MAX_LINE_BYTES, DEFAULT_STDIN_DRAIN_TIMEOUT_MS } from '../../sidecar/agent.js'
+import { waitFor } from '../test-helpers.js'
 
 const TOKEN = 'test-secret-token-abc123'
 const WRONG_TOKEN = 'wrong-token'
@@ -2538,9 +2539,10 @@ describe('PodAgent', () => {
         const clientClosed = once(ws, 'close')
         ws.close()
         await clientClosed
-        for (let i = 0; i < 50 && session.activeWs !== null; i++) {
-          await new Promise((r) => setTimeout(r, 10))
-        }
+        await waitFor(() => session.activeWs === null, {
+          timeoutMs: 500,
+          label: 'session.activeWs cleared after disconnect',
+        })
         assert.equal(session.activeWs, null, 'activeWs must be cleared after disconnect')
 
         // Fire the idle TTL timer.
@@ -2611,9 +2613,10 @@ describe('PodAgent', () => {
           const ws1Closed = once(ws1, 'close')
           ws1.close()
           await ws1Closed
-          for (let i = 0; i < 50 && firstSession.activeWs !== null; i++) {
-            await new Promise((r) => setTimeout(r, 10))
-          }
+          await waitFor(() => firstSession.activeWs === null, {
+            timeoutMs: 500,
+            label: 'firstSession.activeWs cleared after disconnect',
+          })
           assert.equal(firstSession.activeWs, null, 'first session must be idle before cap eviction')
 
           // Second connection: spawn — _enforceSessionCap must evict the
@@ -2624,9 +2627,10 @@ describe('PodAgent', () => {
           // Poll for the eviction to run (spawn -> enforceSessionCap ->
           // evictSession runs synchronously, but we still need to give the
           // server-side message handler time to dispatch).
-          for (let i = 0; i < 50 && agent._sessions.has(firstSessionId); i++) {
-            await new Promise((r) => setTimeout(r, 10))
-          }
+          await waitFor(() => !agent._sessions.has(firstSessionId), {
+            timeoutMs: 500,
+            label: 'first session evicted by session-cap',
+          })
 
           assert.equal(
             firstSession._stdinDrainTimer,
