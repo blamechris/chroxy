@@ -2922,3 +2922,145 @@ describe('SidecarProcess stdin wiring (#3336)', () => {
     proc.stdout.resume(); proc.stderr.resume()
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess stdin disabled signal (#3402)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess stdin disabled signal (#3402)', () => {
+  it('isStdinForwardingEnabled() is true on a fresh spawn', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc.isStdinForwardingEnabled(), true,
+      'stdin forwarding must be enabled after the initial spawn')
+  })
+
+  it('emits stdin_disabled exactly once on reconnect', async () => {
+    const { ws: ws1, controller: ctrl1 } = createFakeWs()
+    const { ws: ws2 } = createFakeWs()
+
+    let dialCount = 0
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        dialCount += 1
+        return Promise.resolve(dialCount === 1 ? ws1 : ws2)
+      },
+      _reconnectDelays: [10],
+      _maxRetries: 5,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+    proc.on('error', () => {})
+
+    let disabledCount = 0
+    proc.on('stdin_disabled', () => { disabledCount += 1 })
+
+    // Establish a session so reconnect is attempted on close.
+    await new Promise(r => setImmediate(r))
+    ctrl1.receive(JSON.stringify({ type: 'session_started', sessionId: 'rsid-1' }))
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc.isStdinForwardingEnabled(), true,
+      'forwarding still enabled before reconnect')
+
+    // Trigger reconnect.
+    ctrl1.triggerClose(1006)
+    await new Promise(r => setTimeout(r, 30))
+
+    assert.equal(proc.isStdinForwardingEnabled(), false,
+      'forwarding must be reported disabled after reconnect')
+    assert.equal(disabledCount, 1,
+      'stdin_disabled must fire exactly once on reconnect')
+
+    // Subsequent writes must NOT re-emit the event.
+    proc.stdin.write('post-reconnect data\n')
+    await new Promise(r => setImmediate(r))
+    assert.equal(disabledCount, 1,
+      'stdin_disabled must remain one-shot — additional writes are silent')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('emits stdin_disabled when WS closes mid-write before reconnect completes', async () => {
+    const { ws, controller } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+    // Swallow the existing 'error' event the listener emits.
+    proc.on('error', () => {})
+
+    let disabledCount = 0
+    proc.on('stdin_disabled', () => { disabledCount += 1 })
+
+    // Wait for spawn + _wireStdin to run.
+    await new Promise(r => setImmediate(r))
+
+    // Mark the WS as closed so the live-forwarding listener trips.
+    ws.readyState = 3  // CLOSED
+    controller.triggerClose(1006)
+
+    // Write something — the live listener detects the closed WS, signals
+    // disabled, and removes itself.
+    proc.stdin.write('after close\n')
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc.isStdinForwardingEnabled(), false,
+      'forwarding must be reported disabled after WS closes mid-write')
+    assert.equal(disabledCount, 1,
+      'stdin_disabled must fire exactly once on mid-write WS close')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('pre-wire writes after disabled flag is set still signal once (defensive)', async () => {
+    // Edge case: if the disabled flag is set before _wireStdin replaced the
+    // accumulator listener (extremely unlikely but defensible), a write
+    // hitting the accumulator while _stdinForwardingDisabled is already true
+    // must still trigger _signalStdinDisabled() — not silently buffer.
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    let disabledCount = 0
+    proc.on('stdin_disabled', () => { disabledCount += 1 })
+
+    // Force into the disabled-but-not-wired state directly (simulates a race
+    // where the disabled flag was set before _wireStdin ran).
+    proc._stdinWired = false
+    proc._stdinForwardingDisabled = true
+
+    proc.stdin.write('writes after disabled flag set\n')
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(disabledCount, 1,
+      'pre-wire accumulator must invoke _signalStdinDisabled when disabled')
+    assert.equal(proc._stdinBuffer.length, 0,
+      'data must NOT be buffered once forwarding is disabled')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})

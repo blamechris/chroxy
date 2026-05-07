@@ -1051,6 +1051,16 @@ export class K8sBackend {
  * (an array of Buffer chunks) and flushed as `stdin` frames when `_wireStdin`
  * is called by `_wireWsToProc` after the connection opens.  If the process is
  * killed or exits before the dial resolves, the buffer is discarded silently.
+ *
+ * ### stdin disabled signal (#3402)
+ *
+ * On WS reconnect (`resume` frame) stdin forwarding is intentionally NOT
+ * re-wired — see resume semantics above. To prevent silent data loss when a
+ * consumer keeps writing after reconnect, the proc emits a one-shot
+ * `'stdin_disabled'` event the moment forwarding becomes unrecoverable
+ * (reconnect dial succeeds, or WS closes mid-write before reconnect).  After
+ * that point further writes are dropped and the consumer can use
+ * `isStdinForwardingEnabled()` to poll the current state.
  */
 class SidecarProcess extends EventEmitter {
   /**
@@ -1094,11 +1104,24 @@ class SidecarProcess extends EventEmitter {
     this._stdinWired = false     // true once _wireStdin() has been called
     this._stdinEnded = false     // true once stdin 'end' has fired
 
+    // stdin disabled signal (#3402): set true once forwarding is permanently
+    // off (reconnect happened, or live WS dropped mid-write).  The first
+    // transition emits a one-shot 'stdin_disabled' event so consumers can
+    // surface the failure to the user instead of silently losing turns.
+    this._stdinForwardingDisabled = false
+    this._stdinDisabledSignaled = false
+
     // Accumulate stdin data until the WS is ready.
     this.stdin.on('data', (chunk) => {
       if (this._stdinWired) {
         // _wireStdin() already flushed and replaced this handler — should not
         // reach here, but guard defensively.
+        return
+      }
+      if (this._stdinForwardingDisabled) {
+        // Reconnect happened before _wireStdin ran on this WS — surface the
+        // disabled state to the consumer rather than buffering forever.
+        this._signalStdinDisabled()
         return
       }
       this._stdinBuffer.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
@@ -1112,6 +1135,34 @@ class SidecarProcess extends EventEmitter {
       }
       // If not yet wired, _wireStdin() will send stdin_end after flushing.
     })
+  }
+
+  /**
+   * Whether writes to `proc.stdin` are currently being forwarded to the
+   * sidecar (#3402).  Returns `false` once a reconnect has occurred or the
+   * live WS dropped mid-write — at that point further writes are dropped
+   * silently, and the consumer should fall back to a different mechanism
+   * (or surface an error to the user).
+   *
+   * @returns {boolean}
+   */
+  isStdinForwardingEnabled() {
+    return !this._stdinForwardingDisabled
+  }
+
+  /**
+   * Mark stdin forwarding as disabled and emit `'stdin_disabled'` exactly
+   * once (#3402).  Idempotent — repeated calls are no-ops after the first
+   * emission.  Called by the reconnect path in `_wireWsToProc` and by the
+   * live-forwarding listener in `_wireStdin` when WS closes mid-write.
+   *
+   * @private
+   */
+  _signalStdinDisabled() {
+    this._stdinForwardingDisabled = true
+    if (this._stdinDisabledSignaled) return
+    this._stdinDisabledSignaled = true
+    this.emit('stdin_disabled')
   }
 
   kill(signal = 'SIGTERM') {
@@ -1272,9 +1323,13 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     // Wire proc.stdin → WS after the first frame is sent so the agent has
     // already opened a piped stdin channel before we forward any data.
     // On reconnect we do NOT re-wire — stdin forwarding is not resumed
-    // (see class-level JSDoc on resume semantics).
+    // (see class-level JSDoc on resume semantics).  Surface the disabled
+    // state to the consumer so they can stop writing or surface an error
+    // (#3402).
     if (!isReconnect) {
       _wireStdin(ws, proc)
+    } else {
+      proc._signalStdinDisabled()
     }
   }
 
@@ -1438,6 +1493,10 @@ function _wireStdin(ws, proc) {
       // WS closed mid-stream. Emit an error on proc so the consumer knows
       // stdin writes are being dropped, then swallow silently afterwards.
       proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      // Surface the disabled state via the dedicated #3402 signal as well —
+      // 'error' may be unhandled by the consumer, but 'stdin_disabled' is
+      // explicit and one-shot.
+      proc._signalStdinDisabled()
       // Stop forwarding — remove this listener so further writes are silent.
       proc.stdin.removeAllListeners('data')
       return
