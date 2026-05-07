@@ -10,13 +10,12 @@
  * the action was taken.
  */
 import { useEffect, useRef } from 'react'
+import type { ServerErrorAction } from '@chroxy/store-core'
 
-export interface ToastAction {
-  /** Short label rendered on the inline action button. */
-  label: string
-  /** Click handler — invoked before the toast is dismissed. */
-  onClick: () => void
-}
+// #3587: re-exported as `ToastAction` for ergonomic local imports —
+// the canonical shape lives in `@chroxy/store-core` so the Toast and
+// the `ServerError.action` field can't drift apart.
+export type ToastAction = ServerErrorAction
 
 export interface ToastItem {
   id: string

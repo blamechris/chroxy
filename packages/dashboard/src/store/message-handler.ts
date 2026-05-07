@@ -214,15 +214,14 @@ export function rejectAllEvaluatorRequests(reason: string): void {
 //
 // Entries are cleared when a `skill_trust_grant_ok` ack lands, when an
 // `error` with a matching `requestId` is processed, or via the cleanup
-// helper invoked on disconnect. The map is bounded at MAX_PENDING entries
-// to defend against a buggy server that never replies — oldest entry is
-// evicted FIFO when the cap is reached.
+// helper invoked on disconnect. The map is bounded at TRUST_GRANT_PENDING_CAP
+// (32) entries to defend against a buggy server that never replies — the
+// oldest entry is evicted FIFO via JS Map insertion order when the cap is
+// reached.
 
 interface PendingTrustGrant {
   skillName: string;
   author: string;
-  /** Request issuance time — used only for FIFO eviction ordering. */
-  createdAt: number;
 }
 
 const _pendingTrustGrants = new Map<string, PendingTrustGrant>();
@@ -238,7 +237,7 @@ export function registerTrustGrantRequest(
     const oldestKey = _pendingTrustGrants.keys().next().value;
     if (oldestKey !== undefined) _pendingTrustGrants.delete(oldestKey);
   }
-  _pendingTrustGrants.set(requestId, { ...entry, createdAt: Date.now() });
+  _pendingTrustGrants.set(requestId, { ...entry });
 }
 
 export function consumePendingTrustGrant(requestId: string): PendingTrustGrant | null {

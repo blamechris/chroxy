@@ -146,13 +146,23 @@ export interface McpServer {
  * #3587: surfaces an actionable button inside the toast so the operator can
  * recover from a structured error (e.g. INVALID_AUTHOR with a corrected
  * `actualAuthor`) without leaving the toast and hunting for the matching
- * row in another panel. The callback is invoked at click time; the
- * notification is dismissed by the consumer afterwards.
+ * row in another panel. The callback is invoked at click time, then the
+ * notification is dismissed by the consumer regardless of whether the
+ * callback returned cleanly or threw — see contract on `onClick` below.
  */
 export interface ServerErrorAction {
   /** Short button label, e.g. "Try as alice". Rendered verbatim. */
   label: string;
-  /** Click handler. Throwing is allowed but does not auto-dismiss. */
+  /**
+   * Click handler. Synchronous; void return.
+   *
+   * Throwing is permitted but the consumer (e.g. the dashboard Toast)
+   * MUST swallow the exception (logging it for diagnostics) and dismiss
+   * the toast anyway, so a buggy callback can't strand a notification on
+   * screen. Async work should be fired-and-forgotten — the action is
+   * intended for store calls (`grantCommunitySkillTrust`, etc.) that
+   * don't need to await a result before the toast disappears.
+   */
   onClick: () => void;
 }
 
