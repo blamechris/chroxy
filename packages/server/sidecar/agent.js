@@ -494,9 +494,20 @@ export class PodAgent {
   // accepts input but never reads from stdin (would never emit 'drain' so
   // the WS would stay paused indefinitely). Armed when cooperative
   // backpressure flips _stdinDraining true; cancelled on the actual 'drain'
-  // event, on _killChild, and during eviction/agent close. On expiry the
-  // session emits a stdin_drain_stalled error frame, kills the child, and
-  // closes the WS with 1011.
+  // event and on every session-teardown path before the child is killed:
+  //   - agent.close() (loop over sessions)
+  //   - _evictSession() (idle TTL + session-cap eviction)
+  //   - oversized-line guard (line_too_long kill path)
+  //   - child 'error' handler (async spawn failure)
+  //   - child 'close' handler (natural exit)
+  //   - _handleStdinDrainStalled (drain timer expiry — self-clears via callback)
+  // _killChild itself does NOT cancel the timer because the timer is per-
+  // session while _killChild only holds the child handle (#3514). Each
+  // caller is responsible for calling _cancelStdinDrainTimer(session)
+  // synchronously before invoking _killChild so a stale callback cannot
+  // re-enter and double-kill an already-torn-down session.
+  // On expiry the session emits a stdin_drain_stalled error frame, kills
+  // the child, and closes the WS with 1011.
   // ---------------------------------------------------------------------------
 
   _armStdinDrainTimer(session) {
@@ -875,6 +886,11 @@ export class PodAgent {
     // block above.
     child.on('error', (err) => {
       if (session.child === child) session.child = null
+      // Cancel the drain timer synchronously on async spawn failure (#3514).
+      // The post-flush callback below also cancels, but if the timer were
+      // to fire between this handler and the ws.send callback it would try
+      // to operate on a session whose child is already null.
+      this._cancelStdinDrainTimer(session)
       this._emitSessionFrame(session, { type: 'error', message: `spawn failed: ${err.message}` })
       // Async spawn never produced a child — there will be no 'close' event
       // to clean up the session. Synthesize an exit and drop the session
@@ -907,6 +923,13 @@ export class PodAgent {
       // handler, but setting the unified flag too keeps the invariant
       // single-sourced for any future terminal-error code.
       session._terminalErrorSent = true
+      // Cancel the drain timer BEFORE killing the child (#3514). The
+      // _emitSessionFrame callback below also cancels, but that runs
+      // asynchronously after ws.send flushes; if the timer were to fire in
+      // the interim it would re-enter _handleStdinDrainStalled and try to
+      // kill an already-killed child + tear down a session that is already
+      // mid-teardown. Cancelling synchronously here closes that race.
+      this._cancelStdinDrainTimer(session)
       if (session.child === child) {
         this._killChild(child)
         session.child = null
@@ -958,6 +981,12 @@ export class PodAgent {
     child.on('close', (code) => {
       if (session.child === child) session.child = null
       if (session._oversized || session._terminalErrorSent) return
+      // Cancel the drain timer synchronously when the child exits naturally
+      // (#3514). The post-flush callback below also cancels, but the timer
+      // could otherwise fire between this handler and the ws.send callback
+      // and try to kill an already-exited child + tear down a session that
+      // is already mid-teardown.
+      this._cancelStdinDrainTimer(session)
       const exitFrame = { type: 'exit', code: code ?? 1 }
       // Close the WS only after the exit frame has been flushed to the socket
       // buffer to avoid a race that can drop the frame (#3399).

@@ -2320,6 +2320,334 @@ describe('PodAgent', () => {
         `DEFAULT_STDIN_DRAIN_TIMEOUT_MS must be positive finite, got ${DEFAULT_STDIN_DRAIN_TIMEOUT_MS}`,
       )
     })
+
+    // -------------------------------------------------------------------------
+    // Drain timer cancellation invariant on every kill path (#3514)
+    //
+    // _killChild itself does not cancel the per-session drain timer (it only
+    // takes a child handle, not a session). Each kill caller must therefore
+    // cancel _stdinDrainTimer synchronously before tearing the session down,
+    // otherwise the timer can fire post-teardown and re-enter
+    // _handleStdinDrainStalled with a stale child reference.
+    //
+    // These tests assert that — after each kill path runs — advancing the
+    // fake clock past the original drain timeout produces NO additional kill
+    // signals, NO re-entry into the drain-stalled handler, and NO change to
+    // the session map. The cancellation invariant is what we test, not the
+    // tear-down side effects (those are covered by other suites).
+    // -------------------------------------------------------------------------
+
+    describe('drain timer cancelled on every kill path (#3514)', () => {
+      /**
+       * Spawn a session and arm the drain timer directly via the internal
+       * helper. We avoid driving the backpressure path through ws.send()
+       * here because it pauses the WS — once paused, the agent cannot
+       * process subsequent frames (including close), which breaks tests
+       * that need to simulate a clean disconnect to drive idle TTL or
+       * session-cap eviction. Calling _armStdinDrainTimer directly arms
+       * the same timer the production code arms; the kill paths under
+       * test do not care HOW the timer was armed, only THAT it was.
+       */
+      async function setupDrainArmed({ stdinDrainTimeoutMs = 1000, ...extraOpts } = {}) {
+        const clock = makeFakeClock()
+        const { child, fakeStdin } = makeFakeChild()
+        const { agent, port } = await startAgent({
+          spawnFn: () => child,
+          stdinDrainTimeoutMs,
+          stdinCloseGraceMs: 25,
+          killGraceMs: 25,
+          setTimeoutFn: clock.fakeSetTimeout,
+          clearTimeoutFn: clock.fakeClearTimeout,
+          ...extraOpts,
+        })
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const session = agent._sessions.get(agent._activeWs._sessionId)
+        assert.ok(session, 'session must be registered after spawn')
+
+        // Arm the drain timer directly (mirrors what _handleStdin does on
+        // a backpressured write, minus the ws.pause() that would block
+        // close-frame propagation).
+        session._stdinDraining = true
+        agent._armStdinDrainTimer(session)
+        assert.ok(session._stdinDrainTimer, 'drain timer must be armed before kill path')
+
+        return { agent, port, ws, child, fakeStdin, session, clock, stdinDrainTimeoutMs }
+      }
+
+      it('idle TTL eviction cancels the drain timer before _killChild', async () => {
+        const RESUME_MS = 50
+        const { agent, ws, session, clock, stdinDrainTimeoutMs } = await setupDrainArmed({
+          resumeTimeoutMs: RESUME_MS,
+        })
+
+        // Capture the drain timer handle BEFORE eviction so we can assert
+        // `_cancelled = true` independently of `session._stdinDrainTimer`
+        // being nulled.
+        const drainHandle = session._stdinDrainTimer
+
+        // Disconnect the WS and wait for the agent-side close to fire
+        // _cleanupConnection (which arms the idle TTL timer). The WS close
+        // handshake is asynchronous so we wait on the client-side 'close'
+        // event then poll briefly for the server-side state update.
+        const clientClosed = once(ws, 'close')
+        ws.close()
+        await clientClosed
+        for (let i = 0; i < 50 && session.activeWs !== null; i++) {
+          await new Promise((r) => setTimeout(r, 10))
+        }
+        assert.equal(session.activeWs, null, 'activeWs must be cleared after disconnect')
+
+        // Fire the idle TTL timer.
+        clock.advance(RESUME_MS + 1)
+
+        assert.equal(
+          session._stdinDrainTimer,
+          null,
+          'idle TTL eviction must cancel _stdinDrainTimer synchronously',
+        )
+        assert.ok(
+          drainHandle._cancelled,
+          'drain timer handle must have been clearTimeout-cancelled by eviction',
+        )
+        assert.equal(agent._sessions.size, 0, 'session removed by idle eviction')
+
+        // Advancing well past the original drain deadline must not re-enter
+        // _handleStdinDrainStalled — the timer is cancelled so its callback
+        // cannot run. (Other timers from _killChild's SIGTERM/SIGKILL grace
+        // are expected to fire here; the invariant is the drain timer.)
+        clock.advance(stdinDrainTimeoutMs + 1000)
+        assert.equal(
+          session._stdinDrainTimer,
+          null,
+          'drain timer must remain null after fake clock advances past original deadline',
+        )
+
+        await agent.close()
+      })
+
+      it('session-cap eviction cancels the drain timer before _killChild', async () => {
+        // maxSessions=1 so the second spawn evicts the first session.
+        const clock = makeFakeClock()
+        const { child: firstChild } = makeFakeChild()
+        const { child: secondChild } = makeFakeChild()
+        const spawns = [firstChild, secondChild]
+        const { agent, port } = await startAgent({
+          maxSessions: 1,
+          stdinDrainTimeoutMs: 1000,
+          stdinCloseGraceMs: 25,
+          killGraceMs: 25,
+          setTimeoutFn: clock.fakeSetTimeout,
+          clearTimeoutFn: clock.fakeClearTimeout,
+          spawnFn: () => spawns.shift(),
+        })
+
+        try {
+          // First connection: spawn → arm drain timer directly → disconnect
+          // (so the session goes idle and becomes the eviction target for
+          // the cap). We arm the drain timer via _armStdinDrainTimer rather
+          // than ws.send(stdin) so the WS is not paused — a paused WS would
+          // refuse to process the subsequent close frame.
+          const ws1 = connect(port, TOKEN)
+          await waitOpen(ws1)
+          ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+          await new Promise((r) => setTimeout(r, 20))
+
+          const firstSessionId = agent._activeWs._sessionId
+          const firstSession = agent._sessions.get(firstSessionId)
+          firstSession._stdinDraining = true
+          agent._armStdinDrainTimer(firstSession)
+          assert.ok(firstSession._stdinDrainTimer, 'drain timer armed on first session')
+          const drainHandle = firstSession._stdinDrainTimer
+
+          // Wait for the WS close to propagate to the agent so the first
+          // session is treated as idle (activeWs == null) by the cap
+          // enforcer's "prefer idle sessions" branch.
+          const ws1Closed = once(ws1, 'close')
+          ws1.close()
+          await ws1Closed
+          for (let i = 0; i < 50 && firstSession.activeWs !== null; i++) {
+            await new Promise((r) => setTimeout(r, 10))
+          }
+          assert.equal(firstSession.activeWs, null, 'first session must be idle before cap eviction')
+
+          // Second connection: spawn — _enforceSessionCap must evict the
+          // first idle session and that path must cancel the drain timer.
+          const ws2 = connect(port, TOKEN)
+          await waitOpen(ws2)
+          ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+          // Poll for the eviction to run (spawn -> enforceSessionCap ->
+          // evictSession runs synchronously, but we still need to give the
+          // server-side message handler time to dispatch).
+          for (let i = 0; i < 50 && agent._sessions.has(firstSessionId); i++) {
+            await new Promise((r) => setTimeout(r, 10))
+          }
+
+          assert.equal(
+            firstSession._stdinDrainTimer,
+            null,
+            'session-cap eviction must cancel _stdinDrainTimer synchronously',
+          )
+          assert.ok(
+            drainHandle._cancelled,
+            'drain timer handle must be clearTimeout-cancelled by cap eviction',
+          )
+          assert.ok(
+            !agent._sessions.has(firstSessionId),
+            'first session removed by cap eviction',
+          )
+
+          // Advance past the original drain timeout — _handleStdinDrainStalled
+          // must not re-enter (timer is cancelled, callback cannot fire).
+          clock.advance(1000 + 1000)
+          assert.equal(
+            firstSession._stdinDrainTimer,
+            null,
+            'drain timer must remain null after fake clock advances past original deadline',
+          )
+
+          ws2.close()
+        } finally {
+          await agent.close()
+        }
+      })
+
+      it('oversized-line kill path cancels the drain timer before _killChild', async () => {
+        // Use a real PassThrough for stdout so the LineLimitTransform fires;
+        // override stdin with a fake writable so we can force backpressure
+        // and arm the drain timer first.
+        const clock = makeFakeClock()
+        const child = new EventEmitter()
+        child.stdout = new PassThrough()
+        child.stderr = new PassThrough()
+        const fakeStdin = new EventEmitter()
+        fakeStdin.nextWriteOk = false
+        fakeStdin.writableEnded = false
+        fakeStdin.write = () => fakeStdin.nextWriteOk
+        fakeStdin.end = () => { fakeStdin.writableEnded = true }
+        child.stdin = fakeStdin
+        child.killSignals = []
+        child.kill = (signal) => { child.killSignals.push(signal); return true }
+
+        const { agent, port } = await startAgent({
+          spawnFn: () => child,
+          stdinDrainTimeoutMs: 1000,
+          stdinCloseGraceMs: 25,
+          killGraceMs: 25,
+          maxLineBytes: 16,
+          setTimeoutFn: clock.fakeSetTimeout,
+          clearTimeoutFn: clock.fakeClearTimeout,
+        })
+
+        try {
+          const ws = connect(port, TOKEN)
+          await waitOpen(ws)
+          ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+          await new Promise((r) => setTimeout(r, 20))
+
+          ws.send(JSON.stringify({ type: 'stdin', data: 'wedge\n' }))
+          await new Promise((r) => setTimeout(r, 20))
+
+          const session = agent._sessions.get(agent._activeWs._sessionId)
+          assert.ok(session._stdinDrainTimer, 'drain timer must be armed before oversized line')
+          const drainHandle = session._stdinDrainTimer
+
+          // Trigger oversized_line — kill path runs synchronously and
+          // cancels the drain timer BEFORE _killChild (this PR's fix).
+          child.stdout.write(Buffer.from('A'.repeat(17)))
+
+          // The cancel must happen synchronously — no awaits between the
+          // write and this assertion. (LineLimitTransform emits
+          // 'oversized_line' synchronously inside _transform.)
+          assert.equal(
+            session._stdinDrainTimer,
+            null,
+            'oversized-line kill path must cancel _stdinDrainTimer synchronously (not just in ws.send callback)',
+          )
+          assert.ok(
+            drainHandle._cancelled,
+            'drain timer handle must be clearTimeout-cancelled by oversized-line kill path',
+          )
+
+          // Advance past the original drain deadline — _handleStdinDrainStalled
+          // must not re-enter (timer is cancelled).
+          clock.advance(1000 + 1000)
+          assert.equal(
+            session._stdinDrainTimer,
+            null,
+            'drain timer must remain null after fake clock advances past original deadline',
+          )
+
+          ws.close()
+        } finally {
+          await agent.close()
+        }
+      })
+
+      it("child 'error' (async spawn failure) cancels the drain timer synchronously", async () => {
+        const { agent, child, session, clock, stdinDrainTimeoutMs } = await setupDrainArmed()
+        const drainHandle = session._stdinDrainTimer
+
+        // Simulate an async spawn failure — child emits 'error' (e.g. ENOENT
+        // arriving after the synchronous spawn returned).
+        child.emit('error', new Error('ENOENT: no such file'))
+
+        // The cancel must happen synchronously, not only inside the
+        // post-flush ws.send callback.
+        assert.equal(
+          session._stdinDrainTimer,
+          null,
+          "child 'error' handler must cancel _stdinDrainTimer synchronously",
+        )
+        assert.ok(
+          drainHandle._cancelled,
+          "drain timer handle must be clearTimeout-cancelled by child 'error'",
+        )
+
+        // Advance past the original drain deadline — _handleStdinDrainStalled
+        // must not re-enter (callback can no longer run).
+        clock.advance(stdinDrainTimeoutMs + 1000)
+        assert.equal(
+          session._stdinDrainTimer,
+          null,
+          'drain timer must remain null after fake clock advances past original deadline',
+        )
+
+        await agent.close()
+      })
+
+      it("child 'close' (natural exit) cancels the drain timer synchronously", async () => {
+        const { agent, child, session, clock, stdinDrainTimeoutMs } = await setupDrainArmed()
+        const drainHandle = session._stdinDrainTimer
+
+        // Child exits naturally before the drain timeout fires.
+        child.emit('close', 0)
+
+        assert.equal(
+          session._stdinDrainTimer,
+          null,
+          "child 'close' handler must cancel _stdinDrainTimer synchronously",
+        )
+        assert.ok(
+          drainHandle._cancelled,
+          "drain timer handle must be clearTimeout-cancelled by child 'close'",
+        )
+
+        // Advance past the original drain deadline — _handleStdinDrainStalled
+        // must not re-enter (callback can no longer run).
+        clock.advance(stdinDrainTimeoutMs + 1000)
+        assert.equal(
+          session._stdinDrainTimer,
+          null,
+          'drain timer must remain null after fake clock advances past original deadline',
+        )
+
+        await agent.close()
+      })
+    })
   })
 
   // ---------------------------------------------------------------------------
