@@ -184,6 +184,30 @@ A chunk of raw text from the child process's stderr stream.
 { "type": "stderr", "data": "some error text\n", "seq": 2 }
 ```
 
+The **first** `stderr` frame on any new session is always the sidecar's own
+per-spawn sentinel line, emitted by the agent immediately after the child is
+spawned.  Its format is:
+
+```
+[chroxy-pod-agent] spawn cmd=<cmd> args=<json-args> sessionId=<uuid>
+```
+
+Example:
+
+```json
+{
+  "type": "stderr",
+  "data": "[chroxy-pod-agent] spawn cmd=claude args=[\"--input-format\",\"stream-json\"] sessionId=550e8400-e29b-41d4-a716-446655440000\n",
+  "seq": 1
+}
+```
+
+This line is intentionally distinct from real child stderr so integration tests
+can assert that the sidecar code — not a shorter path that bypasses the agent —
+handled the spawn.  Clients that display stderr to users should filter lines
+matching `/^\[chroxy-pod-agent\] spawn /` if the sentinel is not meaningful in
+context (see #3344).
+
 #### `exit`
 
 Child process exited.  The WS connection is closed by the agent within 50 ms
