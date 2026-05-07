@@ -2267,7 +2267,7 @@ describe('K8sBackend._readAgentToken()', () => {
     assert.equal(result, null)
   })
 
-  it('caches token so second call does not hit the API', async () => {
+  it('does not short-circuit on sequential calls (no in-flight dedup after resolution)', async () => {
     const token = 'cached-token'
     const encoded = Buffer.from(token).toString('base64')
     let apiCalls = 0
@@ -2278,11 +2278,88 @@ describe('K8sBackend._readAgentToken()', () => {
     const backend = new K8sBackend({ _coreV1Api: api })
 
     await backend._readAgentToken('chroxy-env-cache', 'default')
-    // Manually verify the map is populated so the second call short-circuits
+    // Manually verify the map is populated
     assert.equal(backend._agentTokens.get('chroxy-env-cache'), token)
-    // The method itself does NOT short-circuit — it always reads the Secret.
-    // Caching is used by streamCliInEnvironment (|| tokenOrPromise chain).
+    // Sequential second call starts a fresh fetch (no in-flight entry to coalesce
+    // onto — _pendingAgentTokens was cleared in the finally block).
+    await backend._readAgentToken('chroxy-env-cache', 'default')
+    assert.equal(apiCalls, 2, 'sequential calls each issue their own API request')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._readAgentToken() — concurrent fetch deduplication (#3371)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._readAgentToken() concurrent deduplication (#3371)', () => {
+  it('two concurrent calls hit the API exactly once', async () => {
+    const token = 'dedup-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let apiCalls = 0
+
+    // Use a deferred promise so both callers are in-flight simultaneously
+    let resolveSecret
+    const secretPromise = new Promise((res) => { resolveSecret = res })
+
+    const api = createMockApi({
+      readSecret: async () => {
+        apiCalls++
+        await secretPromise
+        return { data: { CHROXY_AGENT_TOKEN: encoded } }
+      },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    // Fire two concurrent calls before the first has resolved
+    const p1 = backend._readAgentToken('chroxy-env-dedup', 'default')
+    const p2 = backend._readAgentToken('chroxy-env-dedup', 'default')
+
+    // Both should reference the same in-flight promise
+    assert.strictEqual(p1, p2, 'concurrent calls must return the same promise')
+
+    resolveSecret()
+    const [t1, t2] = await Promise.all([p1, p2])
+
+    assert.equal(t1, token, 'first caller gets correct token')
+    assert.equal(t2, token, 'second caller gets correct token')
+    assert.equal(apiCalls, 1, 'API must be called exactly once despite two concurrent callers')
+    assert.equal(backend._agentTokens.get('chroxy-env-dedup'), token,
+      '_agentTokens must be populated after coalesced fetch')
+  })
+
+  it('clears _pendingAgentTokens after resolution so the next call starts fresh', async () => {
+    const token = 'clear-pending-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let apiCalls = 0
+
+    const api = createMockApi({
+      readSecret: async () => { apiCalls++; return { data: { CHROXY_AGENT_TOKEN: encoded } } },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend._readAgentToken('chroxy-env-clear', 'default')
+    assert.equal(backend._pendingAgentTokens.has('chroxy-env-clear'), false,
+      '_pendingAgentTokens must be cleared after promise settles')
     assert.equal(apiCalls, 1)
+
+    // A fresh call after resolution (e.g. reconnect path) starts a new fetch
+    await backend._readAgentToken('chroxy-env-clear', 'default')
+    assert.equal(apiCalls, 2, 'post-resolution call must issue a new API request')
+  })
+
+  it('clears _pendingAgentTokens even when the API throws', async () => {
+    const apiErr = Object.assign(new Error('ServerError'), { code: 500 })
+    const api = createMockApi({
+      readSecret: async () => { throw apiErr },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend._readAgentToken('chroxy-env-err', 'default'),
+      /ServerError/
+    )
+    assert.equal(backend._pendingAgentTokens.has('chroxy-env-err'), false,
+      '_pendingAgentTokens must be cleared even on error')
   })
 })
 
