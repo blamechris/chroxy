@@ -214,6 +214,29 @@ export class K8sBackend {
    *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
    *   must be able to read the path provided in opts.cwd from its local filesystem.
    *
+   * **Security warning — hostPath privilege escalation:**
+   *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
+   *   Pod direct access to the underlying node's filesystem. This is a
+   *   privilege-escalation vector on multi-tenant clusters: a malicious or
+   *   misconfigured workspace path could mount sensitive node paths such as
+   *   `/etc/kubernetes/pki`, `/var/run/docker.sock`, or `/var/lib/kubelet`,
+   *   allowing the workload to read cluster credentials or break out of the
+   *   container.
+   *
+   *   Most production clusters block `hostPath` via PodSecurity admission —
+   *   PSA `restricted` and `baseline` policies both prohibit it, so Pod
+   *   creation will be rejected by the PSA admission controller (the API
+   *   server returns a 4xx at create time, before the Pod ever reaches the
+   *   scheduler).
+   *
+   *   **This mode is not safe for shared / multi-tenant clusters.** Operators
+   *   running on shared infrastructure should use a PVC-based workspace
+   *   strategy (see follow-up #3385) instead of relying on `hostPath`. Use
+   *   this backend only on single-tenant clusters where you control every
+   *   workload, or on a namespace where Pod Security Admission is enforced
+   *   at the `privileged` level (or with an equivalent policy exemption) so
+   *   that `hostPath` volumes are explicitly permitted.
+   *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
    * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod
