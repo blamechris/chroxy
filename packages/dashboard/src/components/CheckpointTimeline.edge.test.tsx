@@ -95,6 +95,51 @@ describe('CheckpointTimeline — edge cases', () => {
     expect(container).toBeNull()
   })
 
+  // #3461: trim guard on checkpoint description. Mirrors the SkillsPanel
+  // guard from #3441/#3458 — if `checkpoint.description` ever arrives as a
+  // whitespace-only string from the server, the timeline must suppress the
+  // empty `<div class="cp-desc">` rather than render an invisible block
+  // with layout but no visible text. The display value is unchanged
+  // (renders `checkpoint.description`, not the trimmed result).
+  describe('description trim guard (#3461)', () => {
+    it('renders the description verbatim when present', () => {
+      storeState.checkpoints = [{
+        id: 'cp-1', name: 'N', description: 'Save before refactor', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      expect(screen.getByText('Save before refactor')).toBeTruthy()
+      expect(document.querySelector('.cp-desc')).not.toBeNull()
+    })
+
+    it('does not render .cp-desc element when description is undefined', () => {
+      storeState.checkpoints = [{
+        id: 'cp-1', name: 'N', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      expect(document.querySelector('.cp-desc')).toBeNull()
+    })
+
+    it('does not render .cp-desc element when description is whitespace-only (spaces)', () => {
+      storeState.checkpoints = [{
+        id: 'cp-1', name: 'N', description: '   ', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      expect(document.querySelector('.cp-desc')).toBeNull()
+    })
+
+    it('does not render .cp-desc element when description is whitespace-only (mixed)', () => {
+      storeState.checkpoints = [{
+        id: 'cp-1', name: 'N', description: '\t\n  ', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      expect(document.querySelector('.cp-desc')).toBeNull()
+    })
+  })
+
   // -- connection state gating --
 
   it('does not call listCheckpoints when not connected', () => {

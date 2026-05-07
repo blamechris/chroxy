@@ -636,6 +636,42 @@ describe('skills-trust', () => {
       assert.equal(store._dirty, false)
       assert.equal(store.inspect('/abs/x.md', 'body').status, 'recorded')
     })
+
+    // #3306: a single corrupted v1 entry must NOT cause the entire file to be
+    // discarded. The v1 classifier was a strict `every()` so a missing /
+    // malformed `sha256` on one record made `looksLikeV1 === false` and the
+    // whole file fell through to "unrecognised shape" — wiping every other
+    // legitimately-recorded skill. Tolerate malformed entries: classify as v1
+    // when at least one entry passes the sha256 test and rely on the per-entry
+    // loop to drop the bad record.
+    it('migrates v1 file with one malformed entry and keeps the valid records', () => {
+      const shaA = sha256Hex('body-a')
+      const shaC = sha256Hex('body-c')
+      writeFileSync(trustPath, JSON.stringify({
+        '/abs/a.md': { sha256: shaA, firstSeen: '2024-01-01T00:00:00.000Z', lastVerified: '2024-01-01T00:00:00.000Z' },
+        // Malformed entry: sha256 is the wrong length (not 64 hex chars).
+        '/abs/b.md': { sha256: 'not-a-real-hash', firstSeen: '2024-01-01T00:00:00.000Z' },
+        '/abs/c.md': { sha256: shaC, firstSeen: '2024-01-02T00:00:00.000Z', lastVerified: '2024-01-02T00:00:00.000Z' },
+      }))
+
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // The two valid entries survive the migration.
+      assert.equal(store.inspect('/abs/a.md', 'body-a').status, 'verified')
+      assert.equal(store.inspect('/abs/c.md', 'body-c').status, 'verified')
+      // The malformed entry is dropped — first inspect re-records it.
+      assert.equal(store.inspect('/abs/b.md', 'body-b').status, 'recorded')
+    })
+
+    it('treats v1 file with all-malformed entries as unrecognised (fail open)', () => {
+      writeFileSync(trustPath, JSON.stringify({
+        '/abs/a.md': { sha256: 'short', firstSeen: '2024-01-01T00:00:00.000Z' },
+        '/abs/b.md': { firstSeen: '2024-01-01T00:00:00.000Z' },
+      }))
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // No entries pass the sha256 test → not v1 → fail open with empty state.
+      assert.equal(store._dirty, false)
+      assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
+    })
   })
 
   // #3297: isCommunityTrusted method.

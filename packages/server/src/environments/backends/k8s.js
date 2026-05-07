@@ -254,7 +254,7 @@ export class K8sBackend {
    *   "hostPath:containerPath[:ro]" format.  Each entry is translated into a
    *   `hostPath` volume + corresponding `volumeMount`.  The volume name is derived
    *   from the entry index ("extra-vol-0", "extra-vol-1", …).
-   * @param {Object}   [opts.containerEnv] - Extra environment variables
+   * @param {Object.<string,string>} [opts.containerEnv] - Extra environment variables
    * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
    *   container imagePullPolicy. Falls back to the constructor-level option when unset.
