@@ -54,6 +54,10 @@
  * @param {number[]|string[]} [opts.forwardPorts] - Ports to expose from the container
  * @param {string[]} [opts.mounts]        - Additional volume mounts (already validated)
  * @param {string}   [opts.postCreateCommand] - Shell command to run after setup completes
+ * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Container image pull policy.
+ *   Honoured only by K8sBackend — Docker and other backends silently ignore this field.
+ *   When absent, K8sBackend omits the field from the Pod spec and the K8s cluster default applies
+ *   (typically `IfNotPresent` for tagged images, `Always` for `latest`).
  * @returns {Promise<{ containerId: string, containerCliPath: string }>}
  *   containerId — the full container ID string returned by the runtime
  *   containerCliPath — absolute path inside the container where the CLI binary was installed
@@ -131,7 +135,7 @@
  * @param {string} containerId - Container ID
  * @param {Object} opts
  * @param {string}   opts.cmd            - Shell command to run (passed as `bash -c <cmd>`)
- * @param {Object}   [opts.env]          - Extra environment variables for the exec process
+ * @param {Object.<string,string>} [opts.env] - Extra environment variables for the exec process; null/undefined values are skipped
  * @param {string}   [opts.cwd]          - Working directory inside the container
  * @param {number}   [opts.timeout]      - Timeout in ms (default 30 000)
  * @returns {Promise<{ stdout: string, stderr: string }>}
@@ -237,6 +241,34 @@
  * @param {string} opts.cpuLimit     - Docker CPU limit string (e.g. "2")
  * @returns {Promise<string>} The full container ID of the newly-started container
  * @throws {Error} If the container fails to start
+ */
+
+/**
+ * Re-populate the backend's in-memory credential cache for a single environment
+ * after a server restart.  This method is OPTIONAL — the Backend interface does
+ * not require it.  EnvironmentManager.reconnect() checks for it via duck-typing:
+ *
+ * ```js
+ * if (typeof this._backend.reconnectAgentToken === 'function') {
+ *   await this._backend.reconnectAgentToken(env.containerId)
+ * }
+ * ```
+ *
+ * Backends that hold per-environment credentials in memory (e.g. K8sBackend
+ * stores agent tokens fetched from a K8s Secret) SHOULD implement this method
+ * so that streamCliInEnvironment() continues to work after the server process
+ * restarts.  Backends whose credentials are stateless or persisted to disk
+ * (e.g. DockerBackend) need not implement it.
+ *
+ * @function reconnectAgentToken
+ * @memberof Backend
+ * @param {string} handle - Opaque environment handle (container ID for Docker, Pod name for K8s)
+ * @param {Object} [opts] - Backend-specific options (e.g. {namespace} for K8sBackend)
+ * @returns {Promise<boolean>}
+ *   `true`  — credential was found and is now cached; the environment is usable
+ *   `false` — credential source is gone (e.g. the Pod/Secret was garbage-collected);
+ *             the caller should treat the environment as unreachable
+ * @throws {Error} On unexpected I/O errors (not on 404 / resource-not-found — return false instead)
  */
 
 /**
