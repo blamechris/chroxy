@@ -399,10 +399,15 @@ export function loadActiveSkills(dir, opts = {}) {
       continue
     }
     if (!communityDirSt.isDirectory()) continue
-    // Read the author-level subdirectories.
+    // Read the author-level subdirectories. Sort to match the top-level
+    // alphabetical order (#3302) — readdirSync return order is filesystem-
+    // dependent, and without this sort the tier-budget cutoff during the
+    // community walk could admit a different set of skills across runs on
+    // the same machine when name-collision tiebreaks fall back to insertion
+    // order.
     let authorEntries
     try {
-      authorEntries = readdirSync(communityPath)
+      authorEntries = readdirSync(communityPath).sort()
     } catch {
       continue
     }
@@ -419,10 +424,12 @@ export function loadActiveSkills(dir, opts = {}) {
         continue
       }
       if (!authorSt.isDirectory()) continue
-      // Walk one level inside the author dir.
+      // Walk one level inside the author dir. Sort for the same reason as
+      // authorEntries above (#3302): keep the budget cutoff deterministic
+      // even if readdirSync returns files in an unstable order.
       let authorFiles
       try {
-        authorFiles = readdirSync(authorPath)
+        authorFiles = readdirSync(authorPath).sort()
       } catch {
         continue
       }

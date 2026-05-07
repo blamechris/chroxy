@@ -680,6 +680,112 @@ describe('EnvironmentManager.reconnect()', () => {
     assert.equal(result, true, 'reconnect() should return true when all credentials refresh')
     assert.equal(manager.get('env-cred-ok').status, 'running')
   })
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // allHealthy semantics for transient failures (#3478)
+  //
+  // Per the reconnect() contract, ANY environment that did not reconnect
+  // successfully must flip the return value to false. This includes transient
+  // errors (throws) — not just the documented "credential source gone" signal.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  it('returns false when reconnectAgentToken throws (#3478)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-token-throw',
+        name: 'token-throw-env',
+        cwd: '/tmp',
+        image: 'chroxy-pod-agent:latest',
+        containerId: 'pod-token-throw',
+        containerUser: 'root',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: null,
+        cpuLimit: null,
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const backend = {
+      async getEnvironmentStatus() { return true },
+      async reconnectAgentToken() { throw new Error('k8s api error') },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    assert.equal(result, false,
+      'reconnect() must return false when reconnectAgentToken throws — same signal as returning false')
+    assert.equal(manager.get('env-token-throw').status, 'error',
+      'env should be marked error when token refresh throws')
+  })
+
+  it('returns false when getEnvironmentStatus reports stopped (#3478)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-stopped-result',
+        name: 'stopped-result-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: 'stopped-ctr-result',
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const backend = {
+      async getEnvironmentStatus() { return false }, // container stopped
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    assert.equal(result, false,
+      'reconnect() must return false when an environment container is stopped')
+    assert.equal(manager.get('env-stopped-result').status, 'stopped')
+  })
+
+  it('returns false when getEnvironmentStatus throws (#3478)', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-status-throw',
+        name: 'status-throw-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: 'gone-ctr-result',
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const backend = {
+      async getEnvironmentStatus() { throw new Error('No such container') },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    assert.equal(result, false,
+      'reconnect() must return false when getEnvironmentStatus throws')
+    assert.equal(manager.get('env-status-throw').status, 'error')
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2207,7 +2313,7 @@ describe('EnvironmentManager.reconnect() — reconnectAgentToken delegation (#33
       'reconnect() must call reconnectAgentToken for each environment with a containerId')
   })
 
-  it('logs a warning but does not throw when reconnectAgentToken rejects', async () => {
+  it('logs a warning, marks env error, and returns false when reconnectAgentToken rejects (#3478)', async () => {
     const seedData = {
       version: 1,
       environments: [{
@@ -2235,12 +2341,17 @@ describe('EnvironmentManager.reconnect() — reconnectAgentToken delegation (#33
     }
 
     const manager = new EnvironmentManager({ statePath, backend: mockBackend })
-    // Must not throw even when reconnectAgentToken rejects
-    await assert.doesNotReject(() => manager.reconnect(),
+    // Must not throw even when reconnectAgentToken rejects — errors are absorbed.
+    let result
+    await assert.doesNotReject(async () => { result = await manager.reconnect() },
       'reconnect() must absorb token refresh errors')
 
-    // Environment should still be marked running from getEnvironmentStatus
-    assert.equal(manager.get('env-k8s-err').status, 'running')
+    // Per #3478: a thrown reconnectAgentToken is the same unreachable signal
+    // as returning false — flip allHealthy and mark the env error.
+    assert.equal(result, false,
+      'reconnect() must return false when reconnectAgentToken throws')
+    assert.equal(manager.get('env-k8s-err').status, 'error',
+      'env should be marked error when token refresh throws')
   })
 
   it('skips reconnectAgentToken when backend does not support it (Docker)', async () => {
