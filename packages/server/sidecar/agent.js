@@ -371,9 +371,13 @@ export class PodAgent {
     // Reject second concurrent connection with a clear error frame, then close.
     // We send the error frame first and close only after the send is flushed so
     // the client reliably receives the frame before the WS close handshake.
+    // Routed through _send so the readyState short-circuit and try/catch around
+    // the synchronous send call apply uniformly to every reject/error path
+    // (#3473).
     if (this._activeWs) {
-      const msg = JSON.stringify({ type: 'error', message: 'another client is already connected' })
-      ws.send(msg, () => ws.close(1008, 'already connected'))
+      this._send(ws, { type: 'error', message: 'another client is already connected' }, () => {
+        try { ws.close(1008, 'already connected') } catch {}
+      })
       return
     }
 
