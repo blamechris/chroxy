@@ -43,9 +43,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // #3619: anchor on monotonic `performance.now()` so an NTP sync /
   // manual wall-clock change doesn't make the countdown snap or drift.
-  // The input `remainingMs` is a delta supplied by the parent (computed
-  // wall-clock against the server-issued `expiresAt`); only the local
-  // expiry anchor needs the monotonic clock.
+  // `remainingMs` is a delta computed by the parent against a local
+  // wall-clock receipt-time anchor (the dashboard store sets
+  // `expiresAt = Date.now() + msg.remainingMs` in message-handler.ts on
+  // `permission_request` arrival — see #3619 for the receipt-time
+  // boundary). Only the in-component countdown needs the monotonic
+  // clock; the receipt-time anchor stays on `Date.now()`.
   const expiresAtRef = useRef(performance.now() + remainingMs)
   // #2852: guard against double-click / key-repeat races. The store-backed
   // `answered` flag only flips after sendPermissionResponse -> markPermissionResolved
