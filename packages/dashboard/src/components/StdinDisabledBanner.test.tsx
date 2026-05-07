@@ -29,10 +29,14 @@ describe('StdinDisabledBanner', () => {
     expect(screen.queryByTestId('stdin-disabled-banner')).not.toBeInTheDocument()
   })
 
-  it('uses role="alert" so screen readers announce the disabled state', () => {
+  it('uses role="status" + aria-live="polite" so screen readers announce the disabled state without interrupting', () => {
+    // The dashboard convention (see Toast.tsx) pairs role="alert" with
+    // aria-live="assertive" and role="status" with aria-live="polite".
+    // The disabled state is a recovery hint, not an emergency, so polite
+    // is the correct urgency.
     render(<StdinDisabledBanner visible sessionId="s1" onRestart={vi.fn()} />)
     const banner = screen.getByTestId('stdin-disabled-banner')
-    expect(banner).toHaveAttribute('role', 'alert')
+    expect(banner).toHaveAttribute('role', 'status')
     expect(banner).toHaveAttribute('aria-live', 'polite')
   })
 

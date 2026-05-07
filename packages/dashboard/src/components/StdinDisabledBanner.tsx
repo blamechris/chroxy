@@ -8,8 +8,10 @@
  * so reconnecting clients can render this banner without waiting for a fresh
  * `error{code:'stdin_disabled'}` event (which only fires once on the original
  * process). Restarting the session is the only recovery path — clicking
- * "Restart Session" calls `destroySession` and the user can re-create with
- * the same cwd.
+ * "Restart Session" invokes the parent's `onRestart` handler which destroys
+ * the broken session and immediately re-creates a fresh one with the same
+ * cwd / name / provider / model / permissionMode (no confirm dialog — the
+ * destruction is implicit in "restart").
  */
 
 export interface StdinDisabledBannerProps {
@@ -26,10 +28,14 @@ export function StdinDisabledBanner({
   if (!visible || !sessionId) return null
 
   return (
+    // role="status" pairs with aria-live="polite" per the dashboard's
+    // ARIA convention (see Toast.tsx — `role="alert"` is paired with
+    // `aria-live="assertive"`). The disabled state is a recovery hint,
+    // not an emergency interruption, so polite is the correct urgency.
     <div
       className="stdin-disabled-banner"
       data-testid="stdin-disabled-banner"
-      role="alert"
+      role="status"
       aria-live="polite"
     >
       <span className="stdin-disabled-banner-icon" aria-hidden="true">

@@ -365,9 +365,15 @@ export function Sidebar({
                               </span>
                             )}
                             {session.stdinForwardingDisabled && (
+                              // role="img" + aria-label is the dashboard
+                              // convention for icon-only badges (see
+                              // SkillsPanel.tsx). A bare span carrying
+                              // aria-label is not consistently announced
+                              // by screen readers.
                               <span
                                 className="sidebar-stdin-disabled-badge"
                                 data-testid={`sidebar-stdin-disabled-${session.sessionId}`}
+                                role="img"
                                 title="Stdin forwarding lost — restart this session"
                                 aria-label="Stdin forwarding disabled"
                               >

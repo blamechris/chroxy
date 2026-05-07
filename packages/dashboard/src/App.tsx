@@ -419,6 +419,26 @@ export function App() {
     destroySession(sessionId)
   }, [destroySession])
 
+  // #3567: dedicated restart handler for the StdinDisabledBanner. Destroys
+  // the broken session and immediately re-creates a fresh one with the same
+  // cwd / name / provider / model / permissionMode so the user lands back
+  // where they started without going through the create-session modal. No
+  // confirm dialog — the destruction is implicit in "restart" and any
+  // in-flight Claude work was already wedged behind the broken stdin pipe.
+  const handleRestartSession = useCallback((sessionId: string) => {
+    const session = sessions.find(s => s.sessionId === sessionId)
+    if (!session) return
+    destroySession(sessionId)
+    createSession({
+      name: session.name,
+      cwd: session.cwd || undefined,
+      provider: session.provider,
+      model: session.model || undefined,
+      permissionMode: session.permissionMode || undefined,
+      worktree: session.worktree,
+    })
+  }, [sessions, destroySession, createSession])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Prevent Backspace from triggering browser/webview "back" navigation
@@ -1232,7 +1252,7 @@ export function App() {
         <StdinDisabledBanner
           visible={!!sessions.find(s => s.sessionId === activeSessionId)?.stdinForwardingDisabled}
           sessionId={activeSessionId}
-          onRestart={handleCloseSession}
+          onRestart={handleRestartSession}
         />
 
         {/* Startup error screen — shown when server failed to start (Tauri) */}

@@ -328,7 +328,12 @@ describe('Sidebar', () => {
         },
       ]
       renderSidebar({ repos, activeSessionId: 'broken' })
-      expect(screen.getByTestId('sidebar-stdin-disabled-broken')).toBeInTheDocument()
+      const badge = screen.getByTestId('sidebar-stdin-disabled-broken')
+      expect(badge).toBeInTheDocument()
+      // role="img" + aria-label is the dashboard convention for icon-only
+      // badges so screen readers reliably announce the state.
+      expect(badge).toHaveAttribute('role', 'img')
+      expect(badge).toHaveAttribute('aria-label', 'Stdin forwarding disabled')
       expect(screen.queryByTestId('sidebar-stdin-disabled-healthy')).not.toBeInTheDocument()
     })
 
