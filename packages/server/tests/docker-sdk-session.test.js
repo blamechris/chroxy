@@ -1756,7 +1756,7 @@ describe('DockerSdkSession stdin_disabled handler (#3468)', () => {
 
     const warns = []
     const listener = (entry) => {
-      if (entry.level === 'warn' && entry.component === 'docker-sdk') warns.push(entry)
+      if (entry.level === 'warn' && (entry.component === 'docker-sdk' || entry.component === 'sdk')) warns.push(entry)
     }
     addLogListener(listener)
 

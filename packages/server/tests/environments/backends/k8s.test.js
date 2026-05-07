@@ -3292,6 +3292,139 @@ describe('SidecarProcess pre-dial stdin buffer cap (#3401)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess stdin_dropped event (#3474)
+//
+// The 1 MiB pre-dial cap (#3401) drops over-cap chunks with a log.warn but
+// is silent from the consumer's perspective: proc.stdin.write() returns true
+// and no event fires.  #3474 adds a 'stdin_dropped' event so consumers
+// (SdkSession) get a runtime signal that bytes were lost and can surface the
+// failure to the user instead of producing a corrupt NDJSON stream.
+//
+// Mirrors the 'stdin_disabled' pattern from #3402: emit on the proc with a
+// payload describing what was dropped and why.  The first emit fires for
+// every over-cap chunk (unlike 'stdin_disabled' which is one-shot) — each
+// dropped chunk represents distinct lost data the consumer may want to
+// surface separately.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess stdin_dropped event (#3474)', () => {
+  /**
+   * Build a backend with a WS stuck in CONNECTING so writes accumulate in the
+   * pre-dial buffer instead of being forwarded.  Same shape as the helper in
+   * the (#3401) describe block above — duplicated locally to keep this suite
+   * self-contained when tests run with --test-name-pattern.
+   */
+  function makeBackendWithPendingDial({ maxStdinBufferBytes } = {}) {
+    const { ws: realWs } = createFakeWs()
+    const pendingOpenListeners = []
+    const connectingWs = {
+      readyState: 0,  // CONNECTING — never opens unless openWs() is called
+      sent: realWs.sent,
+      send: (data) => realWs.sent.push(data),
+      close: realWs.close,
+      once: (ev, fn) => {
+        if (ev === 'open') {
+          pendingOpenListeners.push(fn)
+        } else {
+          realWs.once(ev, fn)
+        }
+      },
+      on: (ev, fn) => realWs.on(ev, fn),
+    }
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(connectingWs),
+      _maxStdinBufferBytes: maxStdinBufferBytes,
+    })
+    backend._agentTokens.set('pod-x', 'tok')
+
+    const openWs = () => {
+      connectingWs.readyState = 1  // OPEN
+      for (const fn of pendingOpenListeners) fn()
+    }
+
+    return { backend, ws: connectingWs, openWs }
+  }
+
+  it('emits stdin_dropped with bytes + pre-dial-cap reason on over-cap write', async () => {
+    // Cap: 100 bytes.  First write fits (50 B), second is 60 B and would
+    // push to 110 B — dropped, fires the event.
+    const { backend } = makeBackendWithPendingDial({ maxStdinBufferBytes: 100 })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const events = []
+    proc.on('stdin_dropped', (info) => { events.push(info) })
+
+    proc.stdin.write('a'.repeat(50))   // fits
+    proc.stdin.write('b'.repeat(60))   // overflows — dropped
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(events.length, 1, 'stdin_dropped must fire once for the over-cap chunk')
+    assert.equal(events[0].bytes, 60, 'event payload must report the dropped byte count')
+    assert.equal(events[0].reason, 'pre-dial-cap',
+      'event payload must identify the pre-dial cap as the drop reason')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('fires stdin_dropped for every subsequent over-cap chunk', async () => {
+    // Unlike the one-shot stdin_disabled event, stdin_dropped fires for each
+    // dropped chunk so consumers can sum/log per-write byte loss.  The
+    // _stdinBufferDropped flag suppresses repeat log.warn spam, but the event
+    // itself must still emit so structured consumers don't miss subsequent
+    // drops.
+    const { backend } = makeBackendWithPendingDial({ maxStdinBufferBytes: 100 })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const events = []
+    proc.on('stdin_dropped', (info) => { events.push(info) })
+
+    proc.stdin.write('a'.repeat(50))   // fits
+    proc.stdin.write('b'.repeat(60))   // dropped
+    proc.stdin.write('c'.repeat(80))   // dropped
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(events.length, 2,
+      'stdin_dropped must fire once per dropped chunk (not gated by the log-spam flag)')
+    assert.equal(events[0].bytes, 60)
+    assert.equal(events[0].reason, 'pre-dial-cap')
+    assert.equal(events[1].bytes, 80)
+    assert.equal(events[1].reason, 'pre-dial-cap')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('does not emit stdin_dropped for under-cap writes', async () => {
+    const { backend } = makeBackendWithPendingDial({ maxStdinBufferBytes: 1024 })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    let dropped = 0
+    proc.on('stdin_dropped', () => { dropped += 1 })
+
+    proc.stdin.write('hello\n')
+    proc.stdin.write('world\n')
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(dropped, 0, 'under-cap writes must not fire stdin_dropped')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SidecarProcess stdin disabled signal (#3402)
 // ─────────────────────────────────────────────────────────────────────────────
 
