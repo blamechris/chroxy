@@ -1119,6 +1119,26 @@ describe('PodAgent', () => {
       assert.equal(oversized, true)
     })
 
+    // CRLF regression tests (#3381) ----------------------------------------
+
+    it('does not fire oversized_line for a CRLF line of exactly maxBytes content bytes (#3381)', async () => {
+      // Before the fix, CR was counted as a content byte — a CRLF line of
+      // exactly maxBytes pushed _pending to maxBytes+1 before the LF could
+      // reset it, causing a false oversized_line.
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      const crlfLine = 'A'.repeat(10) + '\r\n'
+      const { oversized } = await collect(t, [crlfLine])
+      assert.equal(oversized, false)
+    })
+
+    it('fires oversized_line when CRLF line content exceeds maxBytes (#3381)', async () => {
+      // 11 content bytes + CRLF must still trip the guard.
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      const crlfOver = 'A'.repeat(11) + '\r\n'
+      const { oversized } = await collect(t, [crlfOver])
+      assert.equal(oversized, true)
+    })
+
     it('drops all data after the oversized_line event fires (second write is suppressed)', async () => {
       const t = new LineLimitTransform({ maxBytes: 5 })
       const received = []

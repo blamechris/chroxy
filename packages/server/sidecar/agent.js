@@ -137,8 +137,12 @@ export class LineLimitTransform extends Transform {
 
     let offset = 0
     for (let i = 0; i < chunk.length; i++) {
-      if (chunk[i] === 0x0a /* '\n' */) {
-        // Newline resets the pending counter for the next line.
+      if (chunk[i] === 0x0a /* '\n' */ || chunk[i] === 0x0d /* '\r' */) {
+        // LF resets the line counter.  CR is treated the same so that a CRLF
+        // line of exactly maxBytes content bytes does not false-trip the guard
+        // (without this, the CR byte pushes _pending to maxBytes+1 before the
+        // LF resets it).  readline strips CR from CRLF pairs, so excluding it
+        // from the content count matches readline's semantics.
         this._pending = 0
         offset = i + 1
       } else {
