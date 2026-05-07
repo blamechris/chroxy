@@ -562,10 +562,6 @@ export class PodAgent {
       return
     }
 
-    // Enforce the concurrent session cap before creating a new session. Evicts
-    // the oldest idle session if needed so the Map never exceeds _maxSessions.
-    this._enforceSessionCap()
-
     // stdin option controls how the child's stdin is set up (#3329):
     //   'pipe'    — (default) writable stdin; client feeds data via stdin frames.
     //               Required for --input-format stream-json workflows.
@@ -597,6 +593,12 @@ export class PodAgent {
       this._send(ws, { type: 'error', message: `spawn failed: ${err.message}` })
       return
     }
+
+    // Spawn succeeded -- now enforce the concurrent session cap. Evicts the
+    // oldest idle session if needed so the Map never exceeds _maxSessions.
+    // Enforcing after spawn ensures a failed spawn (ENOENT, EACCES, etc.)
+    // never evicts an existing session unnecessarily (#3392).
+    this._enforceSessionCap()
 
     // Assign a sessionId and create the session object.
     const sessionId = randomUUID()

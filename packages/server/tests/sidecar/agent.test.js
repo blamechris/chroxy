@@ -1748,6 +1748,72 @@ describe('PodAgent', () => {
         await capAgent.close()
       }
     })
+
+    it('failed synchronous spawn does not evict an existing session (#3392)', async () => {
+      // Arrange: one idle session already in the map at the cap limit.
+      // The second spawn throws synchronously -- _enforceSessionCap must NOT
+      // have run before the throw, so the existing session must survive.
+      let spawnCallCount = 0
+      const mockChild = new EventEmitter()
+      mockChild.stdout = new PassThrough()
+      mockChild.stderr = new PassThrough()
+      mockChild.kill = () => true
+
+      const spawnFn = (_cmd, _args, _opts) => {
+        spawnCallCount += 1
+        if (spawnCallCount === 1) {
+          // First call succeeds -- establishes the existing session.
+          return mockChild
+        }
+        // Second call fails synchronously (e.g. binary not found).
+        throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })
+      }
+
+      const { agent: capAgent, port: capPort } = await startAgent({
+        spawnFn,
+        maxSessions: 1,          // cap of 1 -- any new spawn at the limit would evict
+        resumeTimeoutMs: 60_000, // long TTL so idle timer does not race
+      })
+
+      try {
+        // Session 1 -- connect, spawn, then disconnect (goes idle).
+        const ws1 = connect(capPort, TOKEN)
+        await waitOpen(ws1)
+        const ws1Msgs = []
+        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 30))
+        const sid1 = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        ws1.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        assert.equal(capAgent._sessions.size, 1, 'one idle session before the failing spawn')
+
+        // Session 2 -- spawn throws synchronously. With the old (buggy) ordering
+        // the cap enforcer would have evicted sid1 before discovering the spawn
+        // fails, leaving _sessions empty. With the fix eviction must not happen.
+        const ws2 = connect(capPort, TOKEN)
+        await waitOpen(ws2)
+        const ws2Msgs = []
+        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+
+        ws2.send(JSON.stringify({ type: 'spawn', cmd: 'missing-bin', args: [] }))
+        await new Promise((r) => setTimeout(r, 30))
+
+        // The client must receive an error frame describing the spawn failure.
+        const errFrame = ws2Msgs.find((m) => m.type === 'error')
+        assert.ok(errFrame, 'expected an error frame for the failed spawn')
+        assert.match(errFrame.message, /spawn failed/)
+
+        // The original session must still be alive -- no eviction occurred.
+        assert.equal(capAgent._sessions.size, 1, 'session count must not decrease after failed spawn')
+        assert.ok(capAgent._sessions.has(sid1), 'original session must survive a failed spawn')
+
+        ws2.close()
+      } finally {
+        await capAgent.close()
+      }
+    })
   })
 
   // spawn stdin option (#3329)
