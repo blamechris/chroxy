@@ -305,7 +305,11 @@ export class K8sBackend {
       for (const entry of forwardPorts) {
         // Accept bare port number or "hostPort:containerPort" strings.
         const containerPort = _parseContainerPort(entry)
-        if (containerPort && containerPort !== AGENT_PORT) {
+        if (containerPort === null) {
+          log.warn(`createEnvironment: ignoring invalid forwardPorts entry "${entry}" (must be 1-65535)`)
+          continue
+        }
+        if (containerPort !== AGENT_PORT) {
           ports.push({ containerPort })
         }
       }
@@ -1507,7 +1511,7 @@ function _parseMountString(mountStr) {
  *   - A bare number or numeric string: "8080" → 8080
  *   - A "hostPort:containerPort" string: "9000:8080" → 8080
  *
- * Returns null for non-numeric or zero values.
+ * Returns null for non-numeric, zero, or out-of-range (> 65535) values.
  *
  * @param {string|number} entry
  * @returns {number | null}
@@ -1517,7 +1521,8 @@ function _parseContainerPort(entry) {
   const colonIdx = str.indexOf(':')
   const portStr = colonIdx >= 0 ? str.slice(colonIdx + 1) : str
   const port = parseInt(portStr, 10)
-  return Number.isFinite(port) && port > 0 ? port : null
+  if (!Number.isFinite(port) || port < 1 || port > 65535) return null
+  return port
 }
 
 /**

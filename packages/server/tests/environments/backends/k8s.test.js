@@ -685,6 +685,102 @@ describe('K8sBackend.createEnvironment() — forwardPorts (#3316)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — port range validation (#3386)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — port range validation (#3386)', () => {
+  it('accepts a valid port (e.g. 8080)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'valid-port',
+      image: 'agent:latest',
+      forwardPorts: [8080],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 8080), 'port 8080 must be present')
+  })
+
+  it('silently drops port 0 — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-zero',
+      image: 'agent:latest',
+      forwardPorts: [0],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'port 0 must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops port 65536 — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-overflow',
+      image: 'agent:latest',
+      forwardPorts: [65536],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'port 65536 must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops a negative port — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-negative',
+      image: 'agent:latest',
+      forwardPorts: [-1],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'negative port must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops a non-integer string — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-nan',
+      image: 'agent:latest',
+      forwardPorts: ['abc'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'non-numeric port must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('drops the out-of-range port but keeps a valid sibling port', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-mixed',
+      image: 'agent:latest',
+      forwardPorts: [99999, 3000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 99999), 'port 99999 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 3000), 'port 3000 must be kept')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.destroyEnvironment
 // ─────────────────────────────────────────────────────────────────────────────
 
