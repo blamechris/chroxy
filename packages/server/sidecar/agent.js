@@ -623,6 +623,9 @@ export class PodAgent {
       buffer: [],
       lastActiveAt: Date.now(),
       idleTimer: null,
+      // Cooperative backpressure flag for child.stdin.write() (#3396).
+      // True while a 'drain' listener is armed and the WS is paused.
+      _stdinDraining: false,
     }
     this._sessions.set(sessionId, session)
     ws._sessionId = sessionId
@@ -774,7 +777,34 @@ export class PodAgent {
     if (!session.child || !session.child.stdin) return
 
     try {
-      session.child.stdin.write(data)
+      // Cooperative backpressure (#3396):
+      //   stream.Writable.write() returns false when the internal buffer is at
+      //   capacity (highWaterMark). A fast WS client streaming many large
+      //   stdin frames to a slow child would otherwise grow the stdin
+      //   WritableStream's internal buffer without bound and OOM the pod.
+      //
+      //   When write() returns false we pause WS message delivery for this
+      //   connection and resume it on the next 'drain' event from
+      //   child.stdin. ws.pause() halts further 'message' events until
+      //   ws.resume() is called, so subsequent stdin frames sit in the kernel
+      //   socket buffer (TCP backpressure) rather than in the agent process
+      //   memory.
+      //
+      //   `_stdinDraining` is an idempotency guard: if pause() and the drain
+      //   listener are already armed we don't re-register on every write.
+      const ok = session.child.stdin.write(data)
+      if (!ok && !session._stdinDraining) {
+        session._stdinDraining = true
+        ws.pause()
+        session.child.stdin.once('drain', () => {
+          session._stdinDraining = false
+          // Only resume the WS that's still attached to this session — a
+          // disconnect during draining must not call resume() on a stale ws.
+          if (session.activeWs && session.activeWs.readyState === 1) {
+            session.activeWs.resume()
+          }
+        })
+      }
     } catch {
       // Ignore write errors — child may have closed its stdin already.
     }
