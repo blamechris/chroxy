@@ -15,8 +15,8 @@ import { K8sBackend } from '../../../src/environments/backends/k8s.js'
  * @param {Function} [opts.createSecret] - Override for `createNamespacedSecret` call
  * @param {Function} [opts.deleteSecret] - Override for `deleteNamespacedSecret` call
  */
-function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret } = {}) {
-  const calls = { create: [], delete: [], read: [], createSecret: [], deleteSecret: [] }
+function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret } = {}) {
+  const calls = { create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [] }
 
   const api = {
     createNamespacedPod: createPod
@@ -38,6 +38,10 @@ function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecr
     deleteNamespacedSecret: deleteSecret
       ? async (args) => { calls.deleteSecret.push(args); return deleteSecret(args) }
       : async (args) => { calls.deleteSecret.push(args); return {} },
+
+    readNamespacedSecret: readSecret
+      ? async (args) => { calls.readSecret.push(args); return readSecret(args) }
+      : async (args) => { calls.readSecret.push(args); return {} },
   }
 
   api.calls = calls
@@ -690,13 +694,29 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
     assert.deepEqual(exitCodes, [-1])
   })
 
-  it('throws synchronously when agentToken is missing', () => {
-    const { backend } = makeBackendWithFakeWs()
+  it('emits exit(-1) when agentToken is missing (no Secret either)', async () => {
+    // After the lazy-fetch refactor the missing-token path is asynchronous:
+    // _readAgentToken is called, finds no CHROXY_AGENT_TOKEN in the Secret
+    // response, returns null, and the Promise chain emits exit(-1).
+    const api = createMockApi({
+      // Default mock returns {}, so data.CHROXY_AGENT_TOKEN is undefined → null
+      readSecret: async () => ({}),
+    })
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
 
-    assert.throws(
-      () => backend.streamCliInEnvironment('pod-x', { cmd: 'node', args: [] }),
-      /agentToken is required/
-    )
+    const proc = backend.streamCliInEnvironment('pod-x', { cmd: 'node', args: [] })
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.deepEqual(exitCodes, [-1],
+      'missing token must drive exit(-1) asynchronously via the lazy-fetch path')
+    proc.stdout.resume(); proc.stderr.resume()
   })
 
   it('kills by closing WS when abort signal fires', async () => {
@@ -773,12 +793,21 @@ describe('K8sBackend.execInEnvironment()', () => {
     await assert.rejects(execPromise, /command failed/)
   })
 
-  it('rejects when agentToken is missing', async () => {
-    const { backend } = makeBackendCapturing()
+  it('rejects when agentToken is missing (no Secret either)', async () => {
+    // After the lazy-fetch refactor the missing-token path is async: the
+    // rejection surfaces as exit(-1) → execInEnvironment rejects.
+    const api = createMockApi({
+      readSecret: async () => ({}),
+    })
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
 
     await assert.rejects(
-      () => backend.execInEnvironment('pod-x', { cmd: 'echo', args: [] }),
-      /agentToken is required/
+      () => backend.execInEnvironment('pod-x', { cmd: 'echo', args: [], timeout: 500 }),
+      /Command exited with code -1/
     )
   })
 })
@@ -987,6 +1016,8 @@ describe('K8sBackend agentToken auto-registration', () => {
   it('destroyEnvironment removes the registered token', async () => {
     const api = createMockApi({
       readPod: async () => { throw make404Error() },
+      // After destroy the Secret is gone — 404 on readNamespacedSecret
+      readSecret: async () => { throw make404Error() },
     })
     const backend = new K8sBackend({
       _coreV1Api: api,
@@ -996,11 +1027,17 @@ describe('K8sBackend agentToken auto-registration', () => {
     const { containerId } = await backend.createEnvironment({ envId: 'gone', image: 'ignored' })
     await backend.destroyEnvironment(containerId)
 
-    // After destroy, calling streamCliInEnvironment without an explicit token must fail
-    assert.throws(
-      () => backend.streamCliInEnvironment(containerId, { cmd: 'node', args: [] }),
-      /agentToken is required/,
-    )
+    // After destroy, calling streamCliInEnvironment without an explicit token must
+    // fail. The lazy Secret fetch returns null (Secret was deleted), so the async
+    // chain emits exit(-1).
+    const proc = backend.streamCliInEnvironment(containerId, { cmd: 'node', args: [] })
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setTimeout(r, 20))
+    assert.deepEqual(exitCodes, [-1],
+      'after destroyEnvironment, missing Secret must drive exit(-1)')
+    proc.stdout.resume(); proc.stderr.resume()
   })
 
   it('destroyEnvironment derives the Secret name from podName when none is passed', async () => {
@@ -1265,7 +1302,6 @@ describe('K8sBackend Phase-1 stubs', () => {
     ['removeImage', b => b.removeImage('tag')],
     ['listEnvironments', b => b.listEnvironments()],
     ['commitEnvironment', b => b.commitEnvironment('id', 'tag')],
-    ['renameEnvironment', b => b.renameEnvironment('id', 'new')],
     ['restoreEnvironment', b => b.restoreEnvironment({})],
   ]
 
@@ -1282,6 +1318,13 @@ describe('K8sBackend Phase-1 stubs', () => {
       )
     })
   }
+
+  it('renameEnvironment() is a no-op — resolves without I/O (K8s pods have unique names)', async () => {
+    const backend = makeBackend()
+    // Must resolve, not reject — the restore flow calls this unconditionally and
+    // a rejection would abort the restore.  See Backend interface in types.js.
+    await assert.doesNotReject(() => backend.renameEnvironment('pod-id', 'new-name'))
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1776,5 +1819,211 @@ describe('SidecarProcess session_lost reasons', () => {
 
     assert.deepEqual(exitCodes, [-2],
       'buffer_overflow session_lost must surface as exit(-2) (unrecoverable)')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._readAgentToken() — Secret-backed token recovery (#3339)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._readAgentToken()', () => {
+  it('fetches the token from the Secret and caches it in _agentTokens', async () => {
+    const token = 'abc123-test-token'
+    // K8s API returns .data values as base64
+    const encoded = Buffer.from(token).toString('base64')
+
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const result = await backend._readAgentToken('chroxy-env-x', 'default')
+    assert.equal(result, token, 'should decode base64 and return the plaintext token')
+    assert.equal(backend._agentTokens.get('chroxy-env-x'), token,
+      '_agentTokens must be populated after fetch')
+  })
+
+  it('returns null and does not throw when Secret is not found (404)', async () => {
+    const api = createMockApi({
+      readSecret: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const result = await backend._readAgentToken('chroxy-env-missing', 'default')
+    assert.equal(result, null, 'should return null for 404')
+    assert.equal(backend._agentTokens.has('chroxy-env-missing'), false,
+      'should not cache on 404')
+  })
+
+  it('re-throws non-404 API errors', async () => {
+    const apiErr = Object.assign(new Error('Forbidden'), { code: 403 })
+    const api = createMockApi({
+      readSecret: async () => { throw apiErr },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend._readAgentToken('chroxy-env-perm', 'default'),
+      /Forbidden/,
+      'non-404 API errors must propagate'
+    )
+  })
+
+  it('returns null when Secret has no CHROXY_AGENT_TOKEN field', async () => {
+    const api = createMockApi({
+      readSecret: async () => ({ data: {} }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const result = await backend._readAgentToken('chroxy-env-empty', 'default')
+    assert.equal(result, null)
+  })
+
+  it('caches token so second call does not hit the API', async () => {
+    const token = 'cached-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let apiCalls = 0
+
+    const api = createMockApi({
+      readSecret: async () => { apiCalls++; return { data: { CHROXY_AGENT_TOKEN: encoded } } },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend._readAgentToken('chroxy-env-cache', 'default')
+    // Manually verify the map is populated so the second call short-circuits
+    assert.equal(backend._agentTokens.get('chroxy-env-cache'), token)
+    // The method itself does NOT short-circuit — it always reads the Secret.
+    // Caching is used by streamCliInEnvironment (|| tokenOrPromise chain).
+    assert.equal(apiCalls, 1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.reconnectAgentToken() (#3339)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.reconnectAgentToken()', () => {
+  it('returns true and populates _agentTokens when Secret exists', async () => {
+    const token = 'reconnect-token'
+    const encoded = Buffer.from(token).toString('base64')
+
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const ok = await backend.reconnectAgentToken('chroxy-env-r1')
+    assert.equal(ok, true, 'should return true when Secret found')
+    assert.equal(backend._agentTokens.get('chroxy-env-r1'), token,
+      '_agentTokens must be populated')
+  })
+
+  it('returns false when Secret does not exist (404)', async () => {
+    const api = createMockApi({
+      readSecret: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const ok = await backend.reconnectAgentToken('chroxy-env-r2')
+    assert.equal(ok, false, 'should return false for 404')
+  })
+
+  it('propagates non-404 API errors', async () => {
+    const apiErr = Object.assign(new Error('ServiceUnavailable'), { code: 503 })
+    const api = createMockApi({
+      readSecret: async () => { throw apiErr },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend.reconnectAgentToken('chroxy-env-r3'),
+      /ServiceUnavailable/
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend agentToken lazy-load via Secret on cache miss (#3339)
+// After a server restart _agentTokens is empty; streamCliInEnvironment must
+// transparently fetch the token from the K8s Secret and succeed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend agentToken lazy-load after server restart (#3339)', () => {
+  it('fetches token from Secret when cache is empty after restart', async () => {
+    const token = 'restart-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let dialCalledWith = null
+
+    const { ws } = createFakeWs()
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: (_url, tok) => { dialCalledWith = tok; return Promise.resolve(ws) },
+    })
+
+    // Simulate server restart: _agentTokens is empty, no opts.agentToken
+    assert.equal(backend._agentTokens.size, 0, 'precondition: cache empty on restart')
+
+    const proc = backend.streamCliInEnvironment('chroxy-env-lazy', { cmd: 'node', args: [] })
+
+    // Wait for async token fetch + dial to complete
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.equal(dialCalledWith, token,
+      'dial must use the token fetched from the Secret')
+    assert.equal(backend._agentTokens.get('chroxy-env-lazy'), token,
+      'token must be cached after lazy fetch')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('emits exit(-1) when Secret is not found (404) after restart', async () => {
+    const { ws } = createFakeWs()
+    const api = createMockApi({
+      readSecret: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('chroxy-env-gone', { cmd: 'node', args: [] })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.deepEqual(exitCodes, [-1],
+      'Secret-not-found must surface as exit(-1) (same as any pre-session failure)')
+  })
+
+  it('after reconnect(), streamCliInEnvironment succeeds without opts.agentToken', async () => {
+    const token = 'post-reconnect-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let dialCalledWith = null
+
+    const { ws } = createFakeWs()
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: (_url, tok) => { dialCalledWith = tok; return Promise.resolve(ws) },
+    })
+
+    // Simulate EnvironmentManager.reconnect() calling reconnectAgentToken
+    await backend.reconnectAgentToken('chroxy-env-post-rc')
+
+    // Now streamCliInEnvironment must succeed without any explicit agentToken
+    backend.streamCliInEnvironment('chroxy-env-post-rc', { cmd: 'node', args: [] })
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(dialCalledWith, token,
+      'after reconnectAgentToken, streamCliInEnvironment uses the cached token')
+
+    ws.close?.()
   })
 })

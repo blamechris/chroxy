@@ -712,6 +712,118 @@ describe('DockerBackend.streamCliInEnvironment() security hardening', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DockerBackend.execInEnvironment — opts.env and opts.cwd wiring (#3312)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('DockerBackend.execInEnvironment()', () => {
+  it('runs docker exec bash -c <cmd> with no extra flags when opts are absent', async () => {
+    const mockExec = createMockExecFile({ results: { exec: 'hello\n' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    const result = await backend.execInEnvironment('ctr-abc', { cmd: 'echo hello' })
+
+    assert.equal(result.stdout, 'hello\n')
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    assert.ok(execCall, 'should have called docker exec')
+    // args: ['exec', 'ctr-abc', 'bash', '-c', 'echo hello']
+    assert.deepEqual(execCall.args, ['exec', 'ctr-abc', 'bash', '-c', 'echo hello'])
+  })
+
+  it('passes --workdir when opts.cwd is provided', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'pwd',
+      cwd: '/workspace/src',
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const wIdx = execCall.args.indexOf('--workdir')
+    assert.ok(wIdx >= 0, '--workdir flag must be present when opts.cwd is set')
+    assert.equal(execCall.args[wIdx + 1], '/workspace/src')
+    // container ID must come after the flags
+    assert.ok(execCall.args.indexOf('ctr-abc') > wIdx + 1)
+  })
+
+  it('passes --env KEY=VAL for each entry in opts.env', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      env: { FOO: 'bar', GREETING: 'hello world' },
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const envPairs = []
+    for (let i = 0; i < execCall.args.length - 1; i++) {
+      if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
+    }
+    assert.ok(envPairs.includes('FOO=bar'), 'FOO must be forwarded')
+    assert.ok(envPairs.includes('GREETING=hello world'), 'GREETING must be forwarded')
+    // container ID must come after env flags
+    assert.ok(execCall.args.indexOf('ctr-abc') > 1)
+  })
+
+  it('passes both --workdir and --env flags together', async () => {
+    const mockExec = createMockExecFile({ results: { exec: 'output\n' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    const result = await backend.execInEnvironment('ctr-xyz', {
+      cmd: 'node -e "console.log(process.env.KEY)"',
+      cwd: '/workspace',
+      env: { KEY: 'value' },
+    })
+
+    assert.equal(result.stdout, 'output\n')
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    assert.ok(execCall.args.includes('--workdir'), '--workdir must be present')
+    assert.ok(execCall.args.includes('/workspace'))
+    const envIdx = execCall.args.indexOf('--env')
+    assert.ok(envIdx >= 0, '--env must be present')
+    assert.equal(execCall.args[envIdx + 1], 'KEY=value')
+    // bash -c <cmd> must be the last elements
+    const bashIdx = execCall.args.indexOf('bash')
+    assert.equal(execCall.args[bashIdx + 1], '-c')
+    assert.equal(execCall.args[bashIdx + 2], 'node -e "console.log(process.env.KEY)"')
+  })
+
+  it('rejects when the command exits non-zero (stderr message)', async () => {
+    const mockExec = createMockExecFile({
+      errors: { exec: new Error('command failed') },
+    })
+    // Override to also supply stderr text
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        cb(new Error('exit 1'), '', 'bash: no such file')
+      },
+    })
+
+    await assert.rejects(
+      () => backend.execInEnvironment('ctr-abc', { cmd: 'nonexistent' }),
+      /bash: no such file/
+    )
+  })
+
+  it('does not forward process.env — only passes what the caller supplies', async () => {
+    // Ensure a process.env var that is NOT in opts.env never appears in args
+    process.env._TEST_EXEC_LEAK = 'should-not-appear'
+
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', { cmd: 'printenv', env: { SAFE: 'ok' } })
+
+    delete process.env._TEST_EXEC_LEAK
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const joined = execCall.args.join(' ')
+    assert.ok(!joined.includes('_TEST_EXEC_LEAK'), 'process.env must never be forwarded')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DockerBackend._composeServices (graceful degradation)
 // ─────────────────────────────────────────────────────────────────────────────
 
