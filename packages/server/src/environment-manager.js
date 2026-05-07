@@ -447,7 +447,7 @@ export class EnvironmentManager extends EventEmitter {
           if (ok === false) {
             env.status = 'error'
             allHealthy = false
-            log.warn(`Environment "${env.name}" credential source is gone — marking unreachable`)
+            log.warn(`Environment "${env.name}" (id: ${env.id}) credential source is gone — marking unreachable`)
           }
         } catch (err) {
           log.warn(`Environment "${env.name}" token refresh failed: ${err.message}`)
