@@ -1718,16 +1718,19 @@ function _deriveSecretName(podName) {
  * drive-letter prefixes (see below). Callers must therefore tolerate both a
  * `null` return and a thrown Error.
  *
- * Windows-style paths with a drive letter (e.g. `C:\Users\foo:/workspace`) are
- * rejected with an explicit Error: splitting on `:` would silently truncate the
- * host path to the drive letter (`"C"`) and treat the rest of the Windows path
- * as the container path, producing a misconfigured mount that fails later at
- * Pod scheduling. K8s nodes are Linux-only, so Windows host paths are not
- * supportable in any case — fail loudly at parse time.
+ * Windows-style paths with a drive letter (e.g. `C:\Users\foo:/workspace` or
+ * the relative form `C:foo:/container`) are rejected with an explicit Error:
+ * splitting on `:` would silently truncate the host path to the drive letter
+ * (`"C"`) and treat the rest of the Windows path as the container path,
+ * producing a misconfigured mount that fails later at Pod scheduling. K8s
+ * nodes are Linux-only, so Windows host paths are not supportable in any
+ * case — fail loudly at parse time. Two guards run: (1) a regex that catches
+ * absolute drive-letter prefixes (`C:\…`/`C:/…`), and (2) a post-split check
+ * for any 1-char single-letter hostPath that catches relative drive paths.
  *
  * @param {string} mountStr Docker-style mount string in `<host>:<container>[:ro]` form.
  * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
- * @throws {Error} when `mountStr` begins with a Windows drive-letter prefix.
+ * @throws {Error} when `mountStr` is recognised as a Windows drive-letter path.
  */
 function _parseMountString(mountStr) {
   if (typeof mountStr !== 'string') return null
@@ -1744,6 +1747,16 @@ function _parseMountString(mountStr) {
   const hostPath = parts[0]
   const containerPath = parts[1]
   if (!hostPath || !containerPath) return null
+  // Defensive second check: a single-character hostPath that is a letter is a
+  // Windows *relative* drive path (e.g. `C:foo:/container` → hostPath="C") that
+  // the leading-slash regex above can't catch. No legitimate POSIX mount ever
+  // produces a 1-char hostPath ('/' alone splits to '' and is already rejected
+  // by the !hostPath check), so fail loud with the same Error shape.
+  if (hostPath.length === 1 && /^[A-Za-z]$/.test(hostPath)) {
+    throw new Error(
+      `K8s mount string '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths (expected '<host>:<container>[:ro]' with a POSIX host path)`
+    )
+  }
   const readOnly = parts[2] === 'ro'
   return { hostPath, containerPath, readOnly }
 }
