@@ -1622,12 +1622,34 @@ export function loadActiveSkillsLayered({
   return _enforceTotalBudget(filtered, totalCap)
 }
 
+// Platform-default heuristic for filesystem case-sensitivity.
+//
 // macOS (HFS+/APFS) and Windows (NTFS) are case-insensitive by default. A
 // `cwd` like `/Users/Bob/proj` and a homedir like `/Users/bob` resolve to the
 // same directory but compare unequal as strings, which would defeat both the
 // $HOME boundary check and the global-skills-dir guard. Lowercase before
 // compare on those platforms to make the equality check actually correspond
 // to "same directory on disk".
+//
+// IMPORTANT — this is an OS heuristic, not a filesystem probe. Two known
+// non-conforming configurations will misbehave silently:
+//
+//   • macOS case-sensitive APFS volume (created with
+//     `diskutil apfs addVolume ... "APFS (Case-sensitive)"`): this flag is
+//     `true`, so paths are lowercased before comparison even though the
+//     filesystem treats `Community/` and `community/` as distinct inodes.
+//     In practice this means a `Community/` directory is matched as if it
+//     were `community/`, but both could legitimately coexist on disk.
+//
+//   • Linux with a case-insensitive mount (ZFS `casesensitivity=insensitive`,
+//     ciopfs, FAT/exFAT, or a WSL workspace on an NTFS volume): this flag is
+//     `false`, so path comparison is case-sensitive even though the underlying
+//     filesystem folds case. A `Community/` directory on such a mount will not
+//     be recognised as a community namespace.
+//
+// A runtime filesystem probe (create a temp file, stat with altered case)
+// would close both gaps but adds startup I/O. Track in a follow-up if the
+// heuristic becomes a real user pain point.
 const _PATH_COMPARE_CASE_INSENSITIVE =
   process.platform === 'darwin' || process.platform === 'win32'
 
@@ -1651,7 +1673,11 @@ function _sameAbsolutePath(a, b) {
  * Returns `{ isCommunity: boolean, author: string|null }`.
  *
  * Rules:
- *   - First segment of the relative path must be exactly `'community'`
+ *   - First segment of the relative path must equal `'community'`.  On
+ *     case-insensitive platforms (`_PATH_COMPARE_CASE_INSENSITIVE === true`,
+ *     i.e. darwin / win32 by default) the comparison is done after
+ *     lowercasing, so `Community/` and `COMMUNITY/` are also accepted.  On
+ *     case-sensitive platforms (Linux by default) the match is exact.
  *   - Second segment (the author dir) must be non-empty, must not be `'.'`
  *     or `'..'`, and must not start with `'.'` (no hidden author dirs)
  *   - If both conditions hold: `isCommunity = true, author = segment[1]`

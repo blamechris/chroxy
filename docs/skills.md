@@ -86,6 +86,38 @@ git clone git@github.com:you/my-chroxy-skills.git ~/.chroxy/skills
 
 Repo-overlay skills (`<repo>/.chroxy/skills/`) are intended to live alongside the project — commit them to the repo so every contributor's Chroxy session inherits the same conventions automatically.
 
+## Community namespace
+
+Skills shared by third parties live under a `community/<author>/` subdirectory of any skills root:
+
+```
+~/.chroxy/skills/
+├── coding-style.md
+└── community/
+    └── alice/
+        ├── typescript-conventions.md
+        └── review-checklist.md
+```
+
+Community skills are subject to a first-activation trust prompt — Chroxy will not inject them until you explicitly grant trust for the author. This prevents a cloned or downloaded skill set from silently influencing the model's behaviour without your consent.
+
+### Linux case-sensitivity requirement
+
+**Always name the directory `community/` in lowercase.** The behaviour differs by platform:
+
+- **macOS and Windows** — filesystems are case-insensitive by default. `Community/`, `COMMUNITY/`, and `community/` all refer to the same directory and are all recognised as the community namespace.
+- **Linux** — the filesystem is case-sensitive. Only the exact name `community/` is recognised. A directory named `Community/` or `COMMUNITY/` on Linux is silently treated as an ordinary top-level skills directory and is **not** subject to the community trust gate — its skills are either loaded without a trust prompt or rejected, depending on configuration.
+
+Using lowercase `community/` everywhere is the portable convention that works on all platforms.
+
+### Trust file migration between platforms
+
+The trust ledger (`~/.chroxy/skills-trust.json`) stores path-based grant records. On macOS and Windows the stored paths are lowercased; on Linux they are stored verbatim as resolved by the filesystem.
+
+If you copy your `skills-trust.json` from macOS to Linux (or vice versa), the `by-path` keys in the ledger may no longer match the real paths on the new machine. The result is that previously-trusted community skills appear as pending and require re-trust on the destination system. The `by-author` index is unaffected by this (author names are not path-cased), so author-level grants survive the migration — only path-level grants are at risk.
+
+**Workaround when migrating from macOS to Linux:** after copying the file, either re-trust affected skills through the UI, or manually edit `skills-trust.json` and update the `by-path` keys to match the verbatim paths on the Linux machine.
+
 ## Scope
 
 Skills span two tiers: machine-wide global (#2957) and per-repo overlay (#3067). Per-skill metadata (author, version, trust level) and a UI toggle are planned for a future release (#2958, #2959).

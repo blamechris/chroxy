@@ -130,6 +130,37 @@ function createFakeClock() {
 /**
  * Fire all pending fake-clock callbacks then yield one event-loop tick so
  * any promise continuations scheduled inside those callbacks can resolve.
+ *
+ * Single-tick assumption
+ * ----------------------
+ * clock.tick() snapshots `pending`, clears the map, then iterates the
+ * snapshot.  If a callback enqueues a *new* timer during that iteration (e.g.
+ * scheduleReconnect → dial fails → .catch handler calls scheduleReconnect
+ * again), the new timer is added to `pending` *after* the snapshot was taken
+ * and is therefore NOT fired by the current tick() call.  The single
+ * setImmediate yield that follows does not drain it either.
+ *
+ * All current tests are unaffected because _dialWs always resolves
+ * successfully, so scheduleReconnect's .catch branch is never entered and no
+ * chained timer is ever queued.
+ *
+ * If a future test exercises a mid-retry dial failure (the .catch path in
+ * scheduleReconnect), it will need to call tickAndFlush() once per chained
+ * failure — or the helper should be extended with a loop that keeps ticking
+ * until pending is empty, guarded by a max-iterations cap to avoid infinite
+ * loops for genuinely self-rescheduling timers:
+ *
+ *   async function tickAndFlushAll(clock, maxIterations = 20) {
+ *     let iterations = 0
+ *     do {
+ *       clock.tick()
+ *       await new Promise(r => setImmediate(r))
+ *       iterations++
+ *       if (iterations >= maxIterations) throw new Error('tickAndFlushAll: max iterations reached')
+ *     } while (clock.hasPending())
+ *   }
+ *
+ * (hasPending() would need to be added to createFakeClock.)
  */
 async function tickAndFlush(clock) {
   clock.tick()
