@@ -672,6 +672,101 @@ describe('skills-trust', () => {
       assert.equal(store._dirty, false)
       assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
     })
+
+    // #3511: the v1 classifier must require BOTH sha256 (correct shape) AND
+    // firstSeen — otherwise a file whose entries carry a valid-looking
+    // sha256 but no firstSeen would classify as v1, the per-entry parse loop
+    // would drop every record (firstSeen is required there too), migration
+    // would proceed with an empty ledger, and the next flush would wipe the
+    // file to an empty v2 shape. Requiring firstSeen in the classifier makes
+    // these files fall through to "unrecognised" and fail open without
+    // overwriting the existing on-disk content.
+    it('treats v1 file with valid sha256 but no firstSeen as unrecognised (fail open)', () => {
+      const shaA = sha256Hex('body-a')
+      const shaB = sha256Hex('body-b')
+      writeFileSync(trustPath, JSON.stringify({
+        // Valid-looking sha256 but no firstSeen on every entry.
+        '/abs/a.md': { sha256: shaA },
+        '/abs/b.md': { sha256: shaB },
+      }))
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Classifier rejects the file → not v1 → load/migration path leaves
+      // the store with an empty ledger and `_dirty = false`. (A subsequent
+      // `inspect()` for any skill will of course flip `_dirty = true` and
+      // BaseSession's `flush()` would then persist a fresh v2 ledger —
+      // that's the intended fail-open recovery, NOT a destructive overwrite
+      // of the original v1 records, because the classifier rejected those
+      // records and the in-memory ledger started empty.)
+      assert.equal(store._dirty, false, 'unrecognised file must not mark store dirty')
+      assert.equal(
+        store.inspect('/abs/a.md', 'body-a').status,
+        'recorded',
+        'sha256-only entries must be treated as first-seen, not verified',
+      )
+    })
+
+    // #3511 defence-in-depth: array-valued entries pass the bare
+    // `typeof === 'object'` check so the tightened predicate
+    // explicitly rejects them with `!Array.isArray(v)`. Standard
+    // JSON serialisation drops named properties on arrays so the
+    // array branch is unreachable from a normal JSON file — the
+    // guard exists to catch a hand-crafted or out-of-band parser
+    // path. This test verifies a JSON array in the entry slot is
+    // treated as unrecognised.
+    it('treats v1 file with array-valued entries as unrecognised (fail open)', () => {
+      // Direct JSON literal so the parsed value is a real array.
+      writeFileSync(trustPath, '{"/abs/a.md": ["a", "b"]}')
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store._dirty, false, 'array-valued entry must not classify as v1')
+      assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
+    })
+
+    // #3511 PR #3531 review: the previous array test only proved that
+    // an array without sha256/firstSeen fails the predicate (which it
+    // would even without the new `!Array.isArray` guard). To actually
+    // exercise the new guard, the array must satisfy
+    // `typeof v.sha256 === 'string'` AND `typeof v.firstSeen === 'string'`.
+    // The only way to achieve that on a JSON-parsed value is via
+    // Array.prototype pollution. We do that here in a try/finally so
+    // the prototype is restored even if the assertion fails — leaving
+    // residual prototype properties would corrupt every subsequent
+    // test run. Without `!Array.isArray(v)` the polluted array would
+    // satisfy the predicate, classify the file as v1, and the
+    // per-entry parse loop would (depending on iteration semantics)
+    // either drop or accept it. The guard rejects it outright.
+    it('rejects array entries even when sha256/firstSeen exist on Array.prototype', () => {
+      const sha = sha256Hex('body')
+      const firstSeen = '2024-01-01T00:00:00.000Z'
+      try {
+        Object.defineProperty(Array.prototype, 'sha256', {
+          value: sha,
+          configurable: true,
+          enumerable: false,
+        })
+        Object.defineProperty(Array.prototype, 'firstSeen', {
+          value: firstSeen,
+          configurable: true,
+          enumerable: false,
+        })
+        // Sanity: a polluted array now reports the predicate's would-be
+        // matchers as truthy — exactly what `!Array.isArray(v)` must reject.
+        const probe = []
+        assert.equal(typeof probe.sha256, 'string')
+        assert.equal(typeof probe.firstSeen, 'string')
+
+        // Direct JSON literal so the parsed value is a real array.
+        writeFileSync(trustPath, '{"/abs/a.md": ["payload"]}')
+        const store = new SkillsTrustStore({ filePath: trustPath })
+        // Without the `!Array.isArray` guard this would have classified
+        // as v1 and set `migratedLegacy = true` (via prototype lookup of
+        // sha256 + firstSeen). The guard rejects it → empty load.
+        assert.equal(store._dirty, false, 'array entry must not classify as v1 even with prototype pollution')
+        assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
+      } finally {
+        delete Array.prototype.sha256
+        delete Array.prototype.firstSeen
+      }
+    })
   })
 
   // #3297: isCommunityTrusted method.

@@ -531,9 +531,9 @@ describe('K8sBackend imagePullPolicy default assignment (#3446)', () => {
 // _namespace, _sidecarImage, _connectMode previously used `||` which would
 // stomp an explicitly-provided empty string with the default.  The fix is to
 // use `??` so empty string (and other falsy-but-non-nullish values) are
-// treated as caller-provided.  Empty string is not a *valid* K8s namespace
-// or pull policy at the API layer, but the constructor must not silently
-// rewrite the input — that's the caller's contract.
+// treated as caller-provided.  Empty string is not a *valid* K8s namespace,
+// sidecar image, or connect mode at the API layer, but the constructor must
+// not silently rewrite the input — that's the caller's contract.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('K8sBackend constructor defaults use nullish coalescing (#3459)', () => {
@@ -579,6 +579,12 @@ describe('K8sBackend constructor defaults use nullish coalescing (#3459)', () =>
     assert.strictEqual(backend._sidecarImage, '')
   })
 
+  it('explicit null sidecarImage falls back to chroxy-pod-agent:latest', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, sidecarImage: null })
+    assert.strictEqual(backend._sidecarImage, 'chroxy-pod-agent:latest')
+  })
+
   it('omitted connectMode defaults to "portforward"', () => {
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api })
@@ -595,6 +601,12 @@ describe('K8sBackend constructor defaults use nullish coalescing (#3459)', () =>
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api, connectMode: '' })
     assert.strictEqual(backend._connectMode, '')
+  })
+
+  it('explicit null connectMode falls back to "portforward"', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, connectMode: null })
+    assert.strictEqual(backend._connectMode, 'portforward')
   })
 })
 
