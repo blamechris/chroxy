@@ -739,13 +739,44 @@ export class SdkSession extends BaseSession {
     })
 
     proc.on('stdin_disabled', () => {
-      // #3468: flip read-only diagnostic flag for callers + log once.
+      // #3468 + #3501: SESSION-STICKY semantics.  Once any spawn under this
+      // session emits 'stdin_disabled' we latch `_stdinForwardingDisabled`
+      // and log a single warn for the lifetime of the session.  Subsequent
+      // spawns (next turn, post-reconnect retry) that fire their own
+      // 'stdin_disabled' are intentionally silenced.
+      //
+      // Trade-off (decided in #3501): per-spawn warns would surface every
+      // reconnect-induced loss but spam the operator log on a session that
+      // is already known to be in the disabled state — the actionable signal
+      // (reconnect/restart) was already delivered.  The session-sticky path
+      // keeps the warn high-signal: one warn = "this session lost stdin
+      // forwarding"; the latched flag is the persistent diagnostic for
+      // anything more granular (e.g. metrics, dashboards).  If a future
+      // K8s-aware subclass wants per-spawn visibility it can override this
+      // method or read `_stdinForwardingDisabled` directly.
       if (this._stdinForwardingDisabled) return
       this._stdinForwardingDisabled = true
-      log.warn(
-        'Sidecar stdin forwarding is disabled — further writes will be ' +
-        'silently dropped; reconnect or restart the session to resume'
-      )
+      // #3536 review: SidecarProcess explicitly does NOT re-wire stdin on
+      // WS reconnect (see k8s.js `stdin_disabled signal` block) — once this
+      // signal fires forwarding is permanently lost for the lifetime of the
+      // session.  Recommend a session restart only; mentioning reconnect
+      // contradicts `recoverable: false` and misleads users into a path
+      // that cannot work.
+      const message = 'Sidecar stdin forwarding is disabled — further writes will be ' +
+        'silently dropped; restart this session to recover'
+      log.warn(message)
+      // #3502: surface the disabled flag to paired clients via the session
+      // `error` channel.  SessionManager._wireSessionEvents proxies `error`
+      // into the unified `session_event` envelope, so dashboards and the
+      // mobile app receive a structured frame and can render a "stdin lost
+      // — restart this session" banner instead of seeing a hung turn.
+      // Single emit per session: gated by the same _stdinForwardingDisabled
+      // short-circuit above so a flapping sidecar can't spam errors.
+      this.emit('error', {
+        code: 'stdin_disabled',
+        message,
+        recoverable: false,
+      })
     })
   }
 
