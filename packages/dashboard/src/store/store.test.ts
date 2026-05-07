@@ -1494,20 +1494,24 @@ describe('reconnect scheduling dedupe (#3615)', () => {
   });
 
   it('repeated onerror fires after onclose do not drift the reconnecting-state patch (idempotent)', async () => {
-    // #3633: pin idempotency — additional onerror fires from the same
-    // transport drop must not change phase / error / retryCount. Today
-    // this holds because scheduleReconnect short-circuits via the
-    // per-socket `reconnectScheduled` flag, and onerror does no state
-    // mutation outside that call. A future regression that bypassed
-    // the flag would silently double-mutate state without changing
-    // the timer count.
+    // #3633: pin idempotency for the *reconnecting-state patch only* —
+    // additional onerror fires from the same transport drop must not
+    // change connectionPhase / connectionError / connectionRetryCount.
+    // Today this holds because scheduleReconnect short-circuits via
+    // the per-socket `reconnectScheduled` flag, so the patch (the
+    // `set({ connectionPhase: 'reconnecting', connectionError, ... })`
+    // call inside scheduleReconnect) only runs once. onerror itself
+    // does perform other cleanup on each fire (clearing the local
+    // socket ref, draining pending trust grants, etc.) — that's NOT
+    // what's being tested here. A future regression that bypassed the
+    // reconnectScheduled flag would silently re-apply the
+    // reconnecting-state patch without changing the timer count, and
+    // these assertions would catch it.
     //
     // Note: we do NOT exercise repeated onclose fires here because
     // onclose's else-branch clobbers phase to 'disconnected' on the
     // second fire (separate bug, #3632 / fixed in PR #3631). That
-    // codepath isn't part of the idempotency contract — the contract
-    // is "the first event arms; subsequent events for the same drop
-    // are no-ops".
+    // codepath isn't part of this idempotency contract.
     const { useConnectionStore } = await import('./connection');
     const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
 
