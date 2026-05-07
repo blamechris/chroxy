@@ -358,4 +358,108 @@ describe('Toast', () => {
       expect(onDismiss).toHaveBeenCalledWith('d6')
     })
   })
+
+
+  // #3604: pause auto-dismiss timer on hover/focus, resume with the
+  // *remaining* time on mouseleave/blur.
+  describe('pause-on-hover (#3604)', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.runOnlyPendingTimers(); vi.useRealTimers() })
+
+    it('pauses auto-dismiss while the toast is hovered', async () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={makeItems('Hover me')} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-toast-0')
+      // Hover after 2s, then advance another 5s — without pause the
+      // toast would have dismissed at the 5s mark.
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      fireEvent.mouseEnter(toast)
+      await act(async () => { vi.advanceTimersByTime(5000) })
+      expect(onDismiss).not.toHaveBeenCalled()
+    })
+
+    it('resumes with remaining time after mouseleave (not a fresh 5s)', async () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={makeItems('Hover me')} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-toast-0')
+      // Elapse 2s, hover (3s remaining), hold for 10s, leave.
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      fireEvent.mouseEnter(toast)
+      await act(async () => { vi.advanceTimersByTime(10000) })
+      fireEvent.mouseLeave(toast)
+      // Resume should fire after the 3s remaining, not a new 5s.
+      await act(async () => { vi.advanceTimersByTime(2999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('toast-0')
+    })
+
+    it('survives multiple hover/leave cycles without leaking grace time', async () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={makeItems('Hover repeatedly')} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-toast-0')
+      // 1s elapsed, hover, leave (4s remaining).
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      fireEvent.mouseEnter(toast)
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      fireEvent.mouseLeave(toast)
+      // 1s of resumed time elapsed (3s remaining), hover again.
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      fireEvent.mouseEnter(toast)
+      await act(async () => { vi.advanceTimersByTime(5000) })
+      fireEvent.mouseLeave(toast)
+      // Final 3s should fire dismiss.
+      await act(async () => { vi.advanceTimersByTime(2999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('toast-0')
+    })
+
+    it('keyboard focus on a toast button pauses the timer', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'k1',
+        message: 'Focus me',
+        action: { label: 'Try again', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      // Focus bubbles to the toast wrapper via React's onFocus.
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      const actionBtn = screen.getByTestId('toast-action-k1')
+      actionBtn.focus()
+      await act(async () => { vi.advanceTimersByTime(5000) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      actionBtn.blur()
+      // 3s remaining after blur.
+      await act(async () => { vi.advanceTimersByTime(2999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('k1')
+    })
+
+    it('manual close while hovered still dismisses immediately', () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={makeItems('Hover then close')} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-toast-0')
+      fireEvent.mouseEnter(toast)
+      fireEvent.click(screen.getByTestId('toast-close-toast-0'))
+      expect(onDismiss).toHaveBeenCalledWith('toast-0')
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it('resumes correctly when pause happens at the boundary of the 5s window', async () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={[{ id: 'e0', message: 'Edge' }]} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-e0')
+      await act(async () => { vi.advanceTimersByTime(4999) })
+      fireEvent.mouseEnter(toast)
+      // 1ms remaining. Hold 10s under hover.
+      await act(async () => { vi.advanceTimersByTime(10000) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      fireEvent.mouseLeave(toast)
+      // Resume schedules the final 1ms.
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('e0')
+    })
+  })
 })
