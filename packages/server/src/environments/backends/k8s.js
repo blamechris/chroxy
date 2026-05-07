@@ -193,6 +193,21 @@ export class K8sBackend {
     this._clearTimeout = clearTimeoutImpl || clearTimeout
   }
 
+  /**
+   * Resolve the effective namespace for a per-call invocation.
+   *
+   * Returns the per-call override when provided (including the empty string —
+   * see #3493), otherwise falls back to the constructor-stored namespace.
+   * Uses `??` so an explicit `''` is preserved verbatim and surfaces to the
+   * K8s API rather than being silently rewritten to the default.
+   *
+   * @param {string|undefined|null} callNamespace - Per-call namespace override
+   * @returns {string} Resolved namespace
+   */
+  _resolveNamespace(callNamespace) {
+    return callNamespace ?? this._namespace
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // createEnvironment — create a sidecar Pod + per-Pod Secret
   // ─────────────────────────────────────────────────────────────────────────
@@ -271,7 +286,7 @@ export class K8sBackend {
       imagePullPolicy: callImagePullPolicy,
     } = opts
     validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
-    const ns = namespace ?? this._namespace
+    const ns = this._resolveNamespace(namespace)
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
     // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
@@ -518,7 +533,7 @@ export class K8sBackend {
    * @returns {Promise<void>}
    */
   async destroyEnvironment(podName, opts = {}) {
-    const ns = opts.namespace ?? this._namespace
+    const ns = this._resolveNamespace(opts.namespace)
     const secretName = opts.secretName || _deriveSecretName(podName)
 
     // Always drop the cached token first so a partial failure can't leave
@@ -579,7 +594,7 @@ export class K8sBackend {
    * @throws {Error} If the Pod does not exist
    */
   async getEnvironmentStatus(podName, opts = {}) {
-    const ns = opts.namespace ?? this._namespace
+    const ns = this._resolveNamespace(opts.namespace)
     const result = await this._api.readNamespacedPod({ name: podName, namespace: ns })
     const phase = result?.status?.phase
     return phase === 'Running'
@@ -715,7 +730,7 @@ export class K8sBackend {
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
     } = opts
-    const ns = namespace ?? this._namespace
+    const ns = this._resolveNamespace(namespace)
 
     // Prefer explicit token (test seam), fall back to the in-memory cache, and
     // lazily fetch from the K8s Secret when neither is available (e.g. after a
@@ -829,7 +844,7 @@ export class K8sBackend {
    * @returns {Promise<boolean>}
    */
   async reconnectAgentToken(podName, opts = {}) {
-    const ns = opts.namespace ?? this._namespace
+    const ns = this._resolveNamespace(opts.namespace)
     const token = await this._readAgentToken(podName, ns)
     return token !== null
   }

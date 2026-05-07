@@ -708,6 +708,35 @@ describe('K8sBackend per-call namespace resolution uses nullish coalescing (#349
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._resolveNamespace() — direct unit tests (#3534)
+//
+// Companion helper extracted from the five per-call namespace resolution sites
+// (createEnvironment, destroyEnvironment, getEnvironmentStatus,
+// streamCliInEnvironment, reconnectAgentToken).  Behavioural tests for those
+// sites live in the #3493 block above; the tests here pin the helper itself so
+// future changes (e.g. RFC 1123 validation in #3534's follow-up) are layered
+// on a stable seam.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._resolveNamespace() (#3534)', () => {
+  it('returns the per-call override when provided (including empty string)', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespace: 'staging' })
+    assert.strictEqual(backend._resolveNamespace('production'), 'production')
+    assert.strictEqual(backend._resolveNamespace(''), '',
+      'empty string must be preserved verbatim (#3493 contract)')
+  })
+
+  it('falls back to constructor namespace when override is undefined or null', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespace: 'staging' })
+    assert.strictEqual(backend._resolveNamespace(undefined), 'staging')
+    assert.strictEqual(backend._resolveNamespace(null), 'staging')
+    assert.strictEqual(backend._resolveNamespace(), 'staging')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — workspace mount (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
