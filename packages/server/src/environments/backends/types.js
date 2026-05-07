@@ -131,7 +131,7 @@
  * @param {string} containerId - Container ID
  * @param {Object} opts
  * @param {string}   opts.cmd            - Shell command to run (passed as `bash -c <cmd>`)
- * @param {Object}   [opts.env]          - Extra environment variables for the exec process
+ * @param {Object.<string,string>} [opts.env] - Extra environment variables for the exec process; null/undefined values are skipped
  * @param {string}   [opts.cwd]          - Working directory inside the container
  * @param {number}   [opts.timeout]      - Timeout in ms (default 30 000)
  * @returns {Promise<{ stdout: string, stderr: string }>}
