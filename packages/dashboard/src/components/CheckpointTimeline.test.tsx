@@ -164,4 +164,51 @@ describe('CheckpointTimeline', () => {
     // Form should be hidden, "New Checkpoint" button should be back
     expect(screen.getByText('+ New Checkpoint')).toBeTruthy()
   })
+
+  // #3484: trim guard on checkpoint name fallback. The header label uses
+  // `checkpoint.name || fallback`, but a whitespace-only name (e.g. '   ')
+  // is truthy and would render as a visually-empty `<span class="cp-name">`.
+  // Mirrors the description guard from #3461 and the SkillsPanel guards
+  // from #3441 / #3458 — the trim is used only as a boolean predicate;
+  // the displayed fallback is the truncated-ID label.
+  describe('name trim guard (#3484)', () => {
+    it('renders whitespace-only name as truncated-ID fallback (spaces)', () => {
+      storeState.checkpoints = [{
+        id: 'abc12345-def6-7890', name: '   ', description: '', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      expect(screen.getByText('Checkpoint abc12345')).toBeTruthy()
+    })
+
+    it('renders whitespace-only name as truncated-ID fallback (mixed)', () => {
+      storeState.checkpoints = [{
+        id: 'abc12345-def6-7890', name: '\t\n  ', description: '', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      expect(screen.getByText('Checkpoint abc12345')).toBeTruthy()
+    })
+
+    it('uses checkpoint.id as title when name is whitespace-only', () => {
+      storeState.checkpoints = [{
+        id: 'abc12345-def6-7890', name: '   ', description: '', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      const nameEl = document.querySelector('.cp-name')
+      expect(nameEl).not.toBeNull()
+      expect(nameEl?.getAttribute('title')).toBe('abc12345-def6-7890')
+    })
+
+    it('renders the name verbatim when present (untrimmed)', () => {
+      storeState.checkpoints = [{
+        id: 'cp-1', name: '  Save point  ', description: '', messageCount: 1,
+        createdAt: Date.now(), hasGitSnapshot: false,
+      }]
+      render(<CheckpointTimeline />)
+      const nameEl = document.querySelector('.cp-name')
+      expect(nameEl?.textContent).toBe('  Save point  ')
+    })
+  })
 })
