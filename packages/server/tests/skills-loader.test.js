@@ -2595,6 +2595,29 @@ describe('skills-loader', () => {
           assert.equal(result.author, 'alice')
         },
       )
+
+      // #3378: Linux (case-sensitive FS) must NOT treat Community/ as the community namespace
+      it(
+        'Community/ (capital C) is NOT a community namespace on Linux (case-sensitive FS)',
+        { skip: process.platform !== 'linux' },
+        () => {
+          const dirReal = '/skills'
+          const result = _isCommunityNamespace('/skills/Community/alice/x.md', dirReal)
+          assert.equal(result.isCommunity, false, 'Community/ must not match on Linux — exact case required')
+          assert.equal(result.author, null)
+        },
+      )
+
+      it(
+        'COMMUNITY/ (all-caps) is NOT a community namespace on Linux (case-sensitive FS)',
+        { skip: process.platform !== 'linux' },
+        () => {
+          const dirReal = '/skills'
+          const result = _isCommunityNamespace('/skills/COMMUNITY/alice/x.md', dirReal)
+          assert.equal(result.isCommunity, false, 'COMMUNITY/ must not match on Linux — exact case required')
+          assert.equal(result.author, null)
+        },
+      )
     })
 
     // ── Loader integration tests ──
@@ -2955,5 +2978,45 @@ describe('skills-loader', () => {
         assert.equal(skills[0].communityAuthor, 'alice')
       },
     )
+
+    // #3378: walk must NOT discover Community/ on Linux (case-sensitive FS)
+    it(
+      'walk does NOT discover Community/ (capital C) as community namespace on Linux (case-sensitive FS)',
+      { skip: process.platform !== 'linux' },
+      () => {
+        // On Linux the directory 'Community' (capital C) is a distinct path from
+        // 'community' — the walk must treat them as separate namespaces and must
+        // not discover Community/ as the community namespace.
+        mkdirSync(join(communityDir, 'Community', 'alice'), { recursive: true })
+        writeFileSync(
+          join(communityDir, 'Community', 'alice', 'caps.md'),
+          '# Caps skill\n\nBody.\n',
+        )
+
+        const skills = loadActiveSkills(communityDir, {
+          communityTrustChecker: () => true,
+        })
+
+        assert.equal(skills.length, 0, 'skill under Community/ must NOT be discovered on Linux')
+      },
+    )
+
+    // #3378: trust-transfer gap — moving skills-trust.json from macOS to Linux
+    //
+    // When a skill is trusted on macOS under 'Community/alice/foo.md' the grant is
+    // stored with the literal (mixed-case) path that macOS reported.  After moving
+    // the skills directory to Linux the same file appears as 'Community/alice/foo.md'
+    // in the filesystem, but _isCommunityNamespace() returns isCommunity:false on
+    // Linux because _PATH_COMPARE_CASE_INSENSITIVE is false and 'Community' !== 'community'.
+    //
+    // Consequence: the skill is not discovered as a community skill on Linux at all,
+    // so the byPath lookup is never reached — the grant effectively disappears.
+    // There is no silent data loss: the skill simply appears as an ordinary
+    // (non-community) top-level namespace and will not be loaded until it is
+    // renamed to lowercase 'community/' on the Linux host.
+    //
+    // If cross-platform portability of community trust grants is required in the
+    // future, _isCommunityNamespace() could optionally normalise on all platforms,
+    // or a migration helper could lowercase 'Community/' entries in the trust file.
   })
 })
