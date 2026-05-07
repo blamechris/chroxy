@@ -2157,6 +2157,117 @@ describe('PodAgent', () => {
       )
     })
 
+    it('child close after stdin_drain_stalled does not emit exit/close 1000 (#3513)', async () => {
+      // Regression: previously the child 'close' handler would fire after
+      // _handleStdinDrainStalled killed the child, racing with the terminal
+      // error path. Clients could observe exit + close(1000) instead of the
+      // intended stdin_drain_stalled error + close(1011).
+      //
+      // After the fix, _handleStdinDrainStalled sets session._terminalErrorSent
+      // before kill, and the child 'close' handler returns early when the flag
+      // is set — mirroring the existing _oversized guard.
+      //
+      // To exercise the race deterministically we instrument session.activeWs
+      // with a fake whose send() defers its callback by a macrotask (mirroring
+      // the line_too_long #3399 test). That widens the window so the child
+      // 'close' fires BEFORE the error frame's send callback runs the
+      // close(1011) — which is precisely the scenario where the unguarded
+      // close handler would emit exit + close(1000).
+      const clock = makeFakeClock()
+      const TIMEOUT_MS = 1000
+      const STDIN_CLOSE_MS = 25
+      const KILL_GRACE_MS = 25
+      const { child, fakeStdin } = makeFakeChild()
+      const { agent, port } = await startAgent({
+        spawnFn: () => child,
+        stdinDrainTimeoutMs: TIMEOUT_MS,
+        stdinCloseGraceMs: STDIN_CLOSE_MS,
+        killGraceMs: KILL_GRACE_MS,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Replace session.activeWs with an instrumented fake that defers send
+        // callbacks. Forces the close-after-flush callback to run AFTER the
+        // child 'close' event, which is the race the guard must protect.
+        const callLog = []
+        const fakeWs = {
+          readyState: 1,
+          send(data, cb) {
+            const frame = JSON.parse(data)
+            callLog.push({ op: 'send', type: frame.type, code: frame.code })
+            if (cb) {
+              setTimeout(() => { callLog.push({ op: 'send_cb_fired', code: frame.code }); cb() }, 30)
+            }
+          },
+          close(code, reason) { callLog.push({ op: 'close', code, reason }) },
+          pause() {},
+          resume() {},
+          terminate() {},
+        }
+        const session = agent._sessions.get(agent._activeWs._sessionId)
+        session.activeWs = fakeWs
+
+        // Trigger backpressure path so the drain timer arms.
+        fakeStdin.nextWriteOk = false
+        ws.send(JSON.stringify({ type: 'stdin', data: 'wedge\n' }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Cross the drain timeout — _handleStdinDrainStalled fires synchronously
+        // on the fake clock: queues the error frame on fake send (cb deferred
+        // 30ms), then arms the SIGTERM timer.
+        clock.advance(TIMEOUT_MS + 1)
+        // Advance past stdin-close grace so SIGTERM lands and child._chroxyKilled
+        // is set. The fake child won't emit 'close' on its own here, so we emit
+        // it manually below to simulate the race window.
+        clock.advance(STDIN_CLOSE_MS + 1)
+
+        // Fire child 'close' BEFORE the deferred send_cb (still pending for
+        // ~30ms). Without the _terminalErrorSent guard this would call
+        // _emitSessionFrame(exit) and close(1000) on the fake ws.
+        child.emit('close', -15)
+
+        // Now wait for the deferred error-frame send callback to fire and
+        // run the close(1011) path.
+        await new Promise((r) => setTimeout(r, 60))
+
+        // The error frame must be present.
+        const errSend = callLog.find((e) => e.op === 'send' && e.code === 'stdin_drain_stalled')
+        assert.ok(errSend, `expected send(stdin_drain_stalled), log=${JSON.stringify(callLog)}`)
+
+        // No exit frame must be sent on the fake ws — the close handler must
+        // return early because _terminalErrorSent is set.
+        const exitSend = callLog.find((e) => e.op === 'send' && e.type === 'exit')
+        assert.equal(
+          exitSend,
+          undefined,
+          `child 'close' must not emit exit after stdin_drain_stalled, log=${JSON.stringify(callLog)}`,
+        )
+
+        // The only close on the fake ws must be 1011 — not 1000.
+        const closeOps = callLog.filter((e) => e.op === 'close')
+        assert.ok(closeOps.length >= 1, `expected at least one close call, log=${JSON.stringify(callLog)}`)
+        for (const c of closeOps) {
+          assert.equal(
+            c.code,
+            1011,
+            `every close must use 1011 (not 1000), got ${c.code}, log=${JSON.stringify(callLog)}`,
+          )
+        }
+
+        try { ws.close() } catch {}
+      } finally {
+        await agent.close()
+      }
+    })
+
     it('env var override: valid CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS is respected', () => {
       // Constructor-arg test exercises the same validation pathway as the
       // env-var parser (both flow through Number.isFinite + > 0 checks
