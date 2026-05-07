@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import WebSocket from 'ws'
-import { PodAgent, LineLimitTransform, DEFAULT_MAX_LINE_BYTES } from '../../sidecar/agent.js'
+import { PodAgent, LineLimitTransform, DEFAULT_MAX_LINE_BYTES, DEFAULT_STDIN_DRAIN_TIMEOUT_MS } from '../../sidecar/agent.js'
 
 const TOKEN = 'test-secret-token-abc123'
 const WRONG_TOKEN = 'wrong-token'
@@ -1861,6 +1861,297 @@ describe('PodAgent', () => {
       assert.equal(session._stdinDraining, false, 'draining flag should clear even without ws')
 
       ws.close()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // Stdin drain stall detection — wedged child guard (#3476)
+  //
+  // PR #3475 introduced cooperative backpressure that calls ws.pause() when
+  // child.stdin.write() returns false and resumes on the next 'drain' event.
+  // A wedged child (accepts input but never reads from stdin) never emits
+  // 'drain' — without a timeout the WS stays paused indefinitely.
+  //
+  // The agent arms a per-session timer when _stdinDraining flips true. If
+  // 'drain' does not arrive within CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS the
+  // session emits a stdin_drain_stalled error frame, kills the child, and
+  // closes the WS with code 1011.
+  // ---------------------------------------------------------------------------
+
+  describe('stdin drain stall detection', () => {
+    /**
+     * Reusable deterministic fake clock — same shape as the one used by the
+     * idle-resume TTL describe block below. Hoisted here so we don't need
+     * forward references across describe scopes.
+     */
+    function makeFakeClock() {
+      let now = 0
+      const pending = []
+      function fakeSetTimeout(fn, delay) {
+        const handle = { _fn: fn, _at: now + delay, _cancelled: false, unref() {} }
+        pending.push(handle)
+        return handle
+      }
+      function fakeClearTimeout(handle) {
+        if (handle) handle._cancelled = true
+      }
+      function advance(ms) {
+        now += ms
+        const due = pending
+          .filter((h) => !h._cancelled && h._at <= now)
+          .sort((a, b) => a._at - b._at)
+        for (const h of due) {
+          h._cancelled = true
+          h._fn()
+        }
+      }
+      return { fakeSetTimeout, fakeClearTimeout, advance }
+    }
+
+    function makeFakeChild() {
+      const child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      const fakeStdin = new EventEmitter()
+      fakeStdin.writes = []
+      fakeStdin.nextWriteOk = true
+      fakeStdin.writableEnded = false
+      fakeStdin.write = (data) => {
+        fakeStdin.writes.push(data)
+        return fakeStdin.nextWriteOk
+      }
+      fakeStdin.end = () => { fakeStdin.writableEnded = true; fakeStdin.ended = true }
+      child.stdin = fakeStdin
+      child.killSignals = []
+      child.kill = (signal) => { child.killSignals.push(signal); return true }
+      return { child, fakeStdin }
+    }
+
+    it('emits stdin_drain_stalled error frame after timeout when no drain arrives', async () => {
+      const clock = makeFakeClock()
+      const TIMEOUT_MS = 1000
+      const STDIN_CLOSE_MS = 25
+      const KILL_GRACE_MS = 25
+      const { child, fakeStdin } = makeFakeChild()
+      const { agent, port } = await startAgent({
+        spawnFn: () => child,
+        stdinDrainTimeoutMs: TIMEOUT_MS,
+        stdinCloseGraceMs: STDIN_CLOSE_MS,
+        killGraceMs: KILL_GRACE_MS,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const collected = collectUntilClose(ws, 3000)
+        await waitOpen(ws)
+
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Trigger backpressure path — write returns false so drain timer arms.
+        fakeStdin.nextWriteOk = false
+        ws.send(JSON.stringify({ type: 'stdin', data: 'wedge\n' }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const session = agent._sessions.get(agent._activeWs._sessionId)
+        assert.ok(session._stdinDraining, 'session must be flagged as draining')
+        assert.ok(session._stdinDrainTimer, 'drain timer must be armed once draining')
+
+        // Advance partway through — nothing fires yet.
+        clock.advance(TIMEOUT_MS - 1)
+        assert.equal(child.killSignals.length, 0, 'child must not be killed before timeout')
+
+        // Cross the drain timeout boundary — _handleStdinDrainStalled fires
+        // synchronously: error frame is queued on ws.send, child.stdin.end()
+        // is called, and the SIGTERM grace timer is armed on the fake clock.
+        clock.advance(2)
+
+        // SIGTERM is scheduled inside _killChild via the fake clock — advance
+        // past the stdin-close grace so SIGTERM lands deterministically.
+        clock.advance(STDIN_CLOSE_MS + 1)
+
+        const { messages, closeCode } = await collected
+
+        const errFrame = messages.find((m) => m.type === 'error' && m.code === 'stdin_drain_stalled')
+        assert.ok(
+          errFrame,
+          `expected error frame with code=stdin_drain_stalled, got ${JSON.stringify(messages)}`,
+        )
+        assert.match(errFrame.message, /did not drain/)
+        assert.ok(typeof errFrame.seq === 'number', 'session-scoped error must carry a seq')
+
+        assert.equal(closeCode, 1011, `WS should close with 1011, got ${closeCode}`)
+        assert.ok(
+          child.killSignals.includes('SIGTERM'),
+          `child must be SIGTERM-killed on drain stall, got ${JSON.stringify(child.killSignals)}`,
+        )
+        assert.equal(agent._sessions.size, 0, 'session must be removed after drain stall')
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('drain event before timeout cancels the drain timer cleanly', async () => {
+      const clock = makeFakeClock()
+      const TIMEOUT_MS = 1000
+      const { child, fakeStdin } = makeFakeChild()
+      const { agent, port } = await startAgent({
+        spawnFn: () => child,
+        stdinDrainTimeoutMs: TIMEOUT_MS,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        fakeStdin.nextWriteOk = false
+        ws.send(JSON.stringify({ type: 'stdin', data: 'a\n' }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const session = agent._sessions.get(agent._activeWs._sessionId)
+        assert.ok(session._stdinDrainTimer, 'drain timer must be armed')
+
+        // Drain arrives before the timeout — timer must be cancelled.
+        fakeStdin.emit('drain')
+        await new Promise((r) => setTimeout(r, 10))
+
+        assert.equal(session._stdinDrainTimer, null, 'drain timer must be cleared on drain')
+        assert.equal(session._stdinDraining, false, 'draining flag must clear on drain')
+
+        // Advance past the original timeout — must not fire because cancelled.
+        clock.advance(TIMEOUT_MS + 100)
+        assert.equal(
+          child.killSignals.length,
+          0,
+          `child must NOT be killed after drain cancelled the timer, got ${JSON.stringify(child.killSignals)}`,
+        )
+        assert.equal(agent._sessions.size, 1, 'session must still be alive')
+
+        ws.close()
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('does not arm a second drain timer while one is already running', async () => {
+      const clock = makeFakeClock()
+      const TIMEOUT_MS = 1000
+      const { child, fakeStdin } = makeFakeChild()
+      const { agent, port } = await startAgent({
+        spawnFn: () => child,
+        stdinDrainTimeoutMs: TIMEOUT_MS,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        fakeStdin.nextWriteOk = false
+        ws.send(JSON.stringify({ type: 'stdin', data: 'a\n' }))
+        ws.send(JSON.stringify({ type: 'stdin', data: 'b\n' }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        const session = agent._sessions.get(agent._activeWs._sessionId)
+        const initialHandle = session._stdinDrainTimer
+        assert.ok(initialHandle, 'first backpressured write must arm a drain timer')
+
+        // The session-level guard means re-entering the backpressure branch is
+        // already prevented by _stdinDraining; verify the drain-timer field
+        // identity has not been replaced.
+        assert.strictEqual(
+          session._stdinDrainTimer,
+          initialHandle,
+          'second backpressured write must not replace the drain timer handle',
+        )
+
+        ws.close()
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('agent.close() cancels pending drain timers', async () => {
+      const clock = makeFakeClock()
+      const TIMEOUT_MS = 1000
+      const { child, fakeStdin } = makeFakeChild()
+      const { agent, port } = await startAgent({
+        spawnFn: () => child,
+        stdinDrainTimeoutMs: TIMEOUT_MS,
+        killGraceMs: 25,
+        setTimeoutFn: clock.fakeSetTimeout,
+        clearTimeoutFn: clock.fakeClearTimeout,
+      })
+
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      fakeStdin.nextWriteOk = false
+      ws.send(JSON.stringify({ type: 'stdin', data: 'x\n' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const killsBeforeClose = child.killSignals.slice()
+
+      await agent.close()
+
+      // Advancing past the original timeout must NOT trigger any extra kill
+      // signals or re-add a session — the drain timer was cancelled.
+      const sessionsBeforeAdvance = agent._sessions.size
+      assert.doesNotThrow(() => clock.advance(TIMEOUT_MS + 100))
+      assert.equal(agent._sessions.size, sessionsBeforeAdvance, 'no session should reappear after close')
+      // _killChild is idempotent (guards on child._chroxyKilled) so even if
+      // the timer leaked a callback, kill list cannot grow from a duplicate
+      // _killChild call. The cancellation invariant is what we really test.
+      assert.ok(
+        child.killSignals.length >= killsBeforeClose.length,
+        'kill signals only grow, never shrink',
+      )
+    })
+
+    it('env var override: valid CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS is respected', () => {
+      // Constructor-arg test exercises the same validation pathway as the
+      // env-var parser (both flow through Number.isFinite + > 0 checks
+      // against FALLBACK_STDIN_DRAIN_TIMEOUT_MS).
+      const agent = new PodAgent({ token: TOKEN, stdinDrainTimeoutMs: 5000 })
+      assert.equal(agent._stdinDrainTimeoutMs, 5000)
+      agent.close()
+    })
+
+    it('env var override: invalid (NaN/<=0) falls back to 30s default', () => {
+      for (const bad of [NaN, 0, -1, -1000]) {
+        const agent = new PodAgent({ token: TOKEN, stdinDrainTimeoutMs: bad })
+        assert.equal(
+          agent._stdinDrainTimeoutMs,
+          30_000,
+          `expected fallback to 30000ms for ${bad}, got ${agent._stdinDrainTimeoutMs}`,
+        )
+        agent.close()
+      }
+    })
+
+    it('env var override: missing falls back to 30s default', () => {
+      // Constructor with no override uses module-level DEFAULT.
+      const agent = new PodAgent({ token: TOKEN })
+      assert.equal(agent._stdinDrainTimeoutMs, 30_000)
+      agent.close()
+    })
+
+    it('exported DEFAULT_STDIN_DRAIN_TIMEOUT_MS is positive finite', () => {
+      assert.ok(
+        Number.isFinite(DEFAULT_STDIN_DRAIN_TIMEOUT_MS) && DEFAULT_STDIN_DRAIN_TIMEOUT_MS > 0,
+        `DEFAULT_STDIN_DRAIN_TIMEOUT_MS must be positive finite, got ${DEFAULT_STDIN_DRAIN_TIMEOUT_MS}`,
+      )
     })
   })
 

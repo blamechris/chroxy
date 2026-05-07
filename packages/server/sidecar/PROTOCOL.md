@@ -400,6 +400,25 @@ The child is killed and the WS is closed with code `1008` within 50 ms of this
 frame.  No `exit` frame follows — the `error` frame is the terminal event for
 the session.
 
+When a wedged child accepts stdin but never reads from it (so no `'drain'`
+event ever fires after a backpressured `child.stdin.write()` returned `false`),
+the agent emits a session-scoped error frame with `code: 'stdin_drain_stalled'`
+once `CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS` (default 30 s) elapses:
+
+```json
+{
+  "type": "error",
+  "code": "stdin_drain_stalled",
+  "message": "child stdin did not drain within 30000ms — child killed",
+  "seq": 7
+}
+```
+
+The child is killed and the WS is closed with code `1011` (server-side
+condition) right after this frame. As with `line_too_long`, no `exit` frame
+follows — the error frame is the terminal event for the session, and the close
+code distinguishes it from a normal idle eviction (`1001`).
+
 ---
 
 ## One Active Client
@@ -574,6 +593,7 @@ replies with `{ type: 'pong' }`.
 | `resume` with stale lastSeq (gap)            | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
 | `resume` while session has active client     | `error` frame + close `1008`                                     |
 | stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1000` |
+| child stdin does not drain within `CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS` | `error` frame (`code: stdin_drain_stalled`) + child SIGTERM + close `1011` |
 | active session evicted by hard session cap   | `session_lost` frame (`reason: evicted_by_cap`) + child SIGTERM + close `1001` |
 | `stdin` before `spawn`                       | `error` frame (`stdin: no active session (send spawn first)`), connection stays open |
 | `stdin_end` before `spawn`                   | `error` frame (`stdin_end: no active session (send spawn first)`), connection stays open |

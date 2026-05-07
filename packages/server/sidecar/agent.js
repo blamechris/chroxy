@@ -79,6 +79,24 @@ const DEFAULT_MAX_SESSIONS = Number.isFinite(_PARSED_MAX_SESSIONS) && _PARSED_MA
   ? _PARSED_MAX_SESSIONS
   : FALLBACK_MAX_SESSIONS
 
+// Stdin drain timeout: how long the agent will wait for child.stdin to emit
+// 'drain' after a backpressured write before declaring the child wedged
+// (#3476). PR #3475 added cooperative backpressure that pauses the WS until
+// 'drain' fires; a wedged child that accepts input but never reads from stdin
+// would never emit 'drain', leaving the WS paused indefinitely. The drain
+// timeout caps that wait and forces an error+kill recovery so the pod cannot
+// silently get stuck on a non-reading child. Configurable via
+// CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS (default 30 s).
+const FALLBACK_STDIN_DRAIN_TIMEOUT_MS = 30_000
+const _PARSED_STDIN_DRAIN_TIMEOUT = parseInt(
+  process.env.CHROXY_AGENT_STDIN_DRAIN_TIMEOUT_MS ?? `${FALLBACK_STDIN_DRAIN_TIMEOUT_MS}`,
+  10,
+)
+export const DEFAULT_STDIN_DRAIN_TIMEOUT_MS =
+  Number.isFinite(_PARSED_STDIN_DRAIN_TIMEOUT) && _PARSED_STDIN_DRAIN_TIMEOUT > 0
+    ? _PARSED_STDIN_DRAIN_TIMEOUT
+    : FALLBACK_STDIN_DRAIN_TIMEOUT_MS
+
 // Canonical `session_lost` frame `reason` field values. Documented in
 // packages/server/sidecar/PROTOCOL.md (sections "session_lost" and
 // "Hard Session Cap"). Centralised here so the call sites that emit the
@@ -199,6 +217,7 @@ export class PodAgent {
    * @param {number}   [opts.maxLineBytes]         Override NDJSON line length cap (tests).
    * @param {number}   [opts.resumeTimeoutMs]      Override idle resume window in ms (tests).
    * @param {number}   [opts.maxSessions]          Override concurrent session cap (tests).
+   * @param {number}   [opts.stdinDrainTimeoutMs]  Override wedged-child drain timeout in ms (tests).
    * @param {Function} [opts.setTimeoutFn]         Override setTimeout for deterministic timer tests.
    * @param {Function} [opts.clearTimeoutFn]       Override clearTimeout for deterministic timer tests.
    */
@@ -208,6 +227,7 @@ export class PodAgent {
     maxLineBytes = DEFAULT_MAX_LINE_BYTES,
     resumeTimeoutMs = DEFAULT_RESUME_TIMEOUT_MS,
     maxSessions = DEFAULT_MAX_SESSIONS,
+    stdinDrainTimeoutMs = DEFAULT_STDIN_DRAIN_TIMEOUT_MS,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout } = {}) {
     this._spawnFn = spawnFn
@@ -231,6 +251,9 @@ export class PodAgent {
     this._maxSessions = Number.isFinite(maxSessions) && maxSessions > 0
       ? maxSessions
       : FALLBACK_MAX_SESSIONS
+    this._stdinDrainTimeoutMs = Number.isFinite(stdinDrainTimeoutMs) && stdinDrainTimeoutMs > 0
+      ? stdinDrainTimeoutMs
+      : FALLBACK_STDIN_DRAIN_TIMEOUT_MS
     this._setTimeoutFn = setTimeoutFn
     this._clearTimeoutFn = clearTimeoutFn
 
@@ -293,6 +316,7 @@ export class PodAgent {
       // Kill children for all live sessions and cancel any idle timers.
       for (const session of this._sessions.values()) {
         this._cancelIdleTimer(session)
+        this._cancelStdinDrainTimer(session)
         if (session.child) {
           this._killChild(session.child)
           session.child = null
@@ -450,6 +474,79 @@ export class PodAgent {
   }
 
   // ---------------------------------------------------------------------------
+  // Stdin drain stall timer (#3476) — guards against a wedged child that
+  // accepts input but never reads from stdin (would never emit 'drain' so
+  // the WS would stay paused indefinitely). Armed when cooperative
+  // backpressure flips _stdinDraining true; cancelled on the actual 'drain'
+  // event, on _killChild, and during eviction/agent close. On expiry the
+  // session emits a stdin_drain_stalled error frame, kills the child, and
+  // closes the WS with 1011.
+  // ---------------------------------------------------------------------------
+
+  _armStdinDrainTimer(session) {
+    // Idempotent — never stack a second timer.
+    if (session._stdinDrainTimer !== null) return
+
+    session._stdinDrainTimer = this._setTimeoutFn(() => {
+      session._stdinDrainTimer = null
+      this._handleStdinDrainStalled(session)
+    }, this._stdinDrainTimeoutMs)
+
+    // Don't keep the event loop alive solely for the drain-stall timer.
+    if (session._stdinDrainTimer && typeof session._stdinDrainTimer.unref === 'function') {
+      session._stdinDrainTimer.unref()
+    }
+  }
+
+  _cancelStdinDrainTimer(session) {
+    if (session._stdinDrainTimer !== null) {
+      this._clearTimeoutFn(session._stdinDrainTimer)
+      session._stdinDrainTimer = null
+    }
+  }
+
+  _handleStdinDrainStalled(session) {
+    const { sessionId, child } = session
+
+    console.warn(
+      `[chroxy-pod-agent] stdin drain stalled for session ${sessionId} (${this._stdinDrainTimeoutMs}ms) — killing wedged child`,
+    )
+
+    // Clear the draining flag so any late 'drain' event (e.g. once the child
+    // is killed) does not try to resume an already-closing WS.
+    session._stdinDraining = false
+
+    if (child) {
+      this._killChild(child)
+      session.child = null
+    }
+
+    // The WS was paused by the cooperative-backpressure path before this
+    // timer fired. A graceful close() handshake requires reading the peer's
+    // CLOSE frame back, which is impossible while the underlying socket is
+    // paused — the close would hang indefinitely. Resume the socket so the
+    // close handshake can complete normally.
+    if (session.activeWs && session.activeWs.readyState === 1) {
+      try { session.activeWs.resume() } catch {}
+    }
+
+    // Emit the error frame BEFORE closing the WS so the client can
+    // distinguish a wedged-child kill from a normal idle eviction
+    // (idle_timeout sends session_lost; this path sends an error code).
+    this._emitSessionFrame(session, {
+      type: 'error',
+      code: 'stdin_drain_stalled',
+      message: `child stdin did not drain within ${this._stdinDrainTimeoutMs}ms — child killed`,
+    }, () => {
+      if (session.activeWs && session.activeWs.readyState === 1) {
+        try { session.activeWs.close(1011, 'stdin_drain_stalled') } catch {}
+      }
+      this._cancelIdleTimer(session)
+      this._sessions.delete(sessionId)
+    })
+  }
+
+  // ---------------------------------------------------------------------------
   // Session eviction — kill the child, drop from _sessions. Called by the
   // idle timer or by the max-sessions cap enforcer.
   // ---------------------------------------------------------------------------
@@ -458,6 +555,10 @@ export class PodAgent {
     const { sessionId, child } = session
 
     console.warn(`[chroxy-pod-agent] Evicting session ${sessionId} reason=${reason}`)
+
+    // Eviction supersedes any pending drain-stall recovery — cancel the timer
+    // so it cannot fire after the session has already been torn down.
+    this._cancelStdinDrainTimer(session)
 
     if (child) {
       this._killChild(child)
@@ -709,6 +810,10 @@ export class PodAgent {
       // Cooperative backpressure flag for child.stdin.write() (#3396).
       // True while a 'drain' listener is armed and the WS is paused.
       _stdinDraining: false,
+      // Drain stall timer (#3476). Armed when _stdinDraining flips true; fires
+      // if no 'drain' event arrives within _stdinDrainTimeoutMs and forces a
+      // wedged-child recovery (error frame + kill + close 1011).
+      _stdinDrainTimer: null,
     }
     this._sessions.set(sessionId, session)
     ws._sessionId = sessionId
@@ -751,6 +856,7 @@ export class PodAgent {
           session.activeWs.close(1000, 'spawn failed')
         }
         this._cancelIdleTimer(session)
+        this._cancelStdinDrainTimer(session)
         this._sessions.delete(sessionId)
       })
     })
@@ -783,6 +889,7 @@ export class PodAgent {
           session.activeWs.close(1008, 'line_too_long')
         }
         this._cancelIdleTimer(session)
+        this._cancelStdinDrainTimer(session)
         this._sessions.delete(sessionId)
       })
     })
@@ -822,8 +929,9 @@ export class PodAgent {
         if (session.activeWs && session.activeWs.readyState === 1) {
           session.activeWs.close(1000, 'process exited')
         }
-        // Cancel any pending idle timer and remove session from map.
+        // Cancel any pending idle / drain timers and remove session from map.
         this._cancelIdleTimer(session)
+        this._cancelStdinDrainTimer(session)
         this._sessions.delete(sessionId)
       })
     })
@@ -882,8 +990,15 @@ export class PodAgent {
       if (!ok && !session._stdinDraining) {
         session._stdinDraining = true
         ws.pause()
+        // Arm the wedged-child drain timeout (#3476) BEFORE attaching the
+        // drain listener. If the child accepts input but never reads from
+        // stdin it will never emit 'drain' — without this timer the WS would
+        // stay paused indefinitely. The drain listener cancels the timer on
+        // success.
+        this._armStdinDrainTimer(session)
         session.child.stdin.once('drain', () => {
           session._stdinDraining = false
+          this._cancelStdinDrainTimer(session)
           // Only resume the WS that's still attached to this session — a
           // disconnect during draining must not call resume() on a stale ws.
           if (session.activeWs && session.activeWs.readyState === 1) {
