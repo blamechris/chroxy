@@ -774,6 +774,16 @@ export function App() {
   // a corrected `actualAuthor` render an inline "Try as <author>" button
   // that re-issues skill_trust_grant. Info notifications never carry
   // actions today, so the spread covers only the error path.
+  // #3603: when the WS socket isn't open (reconnecting, restarting,
+  // or fully disconnected), action callbacks like `grantCommunitySkillTrust`
+  // silently no-op — the operator clicks the button, sees the toast
+  // dismiss, and gets no feedback that nothing happened. Flag the
+  // action as disabled and swap the label to "Reconnecting…" so the
+  // state is visible. The Toast also pauses its 5s auto-dismiss timer
+  // while `actionDisabled` is true (and restarts a fresh 5s window on
+  // reconnect), so the toast survives the entire disconnect and stays
+  // clickable once the socket recovers.
+  const isSocketConnected = connectionPhase === 'connected'
   const toastItems: ToastItem[] = useMemo(
     () => [
       ...serverErrors
@@ -782,12 +792,18 @@ export function App() {
           id: e.id,
           message: e.message,
           level: 'error' as const,
-          ...(e.action ? { action: e.action } : {}),
+          ...(e.action
+            ? {
+                action: e.action,
+                actionDisabled: !isSocketConnected,
+                actionDisabledLabel: 'Reconnecting…',
+              }
+            : {}),
         })),
       ...infoNotifications
         .map(e => ({ id: e.id, message: e.message, level: 'info' as const })),
     ],
-    [serverErrors, infoNotifications, activeSessionId],
+    [serverErrors, infoNotifications, activeSessionId, isSocketConnected],
   )
 
   // Per-session input draft persistence

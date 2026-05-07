@@ -205,4 +205,157 @@ describe('Toast', () => {
       })
     })
   })
+
+  // #3603: when the parent reports the WS socket is reconnecting, the
+  // action button should render disabled with a clear "Reconnecting…"
+  // label so the operator gets feedback instead of a silent no-op.
+  describe('actionDisabled (#3603)', () => {
+    it('renders the action button disabled when actionDisabled is true', () => {
+      const items: ToastItem[] = [{
+        id: 'd1',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: vi.fn() },
+        actionDisabled: true,
+      }]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      const btn = screen.getByTestId('toast-action-d1')
+      expect(btn).toBeDisabled()
+      expect(btn).toHaveAttribute('aria-disabled', 'true')
+    })
+
+    it('renders the action button enabled when actionDisabled is false/undefined', () => {
+      const items: ToastItem[] = [{
+        id: 'd2',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      const btn = screen.getByTestId('toast-action-d2')
+      expect(btn).not.toBeDisabled()
+      expect(btn).not.toHaveAttribute('aria-disabled')
+    })
+
+    it('swaps the label to actionDisabledLabel while disabled', () => {
+      const items: ToastItem[] = [{
+        id: 'd3',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: vi.fn() },
+        actionDisabled: true,
+        actionDisabledLabel: 'Reconnecting…',
+      }]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      expect(screen.getByTestId('toast-action-d3')).toHaveTextContent('Reconnecting…')
+    })
+
+    it('falls back to action.label when actionDisabledLabel is omitted', () => {
+      const items: ToastItem[] = [{
+        id: 'd4',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: vi.fn() },
+        actionDisabled: true,
+      }]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      expect(screen.getByTestId('toast-action-d4')).toHaveTextContent('Try as alice')
+    })
+
+    it('does not invoke onClick or dismiss the toast when clicked while disabled', () => {
+      const onAction = vi.fn()
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'd5',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: onAction },
+        actionDisabled: true,
+        actionDisabledLabel: 'Reconnecting…',
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      fireEvent.click(screen.getByTestId('toast-action-d5'))
+      expect(onAction).not.toHaveBeenCalled()
+      expect(onDismiss).not.toHaveBeenCalled()
+    })
+
+    describe('auto-dismiss pause while disabled', () => {
+      beforeEach(() => { vi.useFakeTimers() })
+      afterEach(() => { vi.runOnlyPendingTimers(); vi.useRealTimers() })
+
+      it('does not auto-dismiss while actionDisabled is true (no matter how long)', async () => {
+        const onDismiss = vi.fn()
+        const items: ToastItem[] = [{
+          id: 'p1',
+          message: 'Owned by alice',
+          action: { label: 'Try as alice', onClick: vi.fn() },
+          actionDisabled: true,
+          actionDisabledLabel: 'Reconnecting…',
+        }]
+        render(<Toast items={items} onDismiss={onDismiss} />)
+        // 30 seconds of "reconnect window" — toast must persist.
+        await act(async () => { vi.advanceTimersByTime(30000) })
+        expect(onDismiss).not.toHaveBeenCalled()
+      })
+
+      it('clears an in-flight auto-dismiss timer when actionDisabled flips to true', async () => {
+        const onDismiss = vi.fn()
+        const baseItem: ToastItem = {
+          id: 'p2',
+          message: 'Owned by alice',
+          action: { label: 'Try as alice', onClick: vi.fn() },
+        }
+        const { rerender } = render(<Toast items={[baseItem]} onDismiss={onDismiss} />)
+        // Run partway through the 5s timer, then disconnect mid-flight.
+        await act(async () => { vi.advanceTimersByTime(2000) })
+        rerender(<Toast items={[{ ...baseItem, actionDisabled: true }]} onDismiss={onDismiss} />)
+        // Advance past the original 5s deadline — must NOT dismiss.
+        await act(async () => { vi.advanceTimersByTime(10000) })
+        expect(onDismiss).not.toHaveBeenCalled()
+      })
+
+      it('starts a fresh 5s timer once actionDisabled flips back to false', async () => {
+        const onDismiss = vi.fn()
+        const baseItem: ToastItem = {
+          id: 'p3',
+          message: 'Owned by alice',
+          action: { label: 'Try as alice', onClick: vi.fn() },
+          actionDisabled: true,
+        }
+        const { rerender } = render(<Toast items={[baseItem]} onDismiss={onDismiss} />)
+        // Long disconnect — no dismiss.
+        await act(async () => { vi.advanceTimersByTime(10000) })
+        expect(onDismiss).not.toHaveBeenCalled()
+
+        // Reconnect — fresh 5s window starts.
+        rerender(<Toast items={[{ ...baseItem, actionDisabled: false }]} onDismiss={onDismiss} />)
+        // Just under 5s post-reconnect — still alive.
+        await act(async () => { vi.advanceTimersByTime(4999) })
+        expect(onDismiss).not.toHaveBeenCalled()
+        // Cross the 5s threshold — auto-dismiss fires.
+        await act(async () => { vi.advanceTimersByTime(2) })
+        expect(onDismiss).toHaveBeenCalledWith('p3')
+      })
+    })
+
+    it('re-enables and fires the action once actionDisabled flips to false', () => {
+      const onAction = vi.fn()
+      const onDismiss = vi.fn()
+      const baseItem: ToastItem = {
+        id: 'd6',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: onAction },
+        actionDisabled: true,
+        actionDisabledLabel: 'Reconnecting…',
+      }
+      const { rerender } = render(<Toast items={[baseItem]} onDismiss={onDismiss} />)
+      // Click while disabled — no-op.
+      fireEvent.click(screen.getByTestId('toast-action-d6'))
+      expect(onAction).not.toHaveBeenCalled()
+
+      // Connection recovers — re-render with actionDisabled false.
+      rerender(<Toast items={[{ ...baseItem, actionDisabled: false }]} onDismiss={onDismiss} />)
+      const btn = screen.getByTestId('toast-action-d6')
+      expect(btn).not.toBeDisabled()
+      expect(btn).toHaveTextContent('Try as alice')
+      fireEvent.click(btn)
+      expect(onAction).toHaveBeenCalledTimes(1)
+      expect(onDismiss).toHaveBeenCalledWith('d6')
+    })
+  })
 })
