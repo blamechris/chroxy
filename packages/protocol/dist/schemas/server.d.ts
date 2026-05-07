@@ -176,9 +176,70 @@ export declare const ServerPlanReadySchema: z.ZodObject<{
     type: z.ZodLiteral<"plan_ready">;
     allowedPrompts: z.ZodOptional<z.ZodArray<z.ZodAny>>;
 }, z.core.$strip>;
+/**
+ * One entry in a `session_list` payload (and the equivalent shape returned
+ * by `SessionManager.listSessions()` server-side).
+ *
+ * `passthrough()` so future field additions don't break older clients that
+ * haven't bumped the schema yet — only the keys we care about for cross-
+ * package validation are listed explicitly. New clients can rely on the
+ * documented optional fields below; older clients see them as `undefined`
+ * and fall back to their pre-existing defaults.
+ *
+ * Documented hydration fields:
+ *   - `stdinForwardingDisabled` (#3540): latched stdin_disabled flag so
+ *     reconnecting clients see the disabled state without waiting for a
+ *     fresh `error` event.
+ *   - `stdinDroppedBytes` / `stdinDroppedCount` (#3573): cumulative
+ *     `stdin_dropped` byte / drop counters maintained for the session
+ *     lifetime by SdkSession. Lets a dashboard / mobile client connecting
+ *     after one or more drops happened paint the "X bytes lost over N
+ *     drops" indicator immediately, instead of waiting for the next drop
+ *     to fire the runtime `stdin_dropped_totals` event. Non-SDK providers
+ *     (CliSession, Codex, Gemini) round-trip as `0`.
+ */
+export declare const ServerSessionListEntrySchema: z.ZodObject<{
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    cwd: z.ZodOptional<z.ZodString>;
+    model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    permissionMode: z.ZodOptional<z.ZodString>;
+    isBusy: z.ZodOptional<z.ZodBoolean>;
+    createdAt: z.ZodOptional<z.ZodNumber>;
+    lastActivityAt: z.ZodOptional<z.ZodNumber>;
+    conversationId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    provider: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    worktree: z.ZodOptional<z.ZodBoolean>;
+    repoCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    isolation: z.ZodOptional<z.ZodString>;
+    promptEvaluator: z.ZodOptional<z.ZodBoolean>;
+    stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
+    stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
+    stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
+}, z.core.$loose>;
 export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
-    sessions: z.ZodArray<z.ZodAny>;
+    sessions: z.ZodArray<z.ZodObject<{
+        sessionId: z.ZodString;
+        name: z.ZodString;
+        cwd: z.ZodOptional<z.ZodString>;
+        model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        permissionMode: z.ZodOptional<z.ZodString>;
+        isBusy: z.ZodOptional<z.ZodBoolean>;
+        createdAt: z.ZodOptional<z.ZodNumber>;
+        lastActivityAt: z.ZodOptional<z.ZodNumber>;
+        conversationId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        provider: z.ZodOptional<z.ZodString>;
+        capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+        worktree: z.ZodOptional<z.ZodBoolean>;
+        repoCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        isolation: z.ZodOptional<z.ZodString>;
+        promptEvaluator: z.ZodOptional<z.ZodBoolean>;
+        stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
+        stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
+        stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$loose>>;
 }, z.core.$strip>;
 /**
  * Emitted when a session in the persisted state file could not be restored
@@ -303,6 +364,14 @@ export declare const ServerSkillTrustGrantInvalidAuthorSchema: z.ZodObject<{
     code: z.ZodLiteral<"INVALID_AUTHOR">;
     message: z.ZodString;
     actualAuthor: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerStdinDroppedTotalsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"stdin_dropped_totals">;
+    sessionId: z.ZodNullable<z.ZodString>;
+    bytes: z.ZodNumber;
+    count: z.ZodNumber;
+    reason: z.ZodString;
+    escalated: z.ZodBoolean;
 }, z.core.$strip>;
 export declare const ServerErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"server_error">;

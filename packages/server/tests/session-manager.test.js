@@ -861,6 +861,86 @@ describe('SessionManager.listSessions includes conversationId', () => {
   })
 })
 
+// #3573: hydrate cumulative stdin_dropped totals on reconnect via the
+// `session_list` payload. PR #3572 (#3544) shipped the `stdin_dropped_totals`
+// transient event but never seeded the running counters into the handshake,
+// so a dashboard / mobile client that connects after one or more drops
+// already happened painted `bytes=0, count=0` until the next drop fired.
+// `listSessions()` is the canonical seed for both `auth_ok`-flow
+// `session_list` and `broadcastSessionList()` re-broadcasts; surface the
+// counters here so reconnecting clients re-hydrate without waiting.
+describe('SessionManager.listSessions includes stdinDroppedTotals (#3573)', () => {
+  it('reads the SDK session getter and exposes both counters', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+
+    // SdkSession exposes a `stdinDroppedTotals` getter (#3544) that returns
+    // `{ bytes, count }`. listSessions() must read it through the public
+    // accessor, NOT the private `_stdinDroppedBytesTotal` field, so the
+    // contract stays stable if the storage shape changes later.
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    Object.defineProperty(session, 'stdinDroppedTotals', {
+      get: () => ({ bytes: 4096, count: 3 }),
+    })
+    session.destroy = () => {}
+    mgr._sessions.set('s-with-drops', { session, name: 'Dropped', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.equal(entry.stdinDroppedBytes, 4096)
+    assert.equal(entry.stdinDroppedCount, 3)
+    assert.equal(typeof entry.stdinDroppedBytes, 'number')
+    assert.equal(typeof entry.stdinDroppedCount, 'number')
+  })
+
+  it('defaults to 0 / 0 for non-SDK providers without the getter', () => {
+    // CliSession / Codex / Gemini do not drop stdin at the SidecarProcess
+    // pre-dial cap (no SidecarProcess in the loop), so they have no
+    // `stdinDroppedTotals` getter. listSessions() must round-trip these as
+    // numeric `0` so reconnecting clients see a stable shape regardless of
+    // provider — `undefined` would force every client to add a fallback.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s-cli', { session, name: 'CliSession', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.equal(entry.stdinDroppedBytes, 0)
+    assert.equal(entry.stdinDroppedCount, 0)
+    assert.equal(typeof entry.stdinDroppedBytes, 'number')
+    assert.equal(typeof entry.stdinDroppedCount, 'number')
+  })
+
+  it('coerces non-finite getter values back to 0', () => {
+    // Defensive: a malformed provider that returns NaN / null fields must
+    // not leak NaN onto the wire — clients would render "X bytes lost over
+    // NaN drops". Coerce to 0 so the indicator renders cleanly.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    Object.defineProperty(session, 'stdinDroppedTotals', {
+      get: () => ({ bytes: NaN, count: undefined }),
+    })
+    session.destroy = () => {}
+    mgr._sessions.set('s-bad', { session, name: 'Bad', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.equal(entry.stdinDroppedBytes, 0)
+    assert.equal(entry.stdinDroppedCount, 0)
+  })
+})
+
 describe('SessionManager provider support', () => {
   it('defaults to claude-sdk provider', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })

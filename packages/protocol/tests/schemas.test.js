@@ -714,4 +714,113 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(!result.success, 'type must be "stdin_dropped_totals"')
     })
   })
+
+  // #3573: session_list entry shape now documents the cumulative
+  // stdin_dropped totals so a reconnecting client can hydrate the live
+  // counter from the handshake. The entry schema is `passthrough()` so
+  // older clients ignore unknown fields and newer clients can rely on
+  // the documented optional fields below.
+  describe('ServerSessionListEntrySchema (#3573)', () => {
+    it('validates an entry with stdinDroppedBytes and stdinDroppedCount', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+        cwd: '/tmp/project',
+        model: 'claude-sonnet-4-6',
+        permissionMode: 'approve',
+        isBusy: false,
+        stdinForwardingDisabled: false,
+        stdinDroppedBytes: 4096,
+        stdinDroppedCount: 3,
+      })
+      assert.ok(result.success, 'session_list entry must accept stdinDropped totals')
+      assert.equal(result.data.stdinDroppedBytes, 4096)
+      assert.equal(result.data.stdinDroppedCount, 3)
+    })
+
+    it('validates an entry with zeroed totals (non-SDK provider)', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-cli',
+        name: 'Cli Session',
+        cwd: '/tmp/cli',
+        stdinDroppedBytes: 0,
+        stdinDroppedCount: 0,
+      })
+      assert.ok(result.success, 'zero counters from non-SDK providers must validate')
+    })
+
+    it('rejects negative stdinDroppedBytes', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+        cwd: '/tmp/project',
+        stdinDroppedBytes: -1,
+        stdinDroppedCount: 0,
+      })
+      assert.ok(!result.success, 'byte counter must be non-negative')
+    })
+
+    it('rejects fractional stdinDroppedCount', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+        cwd: '/tmp/project',
+        stdinDroppedBytes: 0,
+        stdinDroppedCount: 1.5,
+      })
+      assert.ok(!result.success, 'drop count must be an integer')
+    })
+
+    it('treats stdinDroppedTotals as optional (older servers omit them)', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+        cwd: '/tmp/project',
+      })
+      assert.ok(result.success, 'older servers without #3573 fields must still validate')
+    })
+
+    it('passes through unknown fields for forward compat', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+        cwd: '/tmp/project',
+        someFutureField: { foo: 'bar' },
+      })
+      assert.ok(result.success, 'passthrough() must allow unknown fields')
+      assert.equal(result.data.someFutureField.foo, 'bar')
+    })
+
+    it('validates a full session_list payload through ServerSessionListSchema', async () => {
+      const { ServerSessionListSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListSchema.safeParse({
+        type: 'session_list',
+        sessions: [
+          {
+            sessionId: 'sess-1',
+            name: 'Session 1',
+            cwd: '/tmp/project',
+            stdinDroppedBytes: 1024,
+            stdinDroppedCount: 2,
+          },
+          {
+            sessionId: 'sess-2',
+            name: 'Session 2',
+            cwd: '/tmp/project-2',
+            stdinDroppedBytes: 0,
+            stdinDroppedCount: 0,
+          },
+        ],
+      })
+      assert.ok(result.success, 'session_list with stdinDropped totals must validate end-to-end')
+      assert.equal(result.data.sessions[0].stdinDroppedBytes, 1024)
+      assert.equal(result.data.sessions[1].stdinDroppedCount, 0)
+    })
+  })
 })

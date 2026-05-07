@@ -4255,3 +4255,132 @@ describe('WsServer linking-mode pairing default (#3079)', () => {
     ws.close()
   })
 })
+
+// #3573: hydrate cumulative stdin_dropped totals on reconnect via the
+// post-auth `session_list` payload. PR #3572 (#3544) shipped the
+// `stdin_dropped_totals` transient event but never seeded the running
+// counters into the handshake — a dashboard / mobile client connecting
+// after one or more drops happened painted `bytes=0, count=0` until the
+// next drop fired. The end-to-end contract is: connect → auth_ok →
+// session_list arrives with `stdinDroppedBytes` / `stdinDroppedCount`
+// matching the SdkSession's lifetime counters.
+describe('WsServer auth_ok / session_list hydrates stdinDroppedTotals (#3573)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /**
+   * Mock SessionManager whose `listSessions()` mirrors the real one's
+   * field shape — including the new `stdinDroppedBytes` /
+   * `stdinDroppedCount` fields read from `session.stdinDroppedTotals`.
+   * The real SessionManager.listSessions() is exercised by the
+   * session-manager.test.js suite; this test is the WS-layer integration
+   * check that the values reach the wire.
+   */
+  function createDroppedSessionManager(totals) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/project'
+    Object.defineProperty(mockSession, 'stdinDroppedTotals', {
+      get: () => totals,
+    })
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Session 1', cwd: '/tmp/project' })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        const t = entry.session.stdinDroppedTotals
+        list.push({
+          sessionId: id,
+          name: entry.name,
+          cwd: entry.cwd,
+          model: entry.session.model || null,
+          permissionMode: entry.session.permissionMode || 'approve',
+          isBusy: false,
+          stdinForwardingDisabled: !!entry.session._stdinForwardingDisabled,
+          stdinDroppedBytes: t && Number.isFinite(t.bytes) ? t.bytes : 0,
+          stdinDroppedCount: t && Number.isFinite(t.count) ? t.count : 0,
+        })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => 'sess-1',
+    })
+    return manager
+  }
+
+  it('seeds non-zero stdinDroppedBytes / stdinDroppedCount in session_list after auth_ok', async () => {
+    // Simulate a session that already saw 2 drops (1024 bytes total) before
+    // this client connected. Without #3573 the session_list payload omitted
+    // these counters and the dashboard rendered 0 / 0 until the next drop.
+    const mockManager = createDroppedSessionManager({ bytes: 1024, count: 2 })
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    const sessionList = await waitForMessage(messages, 'session_list', 2000)
+    assert.ok(sessionList, 'Should receive session_list after auth_ok')
+    assert.ok(Array.isArray(sessionList.sessions))
+    assert.equal(sessionList.sessions.length, 1)
+    const entry = sessionList.sessions[0]
+    assert.equal(entry.sessionId, 'sess-1')
+    assert.equal(entry.stdinDroppedBytes, 1024,
+      'session_list entry must seed cumulative stdin_dropped bytes for late-joining clients')
+    assert.equal(entry.stdinDroppedCount, 2,
+      'session_list entry must seed cumulative stdin_dropped count for late-joining clients')
+
+    ws.close()
+  })
+
+  it('reports 0 / 0 in session_list when the session has never dropped stdin', async () => {
+    // Baseline: a freshly-created SDK-backed session that has not yet
+    // dropped any stdin must report numeric `0` (not `undefined`) so
+    // clients can rely on a stable shape regardless of session state.
+    const mockManager = createDroppedSessionManager({ bytes: 0, count: 0 })
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    const sessionList = await waitForMessage(messages, 'session_list', 2000)
+    const entry = sessionList.sessions[0]
+    assert.equal(entry.stdinDroppedBytes, 0)
+    assert.equal(entry.stdinDroppedCount, 0)
+    assert.equal(typeof entry.stdinDroppedBytes, 'number')
+    assert.equal(typeof entry.stdinDroppedCount, 'number')
+
+    ws.close()
+  })
+})
