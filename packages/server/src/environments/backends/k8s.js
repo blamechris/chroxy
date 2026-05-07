@@ -124,7 +124,7 @@ export class K8sBackend {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
-    this._imagePullPolicy = imagePullPolicy || null
+    this._imagePullPolicy = imagePullPolicy ?? null
     this._connectMode = connectMode || 'portforward'
 
     if (_coreV1Api) {

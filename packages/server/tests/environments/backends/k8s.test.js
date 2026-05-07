@@ -496,6 +496,36 @@ describe('K8sBackend imagePullPolicy validation (#3375)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend imagePullPolicy default assignment uses nullish coalescing (#3446)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend imagePullPolicy default assignment (#3446)', () => {
+  it('omitted imagePullPolicy resolves to null (not undefined)', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    // Field is internal but exercised here as a regression contract for the
+    // `imagePullPolicy ?? null` assignment in the constructor.  strictEqual
+    // is required because assert.equal(undefined, null) passes under loose
+    // equality and would not detect a constructor that forgets to default.
+    assert.strictEqual(backend._imagePullPolicy, null)
+  })
+
+  it('explicit null is preserved as null', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: null })
+    assert.strictEqual(backend._imagePullPolicy, null)
+  })
+
+  it('valid policy values are preserved verbatim', () => {
+    const api = createMockApi()
+    for (const policy of ['Always', 'IfNotPresent', 'Never']) {
+      const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: policy })
+      assert.strictEqual(backend._imagePullPolicy, policy)
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — workspace mount (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
