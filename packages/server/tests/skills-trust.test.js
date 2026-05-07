@@ -672,6 +672,50 @@ describe('skills-trust', () => {
       assert.equal(store._dirty, false)
       assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
     })
+
+    // #3511: the v1 classifier must require BOTH sha256 (correct shape) AND
+    // firstSeen — otherwise a file whose entries carry a valid-looking
+    // sha256 but no firstSeen would classify as v1, the per-entry parse loop
+    // would drop every record (firstSeen is required there too), migration
+    // would proceed with an empty ledger, and the next flush would wipe the
+    // file to an empty v2 shape. Requiring firstSeen in the classifier makes
+    // these files fall through to "unrecognised" and fail open without
+    // overwriting the existing on-disk content.
+    it('treats v1 file with valid sha256 but no firstSeen as unrecognised (fail open)', () => {
+      const shaA = sha256Hex('body-a')
+      const shaB = sha256Hex('body-b')
+      writeFileSync(trustPath, JSON.stringify({
+        // Valid-looking sha256 but no firstSeen on every entry.
+        '/abs/a.md': { sha256: shaA },
+        '/abs/b.md': { sha256: shaB },
+      }))
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Classifier rejects the file → not v1 → fail open with empty state,
+      // no migration, no dirty flag, so the next flush is a no-op and the
+      // existing on-disk content is left intact for operator recovery.
+      assert.equal(store._dirty, false, 'unrecognised file must not mark store dirty')
+      assert.equal(
+        store.inspect('/abs/a.md', 'body-a').status,
+        'recorded',
+        'sha256-only entries must be treated as first-seen, not verified',
+      )
+    })
+
+    // #3511 defence-in-depth: array-valued entries with a sha256 string
+    // would have passed the previous classifier's `typeof === 'object'` check.
+    // The tightened predicate explicitly rejects arrays.
+    it('treats v1 file with array-valued entries as unrecognised (fail open)', () => {
+      const sha = sha256Hex('body')
+      const arr = [sha, '2024-01-01T00:00:00.000Z']
+      arr.sha256 = sha
+      arr.firstSeen = '2024-01-01T00:00:00.000Z'
+      writeFileSync(trustPath, JSON.stringify({
+        '/abs/a.md': arr,
+      }))
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store._dirty, false, 'array-valued entry must not classify as v1')
+      assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
+    })
   })
 
   // #3297: isCommunityTrusted method.
