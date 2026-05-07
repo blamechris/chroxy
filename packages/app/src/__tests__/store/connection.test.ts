@@ -1138,6 +1138,121 @@ describe('resize store action', () => {
   });
 });
 
+// -- createSession() store action --
+
+describe('createSession store action', () => {
+  function makeMockSocket(): { socket: WebSocket; sent: string[] } {
+    const sent: string[] = [];
+    const socket = {
+      readyState: 1,
+      send: (data: string) => sent.push(data),
+    } as unknown as WebSocket;
+    return { socket, sent };
+  }
+
+  it('sends create_session with name only when other params omitted', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().createSession('NewSession');
+
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({ type: 'create_session', name: 'NewSession' });
+  });
+
+  it('sends cwd, worktree, provider when provided', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().createSession('S', '/work', true, 'sdk');
+
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'create_session',
+      name: 'S',
+      cwd: '/work',
+      worktree: true,
+      provider: 'sdk',
+    });
+  });
+
+  it('forwards model and permissionMode to the wire (#3599)', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().createSession(
+      'S',
+      '/work',
+      false,
+      'sdk',
+      'claude-sonnet-4-5',
+      'plan',
+    );
+
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'create_session',
+      name: 'S',
+      cwd: '/work',
+      provider: 'sdk',
+      model: 'claude-sonnet-4-5',
+      permissionMode: 'plan',
+    });
+  });
+
+  it('omits model and permissionMode when undefined (no behaviour change)', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().createSession(
+      'S',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+
+    const payload = JSON.parse(sent[0]);
+    expect(payload.model).toBeUndefined();
+    expect(payload.permissionMode).toBeUndefined();
+  });
+
+  it('omits empty-string model and permissionMode (so SessionInfo `null` falls through cleanly)', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    // The restart handler passes `session.model || undefined` — but this also
+    // verifies the action itself filters falsy values, defending against any
+    // future caller that forwards an empty string.
+    useConnectionStore.getState().createSession('S', '/cwd', false, 'sdk', '', '');
+
+    const payload = JSON.parse(sent[0]);
+    expect(payload.model).toBeUndefined();
+    expect(payload.permissionMode).toBeUndefined();
+  });
+
+  it('no-ops when socket is not connected', () => {
+    useConnectionStore.setState({ socket: null });
+    // Should not throw
+    useConnectionStore.getState().createSession('S', '/cwd', false, 'sdk', 'opus', 'plan');
+  });
+});
+
+// -- SessionScreen restart handler integration (#3599) --
+//
+// Static check that handleRestartStdinSession forwards the source session's
+// model + permissionMode to createSession so the restart preserves user-
+// customized values. Mirrors the dashboard's handleRestartSession (#3593).
+
+describe('SessionScreen handleRestartStdinSession (#3599)', () => {
+  it('forwards session.model and session.permissionMode to createSession', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src: string = fs.readFileSync(
+      path.resolve(__dirname, '../../screens/SessionScreen.tsx'),
+      'utf-8',
+    );
+    // The restart handler must pass model + permissionMode (5th and 6th args)
+    // so the recreated session preserves them. Match a flexible pattern that
+    // tolerates whitespace/comments but requires both fields.
+    expect(src).toMatch(/handleRestartStdinSession[\s\S]*?createSession\([\s\S]*?session\.model[\s\S]*?session\.permissionMode/);
+  });
+});
+
 // -- Permission boundary splitting --
 
 describe('permission boundary splitting', () => {
