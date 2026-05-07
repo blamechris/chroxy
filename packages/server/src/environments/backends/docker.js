@@ -496,8 +496,12 @@ export class DockerBackend {
 
   _listChroxyContainers() {
     return new Promise((resolve, reject) => {
+      // --no-trunc is required: without it, `docker ps -q` returns 12-char
+      // truncated IDs that never match the full 64-char IDs persisted by
+      // createEnvironment, causing reconcile() to destroy every known
+      // container as an "orphan" (#3314).
       this._execFile('docker', [
-        'ps', '-q', '--filter', 'name=chroxy-env',
+        'ps', '-q', '--no-trunc', '--filter', 'name=chroxy-env',
       ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
         if (err) {
           reject(new Error(err.message))

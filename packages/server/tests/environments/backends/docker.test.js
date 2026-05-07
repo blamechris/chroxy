@@ -461,6 +461,25 @@ describe('DockerBackend.listEnvironments()', () => {
     assert.ok(psCall.args.includes('-q'))
   })
 
+  // Regression guard for #3314: docker ps -q returns 12-char truncated IDs.
+  // createEnvironment persists the full 64-char ID returned by docker run, so
+  // reconcile()'s exact-string comparison would mark every known container as
+  // an orphan and destroy it. --no-trunc keeps both sides of the comparison
+  // using the same full-length ID format.
+  it('passes --no-trunc to docker ps so full container IDs are returned (#3314)', async () => {
+    const mockExec = createMockExecFile({
+      results: { ps: '' },
+    })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.listEnvironments()
+
+    const psCall = mockExec.calls.find(c => c.args[0] === 'ps')
+    assert.ok(psCall, 'should have called docker ps')
+    assert.ok(psCall.args.includes('--no-trunc'),
+      'docker ps must include --no-trunc — without it -q returns 12-char IDs that never match the 64-char IDs stored by createEnvironment, so reconcile() destroys every known container')
+  })
+
   it('returns empty array for empty docker ps output', async () => {
     const mockExec = createMockExecFile({
       results: { ps: '\n' },

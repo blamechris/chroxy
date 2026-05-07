@@ -60,7 +60,14 @@ function CheckpointNode({
             {formatRelativeTime(checkpoint.createdAt)}
           </span>
         </div>
-        {checkpoint.description && (
+        {/* #3461: trim guard suppresses whitespace-only descriptions
+            that would otherwise render a blank <div class="cp-desc">
+            with layout (margins, line-height) but no visible text.
+            The trim is only used as a boolean predicate —
+            `checkpoint.description` is rendered untrimmed so we don't
+            mutate the authored value. Mirrors the SkillsPanel guards
+            from #3441 / #3458. */}
+        {checkpoint.description?.trim() && (
           <div className="cp-desc">{checkpoint.description}</div>
         )}
         <div className="cp-meta">
