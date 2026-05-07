@@ -402,7 +402,7 @@ export class SessionManager extends EventEmitter {
         // fallback to the provider's own default (model:null, which both
         // SdkSession and CliSession treat as "use the upstream default")
         // and log a warning so operators can spot the drift in logs (#3403).
-        if (isClaudeProvider(resolvedProviderType)) {
+        if (isClaudeProvider(resolvedProviderType, PreflightProviderClass)) {
           log.warn(`Requested model '${resolvedModel}' is not in the current registry for provider '${resolvedProviderType}'; falling back to provider default. Supported: ${providerAllowedModels.slice(0, 8).join(', ')}${providerAllowedModels.length > 8 ? ', …' : ''}`)
           resolvedModel = null
         } else {

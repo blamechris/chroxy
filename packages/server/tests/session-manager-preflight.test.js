@@ -113,12 +113,25 @@ class ModelLimitedProvider extends BaseFakeSession {
   }
 }
 
+// Fake Claude-family provider for #3403 fallback tests. Mirrors the dynamic
+// allowlist shape of the real claude-sdk/claude-cli (a list that does NOT
+// include 'opus-4-6') and opts into Claude-family treatment via the
+// `claudeFamily` static flag — without spawning the real `claude` binary that
+// would crash CI runners with ENOENT.
+class FakeClaudeProvider extends BaseFakeSession {
+  static claudeFamily = true
+  static getAllowedModels() {
+    return ['sonnet', 'claude-sonnet-4-6', 'opus', 'claude-opus-4-7', 'haiku', 'claude-haiku-4-5']
+  }
+}
+
 // Register once — these are stable test-only provider names that won't clash
 // with built-ins.
 registerProvider('test-missing-binary-2962', MissingBinaryProvider)
 registerProvider('test-missing-credential-2962', MissingCredentialProvider)
 registerProvider('test-happy-2962', HappyProvider)
 registerProvider('test-model-limited-2962', ModelLimitedProvider)
+registerProvider('test-fake-claude-3403', FakeClaudeProvider)
 
 describe('SessionManager.createSession — preflight', () => {
   let mgr
@@ -201,52 +214,45 @@ describe('SessionManager.createSession — preflight', () => {
     assert.equal(mgr.listSessions().length, 0)
   })
 
-  it('falls back to provider default when stale Claude SDK model is supplied (#3403)', () => {
-    const noBinaryPreflightMgr = new SessionManager({
-      maxSessions: 5,
-      stateFilePath: tmpStateFile(),
-      defaultCwd: tmpdir(),
-      skipPreflight: true,
-    })
-    // A retired model id ('opus-4-6' after opus-4-7 ships) gets soft-cleared
-    // to null so the underlying SdkSession picks the SDK's own default,
-    // rather than crashing the create flow with a hard rejection that
-    // surfaces as the unhelpful "There's an issue with the selected model"
-    // message in the dashboard.
-    const id = noBinaryPreflightMgr.createSession({ provider: 'claude-sdk', model: 'opus-4-6', skipPersist: true })
+  it('falls back to provider default when a stale Claude-family model is supplied (#3403)', () => {
+    // Uses the fake Claude-family provider (claudeFamily=true) so this runs
+    // on CI without the real `claude` binary. A retired model id
+    // ('opus-4-6' after opus-4-7 ships) gets soft-cleared to null so the
+    // underlying session picks the upstream default, rather than crashing
+    // the create flow with a hard rejection that surfaces as the unhelpful
+    // "There's an issue with the selected model" message in the dashboard.
+    const id = mgr.createSession({ provider: 'test-fake-claude-3403', model: 'opus-4-6', skipPersist: true })
     assert.ok(id, 'session id should be returned')
-    const entry = noBinaryPreflightMgr.getSession(id)
+    const entry = mgr.getSession(id)
     assert.equal(entry.session.model, null, 'stale model must be cleared to null (use provider default)')
-    noBinaryPreflightMgr.destroySession(id)
-  })
-
-  it('falls back to provider default when stale Claude CLI model is supplied (#3403)', () => {
-    const noBinaryPreflightMgr = new SessionManager({
-      maxSessions: 5,
-      stateFilePath: tmpStateFile(),
-      defaultCwd: tmpdir(),
-      skipPreflight: true,
-    })
-    const id = noBinaryPreflightMgr.createSession({ provider: 'claude-cli', model: 'opus-4-6', skipPersist: true })
-    assert.ok(id, 'session id should be returned')
-    const entry = noBinaryPreflightMgr.getSession(id)
-    assert.equal(entry.session.model, null, 'stale model must be cleared to null (use provider default)')
-    noBinaryPreflightMgr.destroySession(id)
+    mgr.destroySession(id)
   })
 
   it('keeps a valid Claude model on the session when it is in the registry (#3403)', () => {
-    const noBinaryPreflightMgr = new SessionManager({
-      maxSessions: 5,
-      stateFilePath: tmpStateFile(),
-      defaultCwd: tmpdir(),
-      skipPreflight: true,
-    })
-    // 'opus' is a short alias seeded by FALLBACK_MODELS — must pass through.
-    const id = noBinaryPreflightMgr.createSession({ provider: 'claude-sdk', model: 'opus', skipPersist: true })
+    // 'opus' is a short alias the fake provider's allowlist accepts — must
+    // pass through unchanged.
+    const id = mgr.createSession({ provider: 'test-fake-claude-3403', model: 'opus', skipPersist: true })
     assert.ok(id, 'session id should be returned')
-    const entry = noBinaryPreflightMgr.getSession(id)
-    assert.ok(entry.session.model && typeof entry.session.model === 'string', `expected a resolved model string, got ${entry.session.model}`)
-    noBinaryPreflightMgr.destroySession(id)
+    const entry = mgr.getSession(id)
+    assert.equal(entry.session.model, 'opus', 'valid model must NOT be cleared to null')
+    mgr.destroySession(id)
+  })
+
+  it('keeps strict rejection on a non-Claude provider with a stale model (#3403)', () => {
+    // Belt-and-braces: the asymmetric Claude/non-Claude branch must keep
+    // throwing for non-Claude providers. ModelLimitedProvider has no
+    // `claudeFamily` flag, so its static allowlist is authoritative and
+    // a mismatch surfaces as ProviderModelNotSupportedError instead of
+    // silently falling back.
+    assert.throws(
+      () => mgr.createSession({ provider: 'test-model-limited-2962', model: 'opus-4-6', skipPersist: true }),
+      (err) => {
+        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        return true
+      },
+    )
+    assert.equal(mgr.listSessions().length, 0)
   })
 
   it('proceeds when initial model is valid for the provider', () => {
@@ -268,9 +274,8 @@ describe('SessionManager.createSession — preflight', () => {
       stateFilePath: tmpStateFile(),
       defaultCwd: tmpdir(),
       defaultModel: 'opus-4-6', // a stale config default
-      skipPreflight: true,
     })
-    const id = restoredMgr.createSession({ provider: 'claude-sdk', model: null, skipPersist: true })
+    const id = restoredMgr.createSession({ provider: 'test-fake-claude-3403', model: null, skipPersist: true })
     assert.ok(id, 'session id should be returned')
     const entry = restoredMgr.getSession(id)
     assert.equal(entry.session.model, null, 'explicit null must NOT fall back to _defaultModel')

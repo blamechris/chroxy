@@ -619,11 +619,22 @@ const CLAUDE_PROVIDER_NAMES = new Set([
  * a stale dashboard `defaultModel` (e.g. `opus-4-6` after `opus-4-7` ships)
  * so a hard error breaks otherwise-valid session creation.
  *
+ * Also honours an opt-in static flag on the provider class
+ * (`static claudeFamily = true`) so external/test providers can mark
+ * themselves as Claude-style without extending the hard-coded name set.
+ *
  * @param {string|undefined|null} providerName
+ * @param {Function} [ProviderClass] - optional provider class for the name
  * @returns {boolean}
  */
-export function isClaudeProvider(providerName) {
-  return typeof providerName === 'string' && CLAUDE_PROVIDER_NAMES.has(providerName)
+export function isClaudeProvider(providerName, ProviderClass = null) {
+  if (typeof providerName === 'string' && CLAUDE_PROVIDER_NAMES.has(providerName)) {
+    return true
+  }
+  if (ProviderClass && ProviderClass.claudeFamily === true) {
+    return true
+  }
+  return false
 }
 
 // Populated by providers.js at module load so models.js can resolve a
