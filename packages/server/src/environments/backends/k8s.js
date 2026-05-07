@@ -15,6 +15,16 @@ const DESTROY_TIMEOUT_MS = 30_000
 const DEFAULT_RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 4_000, 8_000]
 const DEFAULT_MAX_RETRIES = 5
 
+/**
+ * Cap on bytes held in `_stdinBuffer` before the WS dial resolves (#3401).
+ * If the dial hangs (slow cluster, DNS failure) and the caller is piping
+ * large stdin payloads, an unbounded buffer would grow until the server
+ * OOMs.  Writes that would push the buffer past the cap are dropped with
+ * a warning.  1 MiB is generous for a few large prompts but bounds the
+ * worst-case memory hold at one process-worth.
+ */
+const DEFAULT_MAX_STDIN_BUFFER_BYTES = 1 * 1024 * 1024  // 1 MiB
+
 /** Default sidecar image — overridden via constructor option */
 const DEFAULT_SIDECAR_IMAGE = 'chroxy-pod-agent:latest'
 
@@ -103,12 +113,13 @@ export class K8sBackend {
    * @param {Function} [opts._dialWs]                   - Injected WS dial factory for testing: (url, token) => WebSocket
    * @param {number[]} [opts._reconnectDelays]          - Override backoff delays in ms for testing
    * @param {number}   [opts._maxRetries]               - Override max reconnect retries for testing
+   * @param {number}   [opts._maxStdinBufferBytes]      - Override SidecarProcess pre-dial stdin buffer cap (#3401)
    * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
   constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, imagePullPolicy,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
-    _reconnectDelays, _maxRetries,
+    _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace || 'default'
@@ -173,6 +184,10 @@ export class K8sBackend {
     this._maxRetries = Number.isFinite(_maxRetries) && _maxRetries >= 0
       ? _maxRetries
       : DEFAULT_MAX_RETRIES
+    // Pre-dial stdin buffer cap (#3401) — injectable for tests.
+    this._maxStdinBufferBytes = Number.isFinite(_maxStdinBufferBytes) && _maxStdinBufferBytes > 0
+      ? _maxStdinBufferBytes
+      : DEFAULT_MAX_STDIN_BUFFER_BYTES
     // Timer seam: allow tests to substitute a fake clock and avoid real-time polling.
     this._setTimeout = setTimeoutImpl || setTimeout
     this._clearTimeout = clearTimeoutImpl || clearTimeout
@@ -717,10 +732,13 @@ export class K8sBackend {
     const {
       _reconnectDelays: reconnectDelays,
       _maxRetries: maxRetries,
+      _maxStdinBufferBytes: maxStdinBufferBytes,
       _setTimeout: setTimeoutImpl,
       _clearTimeout: clearTimeoutImpl,
     } = this
-    const proc = new SidecarProcess({ reconnectDelays, maxRetries, setTimeoutImpl, clearTimeoutImpl })
+    const proc = new SidecarProcess({
+      reconnectDelays, maxRetries, maxStdinBufferBytes, setTimeoutImpl, clearTimeoutImpl,
+    })
 
     // Resolve the token (synchronous fast path or async Secret fetch), then dial.
     Promise.resolve(tokenOrPromise).then((agentToken) => {
@@ -1074,18 +1092,26 @@ export class K8sBackend {
  * (an array of Buffer chunks) and flushed as `stdin` frames when `_wireStdin`
  * is called by `_wireWsToProc` after the connection opens.  If the process is
  * killed or exits before the dial resolves, the buffer is discarded silently.
+ *
+ * The pre-dial buffer is capped at `maxStdinBufferBytes` (default 1 MiB,
+ * #3401).  Writes that would push the buffer past the cap are dropped with
+ * a `log.warn`; this prevents unbounded memory growth when the WS dial
+ * hangs and a fast producer keeps writing.  `kill()` clears the buffer
+ * immediately so the bytes are not held until GC.
  */
 class SidecarProcess extends EventEmitter {
   /**
    * @param {Object} [opts]
-   * @param {number[]} [opts.reconnectDelays]  - Backoff delay schedule in ms
-   * @param {number}   [opts.maxRetries]       - Max reconnect attempts before giving up
-   * @param {Function} [opts.setTimeoutImpl]   - setTimeout override for deterministic testing
-   * @param {Function} [opts.clearTimeoutImpl] - clearTimeout override for deterministic testing
+   * @param {number[]} [opts.reconnectDelays]      - Backoff delay schedule in ms
+   * @param {number}   [opts.maxRetries]           - Max reconnect attempts before giving up
+   * @param {number}   [opts.maxStdinBufferBytes]  - Pre-dial stdin buffer cap in bytes (#3401)
+   * @param {Function} [opts.setTimeoutImpl]       - setTimeout override for deterministic testing
+   * @param {Function} [opts.clearTimeoutImpl]     - clearTimeout override for deterministic testing
    */
   constructor({
     reconnectDelays = DEFAULT_RECONNECT_DELAYS,
     maxRetries = DEFAULT_MAX_RETRIES,
+    maxStdinBufferBytes = DEFAULT_MAX_STDIN_BUFFER_BYTES,
     setTimeoutImpl,
     clearTimeoutImpl,
   } = {}) {
@@ -1114,6 +1140,9 @@ class SidecarProcess extends EventEmitter {
     // Once _wireStdin() is called the buffer is flushed and subsequent writes
     // go directly to the live WS.
     this._stdinBuffer = []       // Array<Buffer> — pre-dial write buffer
+    this._stdinBufferBytes = 0   // running total of bytes held in _stdinBuffer
+    this._stdinBufferDropped = false  // true once a write has been dropped due to cap
+    this._maxStdinBufferBytes = maxStdinBufferBytes
     this._stdinWired = false     // true once _wireStdin() has been called
     this._stdinEnded = false     // true once stdin 'end' has fired
 
@@ -1124,7 +1153,27 @@ class SidecarProcess extends EventEmitter {
         // reach here, but guard defensively.
         return
       }
-      this._stdinBuffer.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      // Cap the pre-dial buffer (#3401). Without a cap a slow WS dial plus a
+      // fast producer would grow this array without bound and OOM the server.
+      // Drop the over-cap chunk entirely (rather than truncating) so we don't
+      // split frames mid-line — the consumer's NDJSON stream would become
+      // invalid otherwise.
+      if (this._stdinBufferBytes + buf.length > this._maxStdinBufferBytes) {
+        if (!this._stdinBufferDropped) {
+          // Log only the first drop to avoid log spam from a fast producer;
+          // smaller writes that still fit may continue to be buffered.
+          log.warn(
+            `SidecarProcess: pre-dial stdin buffer exceeded cap (` +
+            `${this._maxStdinBufferBytes} bytes) — dropping ${buf.length}-byte chunk; ` +
+            `further drops will be silent`
+          )
+          this._stdinBufferDropped = true
+        }
+        return
+      }
+      this._stdinBuffer.push(buf)
+      this._stdinBufferBytes += buf.length
     })
 
     this.stdin.on('end', () => {
@@ -1157,6 +1206,11 @@ class SidecarProcess extends EventEmitter {
       try { this._cleanup() } catch (_) { /* ignore */ }
       this._cleanup = null
     }
+    // Release the pre-dial stdin buffer immediately (#3401). If kill() fires
+    // before the dial resolves, _wireStdin() will never run and the buffered
+    // bytes would otherwise be held until the proc is GC'd.
+    this._stdinBuffer = []
+    this._stdinBufferBytes = 0
     // If the WS was never wired (kill called before dial resolved), there
     // will be no `close` event to drive the exit. The post-dial wiring path
     // checks `proc.killed` and synthesizes exit(-1) in that case.
@@ -1483,6 +1537,7 @@ function _wireStdin(ws, proc) {
     }
   }
   proc._stdinBuffer = []  // release memory
+  proc._stdinBufferBytes = 0
 
   // stdin may have already ended while we were buffering.
   if (proc._stdinEnded) {

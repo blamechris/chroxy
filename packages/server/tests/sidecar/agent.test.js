@@ -1394,6 +1394,137 @@ describe('PodAgent', () => {
         await agent.close()
       }
     })
+
+    it('closes WS only after ws.send callback fires for line_too_long error (#3399)', async () => {
+      // Regression: previously the agent scheduled ws.close() on a fixed 50ms
+      // timer after _emitSessionFrame, which could race with ws.send() flushing
+      // the frame on a busy event loop and drop the frame on the floor.  After
+      // the fix, close() must run inside the ws.send completion callback so
+      // the order is: send → send-callback-fires → close.  Verified directly
+      // by patching the session's activeWs with an instrumented fake whose
+      // send() defers its callback by one macrotask.
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const realMsgs = []
+        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+        // Wait for session_started so we know the session exists.
+        await new Promise((r) => setTimeout(r, 20))
+        const started = realMsgs.find((m) => m.type === 'session_started')
+        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
+        const sessionId = started.sessionId
+
+        // Replace the session's activeWs with an instrumented fake that defers
+        // its send callback by one macrotask and records every operation.
+        // This widens the race window — without the fix, close() would run
+        // before sendCb fires and the assertion below would fail.
+        const callLog = []
+        const fakeWs = {
+          readyState: 1,
+          send(data, cb) {
+            const frame = JSON.parse(data)
+            callLog.push({ op: 'send', type: frame.type, code: frame.code })
+            if (cb) {
+              setTimeout(() => { callLog.push({ op: 'send_cb_fired' }); cb() }, 5)
+            }
+          },
+          close(code, reason) { callLog.push({ op: 'close', code, reason }) },
+          terminate() {},
+        }
+        const session = agent._sessions.get(sessionId)
+        assert.ok(session, 'expected session in _sessions')
+        session.activeWs = fakeWs
+
+        // Trigger the line cap.  The fake now drives the close-after-send
+        // path entirely, so we can deterministically assert ordering.
+        mock.child.stdout.write(Buffer.from('Z'.repeat(17)))
+
+        // Wait long enough for the deferred send cb (5ms) plus close to run.
+        await new Promise((r) => setTimeout(r, 30))
+
+        const sendIdx = callLog.findIndex((e) => e.op === 'send' && e.code === 'line_too_long')
+        const cbIdx = callLog.findIndex((e) => e.op === 'send_cb_fired')
+        const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1008)
+
+        assert.ok(sendIdx !== -1, `expected send(line_too_long); log=${JSON.stringify(callLog)}`)
+        assert.ok(cbIdx !== -1, `expected send callback to fire; log=${JSON.stringify(callLog)}`)
+        assert.ok(closeIdx !== -1, `expected close(1008); log=${JSON.stringify(callLog)}`)
+        assert.ok(
+          sendIdx < cbIdx,
+          `send must precede send_cb_fired (idx ${sendIdx} vs ${cbIdx}); log=${JSON.stringify(callLog)}`,
+        )
+        assert.ok(
+          cbIdx < closeIdx,
+          `close(1008) must run after send callback fires (cbIdx ${cbIdx} vs closeIdx ${closeIdx}); log=${JSON.stringify(callLog)}`,
+        )
+
+        try { ws.close() } catch {}
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('still closes WS even when ws.send throws synchronously (#3399)', async () => {
+      // If ws.send throws (e.g. socket already half-closed), the callback
+      // would never fire under naive `ws.send(json, cb)` usage.  The agent's
+      // _send wrapper invokes the callback in the catch path so the close-
+      // after-send sequence still progresses and the session is cleaned up.
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const realMsgs = []
+        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const started = realMsgs.find((m) => m.type === 'session_started')
+        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
+        const sessionId = started.sessionId
+
+        const callLog = []
+        const fakeWs = {
+          readyState: 1,
+          send() { callLog.push({ op: 'send_threw' }); throw new Error('socket already closed') },
+          close(code) { callLog.push({ op: 'close', code }) },
+          terminate() {},
+        }
+        const session = agent._sessions.get(sessionId)
+        session.activeWs = fakeWs
+
+        mock.child.stdout.write(Buffer.from('Q'.repeat(17)))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Even though send threw, the close-after-flush callback must still
+        // run so the session is evicted and the WS is closed.
+        assert.ok(
+          callLog.some((e) => e.op === 'close' && e.code === 1008),
+          `close(1008) must run even when send throws; log=${JSON.stringify(callLog)}`,
+        )
+        assert.ok(
+          !agent._sessions.has(sessionId),
+          'session should be deleted after line_too_long cleanup',
+        )
+
+        try { ws.close() } catch {}
+      } finally {
+        await agent.close()
+      }
+    })
   })
 
   // stdin forwarding (#3329)
@@ -1526,6 +1657,168 @@ describe('PodAgent', () => {
       const msgs = await msgsPromise
       assert.equal(msgs[0].type, 'error')
       assert.match(msgs[0].message, /data must be a string/)
+
+      ws.close()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // stdin backpressure (#3396)
+  //
+  // child.stdin.write() returns false when the writable's internal buffer hits
+  // highWaterMark.  The agent must pause WS message delivery and resume on
+  // 'drain' so a fast client cannot grow the stdin buffer without bound.
+  // ---------------------------------------------------------------------------
+
+  describe('stdin backpressure', () => {
+    let agent, port, child, fakeStdin
+
+    beforeEach(async () => {
+      child = new EventEmitter()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+
+      // Fake stdin that lets the test control write() return value and emit
+      // 'drain' deterministically.  Behaves like a Writable for the agent's
+      // purposes (write returns bool, once('drain', cb) attaches a listener).
+      fakeStdin = new EventEmitter()
+      fakeStdin.writes = []
+      fakeStdin.nextWriteOk = true
+      fakeStdin.write = (data) => {
+        fakeStdin.writes.push(data)
+        return fakeStdin.nextWriteOk
+      }
+      fakeStdin.end = () => { fakeStdin.ended = true }
+      child.stdin = fakeStdin
+
+      child.killSignals = []
+      child.kill = (signal) => { child.killSignals.push(signal); return true }
+
+      const spawnFn = (_cmd, _args, _opts) => child
+      ;({ agent, port } = await startAgent({ spawnFn }))
+    })
+
+    afterEach(() => agent.close())
+
+    it('pauses ws and resumes on drain when stdin.write returns false', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Locate the server-side ws so we can assert pause/resume on it. The
+      // test client's WebSocket is the *connecting* end; the agent receives
+      // the upgraded socket via its own WebSocketServer.  We patch the
+      // agent's _activeWs.pause/resume to record calls.
+      const serverWs = agent._activeWs
+      assert.ok(serverWs, 'expected agent to have an active WS')
+      const calls = []
+      const origPause = serverWs.pause.bind(serverWs)
+      const origResume = serverWs.resume.bind(serverWs)
+      serverWs.pause = () => { calls.push('pause'); return origPause() }
+      serverWs.resume = () => { calls.push('resume'); return origResume() }
+
+      // First write returns false → agent should pause and arm a drain listener.
+      fakeStdin.nextWriteOk = false
+      ws.send(JSON.stringify({ type: 'stdin', data: 'first chunk\n' }))
+      await new Promise((r) => setTimeout(r, 30))
+
+      assert.equal(fakeStdin.writes.length, 1, 'first write should reach stdin')
+      assert.deepEqual(calls, ['pause'], 'ws should be paused after write returned false')
+      const session = agent._sessions.get(serverWs._sessionId)
+      assert.ok(session._stdinDraining, 'session should be flagged as draining')
+
+      // Drain emits → agent resumes the WS and clears the flag.
+      fakeStdin.emit('drain')
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.deepEqual(calls, ['pause', 'resume'], 'ws should resume on drain')
+      assert.equal(session._stdinDraining, false, 'draining flag should clear on drain')
+
+      ws.close()
+    })
+
+    it('does not register a second drain listener while already draining', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const serverWs = agent._activeWs
+      let pauseCount = 0
+      const origPause = serverWs.pause.bind(serverWs)
+      serverWs.pause = () => { pauseCount += 1; return origPause() }
+
+      // Both writes return false. The first arms the drain listener and
+      // pauses the WS; the second must not pause again or stack drain
+      // listeners (would leak handlers and trigger spurious resume() calls).
+      fakeStdin.nextWriteOk = false
+      ws.send(JSON.stringify({ type: 'stdin', data: 'a\n' }))
+      ws.send(JSON.stringify({ type: 'stdin', data: 'b\n' }))
+      await new Promise((r) => setTimeout(r, 30))
+
+      assert.equal(fakeStdin.writes.length, 2, 'both writes should reach stdin')
+      assert.equal(pauseCount, 1, 'ws.pause should be called only once while draining')
+      assert.equal(fakeStdin.listenerCount('drain'), 1, 'only one drain listener should be armed')
+
+      ws.close()
+    })
+
+    it('write returning true keeps ws flowing without pause', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const serverWs = agent._activeWs
+      let pauseCalls = 0
+      const origPause = serverWs.pause.bind(serverWs)
+      serverWs.pause = () => { pauseCalls += 1; return origPause() }
+
+      fakeStdin.nextWriteOk = true
+      ws.send(JSON.stringify({ type: 'stdin', data: 'happy\n' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      assert.equal(fakeStdin.writes.length, 1)
+      assert.equal(pauseCalls, 0, 'ws.pause should not be called when write returns true')
+      const session = agent._sessions.get(serverWs._sessionId)
+      assert.equal(session._stdinDraining, false)
+
+      ws.close()
+    })
+
+    it('disconnect during draining does not call resume on stale ws', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const serverWs = agent._activeWs
+      let resumeCalls = 0
+      serverWs.resume = () => { resumeCalls += 1 }
+
+      // Trigger the backpressure path.
+      fakeStdin.nextWriteOk = false
+      ws.send(JSON.stringify({ type: 'stdin', data: 'x\n' }))
+      await new Promise((r) => setTimeout(r, 20))
+
+      const session = agent._sessions.get(serverWs._sessionId)
+      assert.ok(session._stdinDraining)
+
+      // Detach the WS as the cleanup path would on disconnect.
+      session.activeWs = null
+
+      // Drain fires after the WS is gone — the listener must clear the flag
+      // but skip resume() on the now-null activeWs.
+      fakeStdin.emit('drain')
+      await new Promise((r) => setTimeout(r, 10))
+
+      assert.equal(resumeCalls, 0, 'resume must not run when activeWs is null')
+      assert.equal(session._stdinDraining, false, 'draining flag should clear even without ws')
 
       ws.close()
     })
@@ -2043,12 +2336,17 @@ describe('PodAgent', () => {
         const callLog = []
         const fakeWsA = {
           readyState: 1,  // WebSocket.OPEN
-          send(data) { callLog.push({ op: 'send', frame: JSON.parse(data) }) },
+          // Mirror the real ws.send(data, cb) shape so the callback-driven
+          // close-after-flush logic in _send / _evictSession progresses (#3399).
+          send(data, cb) {
+            callLog.push({ op: 'send', frame: JSON.parse(data) })
+            if (cb) cb()
+          },
           close(code, reason) { callLog.push({ op: 'close', code, reason }) },
         }
         const fakeWsB = {
           readyState: 1,
-          send() {},
+          send(_data, cb) { if (cb) cb() },
           close() {},
         }
 
