@@ -1111,6 +1111,16 @@ export class K8sBackend {
  * a `log.warn`; this prevents unbounded memory growth when the WS dial
  * hangs and a fast producer keeps writing.  `kill()` clears the buffer
  * immediately so the bytes are not held until GC.
+ *
+ * ### stdin disabled signal (#3402)
+ *
+ * On WS reconnect (`resume` frame) stdin forwarding is intentionally NOT
+ * re-wired — see resume semantics above. To prevent silent data loss when a
+ * consumer keeps writing after reconnect, the proc emits a one-shot
+ * `'stdin_disabled'` event the moment forwarding becomes unrecoverable
+ * (reconnect dial succeeds, or WS closes mid-write before reconnect).  After
+ * that point further writes are dropped and the consumer can use
+ * `isStdinForwardingEnabled()` to poll the current state.
  */
 class SidecarProcess extends EventEmitter {
   /**
@@ -1159,11 +1169,24 @@ class SidecarProcess extends EventEmitter {
     this._stdinWired = false     // true once _wireStdin() has been called
     this._stdinEnded = false     // true once stdin 'end' has fired
 
+    // stdin disabled signal (#3402): set true once forwarding is permanently
+    // off (reconnect happened, or live WS dropped mid-write).  The first
+    // transition emits a one-shot 'stdin_disabled' event so consumers can
+    // surface the failure to the user instead of silently losing turns.
+    this._stdinForwardingDisabled = false
+    this._stdinDisabledSignaled = false
+
     // Accumulate stdin data until the WS is ready.
     this.stdin.on('data', (chunk) => {
       if (this._stdinWired) {
         // _wireStdin() already flushed and replaced this handler — should not
         // reach here, but guard defensively.
+        return
+      }
+      if (this._stdinForwardingDisabled) {
+        // Reconnect happened before _wireStdin ran on this WS — surface the
+        // disabled state to the consumer rather than buffering forever.
+        this._signalStdinDisabled()
         return
       }
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
@@ -1197,6 +1220,51 @@ class SidecarProcess extends EventEmitter {
       }
       // If not yet wired, _wireStdin() will send stdin_end after flushing.
     })
+  }
+
+  /**
+   * Whether writes to `proc.stdin` are currently being forwarded to the
+   * sidecar (#3402).  Returns `false` once a reconnect has occurred or the
+   * live WS dropped mid-write — at that point further writes are dropped
+   * silently, and the consumer should fall back to a different mechanism
+   * (or surface an error to the user).
+   *
+   * @returns {boolean}
+   */
+  isStdinForwardingEnabled() {
+    return !this._stdinForwardingDisabled
+  }
+
+  /**
+   * Mark stdin forwarding as disabled and emit `'stdin_disabled'` exactly
+   * once (#3402).  Idempotent — repeated calls are no-ops after the first
+   * emission.  Called by the reconnect path in `_wireWsToProc` and by the
+   * live-forwarding listener in `_wireStdin` when WS closes mid-write.
+   *
+   * On the first transition we also drop any pre-wire buffered chunks in
+   * `_stdinBuffer`: once forwarding is permanently off the buffer can never
+   * be flushed (no live WS will ever take it), so retaining it would leak
+   * memory.  Anything that was already buffered is unrecoverable from the
+   * sidecar's perspective; the consumer was just told via `'stdin_disabled'`
+   * and should fall back to a different mechanism.  The number of dropped
+   * chunks is logged so operators have a paper trail for lost input.
+   *
+   * @private
+   */
+  _signalStdinDisabled() {
+    this._stdinForwardingDisabled = true
+    if (this._stdinDisabledSignaled) return
+    this._stdinDisabledSignaled = true
+    if (this._stdinBuffer.length > 0) {
+      log.warn(
+        `SidecarProcess: dropping ${this._stdinBuffer.length} pre-wire stdin ` +
+        `chunk(s) (${this._stdinBufferBytes} bytes) — forwarding disabled ` +
+        'before flush could complete',
+      )
+      this._stdinBuffer = []
+      this._stdinBufferBytes = 0
+    }
+    this.emit('stdin_disabled')
   }
 
   kill(signal = 'SIGTERM') {
@@ -1362,9 +1430,13 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     // Wire proc.stdin → WS after the first frame is sent so the agent has
     // already opened a piped stdin channel before we forward any data.
     // On reconnect we do NOT re-wire — stdin forwarding is not resumed
-    // (see class-level JSDoc on resume semantics).
+    // (see class-level JSDoc on resume semantics).  Surface the disabled
+    // state to the consumer so they can stop writing or surface an error
+    // (#3402).
     if (!isReconnect) {
       _wireStdin(ws, proc)
+    } else {
+      proc._signalStdinDisabled()
     }
   }
 
@@ -1525,9 +1597,21 @@ function _wireStdin(ws, proc) {
   proc.stdin.removeAllListeners('data')
   proc.stdin.on('data', (chunk) => {
     if (ws.readyState !== WebSocket.OPEN) {
-      // WS closed mid-stream. Emit an error on proc so the consumer knows
-      // stdin writes are being dropped, then swallow silently afterwards.
-      proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      // WS closed mid-stream. Surface the disabled state via the dedicated
+      // #3402 'stdin_disabled' signal first — that event is one-shot and
+      // explicit, and unlike 'error' it never throws when no listener is
+      // attached.
+      proc._signalStdinDisabled()
+      // Only emit 'error' if a consumer is actually listening — Node throws
+      // an unhandled 'error' otherwise, which would crash the process and
+      // defeat the point of the 'stdin_disabled' signal.  Consumers that
+      // care about errors should subscribe; consumers that only need the
+      // disabled signal listen on 'stdin_disabled' instead.
+      if (proc.listenerCount('error') > 0) {
+        proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      } else {
+        log.warn('SidecarProcess: WS closed while writing stdin — dropping further writes (no error listener)')
+      }
       // Stop forwarding — remove this listener so further writes are silent.
       proc.stdin.removeAllListeners('data')
       return
