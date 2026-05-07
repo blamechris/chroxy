@@ -458,7 +458,10 @@ export class PodAgent {
 
   // ---------------------------------------------------------------------------
   // Size-cap enforcer — evict the oldest idle session (by lastActiveAt) when
-  // _sessions.size >= _maxSessions. Called before inserting a new session.
+  // _sessions.size >= _maxSessions. Called after spawn succeeds, before
+  // registering the new session in `_sessions`. Running this post-spawn
+  // ensures a failed spawn (ENOENT, EACCES, etc.) never evicts an existing
+  // session unnecessarily (#3392, #3430).
   // ---------------------------------------------------------------------------
 
   _enforceSessionCap() {
