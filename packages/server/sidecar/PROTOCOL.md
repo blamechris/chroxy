@@ -179,6 +179,17 @@ If the child was spawned with `stdin: 'ignore'` or `stdin: 'inherit'`,
 `child.stdin` is `null`; `stdin` frames are **silently dropped** in that case
 (no error is returned) so callers do not need to track the stdin mode.
 
+**Backpressure (#3396).**  Writes to `child.stdin` are cooperative: when the
+child's stdin buffer reaches its `highWaterMark`, `child.stdin.write()` returns
+`false`.  In that case the agent calls `ws.pause()` on the connection,
+deferring further frame delivery to the kernel socket buffer (TCP-level
+backpressure) until the child consumes its buffered input.  On the next
+`drain` event from `child.stdin` the agent calls `ws.resume()` and frame
+delivery continues.  This is transparent to the client — no frame is lost,
+delayed beyond the kernel socket buffer, or surfaced as an error — but a
+client sending faster than the child can read may observe slower TCP
+acknowledgements during the back-pressured window.
+
 #### `stdin_end`
 
 Close the write end of the child's stdin pipe (equivalent to EOF).  After this
