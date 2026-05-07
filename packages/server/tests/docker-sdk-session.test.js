@@ -1814,6 +1814,78 @@ describe('DockerSdkSession stdin_disabled handler (#3468)', () => {
     })
     assert.equal(session._stdinForwardingDisabled, false)
   })
+
+  // #3501 — Session-sticky semantics: once any spawn under this session emits
+  // 'stdin_disabled', the warn is logged once and the diagnostic flag latches
+  // on. Subsequent fresh spawns (new turn, new SidecarProcess) that emit their
+  // own 'stdin_disabled' MUST NOT log again.  Lock down the contract decided in
+  // the issue so we don't drift back to noisy per-spawn warns by accident.
+  it('logs stdin_disabled exactly once across multiple distinct spawns (session-sticky)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+    // Each call to streamCliInEnvironment returns a fresh EventEmitter to
+    // simulate a brand-new SidecarProcess for every turn / reconnect attempt.
+    const procs = []
+    const fakeBackend = {
+      streamCliInEnvironment: () => {
+        const p = new EventEmitter()
+        p.stdout = new EventEmitter()
+        p.stderr = new EventEmitter()
+        p.stdin = new EventEmitter()
+        procs.push(p)
+        return p
+      },
+    }
+
+    const session = new DockerSdkSession({
+      containerId: 'sticky-ctr',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    session._backend = fakeBackend
+
+    const warns = []
+    const listener = (entry) => {
+      if (entry.level === 'warn'
+        && (entry.component === 'docker-sdk' || entry.component === 'sdk')
+        && /stdin forwarding is disabled/i.test(entry.message)) {
+        warns.push(entry)
+      }
+    }
+    addLogListener(listener)
+
+    try {
+      const cb = session._createSpawnCallback()
+
+      // Spawn #1 — fires stdin_disabled, should log once and set the flag.
+      const proc1 = cb({ command: 'node', args: [], cwd: '/workspace', env: {} })
+      assert.equal(session._stdinForwardingDisabled, false)
+      proc1.emit('stdin_disabled')
+      assert.equal(session._stdinForwardingDisabled, true,
+        'session flag should latch true after first spawn signals')
+      assert.equal(warns.length, 1, 'first stdin_disabled emits exactly one warn')
+
+      // Spawn #2 — a brand-new SidecarProcess (different EventEmitter
+      // instance, different SIDECAR_LISTENERS_ATTACHED marker).  Per the
+      // #3501 session-sticky decision, its stdin_disabled MUST be silenced.
+      const proc2 = cb({ command: 'node', args: [], cwd: '/workspace', env: {} })
+      assert.notEqual(proc2, proc1, 'sanity: each spawn returns a fresh proc')
+      proc2.emit('stdin_disabled')
+
+      // Spawn #3 — same contract.  Use a third spawn to make sure the
+      // suppression is not just "skip the next one" but truly session-wide.
+      const proc3 = cb({ command: 'node', args: [], cwd: '/workspace', env: {} })
+      proc3.emit('stdin_disabled')
+
+      assert.equal(warns.length, 1,
+        'stdin_disabled warn must fire only once per session — subsequent ' +
+        'spawns are silenced by _stdinForwardingDisabled (session-sticky, #3501)')
+      assert.equal(session._stdinForwardingDisabled, true,
+        'flag remains latched across spawns')
+    } finally {
+      removeLogListener(listener)
+    }
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
