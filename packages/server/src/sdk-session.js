@@ -50,6 +50,19 @@ const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 // Symbol-keyed so it cannot collide with consumer code or test stubs.
 const SIDECAR_LISTENERS_ATTACHED = Symbol('sdk-session.sidecarListenersAttached')
 
+// Cumulative byte threshold for escalating stdin_dropped to error (#3506).
+// Defaults to 10 MiB — equivalent to ten full pre-dial-cap chunks.  Once the
+// running total of dropped bytes meets or exceeds this, a single error log
+// is emitted (one-shot per crossing) so operators triaging "why did my
+// prompt vanish?" get a loud signal even on a flood of small drops.
+export const STDIN_DROPPED_BYTES_ERROR_THRESHOLD = 10 * 1024 * 1024
+
+// Drop-count cadence for re-escalating stdin_dropped to error (#3506).
+// In addition to the byte threshold, every Nth drop event is logged at error
+// level so a stream of zero-byte / unknown-size drops still raises a loud
+// signal.  Set to 10 to balance signal-to-noise.
+export const STDIN_DROPPED_ESCALATION_EVERY_N = 10
+
 export class SdkSession extends BaseSession {
   /**
    * Human-readable label shown in the startup banner and anywhere else the
@@ -238,6 +251,17 @@ export class SdkSession extends BaseSession {
     this._permissionPauseCount = 0
     this._resultTimeoutPaused = false
     this._resetResultTimeout = null
+
+    // stdin_dropped accounting (#3506) — every chunk dropped at the
+    // SidecarProcess pre-dial cap accumulates here so operators can
+    // see the running cost of dropped input.  The default listener
+    // (see _attachSidecarProcessListeners) escalates to an error log
+    // on the first drop, every Nth drop, and when the cumulative byte
+    // total crosses STDIN_DROPPED_BYTES_ERROR_THRESHOLD.  Subsequent
+    // drops fall back to warn so a hot-loop drop flood doesn't spam.
+    this._stdinDroppedBytesTotal = 0
+    this._stdinDroppedCount = 0
+    this._stdinDroppedThresholdLogged = false
   }
 
   get sessionId() {
@@ -666,12 +690,45 @@ export class SdkSession extends BaseSession {
     proc[SIDECAR_LISTENERS_ATTACHED] = true
 
     proc.on('stdin_dropped', (info) => {
-      const bytes = info?.bytes ?? 'unknown'
+      // #3506: track a cumulative byte counter and escalate to error
+      // level on the first drop, every Nth drop, and when the running
+      // total crosses STDIN_DROPPED_BYTES_ERROR_THRESHOLD.  Other drops
+      // log at warn so the signal stays loud without flooding logs.
+      const rawBytes = info?.bytes
+      const knownBytes = typeof rawBytes === 'number' && Number.isFinite(rawBytes)
+      const bytesLabel = knownBytes ? `${rawBytes} bytes` : 'unknown bytes'
       const reason = info?.reason ?? 'unknown'
-      log.warn(
-        `Sidecar stdin chunk dropped (${bytes} bytes, reason=${reason}) — ` +
+
+      this._stdinDroppedCount += 1
+      if (knownBytes && rawBytes > 0) {
+        this._stdinDroppedBytesTotal += rawBytes
+      }
+
+      const cumulative = this._stdinDroppedBytesTotal
+      const dropCount = this._stdinDroppedCount
+
+      const isFirstDrop = dropCount === 1
+      const crossedByteThreshold =
+        !this._stdinDroppedThresholdLogged &&
+        cumulative >= STDIN_DROPPED_BYTES_ERROR_THRESHOLD
+      const hitCountCadence =
+        dropCount > 1 && dropCount % STDIN_DROPPED_ESCALATION_EVERY_N === 0
+
+      const escalate = isFirstDrop || crossedByteThreshold || hitCountCadence
+      if (crossedByteThreshold) {
+        this._stdinDroppedThresholdLogged = true
+      }
+
+      const message =
+        `Sidecar stdin chunk dropped (${bytesLabel}, reason=${reason}, ` +
+        `cumulative=${cumulative} bytes over ${dropCount} drops) — ` +
         'turn input was truncated; consumer may need to retry'
-      )
+
+      if (escalate) {
+        log.error(message)
+      } else {
+        log.warn(message)
+      }
     })
 
     proc.on('stdin_disabled', () => {
