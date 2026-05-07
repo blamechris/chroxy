@@ -334,6 +334,37 @@ If the agent has no record of the `sessionId` (e.g. the agent process
 restarted), it sends `{ type: 'session_lost', sessionId, reason: 'unknown_session' }`.
 The child process is gone in this case; the session is unrecoverable.
 
+### Idle Resume Window
+
+When the WS connection drops with an active session, the agent starts an
+**idle-resume timer** (default 60 s, configurable via
+`CHROXY_AGENT_RESUME_TIMEOUT_MS`).  If the client sends a valid `resume` frame
+before the timer fires, the timer is cancelled and normal live-forwarding
+resumes.  If the timer fires first, the agent:
+
+1. Sends `SIGTERM` to the child (with a 5 s `SIGKILL` escalation).
+2. Deletes the session from `_sessions`.
+
+A subsequent `resume` for the evicted session receives
+`session_lost(unknown_session)` — the same response as for a session that was
+never created.  The eviction reason is **not** exposed to the client; consumers
+should treat both cases identically (unrecoverable, open a fresh session with
+`spawn`).
+
+The resume window is a best-effort safety net against **short** network blips.
+It is not intended as durable session persistence.
+
+### Hard Session Cap
+
+The agent limits concurrent sessions to `CHROXY_AGENT_MAX_SESSIONS` (default
+8).  When a new `spawn` would exceed the cap, the agent evicts the idle session
+(no active WS) with the oldest `lastActiveAt` timestamp before inserting the
+new one.  If all sessions are active, the globally oldest session is evicted
+(and its live WS is closed with code `1001`).
+
+This cap is defense-in-depth against a buggy K8sBackend that reconnects
+repeatedly without resuming.
+
 ### PID 1 Reaping Limitation
 
 This resume mechanism survives **network blips** (transient WS disconnects)
