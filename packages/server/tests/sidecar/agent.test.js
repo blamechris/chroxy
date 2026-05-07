@@ -449,6 +449,69 @@ describe('PodAgent', () => {
 
       ws.close()
     })
+
+    // ── sentinel args truncation tests (#3393) ──────────────────────────────
+
+    it('sentinel shows all args when args.length <= 3', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForDataMessages(ws, 1)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'node', args: ['-e', 'process.exit(0)', '--flag'] }))
+
+      const msgs = await msgsPromise
+      const sentinelData = msgs[0].data
+      // All 3 args must appear — no truncation summary.
+      assert.ok(sentinelData.includes('"-e"'), `sentinel must include first arg, got: ${sentinelData}`)
+      assert.ok(sentinelData.includes('"process.exit(0)"'), `sentinel must include second arg, got: ${sentinelData}`)
+      assert.ok(sentinelData.includes('"--flag"'), `sentinel must include third arg, got: ${sentinelData}`)
+      assert.ok(!sentinelData.includes('more]'), `sentinel must NOT include truncation summary for 3 args, got: ${sentinelData}`)
+
+      ws.close()
+    })
+
+    it('sentinel truncates args beyond 3 — first 3 shown, remainder summarised (#3393)', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForDataMessages(ws, 1)
+      // 5 args: first 3 shown, last 2 replaced with "...[2 more]"
+      ws.send(JSON.stringify({
+        type: 'spawn',
+        cmd: 'node',
+        args: ['arg1', 'arg2', 'arg3', 'secret-flag', 'secret-value'],
+      }))
+
+      const msgs = await msgsPromise
+      const sentinelData = msgs[0].data
+      assert.ok(sentinelData.includes('"arg1"'), `first arg must be present, got: ${sentinelData}`)
+      assert.ok(sentinelData.includes('"arg2"'), `second arg must be present, got: ${sentinelData}`)
+      assert.ok(sentinelData.includes('"arg3"'), `third arg must be present, got: ${sentinelData}`)
+      assert.ok(!sentinelData.includes('"secret-flag"'), `fourth arg must be elided, got: ${sentinelData}`)
+      assert.ok(!sentinelData.includes('"secret-value"'), `fifth arg must be elided, got: ${sentinelData}`)
+      assert.ok(sentinelData.includes('...[2 more]'), `sentinel must include truncation summary, got: ${sentinelData}`)
+
+      ws.close()
+    })
+
+    it('sentinel truncation summary reflects the correct count of elided args (#3393)', async () => {
+      const ws = connect(port, TOKEN)
+      await waitOpen(ws)
+
+      const msgsPromise = waitForDataMessages(ws, 1)
+      // 7 args: 3 shown, 4 elided
+      ws.send(JSON.stringify({
+        type: 'spawn',
+        cmd: 'node',
+        args: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+      }))
+
+      const msgs = await msgsPromise
+      const sentinelData = msgs[0].data
+      assert.ok(sentinelData.includes('...[4 more]'), `sentinel must report 4 elided args, got: ${sentinelData}`)
+
+      ws.close()
+    })
   })
 
   describe('ping/pong', () => {
