@@ -78,6 +78,56 @@ function validateImagePullPolicy(value, context) {
 }
 
 /**
+ * RFC 1123 label regex: lowercase alphanumeric, '-' allowed in the middle,
+ * must start and end with an alphanumeric character.
+ *   1 char         → [a-z0-9]
+ *   ≥2 chars       → [a-z0-9] + 0..n of ([a-z0-9-]) + [a-z0-9]
+ * Length is checked separately so the error message can distinguish
+ * "too long" from "bad characters".
+ */
+const RFC_1123_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
+
+/** RFC 1123 label maximum length (per the spec; K8s namespace == DNS label). */
+const RFC_1123_MAX_LENGTH = 63
+
+/**
+ * Validates a Kubernetes namespace string against the RFC 1123 DNS label rules
+ * the API server enforces.  Layered on top of `_resolveNamespace()` so all five
+ * per-call resolution sites gain validation atomically (#3571).
+ *
+ * Rules enforced:
+ *   - Must be a non-empty string
+ *   - Length 1..63 characters
+ *   - Lowercase alphanumeric and hyphens only
+ *   - First and last character must be alphanumeric
+ *
+ * Throws Error with a `${context}:` prefix so the caller can identify which
+ * Backend method observed the invalid namespace (mirrors validateImagePullPolicy).
+ *
+ * @param {*}      ns       - Resolved namespace value
+ * @param {string} context  - Method name / call site label for the error message
+ * @returns {string} The validated namespace (returned for convenient one-line use)
+ * @throws {Error} If `ns` is not a non-empty RFC 1123 label
+ */
+function validateNamespace(ns, context) {
+  if (typeof ns !== 'string' || ns.length === 0) {
+    throw new Error(`${context}: namespace must be a non-empty string`)
+  }
+  if (ns.length > RFC_1123_MAX_LENGTH) {
+    throw new Error(
+      `${context}: namespace "${ns}" exceeds ${RFC_1123_MAX_LENGTH}-char RFC 1123 limit`
+    )
+  }
+  if (!RFC_1123_LABEL.test(ns)) {
+    throw new Error(
+      `${context}: namespace "${ns}" must match RFC 1123 label format ` +
+      '(lowercase alphanumeric and hyphens, start/end alphanumeric)'
+    )
+  }
+  return ns
+}
+
+/**
  * K8sBackend implements the Backend interface (see types.js) using the
  * Kubernetes API via @kubernetes/client-node.
  *
@@ -88,6 +138,19 @@ function validateImagePullPolicy(value, context) {
  * This class owns NO environment state.  Every method receives the identifier
  * (Pod name) from the caller's in-memory record.  The "handle" stored by
  * EnvironmentManager for a K8s environment is the Pod name string.
+ *
+ * Namespace contract (#3571):
+ *   - `_resolveNamespace(callNs)` returns `callNs ?? this._namespace` so an
+ *     explicit empty string from the caller is preserved verbatim (#3493).
+ *   - `_validateNamespace(ns, context)` enforces the RFC 1123 DNS label rules
+ *     the K8s API server applies: 1-63 chars, lowercase alphanumeric + hyphens,
+ *     start/end alphanumeric.  Throws with a `${context}:` prefix.
+ *   - The five per-call sites (createEnvironment, destroyEnvironment,
+ *     getEnvironmentStatus, streamCliInEnvironment, reconnectAgentToken) call
+ *     `_validateNamespace(_resolveNamespace(opts.namespace), '<method>')` so
+ *     bad namespaces (empty, uppercase, too long, bad characters, leading or
+ *     trailing dashes) are rejected client-side before any K8s API call is
+ *     issued.
  *
  * Connection modes for streamCliInEnvironment (constructor-gated):
  *   'portforward' (default) — uses @kubernetes/client-node PortForward to tunnel
@@ -208,6 +271,22 @@ export class K8sBackend {
     return callNamespace ?? this._namespace
   }
 
+  /**
+   * Validates a resolved namespace against RFC 1123 DNS label rules (#3571).
+   *
+   * Layered on top of `_resolveNamespace` so all five per-call resolution
+   * sites gain validation atomically.  Delegates to the module-level
+   * `validateNamespace()` helper.
+   *
+   * @param {*}      ns      - Resolved namespace value (output of _resolveNamespace)
+   * @param {string} context - Method name / call site label for the error message
+   * @returns {string} The validated namespace
+   * @throws {Error} If `ns` is not a valid RFC 1123 DNS label
+   */
+  _validateNamespace(ns, context) {
+    return validateNamespace(ns, context)
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // createEnvironment — create a sidecar Pod + per-Pod Secret
   // ─────────────────────────────────────────────────────────────────────────
@@ -286,7 +365,7 @@ export class K8sBackend {
       imagePullPolicy: callImagePullPolicy,
     } = opts
     validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
-    const ns = this._resolveNamespace(namespace)
+    const ns = this._validateNamespace(this._resolveNamespace(namespace), 'createEnvironment')
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
     // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
@@ -533,7 +612,7 @@ export class K8sBackend {
    * @returns {Promise<void>}
    */
   async destroyEnvironment(podName, opts = {}) {
-    const ns = this._resolveNamespace(opts.namespace)
+    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'destroyEnvironment')
     const secretName = opts.secretName || _deriveSecretName(podName)
 
     // Always drop the cached token first so a partial failure can't leave
@@ -594,7 +673,7 @@ export class K8sBackend {
    * @throws {Error} If the Pod does not exist
    */
   async getEnvironmentStatus(podName, opts = {}) {
-    const ns = this._resolveNamespace(opts.namespace)
+    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'getEnvironmentStatus')
     const result = await this._api.readNamespacedPod({ name: podName, namespace: ns })
     const phase = result?.status?.phase
     return phase === 'Running'
@@ -730,7 +809,7 @@ export class K8sBackend {
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
     } = opts
-    const ns = this._resolveNamespace(namespace)
+    const ns = this._validateNamespace(this._resolveNamespace(namespace), 'streamCliInEnvironment')
 
     // Prefer explicit token (test seam), fall back to the in-memory cache, and
     // lazily fetch from the K8s Secret when neither is available (e.g. after a
@@ -844,7 +923,7 @@ export class K8sBackend {
    * @returns {Promise<boolean>}
    */
   async reconnectAgentToken(podName, opts = {}) {
-    const ns = this._resolveNamespace(opts.namespace)
+    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'reconnectAgentToken')
     const token = await this._readAgentToken(podName, ns)
     return token !== null
   }
