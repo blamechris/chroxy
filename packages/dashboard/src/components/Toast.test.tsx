@@ -461,5 +461,62 @@ describe('Toast', () => {
       await act(async () => { vi.advanceTimersByTime(1) })
       expect(onDismiss).toHaveBeenCalledWith('e0')
     })
+
+    // Copilot review (PR #3610): hover + focus must be tracked as
+    // independent pause reasons — mouseleave while still focused must
+    // NOT resume the timer.
+    it('hover→focus→mouseleave stays paused while focus is still active', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'hf1',
+        message: 'Hover then focus',
+        action: { label: 'Act', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-hf1')
+      const actionBtn = screen.getByTestId('toast-action-hf1')
+      // 1s elapsed, then hover (paused, 4s remaining).
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      fireEvent.mouseEnter(toast)
+      // Focus the action button while still hovered. Paused by both.
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      actionBtn.focus()
+      // Mouse leaves but focus remains — must stay paused.
+      fireEvent.mouseLeave(toast)
+      await act(async () => { vi.advanceTimersByTime(10000) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      // Blur clears the last pause reason; remaining 4s resumes.
+      actionBtn.blur()
+      await act(async () => { vi.advanceTimersByTime(3999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('hf1')
+    })
+
+    it('focus→hover→blur stays paused while still hovered', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'fh1',
+        message: 'Focus then hover',
+        action: { label: 'Act', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-fh1')
+      const actionBtn = screen.getByTestId('toast-action-fh1')
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      actionBtn.focus()
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      fireEvent.mouseEnter(toast)
+      // Blur but mouse is still over toast.
+      actionBtn.blur()
+      await act(async () => { vi.advanceTimersByTime(10000) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      // Mouseleave clears the last pause reason.
+      fireEvent.mouseLeave(toast)
+      await act(async () => { vi.advanceTimersByTime(3999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('fh1')
+    })
   })
 })

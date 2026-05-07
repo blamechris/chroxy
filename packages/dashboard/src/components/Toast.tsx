@@ -65,11 +65,21 @@ export interface ToastProps {
  * (or null while paused). `remaining` is the ms left when the timer was
  * last paused; on resume we restart with that remaining duration so a
  * brief hover doesn't grant a fresh 5s grace period.
+ *
+ * `pauseReasons` is a set of currently-active pause reasons (hover, focus).
+ * The timer is paused while the set is non-empty and only resumes when
+ * the set becomes empty — so e.g. hover→focus→mouseleave keeps the timer
+ * paused until the operator also blurs. Without this the toast would
+ * resume mid-interaction and dismiss while the user is still reading or
+ * about to click the action button.
  */
+type PauseReason = 'hover' | 'focus'
+
 interface TimerState {
   timer: ReturnType<typeof setTimeout> | null
   remaining: number
   startedAt: number
+  pauseReasons: Set<PauseReason>
 }
 
 export function Toast({ items, onDismiss }: ToastProps) {
@@ -80,10 +90,12 @@ export function Toast({ items, onDismiss }: ToastProps) {
       onDismiss(id)
       timersRef.current.delete(id)
     }, duration)
+    const existing = timersRef.current.get(id)
     timersRef.current.set(id, {
       timer,
       remaining: duration,
       startedAt: Date.now(),
+      pauseReasons: existing?.pauseReasons ?? new Set(),
     })
   }
 
@@ -97,22 +109,34 @@ export function Toast({ items, onDismiss }: ToastProps) {
 
   // #3604: pause auto-dismiss while hovered/focused. Compute remaining
   // from `startedAt` so subsequent resumes don't re-grant time elapsed
-  // before this pause.
-  const pauseTimer = (id: string) => {
+  // before this pause. The reason is added to `pauseReasons` so we can
+  // tell when *every* pause source has cleared before resuming.
+  const pauseTimer = (id: string, reason: PauseReason) => {
     const state = timersRef.current.get(id)
-    if (!state || !state.timer) return
+    if (!state) return
+    state.pauseReasons.add(reason)
+    if (!state.timer) return // already paused — just record the new reason
     clearTimeout(state.timer)
     const elapsed = Date.now() - state.startedAt
     const remaining = Math.max(0, state.remaining - elapsed)
-    timersRef.current.set(id, { timer: null, remaining, startedAt: 0 })
+    timersRef.current.set(id, {
+      timer: null,
+      remaining,
+      startedAt: 0,
+      pauseReasons: state.pauseReasons,
+    })
   }
 
-  // #3604: resume with whatever time remained when we paused. If the
-  // timer had already fired (remaining <= 0) we dismiss immediately to
-  // avoid a stuck toast.
-  const resumeTimer = (id: string) => {
+  // #3604: resume only when *all* pause reasons have cleared. If hover
+  // ends but focus is still active (or vice-versa) the timer stays
+  // paused. If the timer had already elapsed (remaining <= 0) we
+  // dismiss immediately to avoid a stuck toast.
+  const resumeTimer = (id: string, reason: PauseReason) => {
     const state = timersRef.current.get(id)
-    if (!state || state.timer) return
+    if (!state) return
+    state.pauseReasons.delete(reason)
+    if (state.timer) return // not paused
+    if (state.pauseReasons.size > 0) return // still paused by another source
     if (state.remaining <= 0) {
       onDismiss(id)
       timersRef.current.delete(id)
@@ -169,15 +193,16 @@ export function Toast({ items, onDismiss }: ToastProps) {
           role={item.level === 'info' ? 'status' : 'alert'}
           aria-live={item.level === 'info' ? 'polite' : 'assertive'}
           data-testid={`toast-${item.id}`}
-          // #3604: pause auto-dismiss on hover. Keyboard focus is
-          // handled by onFocus/onBlur on the inner buttons (a non-button
-          // toast wrapper is not focusable), with focus events bubbling
-          // up to this container so any focused descendant pauses the
-          // timer for the whole toast.
-          onMouseEnter={() => pauseTimer(item.id)}
-          onMouseLeave={() => resumeTimer(item.id)}
-          onFocus={() => pauseTimer(item.id)}
-          onBlur={() => resumeTimer(item.id)}
+          // #3604: pause auto-dismiss on hover and on keyboard focus
+          // (focus events bubble from descendant buttons to this
+          // container). Hover and focus are tracked as independent
+          // pause reasons — the timer only resumes when *both* have
+          // cleared, so hover→focus→mouseleave keeps the toast visible
+          // until the user also blurs.
+          onMouseEnter={() => pauseTimer(item.id, 'hover')}
+          onMouseLeave={() => resumeTimer(item.id, 'hover')}
+          onFocus={() => pauseTimer(item.id, 'focus')}
+          onBlur={() => resumeTimer(item.id, 'focus')}
         >
           <span className="toast-msg">{item.message}</span>
           {item.action ? (
