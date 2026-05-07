@@ -469,13 +469,13 @@ export class EnvironmentManager extends EventEmitter {
           // warn in server-cli.js#logEnvironmentManagerReconnectResult.
           env.status = 'stopped'
           allHealthy = false
-          log.warn(`Environment "${env.name}" container is stopped`)
+          log.warn(`Environment "${env.name}" (id: ${env.id}) container is stopped`)
         }
       } catch (err) {
         // Invariant: allHealthy=false co-located with unreachable status (#3492)
         env.status = 'error'
         allHealthy = false
-        log.warn(`Environment "${env.name}" container inspect failed: ${err.message}`)
+        log.warn(`Environment "${env.name}" (id: ${env.id}) container inspect failed: ${err.message}`)
       }
       // For backends that hold per-environment credentials in memory (e.g.
       // K8sBackend._agentTokens), re-populate them from the canonical source
