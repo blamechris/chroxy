@@ -199,7 +199,7 @@ export class K8sBackend {
    *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
    *   must be able to read the path provided in opts.cwd from its local filesystem.
    *
-   * **Security Warning — hostPath privilege escalation:**
+   * **Security warning — hostPath privilege escalation:**
    *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
    *   Pod direct access to the underlying node's filesystem. This is a
    *   privilege-escalation vector on multi-tenant clusters: a malicious or
