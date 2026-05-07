@@ -122,10 +122,10 @@ export class K8sBackend {
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
-    this._namespace = namespace || 'default'
-    this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
+    this._namespace = namespace ?? 'default'
+    this._sidecarImage = sidecarImage ?? DEFAULT_SIDECAR_IMAGE
     this._imagePullPolicy = imagePullPolicy ?? null
-    this._connectMode = connectMode || 'portforward'
+    this._connectMode = connectMode ?? 'portforward'
 
     if (_coreV1Api) {
       this._api = _coreV1Api
