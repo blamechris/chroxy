@@ -842,7 +842,7 @@ describe('DockerBackend.execInEnvironment()', () => {
       if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
     }
     assert.ok(envPairs.includes('GOOD=value'), 'non-null value must be forwarded')
-    assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'null value must be silently skipped')
+    assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'null value must be skipped')
   })
 
   it('filters out entries whose value is undefined', async () => {
@@ -860,7 +860,34 @@ describe('DockerBackend.execInEnvironment()', () => {
       if (execCall.args[i] === '--env') envPairs.push(execCall.args[i + 1])
     }
     assert.ok(envPairs.includes('GOOD=value'), 'non-undefined value must be forwarded')
-    assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'undefined value must be silently skipped')
+    assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'undefined value must be skipped')
+  })
+
+  it('emits log.warn when skipping a null/undefined env value (#3419)', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    // log.warn writes through console.warn (see logger.js)
+    const originalWarn = console.warn
+    const warnCalls = []
+    console.warn = (msg) => warnCalls.push(String(msg))
+
+    try {
+      await backend.execInEnvironment('ctr-abc', {
+        cmd: 'printenv',
+        env: { FOO: null, BAR: undefined, OK: 'value' },
+      })
+    } finally {
+      console.warn = originalWarn
+    }
+
+    const fooWarn = warnCalls.find(m => m.includes('"FOO"'))
+    const barWarn = warnCalls.find(m => m.includes('"BAR"'))
+    assert.ok(fooWarn, 'must warn for null env key by name')
+    assert.match(fooWarn, /execInEnvironment: skipping null\/undefined value for env key "FOO"/)
+    assert.ok(barWarn, 'must warn for undefined env key by name')
+    assert.match(barWarn, /execInEnvironment: skipping null\/undefined value for env key "BAR"/)
+    assert.ok(!warnCalls.some(m => m.includes('"OK"')), 'must not warn for non-null entries')
   })
 
   it('coerces numeric values to string via String()', async () => {

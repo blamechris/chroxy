@@ -141,9 +141,10 @@ export class DockerBackend {
    * @returns {Promise<{ stdout: string, stderr: string }>}
    *
    * opts.env — all key/value pairs are forwarded as `--env KEY=VAL` flags.
-   * Entries whose value is null or undefined are silently skipped (caller
-   * mistake — passing them would produce `KEY=null` / `KEY=undefined` which
-   * is hard to debug).  All other values are coerced to String explicitly.
+   * Entries whose value is null or undefined are skipped with a `log.warn`
+   * (caller mistake — passing them would produce `KEY=null` / `KEY=undefined`
+   * which is hard to debug; the warn surfaces it in server logs without
+   * breaking the call).  All other values are coerced to String explicitly.
    * No allowlist filter is applied here: unlike streamCliInEnvironment (which
    * runs the long-lived Claude Code CLI and must never leak the full host env),
    * execInEnvironment is a general-purpose helper invoked with an explicit env
@@ -164,7 +165,10 @@ export class DockerBackend {
 
       if (env) {
         for (const [key, val] of Object.entries(env)) {
-          if (val == null) continue
+          if (val == null) {
+            log.warn(`execInEnvironment: skipping null/undefined value for env key "${key}"`)
+            continue
+          }
           execArgs.push('--env', `${key}=${String(val)}`)
         }
       }
