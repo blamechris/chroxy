@@ -643,6 +643,34 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     const socket = new WebSocket(url);
 
+    // #3615: shared reconnect scheduler used by both onclose and onerror.
+    // Browsers fire `error` → `close` for the same transport drop, so without
+    // this guard we'd queue two setTimeouts for one underlying failure. The
+    // attempt-id checks downstream still cancel the redundant timer, but
+    // letting only the first scheduling site arm a timer is cleaner and is
+    // robust against future regressions in the attempt-id logic.
+    let reconnectScheduled = false;
+    const scheduleReconnect = (
+      reasonText: string,
+      errorMessage: string,
+      delayMs: number,
+    ): void => {
+      if (reconnectScheduled) return;
+      if (get().userDisconnected) return;
+      if (disconnectedAttemptId === myAttemptId) return;
+      reconnectScheduled = true;
+      console.log(`[ws] ${reasonText}, reconnecting...`);
+      set({
+        connectionPhase: 'reconnecting',
+        connectionError: errorMessage,
+        connectionRetryCount: 0,
+      });
+      setTimeout(() => {
+        if (myAttemptId !== connectionAttemptId) return;
+        get().connect(url, token);
+      }, delayMs);
+    };
+
     socket.onopen = () => {
       // Include device info in auth for multi-client awareness
       const info = getDeviceInfo();
@@ -725,12 +753,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
-        console.log('[ws] Connection lost, auto-reconnecting...');
-        set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
-        setTimeout(() => {
-          if (myAttemptId !== connectionAttemptId) return;
-          get().connect(url, token);
-        }, AUTO_RECONNECT_DELAY);
+        scheduleReconnect('Connection lost', 'Connection lost', AUTO_RECONNECT_DELAY);
       } else if (disconnectedAttemptId === myAttemptId || get().userDisconnected) {
         set({ connectionPhase: 'disconnected' });
       } else {
@@ -753,14 +776,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       set({ socket: null, sessionStates: cleanedSessionStates });
 
       // Auto-reconnect on unexpected WS error (skip if user explicitly disconnected)
-      if (!get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
-        console.log('[ws] WebSocket error, reconnecting...');
-        set({ connectionPhase: 'reconnecting', connectionError: 'Connection error', connectionRetryCount: 0 });
-        setTimeout(() => {
-          if (myAttemptId !== connectionAttemptId) return;
-          get().connect(url, token);
-        }, ERROR_RECONNECT_DELAY);
-      }
+      // scheduleReconnect() short-circuits if onclose already armed a timer for
+      // this transport drop (browsers fire `error` → `close` for the same
+      // failure, see #3615).
+      scheduleReconnect('WebSocket error', 'Connection error', ERROR_RECONNECT_DELAY);
     };
     } // end _connectWebSocket
   },

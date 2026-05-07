@@ -1327,6 +1327,167 @@ describe('SSR safety', () => {
 // ---------------------------------------------------------------------------
 // App.tsx toast filtering — session-scoped server_error (#1804)
 // ---------------------------------------------------------------------------
+describe('reconnect scheduling dedupe (#3615)', () => {
+  /**
+   * Browsers fire `error` → `close` for the same transport drop, so without
+   * dedupe both `socket.onerror` and `socket.onclose` would each schedule a
+   * `setTimeout(connect)`. The downstream attempt-id guard cancels the
+   * redundant timer, but that is fragile — this test pins the contract that
+   * a single transport drop arms exactly ONE reconnect timer.
+   */
+  type ReconnectMockSocket = {
+    onclose: (() => void) | null;
+    onerror: (() => void) | null;
+    close: () => void;
+  };
+
+  type SetTimeoutCallTuple = [() => void, number];
+
+  async function setupReconnectScenario(): Promise<{
+    socket: ReconnectMockSocket;
+    wsConstructions: { count: number };
+    reconnectTimers: SetTimeoutCallTuple[];
+    teardown: () => void;
+  }> {
+    const { useConnectionStore } = await import('./connection');
+
+    // Mock health check so connect() advances to _connectWebSocket().
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'ok' }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const captured: { socket: ReconnectMockSocket | null } = { socket: null };
+    const wsConstructions = { count: 0 };
+
+    class MockWebSocket {
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      readyState = 0;
+      constructor(_url: string) {
+        wsConstructions.count++;
+        captured.socket = this as unknown as ReconnectMockSocket;
+      }
+      send(_data: string): void { /* no-op */ }
+      close(): void { this.readyState = 3; }
+    }
+    (MockWebSocket as unknown as { OPEN: number }).OPEN = 1;
+    vi.stubGlobal('WebSocket', MockWebSocket);
+
+    // Filter setTimeout calls down to "reconnect" timers (>=1000ms). We avoid
+    // fake timers because the connect() flow uses Promise microtasks for the
+    // health check; mixing fake timers + microtasks turned out to be flaky.
+    const reconnectTimers: SetTimeoutCallTuple[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = vi.fn((fn: () => void, ms?: number) => {
+      if (typeof ms === 'number' && ms >= 1000) {
+        reconnectTimers.push([fn, ms]);
+        // Don't actually schedule reconnect timers — we only want to count them.
+        // Returning a sentinel id is fine because production code never reads it.
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(fn, ms);
+    });
+    vi.stubGlobal('setTimeout', setTimeoutSpy);
+
+    // Pre-populate one connected session so onclose treats this as an
+    // unexpected drop (wasConnected=true) and schedules a reconnect.
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState() },
+      },
+      socket: null,
+      userDisconnected: false,
+      connectionPhase: 'connected',
+    });
+
+    void useConnectionStore.getState().connect('wss://example.invalid', 'tok');
+
+    // Let the mocked fetch().then chain run so _connectWebSocket() executes.
+    await new Promise((r) => realSetTimeout(r, 0));
+    await new Promise((r) => realSetTimeout(r, 0));
+
+    if (!captured.socket) throw new Error('MockWebSocket was never constructed');
+    // Reset wsConstructions count to 0 so the test only counts reconnect-driven
+    // WebSocket constructions (not the initial connect).
+    wsConstructions.count = 0;
+    // Reset reconnectTimers — only count timers armed AFTER the initial connect.
+    reconnectTimers.length = 0;
+
+    // Move phase back to 'connected' so onclose treats this drop as an
+    // unexpected loss (wasConnected=true). connect() transitions to
+    // 'connecting' on its own; in production this would advance to
+    // 'connected' via the auth_ok handler we don't run here.
+    useConnectionStore.setState({ connectionPhase: 'connected' });
+
+    const teardown = () => {
+      vi.unstubAllGlobals();
+      useConnectionStore.setState({
+        sessions: [],
+        activeSessionId: null,
+        sessionStates: {},
+        userDisconnected: true,
+        socket: null,
+        connectionPhase: 'disconnected',
+      });
+    };
+
+    return { socket: captured.socket, wsConstructions, reconnectTimers, teardown };
+  }
+
+  it('arms exactly one reconnect timer for an error → close pair', async () => {
+    const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
+
+    try {
+      // Order matches browser semantics for a transport drop.
+      socket.onerror!();
+      socket.onclose!();
+
+      expect(reconnectTimers).toHaveLength(1);
+    } finally {
+      teardown();
+    }
+  });
+
+  it('arms exactly one reconnect timer for a close → error pair', async () => {
+    // Some failure modes (e.g. server-initiated close) fire close-then-error.
+    // Either way we want the dedupe to hold.
+    const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
+
+    try {
+      socket.onclose!();
+      socket.onerror!();
+
+      expect(reconnectTimers).toHaveLength(1);
+    } finally {
+      teardown();
+    }
+  });
+
+  it('does not schedule a reconnect after disconnect()', async () => {
+    // After user-initiated disconnect, both onclose and onerror should
+    // short-circuit before scheduling.
+    const { useConnectionStore } = await import('./connection');
+    const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
+
+    try {
+      useConnectionStore.getState().disconnect();
+      // disconnect() nulls out socket.onclose, but the onerror handler on the
+      // captured socket is still wired — fire it to verify the guard.
+      socket.onerror?.();
+
+      expect(reconnectTimers).toHaveLength(0);
+    } finally {
+      teardown();
+    }
+  });
+});
+
 describe('server_error toast scope filtering', () => {
   // Replicates the exact filter from App.tsx toastItems useMemo:
   //   serverErrors.filter(e => !e.sessionId || e.sessionId === activeSessionId)
