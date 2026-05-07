@@ -620,7 +620,10 @@ describe('SdkSession', () => {
       s.destroy()
 
       assert.equal(captured.length, 1, 'pre-disable sendMessage should reach the SDK')
-      assert.equal(s._stdinForwardingDisabled, undefined, 'flag must remain unset on a healthy turn')
+      // #3540 wired a constructor initializer `this._stdinForwardingDisabled = false`,
+      // so the pre-flip value is now `false` rather than `undefined`. The contract
+      // here is "flag has not flipped" — match against the falsy initial state.
+      assert.equal(s._stdinForwardingDisabled, false, 'flag must remain unset on a healthy turn')
     })
 
     it('refuses sendMessage after the flag is set and never invokes _callQuery', async () => {
