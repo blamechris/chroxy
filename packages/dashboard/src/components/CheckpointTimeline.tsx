@@ -47,26 +47,25 @@ function CheckpointNode({
   checkpoint, isLatest, onRestore, onDelete, confirmingDelete, setConfirmingDelete,
 }: CheckpointNodeProps) {
   const isConfirming = confirmingDelete === checkpoint.id
+  // #3484: trim guard on the name fallback. A whitespace-only
+  // `checkpoint.name` is truthy and would render as a visually-empty
+  // `<span class="cp-name">` (and a whitespace-only `title` tooltip).
+  // The trim is only used as a boolean predicate — `checkpoint.name`
+  // is rendered untrimmed when present so the authored value is not
+  // mutated. Mirrors the description guard from #3461 and the
+  // SkillsPanel guards from #3441 / #3458.
+  const hasName = !!checkpoint.name?.trim()
 
   return (
     <div className={`cp-node${isLatest ? ' cp-latest' : ''}`} data-testid="checkpoint-node">
       <div className="cp-dot" />
       <div className="cp-card">
         <div className="cp-header">
-          {/* #3484: trim guard on the name fallback. A whitespace-only
-              `checkpoint.name` is truthy and would render as a visually-empty
-              `<span class="cp-name">` (and a whitespace-only `title` tooltip).
-              The trim is only used as a boolean predicate — `checkpoint.name`
-              is rendered untrimmed when present so the authored value is not
-              mutated. Mirrors the description guard from #3461 and the
-              SkillsPanel guards from #3441 / #3458. */}
           <span
             className="cp-name"
-            title={checkpoint.name?.trim() ? checkpoint.name : checkpoint.id}
+            title={hasName ? checkpoint.name : checkpoint.id}
           >
-            {checkpoint.name?.trim()
-              ? checkpoint.name
-              : `Checkpoint ${checkpoint.id.slice(0, 8)}`}
+            {hasName ? checkpoint.name : `Checkpoint ${checkpoint.id.slice(0, 8)}`}
           </span>
           <span className="cp-time" title={formatTimestamp(checkpoint.createdAt)}>
             {formatRelativeTime(checkpoint.createdAt)}
