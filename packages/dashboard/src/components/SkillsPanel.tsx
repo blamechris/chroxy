@@ -77,6 +77,23 @@ function formatTimestamp(iso: string | undefined): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
+// #3477: trim-guarded description span shared by the auto-skill and
+// manual-skill rows. Centralises the trim predicate, className, and
+// `data-testid` so future edits to either row stay in lockstep.
+//
+// The trim is only used as a boolean predicate — `description` is
+// rendered untrimmed so we don't mutate the authored value. HTML text
+// nodes collapse runs of whitespace by default (no `white-space: pre*`
+// on `.skill-desc`), so any preserved leading/trailing whitespace
+// collapses visually. Mirrors the pending-row guard from #3441 and the
+// active-skill guard introduced in #3444.
+function SkillDescription({ name, description }: { name: string; description: string | undefined }) {
+  if (!description?.trim()) return null
+  return (
+    <span className="skill-desc" data-testid={`skill-desc-${name}`}>{description}</span>
+  )
+}
+
 // #3205: render the per-skill metadata row (source / version /
 // last-activated / hash). Each field is conditional — older servers
 // or trust-disabled sessions omit the relevant fields and the row
@@ -246,16 +263,10 @@ export function SkillsPanel({
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
                 <div className="skill-row">
                   <span className="skill-name">{s.name}</span>
-                  {/* #3444: trim guard suppresses whitespace-only descriptions
-                      that would otherwise render a blank <span> with skill-desc
-                      layout (margins, color). The trim is only used as a
-                      boolean predicate — `s.description` is rendered untrimmed
-                      so we don't mutate the authored value. Note: HTML text
-                      nodes collapse runs of whitespace by default (no
-                      `white-space: pre*` on `.skill-desc`), so any preserved
-                      leading/trailing whitespace will collapse visually.
-                      Mirrors the pending-row guard added in #3441. */}
-                  {s.description?.trim() && <span className="skill-desc" data-testid={`skill-desc-${s.name}`}>{s.description}</span>}
+                  {/* #3444/#3477: trim-guarded description rendered via
+                      <SkillDescription /> so the auto-skill and manual-skill
+                      rows stay in lockstep. See helper comment for rationale. */}
+                  <SkillDescription name={s.name} description={s.description} />
                   {/* #3251: auto skills have no <label>, so label-
                       association doesn't apply here — keep the flag
                       inside the existing flex row so it renders
@@ -306,9 +317,9 @@ export function SkillsPanel({
                       data-testid={`skill-toggle-${s.name}`}
                     />
                     <span className="skill-name">{s.name}</span>
-                    {/* #3444: trim guard — see auto-skill section above for
-                        rationale. Mirrors the pending-row guard from #3441. */}
-                    {s.description?.trim() && <span className="skill-desc" data-testid={`skill-desc-${s.name}`}>{s.description}</span>}
+                    {/* #3444/#3477: trim-guarded description rendered via
+                        <SkillDescription /> — see helper comment for rationale. */}
+                    <SkillDescription name={s.name} description={s.description} />
                   </label>
                   <MismatchFlag name={s.name} />
                   {/* #3270: AcceptTrustButton sits as a sibling to
