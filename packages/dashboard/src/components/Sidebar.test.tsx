@@ -311,4 +311,44 @@ describe('Sidebar', () => {
     renderSidebar({ serverStatus: 'connected' })
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('Running')
   })
+
+  describe('stdin forwarding disabled badge (#3567)', () => {
+    it('renders the badge on rows whose session has the latched flag', () => {
+      const repos: RepoNode[] = [
+        {
+          path: '/repo',
+          name: 'repo',
+          source: 'auto',
+          exists: true,
+          activeSessions: [
+            { sessionId: 'broken', name: 'BrokenSession', isBusy: false, stdinForwardingDisabled: true },
+            { sessionId: 'healthy', name: 'HealthySession', isBusy: false },
+          ],
+          resumableSessions: [],
+        },
+      ]
+      renderSidebar({ repos, activeSessionId: 'broken' })
+      expect(screen.getByTestId('sidebar-stdin-disabled-broken')).toBeInTheDocument()
+      expect(screen.queryByTestId('sidebar-stdin-disabled-healthy')).not.toBeInTheDocument()
+    })
+
+    it('omits the badge when the flag is undefined or false', () => {
+      const repos: RepoNode[] = [
+        {
+          path: '/repo',
+          name: 'repo',
+          source: 'auto',
+          exists: true,
+          activeSessions: [
+            { sessionId: 's1', name: 'Plain', isBusy: false },
+            { sessionId: 's2', name: 'NotBroken', isBusy: false, stdinForwardingDisabled: false },
+          ],
+          resumableSessions: [],
+        },
+      ]
+      renderSidebar({ repos, activeSessionId: 's1' })
+      expect(screen.queryByTestId('sidebar-stdin-disabled-s1')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('sidebar-stdin-disabled-s2')).not.toBeInTheDocument()
+    })
+  })
 })

@@ -24,6 +24,11 @@ export interface SessionTabData {
   model?: string
   provider?: string
   status?: SessionStatus
+  // #3567: latched stdin-forwarding-disabled flag from session_list
+  // metadata. Renders an inline badge on the tab so the disabled state
+  // is visible even when another session is active and the bigger
+  // banner isn't shown.
+  stdinForwardingDisabled?: boolean
 }
 
 export interface SessionBarProps {
@@ -175,6 +180,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 title={getProviderInfo(session.provider).tooltip}
               >
                 {shortenProvider(session.provider)}
+              </span>
+            )}
+
+            {session.stdinForwardingDisabled && (
+              <span
+                className="tab-stdin-disabled-badge"
+                data-testid="tab-stdin-disabled-badge"
+                title="Stdin forwarding lost — restart this session"
+                aria-label="Stdin forwarding disabled"
+              >
+                stdin lost
               </span>
             )}
 

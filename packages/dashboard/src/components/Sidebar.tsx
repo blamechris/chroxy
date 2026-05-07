@@ -17,6 +17,10 @@ export interface ActiveSessionNode {
   status?: SessionVisualStatus
   provider?: string
   worktree?: boolean
+  // #3567: latched stdin-forwarding-disabled flag from session_list
+  // metadata. Surfaces a small badge on the sidebar row so the user
+  // can spot disabled sessions without switching to them.
+  stdinForwardingDisabled?: boolean
 }
 
 export interface ResumableSessionNode {
@@ -358,6 +362,16 @@ export function Sidebar({
                             {session.provider && session.provider !== 'claude-sdk' && (
                               <span className="sidebar-provider-badge" title={session.provider}>
                                 {session.provider.replace(/^claude-/, '').toUpperCase()}
+                              </span>
+                            )}
+                            {session.stdinForwardingDisabled && (
+                              <span
+                                className="sidebar-stdin-disabled-badge"
+                                data-testid={`sidebar-stdin-disabled-${session.sessionId}`}
+                                title="Stdin forwarding lost — restart this session"
+                                aria-label="Stdin forwarding disabled"
+                              >
+                                !
                               </span>
                             )}
                           </div>

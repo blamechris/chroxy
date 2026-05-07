@@ -31,6 +31,7 @@ import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
+import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { NotificationBanners } from './components/NotificationBanners'
@@ -676,6 +677,8 @@ export function App() {
         model: s.model ?? undefined,
         provider: s.provider,
         status: getSessionVisualStatus(s),
+        // #3567: surface latched stdin-disabled flag from session_list.
+        stdinForwardingDisabled: s.stdinForwardingDisabled,
       }
     }),
     [sessions, activeSessionId, getSessionVisualStatus],
@@ -701,6 +704,8 @@ export function App() {
         provider: s.provider,
         worktree: s.worktree,
         status: getSessionVisualStatus(s),
+        // #3567: surface latched stdin-disabled flag from session_list.
+        stdinForwardingDisabled: s.stdinForwardingDisabled,
       })
     }
 
@@ -1218,6 +1223,17 @@ export function App() {
             onNewSession={handleNewSession}
           />
         )}
+
+        {/* Stdin forwarding lost banner (#3567) — render the latched
+            `stdinForwardingDisabled` flag from session_list metadata for the
+            currently-active session. The flag persists across server restarts
+            (#3540 / #3564), so this banner appears immediately after a
+            cold-restart reconnect without needing a fresh `error` event. */}
+        <StdinDisabledBanner
+          visible={!!sessions.find(s => s.sessionId === activeSessionId)?.stdinForwardingDisabled}
+          sessionId={activeSessionId}
+          onRestart={handleCloseSession}
+        />
 
         {/* Startup error screen — shown when server failed to start (Tauri) */}
         {isStartupError && (

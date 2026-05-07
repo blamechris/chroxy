@@ -600,6 +600,20 @@
   border: 1px solid var(--accent-green-border, rgba(34, 197, 94, 0.2));
 }
 
+/* #3567: stdin-forwarding-disabled badge on the sidebar session row. */
+.sidebar-stdin-disabled-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 13px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent-orange) 20%, transparent);
+  color: var(--accent-orange);
+  border: 1px solid color-mix(in srgb, var(--accent-orange) 40%, transparent);
+  cursor: help;
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -766,6 +780,22 @@
 .tab-provider[data-provider="other"] {
   color: var(--text-secondary);
   background: var(--bg-secondary);
+}
+
+/* #3567: stdin-forwarding-disabled badge on a session tab. */
+.tab-stdin-disabled-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent-orange) 18%, transparent);
+  color: var(--accent-orange);
+  border: 1px solid color-mix(in srgb, var(--accent-orange) 40%, transparent);
+  cursor: help;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
 
 .tab-close {
@@ -1720,6 +1750,42 @@
 }
 
 .btn-retry:hover { opacity: 0.85; }
+
+/* ---- Stdin Forwarding Disabled Banner (#3540 / #3567) ----
+   Shown for the active session when its sidecar process latched the
+   `stdin_disabled` flag. Restart is the only recovery — clicking the
+   button calls destroySession so the user can re-create the session
+   with the same cwd. */
+.stdin-disabled-banner {
+  background: #3b2010;
+  color: var(--accent-orange);
+  padding: 8px 12px;
+  font-size: var(--text-base);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-orange) 30%, transparent);
+}
+
+.stdin-disabled-banner-icon {
+  flex-shrink: 0;
+  font-weight: 700;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-orange);
+  color: var(--bg-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.stdin-disabled-banner-message {
+  flex: 1;
+}
 
 /* ---- Tunnel Warming Banner (#2836) ---- */
 /* Always rendered so toggling the warming message animates instead of

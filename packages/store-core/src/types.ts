@@ -100,13 +100,15 @@ export interface SessionInfo {
   // false). Loosely typed because future providers may add fields
   // the type definition doesn't yet enumerate.
   capabilities?: Record<string, boolean>;
-  // #3577: latched true after a SidecarProcess emitted `stdin_disabled`
-  // (#3402, #3501). PR #3564 (closing #3540) persists the flag across
-  // restarts and surfaces it on `session_list` so reconnecting clients
-  // can render the disabled banner without replaying the original
-  // transient `error` event. Optional so older servers (pre-#3564)
-  // that omit the field still parse cleanly; renderers should treat
-  // `undefined` as `false`.
+  // #3540 / #3567 / #3577: latched stdin-forwarding-disabled flag. PR
+  // #3564 persists the SidecarProcess `_stdinForwardingDisabled` latch
+  // on session metadata and surfaces it via `session_list` so reconnecting
+  // clients (and clients connecting after a server restart) can render
+  // the "stdin forwarding lost — restart this session" banner without
+  // waiting for a fresh `error{code:'stdin_disabled'}` event (which
+  // only fires once on the original sidecar process). Optional in the
+  // type so older servers and non-SDK providers that omit the field
+  // still parse cleanly; renderers should treat `undefined` as `false`.
   stdinForwardingDisabled?: boolean;
 }
 
