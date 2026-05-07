@@ -863,23 +863,23 @@ describe('DockerBackend.execInEnvironment()', () => {
     assert.ok(!envPairs.some(p => p.startsWith('BAD=')), 'undefined value must be skipped')
   })
 
-  it('emits log.warn when skipping a null/undefined env value (#3419)', async () => {
+  it('emits log.warn when skipping a null/undefined env value (#3419)', async (t) => {
     const mockExec = createMockExecFile({ results: { exec: '' } })
     const backend = new DockerBackend({ _execFile: mockExec })
 
-    // log.warn writes through console.warn (see logger.js)
-    const originalWarn = console.warn
+    // log.warn writes through console.warn (see logger.js).
+    // Use node:test's t.mock.method which auto-restores on teardown — avoids
+    // the cross-test contamination risk of overriding console.warn at global
+    // scope (especially under parallel test runners).
     const warnCalls = []
-    console.warn = (msg) => warnCalls.push(String(msg))
+    t.mock.method(console, 'warn', (msg) => {
+      warnCalls.push(String(msg))
+    })
 
-    try {
-      await backend.execInEnvironment('ctr-abc', {
-        cmd: 'printenv',
-        env: { FOO: null, BAR: undefined, OK: 'value' },
-      })
-    } finally {
-      console.warn = originalWarn
-    }
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      env: { FOO: null, BAR: undefined, OK: 'value' },
+    })
 
     const fooWarn = warnCalls.find(m => m.includes('"FOO"'))
     const barWarn = warnCalls.find(m => m.includes('"BAR"'))

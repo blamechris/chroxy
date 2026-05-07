@@ -166,7 +166,9 @@ export class DockerBackend {
       if (env) {
         for (const [key, val] of Object.entries(env)) {
           if (val == null) {
-            log.warn(`execInEnvironment: skipping null/undefined value for env key "${key}"`)
+            // Caller-provided key is JSON-encoded before interpolation to prevent
+            // log forging via embedded control characters (newlines, ANSI escapes).
+            log.warn(`execInEnvironment: skipping null/undefined value for env key ${JSON.stringify(key)}`)
             continue
           }
           execArgs.push('--env', `${key}=${String(val)}`)
