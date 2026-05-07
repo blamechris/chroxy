@@ -701,12 +701,13 @@ describe('SdkSession', () => {
     //
     // PR #3560 (closes #3539) drains _pendingInput at the *entry* of sendMessage
     // when the flag is set. This handles the case "next caller hits the gate".
-    // But the finally block at sdk-session.js:701-709 still has its own
-    // "shift + process.nextTick(sendMessage)" path. If a turn is mid-flight
-    // when the SidecarProcess emits stdin_disabled, the entry-gate has already
-    // been passed, so the finally path will still schedule a recursive
-    // sendMessage for the queued follow-up — wasting an event-loop hop and
-    // a redundant function call before the entry gate finally rejects it.
+    // But the post-turn dequeue path in sendMessage's finally block still has
+    // its own "shift + process.nextTick(sendMessage)" branch. If a turn is
+    // mid-flight when the SidecarProcess emits stdin_disabled, the entry-gate
+    // has already been passed, so the finally path will still schedule a
+    // recursive sendMessage for the queued follow-up — wasting an event-loop
+    // hop and a redundant function call before the entry gate finally rejects
+    // it.
     //
     // The fix: short-circuit at the dequeue site too. If the flag flips
     // mid-turn, drain the queue, log a single warn, and skip the recursion.
@@ -735,8 +736,9 @@ describe('SdkSession', () => {
 
       await s.sendMessage('initial turn')
 
-      // Wait one process.nextTick + a microtask so the dequeue path has had
-      // the opportunity to recurse, if it were going to.
+      // Wait one process.nextTick and one event-loop turn (setImmediate
+      // schedules into the check phase) so the dequeue path has had the
+      // opportunity to recurse, if it were going to.
       await new Promise((resolve) => process.nextTick(resolve))
       await new Promise((resolve) => setImmediate(resolve))
 
