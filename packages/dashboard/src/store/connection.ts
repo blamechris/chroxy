@@ -999,10 +999,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     const activeId = get().activeSessionId;
     if (activeId && get().sessionStates[activeId]) {
-      updateActiveSession((ss) => ({
-        messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
-        streamingMessageId: 'pending',
-      }));
+      updateActiveSession((ss) => {
+        const patch: Partial<SessionState> = {
+          messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
+          streamingMessageId: 'pending',
+        };
+        // #3188: a fresh user_input means the operator answered (or
+        // ignored) any pending auto-evaluator clarify question — clear
+        // the inline prompt block so it doesn't linger past the next
+        // round-trip. The server will re-fire `evaluator_clarify` if the
+        // new draft also lands on the clarify verdict.
+        if (ss.pendingEvaluatorClarify) {
+          patch.pendingEvaluatorClarify = null;
+        }
+        return patch;
+      });
     } else {
       set((state) => ({
         messages: [...filterThinking(state.messages), userMsg, thinkingMsg],

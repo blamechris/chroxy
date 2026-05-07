@@ -29,6 +29,7 @@ import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
+import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -265,6 +266,7 @@ export function App() {
     mismatchedSkillNames: activeMismatched,
     pendingCommunitySkills: activePendingCommunitySkills,
     pendingTrustGrants: activePendingTrustGrants,
+    pendingEvaluatorClarify,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -1033,6 +1035,14 @@ export function App() {
       )
     }
 
+    // #3188: auto-evaluator rewrite banner. The system message is pushed
+    // by the dashboard's `evaluator_rewrite` handler and persisted in
+    // session_messages, so reconnect/replay re-renders the banner from
+    // the cached metadata (no need to re-fire the transient wire event).
+    if (storeMsg.type === 'system' && storeMsg.evaluator?.kind === 'rewrite') {
+      return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
+    }
+
     // Default rendering
     return null
   }, [storeMsgMap, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
@@ -1453,6 +1463,21 @@ export function App() {
                 planHtml={planHtml}
                 onApprove={handlePlanApprove}
                 onFeedback={handlePlanFeedback}
+              />
+            )}
+
+            {/* #3188 auto-evaluator clarify prompt. Inline block above
+              the input bar; submitting fires sendInput (a fresh
+              user_input round-trip) — the addUserMessage path clears
+              pendingEvaluatorClarify so the block disappears, and the
+              server re-evaluates the new draft. */}
+            {pendingEvaluatorClarify && (
+              <EvaluatorClarifyPrompt
+                evaluatorIteration={pendingEvaluatorClarify.evaluatorIteration}
+                originalDraft={pendingEvaluatorClarify.originalDraft}
+                clarification={pendingEvaluatorClarify.clarification}
+                reasoning={pendingEvaluatorClarify.reasoning}
+                onSubmit={(answer) => sendInput(answer)}
               />
             )}
 

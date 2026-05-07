@@ -340,8 +340,8 @@ function _isSecureRequest(req) {
  *   { type: 'environment_error', error, environmentId? } — environment operation error
  *   { type: 'evaluate_draft_result', requestId, verdict?, rewritten?, clarification?, reasoning?, error? } — prompt evaluator response (#3068)
  *   { type: 'prompt_evaluator_changed', sessionId, value: boolean } — per-session promptEvaluator toggle changed (#3185)
- *   { type: 'evaluator_rewrite', sessionId, originalDraft, rewritten, reasoning, evaluatorIterationId } — auto-evaluator landed on rewrite verdict (#3208, transient broadcast)
- *   { type: 'evaluator_clarify', sessionId, originalDraft, clarification, reasoning, evaluatorIterationId, evaluatorIteration } — auto-evaluator landed on clarify verdict (#3208, transient broadcast; iteration is 1-based, clamped to maxIterations)
+ *   { type: 'evaluator_rewrite', sessionId, originalDraft, rewritten, reasoning, evaluatorIterationId } — auto-evaluator rewrite verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
+ *   { type: 'evaluator_clarify', sessionId, originalDraft, clarification, reasoning, evaluatorIterationId, evaluatorIteration } — auto-evaluator clarify verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'stdin_dropped_totals', sessionId, bytes, count, reason, escalated } — cumulative SidecarProcess pre-dial-cap drop totals (#3544, transient)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
