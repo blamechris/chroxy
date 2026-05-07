@@ -92,23 +92,39 @@ function waitForMessages(ws, count, timeoutMs = 2000) {
  * Wait for the next `session_started` frame and resolve with its sessionId.
  * Attach BEFORE sending `spawn` so the frame is never missed.  Other message
  * listeners (e.g. message-buffer arrays in cap-eviction tests) can coexist
- * because this helper detaches itself once the frame arrives.
+ * because this helper always detaches itself before settling — on success,
+ * timeout, socket error, or socket close.
  */
 function waitForSessionStarted(ws, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('timeout waiting for session_started frame')),
-      timeoutMs,
-    )
+    function cleanup() {
+      clearTimeout(timer)
+      ws.off('message', onMsg)
+      ws.off('error', onError)
+      ws.off('close', onClose)
+    }
     function onMsg(data) {
       let msg
       try { msg = JSON.parse(data.toString()) } catch { return }
       if (msg.type !== 'session_started') return
-      clearTimeout(timer)
-      ws.off('message', onMsg)
+      cleanup()
       resolve(msg.sessionId)
     }
+    function onError(err) {
+      cleanup()
+      reject(new Error(`socket error while waiting for session_started: ${err && err.message}`))
+    }
+    function onClose(code) {
+      cleanup()
+      reject(new Error(`socket closed (${code}) before session_started arrived`))
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error('timeout waiting for session_started frame'))
+    }, timeoutMs)
     ws.on('message', onMsg)
+    ws.on('error', onError)
+    ws.on('close', onClose)
   })
 }
 
