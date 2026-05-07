@@ -30,6 +30,12 @@ export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
     for (const prompt of prompts) {
       // Skip answered or expired prompts
       if (prompt.answered) continue
+      // #3619: `prompt.expiresAt` is captured wall-clock at receipt time
+      // (`Date.now() + remainingMs`); comparing against `Date.now()` keeps
+      // both sides on the same clock. Switching to `performance.now()`
+      // here would mix clocks with the receipt-time anchor and break the
+      // expiry check. The PermissionPrompt's *visible countdown* uses the
+      // monotonic clock independently — see PermissionPrompt.tsx (#3619).
       if (prompt.expiresAt <= Date.now()) continue
       // Skip already-notified
       if (notifiedRef.current.has(prompt.requestId)) continue
