@@ -758,10 +758,12 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
  *
  * Error codes:
  *   - `INVALID_SKILL_NAME` — missing/empty skillName
- *   - `INVALID_AUTHOR` — missing/empty author
+ *   - `INVALID_AUTHOR` — missing/empty author, OR (#3307) the skill resolves
+ *      on disk under a different `community/<author>/` namespace than the
+ *      caller claims (e.g. via a symlink that crosses author dirs)
  *   - `No active session` (session_error) — no bound session
  *   - `TRUST_NOT_ENABLED` — session has no trust store
- *   - `SKILL_NOT_FOUND` — can't find the skill on disk
+ *   - `SKILL_NOT_FOUND` — can't find the skill on disk under any author
  *   - `TRUST_FLUSH_FAILED` — granted in memory but the trust ledger could not be persisted
  */
 function handleSkillTrustGrant(ws, client, msg, ctx) {
@@ -800,6 +802,12 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
 
   let resolvedPath = null
   let dirReal = null
+  // #3307: track when the lookup resolves to a real file but lands under a
+  // different community author than the caller claims. Distinguishes
+  // "skill missing entirely" (SKILL_NOT_FOUND) from "skill exists under
+  // a different namespace" (INVALID_AUTHOR) so clients can guide the
+  // operator toward the correct author.
+  let namespaceMismatchDetected = false
 
   for (const root of skillsRoots) {
     let rootReal
@@ -823,13 +831,28 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
     // Security gate: verify the resolved path is under community/<author>/
     const { isCommunity, author: actualAuthor } = _isCommunityNamespace(candidateReal, rootReal)
     if (!isCommunity) continue
-    if (actualAuthor !== msg.author) continue
+    if (actualAuthor !== msg.author) {
+      // Skill exists on disk but the realpath belongs to a different community
+      // author (e.g. via a symlink). Flag it so we can surface INVALID_AUTHOR
+      // after the loop instead of the misleading SKILL_NOT_FOUND.
+      namespaceMismatchDetected = true
+      continue
+    }
     resolvedPath = candidateReal
     dirReal = rootReal
     break
   }
 
   if (!resolvedPath) {
+    if (namespaceMismatchDetected) {
+      sendError(
+        ws,
+        msg?.requestId,
+        'INVALID_AUTHOR',
+        `Community skill '${msg.skillName}' resolves to a different author than '${msg.author}'.`,
+      )
+      return
+    }
     sendError(ws, msg?.requestId, 'SKILL_NOT_FOUND', `No community skill '${msg.skillName}' found for author '${msg.author}'.`)
     return
   }

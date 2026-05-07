@@ -1728,3 +1728,90 @@ describe('DockerSdkSession external container (real class)', () => {
     assert.equal(session._containerId, null)
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────────
+// #3468 — DockerSdkSession reacts to SidecarProcess 'stdin_disabled' signal
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession stdin_disabled handler (#3468)', () => {
+  it('logs a structured warn and sets _stdinForwardingDisabled when proc emits stdin_disabled', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+    // Fake backend whose streamCliInEnvironment returns a controllable EventEmitter,
+    // mirroring the SidecarProcess shape from K8sBackend.
+    const fakeProc = new EventEmitter()
+    fakeProc.stdout = new EventEmitter()
+    fakeProc.stderr = new EventEmitter()
+    fakeProc.stdin = new EventEmitter()
+    const fakeBackend = {
+      streamCliInEnvironment: () => fakeProc,
+    }
+
+    const session = new DockerSdkSession({
+      containerId: 'stdin-disabled-ctr',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    session._backend = fakeBackend
+
+    const warns = []
+    const listener = (entry) => {
+      if (entry.level === 'warn' && entry.component === 'docker-sdk') warns.push(entry)
+    }
+    addLogListener(listener)
+
+    try {
+      const cb = session._createSpawnCallback()
+      const proc = cb({
+        command: 'node',
+        args: ['/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'],
+        cwd: '/workspace',
+        env: {},
+      })
+
+      assert.equal(proc, fakeProc, 'spawn callback should return the backend proc')
+      assert.equal(session._stdinForwardingDisabled, false,
+        'flag is unset until the signal fires')
+
+      proc.emit('stdin_disabled')
+
+      assert.equal(session._stdinForwardingDisabled, true,
+        'session should record that stdin forwarding is now off')
+      assert.equal(warns.length, 1, 'exactly one warn should fire on first signal')
+      assert.match(warns[0].message, /stdin_disabled|stdin forwarding/i,
+        'warn message should mention stdin disabled/forwarding')
+
+      // Idempotent: a second emission must NOT log again.
+      proc.emit('stdin_disabled')
+      assert.equal(warns.length, 1, 'second stdin_disabled emission is a no-op')
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('does not blow up when the returned proc has no .on (no-op for non-emitter procs)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+
+    // A bare object with no EventEmitter API — represents a backend that
+    // returns a non-emitter handle (e.g., legacy ChildProcess prior to wiring).
+    const bareProc = { stdout: null, stderr: null, stdin: null }
+    const fakeBackend = { streamCliInEnvironment: () => bareProc }
+
+    const session = new DockerSdkSession({
+      containerId: 'bare-ctr',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    session._backend = fakeBackend
+
+    const cb = session._createSpawnCallback()
+    assert.doesNotThrow(() => {
+      cb({
+        command: 'node',
+        args: ['/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'],
+        cwd: '/workspace',
+        env: {},
+      })
+    })
+    assert.equal(session._stdinForwardingDisabled, false)
+  })
+})
