@@ -144,6 +144,101 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.serverErrors).toHaveLength(1)
       expect(typeof state.serverErrors[0]).toBe('string')
     })
+
+    // #3570: INVALID_AUTHOR error from skill_trust_grant carries the
+    // structured `actualAuthor` field (#3568,
+    // ServerSkillTrustGrantInvalidAuthorSchema). The dashboard surfaces
+    // the real owner in the toast and points the operator at the
+    // matching pending-row Trust button as the recovery path, instead
+    // of regex-parsing the (intentionally unstable) human-readable
+    // server message.
+    describe('skill_trust_grant INVALID_AUTHOR (#3570)', () => {
+      it('rewrites the toast to name the actualAuthor and points to the matching pending row', () => {
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'trust-grant-1',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch — skill resolves to a different owner',
+            actualAuthor: 'alice',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        expect(state.serverErrors).toHaveLength(1)
+        const surfaced = state.serverErrors[0] as string
+        expect(surfaced).toContain("'alice'")
+        expect(surfaced.toLowerCase()).toContain('owned by')
+        expect(surfaced).toContain("Trust alice")
+        // Server's stable-wording-disclaimed text must NOT be the
+        // surfaced toast — we built our own using the structured field.
+        expect(surfaced).not.toBe('Author mismatch — skill resolves to a different owner')
+      })
+
+      it('falls back to the raw message when actualAuthor is missing (empty-author validation variant)', () => {
+        // #3568 schema comment: the empty-`author` validation branch
+        // emits INVALID_AUTHOR WITHOUT `actualAuthor`. The dashboard
+        // must not crash and must show the server-supplied text.
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'trust-grant-2',
+            code: 'INVALID_AUTHOR',
+            message: 'author must be a non-empty string',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        expect(state.serverErrors).toEqual(['author must be a non-empty string'])
+      })
+
+      it('ignores actualAuthor on unrelated error codes', () => {
+        // Defensive: if some future handler accidentally sets
+        // `actualAuthor` on a non-INVALID_AUTHOR error, we must NOT
+        // rewrite — the structured field is INVALID_AUTHOR-only.
+        handleMessage(
+          {
+            type: 'error',
+            code: 'TRUST_FLUSH_FAILED',
+            message: 'flush failed',
+            actualAuthor: 'alice',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        expect(state.serverErrors).toEqual(['flush failed'])
+      })
+
+      it('falls back to the raw message when actualAuthor is empty string', () => {
+        // Empty string is treated as missing — we don't want to render
+        // "owned by ''" if the server somehow sends a blank field.
+        handleMessage(
+          {
+            type: 'error',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch',
+            actualAuthor: '',
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        expect(state.serverErrors).toEqual(['Author mismatch'])
+      })
+
+      it('falls back to the raw message when actualAuthor is non-string', () => {
+        handleMessage(
+          {
+            type: 'error',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch',
+            actualAuthor: 42,
+          },
+          ctx() as any,
+        )
+        const state = store.getState() as any
+        expect(state.serverErrors).toEqual(['Author mismatch'])
+      })
+    })
   })
 
   describe('session_error dispatch', () => {

@@ -697,6 +697,58 @@ describe('SdkSession', () => {
       s.destroy()
     })
 
+    // #3562: short-circuit dequeue in finally when stdin forwarding is disabled.
+    //
+    // PR #3560 (closes #3539) drains _pendingInput at the *entry* of sendMessage
+    // when the flag is set. This handles the case "next caller hits the gate".
+    // But the post-turn dequeue path in sendMessage's finally block still has
+    // its own "shift + process.nextTick(sendMessage)" branch. If a turn is
+    // mid-flight when the SidecarProcess emits stdin_disabled, the entry-gate
+    // has already been passed, so the finally path will still schedule a
+    // recursive sendMessage for the queued follow-up — wasting an event-loop
+    // hop and a redundant function call before the entry gate finally rejects
+    // it.
+    //
+    // The fix: short-circuit at the dequeue site too. If the flag flips
+    // mid-turn, drain the queue, log a single warn, and skip the recursion.
+    it('short-circuits dequeue in finally when flag flips mid-turn (#3562)', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      let callCount = 0
+      s._callQuery = (_args) => {
+        callCount++
+        return (async function* () {
+          // Simulate the SidecarProcess latching stdin_disabled mid-turn —
+          // the flag flips while _callQuery is still streaming, before the
+          // result event finishes the turn. The finally block runs after
+          // this generator returns and must observe the flipped flag.
+          s._stdinForwardingDisabled = true
+          yield { type: 'result', session_id: 'mid-turn-flip', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      // Pre-queue a follow-up so the dequeue site has work to do.
+      s._pendingInput = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      await s.sendMessage('initial turn')
+
+      // Wait one process.nextTick and one event-loop turn (setImmediate
+      // schedules into the check phase) so the dequeue path has had the
+      // opportunity to recurse, if it were going to.
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assert.equal(callCount, 1, '_callQuery must only be invoked for the original turn — no recursive dequeue')
+      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained at the dequeue site')
+      assert.equal(errors.length, 0, 'dequeue-site short-circuit must not emit a per-message error (the warn is enough)')
+
+      s.destroy()
+    })
+
     it('emits an error every time a fresh sendMessage is refused (no one-shot mute)', async () => {
       // The #3502 emit on the stdin_disabled signal is gated by the flag
       // itself (one warn / one error per session). The #3539 refusal at the
@@ -1912,7 +1964,7 @@ describe('SdkSession', () => {
       const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
 
       // Mid-session interrupt — no active query so this is a no-op,
-      // but it exercises the public contract.
+      // but it exercises the public contract (early-return guard).
       await session.interrupt()
 
       assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
@@ -1921,6 +1973,61 @@ describe('SdkSession', () => {
         '_stdinDroppedCount must survive interrupt()')
       assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
         '_stdinDroppedThresholdLogged must survive interrupt()')
+    })
+
+    // The early-return test above only exercises `if (!this._query) return`.
+    // This sibling test stubs an active query so we cover the more meaningful
+    // active-query branch — counters must survive interrupt() even when it
+    // actually tears the query down (#3565).
+    it('preserves stdin_dropped counters across interrupt() with active query (#3565)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
+
+      // Stub `_callQuery` to return a long-running async iterable so the
+      // active-query branch of interrupt() is exercised. The iterable hangs
+      // on next() until `interrupt()` is called, which resolves a pending
+      // gate so the iterator can return cleanly.
+      let interruptCalled = false
+      let resolveGate
+      const gate = new Promise((resolve) => { resolveGate = resolve })
+      const longRunningQuery = {
+        [Symbol.asyncIterator]() { return this },
+        async next() {
+          await gate
+          return { value: undefined, done: true }
+        },
+        async interrupt() {
+          interruptCalled = true
+          resolveGate()
+        },
+      }
+      session._query = longRunningQuery
+
+      // Kick off iteration so the query is "mid-stream" when interrupt fires.
+      const iterationPromise = (async () => {
+        // eslint-disable-next-line no-unused-vars
+        for await (const _ of session._query) { /* drain */ }
+      })()
+
+      await session.interrupt()
+      await iterationPromise
+
+      assert.equal(interruptCalled, true,
+        'active query interrupt() must be awaited (active-query branch)')
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive active-query interrupt()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive active-query interrupt()')
+      assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
+        '_stdinDroppedThresholdLogged must survive active-query interrupt()')
     })
 
     it('does not re-escalate a fresh drop after _clearMessageState() to error (#3542)', async () => {
