@@ -1060,7 +1060,10 @@ describe('SdkSession', () => {
   // sees a hung turn.  SdkSession provides a default warn-log listener so
   // the failure surfaces in operator logs at minimum.
   describe('_attachSidecarProcessListeners', () => {
-    it('logs a warning when stdin_dropped fires on the proc', async () => {
+    it('logs an error on the first stdin_dropped (#3506)', async () => {
+      // The first drop in a session is escalated to error level so the
+      // signal stands out in operator logs — subsequent drops fall back
+      // to warn unless a cumulative threshold is crossed.
       const { EventEmitter } = await import('events')
       const { addLogListener, removeLogListener } = await import('../src/logger.js')
 
@@ -1076,16 +1079,181 @@ describe('SdkSession', () => {
         removeLogListener(listener)
       }
 
-      const warn = entries.find(
+      const errorEntry = entries.find(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.ok(errorEntry, 'expected an error-level log on first stdin_dropped')
+      assert.ok(errorEntry.message.includes('60 bytes'),
+        'log must include the dropped byte count')
+      assert.ok(errorEntry.message.includes('pre-dial-cap'),
+        'log must include the drop reason tag')
+      assert.ok(errorEntry.message.includes('cumulative='),
+        'log must include the cumulative running total')
+    })
+
+    it('accumulates dropped bytes across events (#3506)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 100, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 250, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 50, reason: 'pre-dial-cap' })
+
+      assert.equal(session._stdinDroppedBytesTotal, 400,
+        'cumulative bytes must equal the sum of every drop')
+      assert.equal(session._stdinDroppedCount, 3,
+        'drop count must equal the number of stdin_dropped events')
+    })
+
+    it('treats unknown/missing byte counts as zero in the running total (#3506)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 100, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped')                 // no payload
+      proc.emit('stdin_dropped', { reason: 'x' }) // no bytes field
+
+      assert.equal(session._stdinDroppedBytesTotal, 100,
+        'unknown byte counts must not poison the running total')
+      assert.equal(session._stdinDroppedCount, 3,
+        'every event still bumps the drop count')
+    })
+
+    it('logs subsequent drops at warn level (#3506)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })  // first → error
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })  // second → warn
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })  // third → warn
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errs = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      const warns = entries.filter(
         (e) => e.component === 'sdk' &&
           e.level === 'warn' &&
           e.message.includes('Sidecar stdin chunk dropped'),
       )
-      assert.ok(warn, 'expected a warn-level log on stdin_dropped')
-      assert.ok(warn.message.includes('60 bytes'),
-        'log must include the dropped byte count')
-      assert.ok(warn.message.includes('pre-dial-cap'),
-        'log must include the drop reason tag')
+      assert.equal(errs.length, 1, 'only the first drop escalates to error')
+      assert.equal(warns.length, 2, 'subsequent drops log at warn level')
+    })
+
+    it('escalates to error every N drops (#3506)', async () => {
+      // Operators triaging "why did my prompt vanish?" need a recurring
+      // loud signal even on a flood of small drops.  Every Nth drop is
+      // re-escalated to error.
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { STDIN_DROPPED_ESCALATION_EVERY_N } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        for (let i = 0; i < STDIN_DROPPED_ESCALATION_EVERY_N; i++) {
+          proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })
+        }
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errs = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      // First drop is always error; the Nth drop is re-escalated.
+      assert.equal(errs.length, 2,
+        'expected error on first drop and on the Nth drop')
+    })
+
+    it('escalates to error when cumulative bytes cross the threshold (#3506)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        // First drop — always error, so emit a tiny one then push a chunk
+        // that crosses the cumulative threshold and produces a second error.
+        proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })
+        proc.emit('stdin_dropped', {
+          bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+          reason: 'pre-dial-cap',
+        })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errs = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.equal(errs.length, 2,
+        'expected error on first drop and again when cumulative >= threshold')
+      assert.ok(errs[1].message.includes('cumulative='),
+        'threshold-cross error must include the cumulative byte total')
+    })
+
+    it('does not re-escalate after the byte threshold once crossed (#3506)', async () => {
+      // After the cumulative byte threshold is crossed, subsequent drops
+      // still log (at warn) but should not spam additional error lines —
+      // the escalation is one-shot per crossing.
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })  // first → error
+        proc.emit('stdin_dropped', {
+          bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+          reason: 'pre-dial-cap',
+        })  // crosses threshold → error
+        proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })  // → warn, no re-escalation
+        proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })  // → warn
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errs = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.equal(errs.length, 2,
+        'threshold-crossing escalation must be one-shot')
     })
 
     it('logs a warning when stdin_disabled fires on the proc', async () => {
@@ -1139,13 +1307,14 @@ describe('SdkSession', () => {
         removeLogListener(listener)
       }
 
-      const warn = entries.find(
+      // First drop always escalates to error (#3506); accept either level.
+      const entry = entries.find(
         (e) => e.component === 'sdk' &&
-          e.level === 'warn' &&
+          (e.level === 'warn' || e.level === 'error') &&
           e.message.includes('Sidecar stdin chunk dropped'),
       )
-      assert.ok(warn, 'must still log when payload is missing')
-      assert.ok(warn.message.includes('unknown bytes'),
+      assert.ok(entry, 'must still log when payload is missing')
+      assert.ok(entry.message.includes('unknown bytes'),
         'must report unknown bytes when payload omits the count')
     })
 
@@ -1201,9 +1370,10 @@ describe('SdkSession', () => {
         removeLogListener(listener)
       }
 
-      const droppedWarns = entries.filter(
+      // The first drop now escalates to error (#3506); accept either level.
+      const droppedLogs = entries.filter(
         (e) => e.component === 'sdk' &&
-          e.level === 'warn' &&
+          (e.level === 'warn' || e.level === 'error') &&
           e.message.includes('Sidecar stdin chunk dropped'),
       )
       const disabledWarns = entries.filter(
@@ -1211,8 +1381,8 @@ describe('SdkSession', () => {
           e.level === 'warn' &&
           e.message.includes('Sidecar stdin forwarding is disabled'),
       )
-      assert.equal(droppedWarns.length, 1,
-        'stdin_dropped warn must fire exactly once even after triple-attach')
+      assert.equal(droppedLogs.length, 1,
+        'stdin_dropped log must fire exactly once even after triple-attach')
       assert.equal(disabledWarns.length, 1,
         'stdin_disabled warn must fire exactly once even after triple-attach')
       // Listener counts on the proc itself should also reflect single-wire.
