@@ -1256,6 +1256,93 @@ describe('SdkSession', () => {
         'threshold-crossing escalation must be one-shot')
     })
 
+    // #3543 — the cumulative byte total is hard to scan as raw bytes once a
+    // session crosses MiB scale.  The log line keeps the raw count for
+    // scriptable consumers and appends a humanised KiB/MiB/GiB suffix so
+    // operators can triage at a glance.
+    it('formats the cumulative byte total as a humanised KiB/MiB suffix (#3543)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      // Drive the cumulative total through three magnitudes (B → KiB → MiB)
+      // in a single attach, asserting the suffix on each emit so we lock the
+      // log-line shape for every range we care about.
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        // First emit: 500 B total — bytes range.
+        proc.emit('stdin_dropped', { bytes: 500, reason: 'pre-dial-cap' })
+        // Second emit: +2000 B → 2500 B total — KiB range (2.4 KiB).
+        proc.emit('stdin_dropped', { bytes: 2000, reason: 'pre-dial-cap' })
+        // Third emit: bump to MiB scale — 2500 + 1 MiB = 1051076 → "1.0 MiB".
+        proc.emit('stdin_dropped', { bytes: 1024 * 1024, reason: 'pre-dial-cap' })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const drops = entries.filter(
+        (e) => e.component === 'sdk' &&
+          (e.level === 'error' || e.level === 'warn') &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.equal(drops.length, 3, 'expected one log per stdin_dropped emit')
+
+      // Raw byte count is preserved on every line — scriptable consumers
+      // (regex log scrapers, dashboards) keep working unchanged.
+      for (const entry of drops) {
+        assert.ok(/cumulative=\d+ bytes /.test(entry.message),
+          `line must keep the raw "cumulative=N bytes" prefix, got: ${entry.message}`)
+      }
+
+      // Humanised suffix per magnitude.
+      assert.ok(drops[0].message.includes('cumulative=500 bytes (500 B)'),
+        `bytes-range line must show "500 B", got: ${drops[0].message}`)
+      assert.ok(drops[1].message.includes('cumulative=2500 bytes (2.4 KiB)'),
+        `KiB-range line must show "2.4 KiB", got: ${drops[1].message}`)
+      // 2500 + 1048576 = 1051076 bytes → 1.0 MiB once formatted.
+      assert.ok(/cumulative=1051076 bytes \(1\.0 MiB\)/.test(drops[2].message),
+        `MiB-range line must show "1.0 MiB", got: ${drops[2].message}`)
+    })
+
+    // #3543 — the load-bearing case: at the 10 MiB error-escalation
+    // threshold the line must read "10.0 MiB" so triage operators can spot
+    // the threshold crossing without doing arithmetic in their head.
+    it('renders the 10 MiB error-escalation threshold as "10.0 MiB" (#3543)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        // Single drop big enough to cross the threshold immediately so the
+        // first-drop error log is also the threshold-cross log.
+        proc.emit('stdin_dropped', {
+          bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+          reason: 'pre-dial-cap',
+        })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errorEntry = entries.find(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.ok(errorEntry, 'expected error log on threshold-cross drop')
+      assert.ok(errorEntry.message.includes(`cumulative=${STDIN_DROPPED_BYTES_ERROR_THRESHOLD} bytes (10.0 MiB)`),
+        `threshold line must show "10.0 MiB" alongside raw byte count, got: ${errorEntry.message}`)
+    })
+
     it('logs a warning when stdin_disabled fires on the proc', async () => {
       const { EventEmitter } = await import('events')
       const { addLogListener, removeLogListener } = await import('../src/logger.js')
