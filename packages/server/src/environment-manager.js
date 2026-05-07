@@ -470,7 +470,7 @@ export class EnvironmentManager extends EventEmitter {
         } catch (err) {
           env.status = 'error'
           allHealthy = false
-          log.warn(`Environment "${env.name}" token refresh failed: ${err.message}`)
+          log.warn(`Environment "${env.name}" (id: ${env.id}) token refresh failed: ${err.message}`)
         }
       }
       // Clear stale session references — sessions don't survive server restart
