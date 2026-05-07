@@ -493,6 +493,97 @@ describe('Toast', () => {
       expect(onDismiss).toHaveBeenCalledWith('hf1')
     })
 
+    // #3614: focus moving *within* the same toast (e.g. tab from action
+    // button to close button) bubbles a blur on the wrapper followed by
+    // a focus. The blur handler should detect intra-toast focus moves
+    // via `relatedTarget` and skip the resume so we don't burn a tick
+    // on a wasteful resume→pause cycle.
+    it('intra-toast focus move (action → close) does not resume the timer', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'it1',
+        message: 'Tab between buttons',
+        action: { label: 'Act', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-it1')
+      const actionBtn = screen.getByTestId('toast-action-it1')
+      const closeBtn = screen.getByTestId('toast-close-it1')
+
+      // 1s elapsed, focus action button (paused, 4s remaining).
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      actionBtn.focus()
+
+      // Tab from action → close: synthesize a blur on the wrapper with
+      // relatedTarget pointing inside the same toast, then a focus from
+      // close. The wrapper's onBlur should NOT call resumeTimer because
+      // focus is still within the toast.
+      fireEvent.blur(toast, { relatedTarget: closeBtn })
+      // If the timer had been resumed, advancing 4s would dismiss.
+      // It must remain paused.
+      await act(async () => { vi.advanceTimersByTime(10000) })
+      expect(onDismiss).not.toHaveBeenCalled()
+
+      // Now actually leave the toast (blur to something outside): the
+      // remaining 4s should resume.
+      fireEvent.blur(toast, { relatedTarget: document.body })
+      await act(async () => { vi.advanceTimersByTime(3999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('it1')
+    })
+
+    it('blur out of toast (relatedTarget outside) resumes the timer', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'it2',
+        message: 'Tab away',
+        action: { label: 'Act', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-it2')
+      const actionBtn = screen.getByTestId('toast-action-it2')
+
+      // 1s elapsed, focus action button (paused, 4s remaining).
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      actionBtn.focus()
+      await act(async () => { vi.advanceTimersByTime(2000) })
+
+      // Tab outside the toast — relatedTarget is something not contained
+      // by the wrapper. Resume should fire and the remaining 4s should
+      // play out.
+      fireEvent.blur(toast, { relatedTarget: document.body })
+      await act(async () => { vi.advanceTimersByTime(3999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('it2')
+    })
+
+    // #3614: blur with relatedTarget === null (e.g. focus moved to
+    // another window, devtools, the URL bar) should also resume —
+    // there's no descendant being focused, so it's a real blur out.
+    it('blur with null relatedTarget resumes the timer', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'it3',
+        message: 'Tab to nothing',
+        action: { label: 'Act', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      const toast = screen.getByTestId('toast-it3')
+      const actionBtn = screen.getByTestId('toast-action-it3')
+
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      actionBtn.focus()
+      await act(async () => { vi.advanceTimersByTime(2000) })
+
+      fireEvent.blur(toast, { relatedTarget: null })
+      await act(async () => { vi.advanceTimersByTime(3999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(onDismiss).toHaveBeenCalledWith('it3')
+    })
+
     it('focus→hover→blur stays paused while still hovered', async () => {
       const onDismiss = vi.fn()
       const items: ToastItem[] = [{
