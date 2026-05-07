@@ -211,9 +211,60 @@ export const ServerPlanReadySchema = z.object({
   allowedPrompts: z.array(z.any()).optional(),
 })
 
+/**
+ * One entry in a `session_list` payload (and the equivalent shape returned
+ * by `SessionManager.listSessions()` server-side).
+ *
+ * `passthrough()` so future field additions don't break older clients that
+ * haven't bumped the schema yet — only the keys we care about for cross-
+ * package validation are listed explicitly. New clients can rely on the
+ * documented optional fields below; older clients see them as `undefined`
+ * and fall back to their pre-existing defaults.
+ *
+ * Documented hydration fields:
+ *   - `stdinForwardingDisabled` (#3540): latched stdin_disabled flag so
+ *     reconnecting clients see the disabled state without waiting for a
+ *     fresh `error` event.
+ *   - `stdinDroppedBytes` / `stdinDroppedCount` (#3573): cumulative
+ *     `stdin_dropped` byte / drop counters maintained for the session
+ *     lifetime by SdkSession. Lets a dashboard / mobile client connecting
+ *     after one or more drops happened paint the "X bytes lost over N
+ *     drops" indicator immediately, instead of waiting for the next drop
+ *     to fire the runtime `stdin_dropped_totals` event. Non-SDK providers
+ *     (CliSession, Codex, Gemini) round-trip as `0`.
+ */
+export const ServerSessionListEntrySchema = z.object({
+  sessionId: z.string(),
+  name: z.string(),
+  // cwd is conventionally always set by the server, but the schema accepts
+  // it as optional so test fixtures and minimal mock managers (which omit
+  // it for brevity) still validate. Real session_list payloads always carry
+  // a string `cwd`.
+  cwd: z.string().optional(),
+  model: z.string().nullable().optional(),
+  permissionMode: z.string().optional(),
+  isBusy: z.boolean().optional(),
+  createdAt: z.number().optional(),
+  lastActivityAt: z.number().optional(),
+  conversationId: z.string().nullable().optional(),
+  provider: z.string().optional(),
+  capabilities: z.record(z.string(), z.unknown()).optional(),
+  worktree: z.boolean().optional(),
+  repoCwd: z.string().nullable().optional(),
+  isolation: z.string().optional(),
+  promptEvaluator: z.boolean().optional(),
+  stdinForwardingDisabled: z.boolean().optional(),
+  // #3573: cumulative stdin_dropped totals seeded into the handshake so a
+  // late-joining client sees the running counter without waiting for the
+  // next drop. SDK-backed sessions report real values; non-SDK providers
+  // serialize as 0.
+  stdinDroppedBytes: z.number().int().nonnegative().optional(),
+  stdinDroppedCount: z.number().int().nonnegative().optional(),
+}).passthrough()
+
 export const ServerSessionListSchema = z.object({
   type: z.literal('session_list'),
-  sessions: z.array(z.any()),
+  sessions: z.array(ServerSessionListEntrySchema),
 })
 
 /**

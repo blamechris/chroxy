@@ -617,13 +617,23 @@ export class SessionManager extends EventEmitter {
 
   /**
    * List all sessions with summary info.
-   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt, stdinForwardingDisabled }>}
+   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */
   listSessions() {
     const list = []
     for (const [sessionId, entry] of this._sessions) {
       if (entry._destroying) continue
       const ProviderClass = entry.session.constructor
+      // #3573: hydrate cumulative stdin_dropped totals on reconnect.
+      // SdkSession exposes the running counters via the `stdinDroppedTotals`
+      // getter (added in #3544). Other providers (CliSession, Codex, Gemini)
+      // do not drop stdin at the SidecarProcess pre-dial cap, so they
+      // round-trip as `0` — matching the strict-boolean pattern used by
+      // `stdinForwardingDisabled` so reconnecting clients see a stable
+      // numeric shape regardless of provider.
+      const totals = entry.session.stdinDroppedTotals
+      const stdinDroppedBytes = totals && Number.isFinite(totals.bytes) ? totals.bytes : 0
+      const stdinDroppedCount = totals && Number.isFinite(totals.count) ? totals.count : 0
       list.push({
         sessionId,
         name: entry.name,
@@ -652,6 +662,14 @@ export class SessionManager extends EventEmitter {
         // sessions in the same process. Strict-boolean coerce so
         // non-Sdk providers round-trip as `false`.
         stdinForwardingDisabled: !!entry.session._stdinForwardingDisabled,
+        // #3573: hydrate cumulative stdin_dropped totals on reconnect so a
+        // dashboard / mobile client that joins after one or more drops
+        // already happened can paint the live "X bytes lost over N drops"
+        // indicator without waiting for the next drop to fire. The runtime
+        // `stdin_dropped_totals` event remains the live signal; this field
+        // is the authoritative seed for clients connecting late.
+        stdinDroppedBytes,
+        stdinDroppedCount,
       })
     }
     return list
