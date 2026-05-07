@@ -1995,6 +1995,13 @@ describe('SdkSession', () => {
       // active-query branch of interrupt() is exercised. The iterable hangs
       // on next() until `interrupt()` is called, which resolves a pending
       // gate so the iterator can return cleanly.
+      //
+      // Async gate (#3596): the stubbed interrupt() yields past a
+      // setImmediate boundary BEFORE flipping `interruptCalled`. If
+      // SdkSession.interrupt() ever drops the `await` on _query.interrupt(),
+      // control returns from `await session.interrupt()` before the gate
+      // resolves and the assertion below fails — locking down the await
+      // contract regression-style.
       let interruptCalled = false
       let resolveGate
       const gate = new Promise((resolve) => { resolveGate = resolve })
@@ -2005,6 +2012,17 @@ describe('SdkSession', () => {
           return { value: undefined, done: true }
         },
         async interrupt() {
+          // Defer flag set past a macrotask boundary (setImmediate) so a
+          // missing `await` in SdkSession.interrupt() leaves
+          // `interruptCalled` false at the assertion site. A bare
+          // `await Promise.resolve()` is not strict enough — both async
+          // function returns and the awaited query promise drain
+          // microtasks in FIFO order, so a single microtask gate would
+          // still resolve before the outer await of session.interrupt()
+          // returns control. setImmediate forces a full event-loop turn,
+          // which only happens if SdkSession.interrupt() actually awaits
+          // the returned promise.
+          await new Promise((resolve) => setImmediate(resolve))
           interruptCalled = true
           resolveGate()
         },
@@ -2018,8 +2036,16 @@ describe('SdkSession', () => {
       })()
 
       await session.interrupt()
+
+      // Snapshot the flag immediately after the await resolves — this is
+      // the strict assertion that proves SdkSession.interrupt() awaited the
+      // query interrupt promise (the microtask gate above must have run).
+      const interruptCalledAfterAwait = interruptCalled
+
       await iterationPromise
 
+      assert.equal(interruptCalledAfterAwait, true,
+        'SdkSession.interrupt() must await query.interrupt() (microtask gate, active-query branch)')
       assert.equal(interruptCalled, true,
         'active query interrupt() must be awaited (active-query branch)')
       assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
