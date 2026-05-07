@@ -100,6 +100,14 @@ export interface SessionInfo {
   // false). Loosely typed because future providers may add fields
   // the type definition doesn't yet enumerate.
   capabilities?: Record<string, boolean>;
+  // #3577: latched true after a SidecarProcess emitted `stdin_disabled`
+  // (#3402, #3501). PR #3564 (closing #3540) persists the flag across
+  // restarts and surfaces it on `session_list` so reconnecting clients
+  // can render the disabled banner without replaying the original
+  // transient `error` event. Optional so older servers (pre-#3564)
+  // that omit the field still parse cleanly; renderers should treat
+  // `undefined` as `false`.
+  stdinForwardingDisabled?: boolean;
 }
 
 export interface AgentInfo {

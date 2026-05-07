@@ -1749,7 +1749,7 @@ describe('SdkSession', () => {
       const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
 
       // Mid-session interrupt — no active query so this is a no-op,
-      // but it exercises the public contract.
+      // but it exercises the public contract (early-return guard).
       await session.interrupt()
 
       assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
@@ -1758,6 +1758,61 @@ describe('SdkSession', () => {
         '_stdinDroppedCount must survive interrupt()')
       assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
         '_stdinDroppedThresholdLogged must survive interrupt()')
+    })
+
+    // The early-return test above only exercises `if (!this._query) return`.
+    // This sibling test stubs an active query so we cover the more meaningful
+    // active-query branch — counters must survive interrupt() even when it
+    // actually tears the query down (#3565).
+    it('preserves stdin_dropped counters across interrupt() with active query (#3565)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
+
+      // Stub `_callQuery` to return a long-running async iterable so the
+      // active-query branch of interrupt() is exercised. The iterable hangs
+      // on next() until `interrupt()` is called, which resolves a pending
+      // gate so the iterator can return cleanly.
+      let interruptCalled = false
+      let resolveGate
+      const gate = new Promise((resolve) => { resolveGate = resolve })
+      const longRunningQuery = {
+        [Symbol.asyncIterator]() { return this },
+        async next() {
+          await gate
+          return { value: undefined, done: true }
+        },
+        async interrupt() {
+          interruptCalled = true
+          resolveGate()
+        },
+      }
+      session._query = longRunningQuery
+
+      // Kick off iteration so the query is "mid-stream" when interrupt fires.
+      const iterationPromise = (async () => {
+        // eslint-disable-next-line no-unused-vars
+        for await (const _ of session._query) { /* drain */ }
+      })()
+
+      await session.interrupt()
+      await iterationPromise
+
+      assert.equal(interruptCalled, true,
+        'active query interrupt() must be awaited (active-query branch)')
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive active-query interrupt()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive active-query interrupt()')
+      assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
+        '_stdinDroppedThresholdLogged must survive active-query interrupt()')
     })
 
     it('does not re-escalate a fresh drop after _clearMessageState() to error (#3542)', async () => {
