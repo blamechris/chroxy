@@ -54,9 +54,12 @@ export class DockerSdkSession extends SdkSession {
     }
     this._containerUser = user
     this._containerCliPath = containerCliPath
-    // #3468: set true once the SidecarProcess emits 'stdin_disabled' for any
-    // spawn under this session. Read-only diagnostic flag — flipped by
-    // _attachSidecarProcessListeners (sdk-session.js base) and never reset.
+    // #3468 + #3501: set true once the SidecarProcess emits 'stdin_disabled'
+    // for any spawn under this session.  Read-only diagnostic flag — flipped
+    // by _attachSidecarProcessListeners (sdk-session.js base) and never
+    // reset.  The flag drives session-sticky warn semantics decided in
+    // #3501: once latched, subsequent spawns' 'stdin_disabled' signals are
+    // silenced (one warn per session, not per spawn).
     this._stdinForwardingDisabled = false
   }
 
