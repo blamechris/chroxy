@@ -78,6 +78,13 @@ type PauseReason = 'hover' | 'focus'
 interface TimerState {
   timer: ReturnType<typeof setTimeout> | null
   remaining: number
+  /**
+   * #3612: monotonic `performance.now()` timestamp captured when the
+   * active timer was started. Wall-clock (`Date.now()`) can jump
+   * backwards on NTP sync / manual clock change, so elapsed-time math
+   * uses the monotonic clock to keep the pause→resume remaining
+   * calculation correct regardless of system clock changes.
+   */
   startedAt: number
   pauseReasons: Set<PauseReason>
 }
@@ -94,7 +101,8 @@ export function Toast({ items, onDismiss }: ToastProps) {
     timersRef.current.set(id, {
       timer,
       remaining: duration,
-      startedAt: Date.now(),
+      // #3612: monotonic clock — see TimerState.startedAt.
+      startedAt: performance.now(),
       pauseReasons: existing?.pauseReasons ?? new Set(),
     })
   }
@@ -117,7 +125,8 @@ export function Toast({ items, onDismiss }: ToastProps) {
     state.pauseReasons.add(reason)
     if (!state.timer) return // already paused — just record the new reason
     clearTimeout(state.timer)
-    const elapsed = Date.now() - state.startedAt
+    // #3612: monotonic elapsed — Date.now() can jump on clock change.
+    const elapsed = performance.now() - state.startedAt
     const remaining = Math.max(0, state.remaining - elapsed)
     timersRef.current.set(id, {
       timer: null,
@@ -201,8 +210,27 @@ export function Toast({ items, onDismiss }: ToastProps) {
           // until the user also blurs.
           onMouseEnter={() => pauseTimer(item.id, 'hover')}
           onMouseLeave={() => resumeTimer(item.id, 'hover')}
-          onFocus={() => pauseTimer(item.id, 'focus')}
-          onBlur={() => resumeTimer(item.id, 'focus')}
+          onFocus={(e) => {
+            // #3614: skip pause when focus came from a descendant (the
+            // wrapper was already focused via bubbling). Without this we
+            // record a redundant pause-reason mutation when tab lands on
+            // an inner button having moved from another inner button.
+            // `pauseTimer` is idempotent on the reason set so this is
+            // mostly cosmetic, but mirrors the relatedTarget-aware blur
+            // for symmetry.
+            if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+            pauseTimer(item.id, 'focus')
+          }}
+          onBlur={(e) => {
+            // #3614: focus moving *within* the same toast (e.g. tab
+            // from action button to close button) bubbles a blur on
+            // the wrapper followed by a focus. Skip the resume in that
+            // case so we don't fire a wasteful resume→pause cycle.
+            // `relatedTarget` is the element receiving focus; if it's
+            // contained by the wrapper, the focus is still inside.
+            if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+            resumeTimer(item.id, 'focus')
+          }}
         >
           <span className="toast-msg">{item.message}</span>
           {item.action ? (
