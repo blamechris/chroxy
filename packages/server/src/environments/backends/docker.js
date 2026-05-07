@@ -137,10 +137,13 @@ export class DockerBackend {
 
   /**
    * @param {string} containerId
-   * @param {{ cmd: string, env?: Object, cwd?: string, timeout?: number }} opts
+   * @param {{ cmd: string, env?: Object.<string,string>, cwd?: string, timeout?: number }} opts
    * @returns {Promise<{ stdout: string, stderr: string }>}
    *
    * opts.env — all key/value pairs are forwarded as `--env KEY=VAL` flags.
+   * Entries whose value is null or undefined are silently skipped (caller
+   * mistake — passing them would produce `KEY=null` / `KEY=undefined` which
+   * is hard to debug).  All other values are coerced to String explicitly.
    * No allowlist filter is applied here: unlike streamCliInEnvironment (which
    * runs the long-lived Claude Code CLI and must never leak the full host env),
    * execInEnvironment is a general-purpose helper invoked with an explicit env
@@ -161,7 +164,8 @@ export class DockerBackend {
 
       if (env) {
         for (const [key, val] of Object.entries(env)) {
-          execArgs.push('--env', `${key}=${val}`)
+          if (val == null) continue
+          execArgs.push('--env', `${key}=${String(val)}`)
         }
       }
 

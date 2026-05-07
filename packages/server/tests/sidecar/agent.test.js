@@ -952,7 +952,8 @@ describe('PodAgent', () => {
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
       await new Promise((r) => setTimeout(r, 10))
 
-      // Push 5 events into a buffer of size 3; oldest 2 should be evicted.
+      // Push 5 events into a buffer of size 3; sentinel (seq=1) + oldest 2
+      // events (seq=2, seq=3) are evicted — 3 frames total, leaving seq=4,5,6.
       for (let i = 0; i < 5; i++) {
         controller.writeStdout(JSON.stringify({ idx: i }))
       }
@@ -1116,6 +1117,26 @@ describe('PodAgent', () => {
       const t = new LineLimitTransform({ maxBytes: 10 })
       const oneOver = 'A'.repeat(11) + '\n'
       const { oversized } = await collect(t, [oneOver])
+      assert.equal(oversized, true)
+    })
+
+    // CRLF regression tests (#3381) ----------------------------------------
+
+    it('does not fire oversized_line for a CRLF line of exactly maxBytes content bytes (#3381)', async () => {
+      // Before the fix, CR was counted as a content byte — a CRLF line of
+      // exactly maxBytes pushed _pending to maxBytes+1 before the LF could
+      // reset it, causing a false oversized_line.
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      const crlfLine = 'A'.repeat(10) + '\r\n'
+      const { oversized } = await collect(t, [crlfLine])
+      assert.equal(oversized, false)
+    })
+
+    it('fires oversized_line when CRLF line content exceeds maxBytes (#3381)', async () => {
+      // 11 content bytes + CRLF must still trip the guard.
+      const t = new LineLimitTransform({ maxBytes: 10 })
+      const crlfOver = 'A'.repeat(11) + '\r\n'
+      const { oversized } = await collect(t, [crlfOver])
       assert.equal(oversized, true)
     })
 

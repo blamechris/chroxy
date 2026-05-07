@@ -6,6 +6,12 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+# Prevent overlapping runs: a new dispatch (or schedule) cancels an in-flight
+# run rather than spinning up a second kind cluster on the same runner pool.
+concurrency:
+  group: nightly-k8s-integration
+  cancel-in-progress: true
+
 # Read-only token — the job only reads the repo and talks to GitHub Checks.
 permissions:
   contents: read
@@ -13,7 +19,7 @@ permissions:
 jobs:
   k8s-sidecar-integration:
     name: K8s Sidecar Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 15 min: cluster boot (~2 min) + image build/load (~2 min) + test suite
     # (~3 min) + cleanup (~1 min) + generous headroom for slow runners.
     timeout-minutes: 15

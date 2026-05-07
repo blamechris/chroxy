@@ -1,0 +1,16 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "automerge": false,
+  "regexManagers": [
+    {
+      "description": "Track @anthropic-ai/claude-code version pinned in the sidecar Dockerfile ARG",
+      "fileMatch": ["^packages/server/sidecar/Dockerfile$"],
+      "matchStrings": [
+        "ARG CLAUDE_CODE_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "depNameTemplate": "@anthropic-ai/claude-code",
+      "datasourceTemplate": "npm"
+    }
+  ]
+}
