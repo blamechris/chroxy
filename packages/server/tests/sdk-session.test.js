@@ -560,6 +560,132 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- sendMessage when stdin forwarding is disabled (#3539) --
+  //
+  // PR #3536 (closes #3502) latches `_stdinForwardingDisabled` and surfaces it
+  // to clients via a session-level `error` event. The flag is now visible, but
+  // until #3539 sendMessage still accepted further writes that disappeared
+  // into the SidecarProcess PassThrough. These tests cover the contract: send
+  // before the flag flips succeeds; send after the flag flips is refused with
+  // the same machine-readable `code: 'stdin_disabled'` and never reaches the
+  // underlying SDK query.
+  describe('sendMessage when stdin forwarding is disabled (#3539)', () => {
+    it('accepts sendMessage before the flag flips (regression guard)', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-pre', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('before disable')
+      s.destroy()
+
+      assert.equal(captured.length, 1, 'pre-disable sendMessage should reach the SDK')
+      assert.equal(s._stdinForwardingDisabled, undefined, 'flag must remain unset on a healthy turn')
+    })
+
+    it('refuses sendMessage after the flag is set and never invokes _callQuery', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'should-not-run', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      // Simulate the SidecarProcess having latched the flag (e.g. via
+      // #3502's stdin_disabled signal handler) before this sendMessage call.
+      s._stdinForwardingDisabled = true
+
+      await s.sendMessage('after disable')
+
+      assert.equal(captured.length, 0, '_callQuery must NOT be invoked when stdin forwarding is disabled')
+      assert.equal(errors.length, 1, 'exactly one error event should fire on refused sendMessage')
+      assert.equal(errors[0].code, 'stdin_disabled', 'error must carry the same machine-readable code as #3502')
+      assert.equal(errors[0].recoverable, false, 'stdin_disabled is unrecoverable until session restart')
+      assert.match(errors[0].message, /stdin/i, 'error message should mention stdin')
+      assert.equal(s._isBusy, false, 'refused sendMessage must not flip _isBusy')
+
+      s.destroy()
+    })
+
+    it('drains queued follow-ups when the flag flips so the dequeue path does not re-trigger writes', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'drain', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      // Queue up a few follow-ups while the session is busy (mirrors a real
+      // turn that has the dequeue-on-finish path active).
+      s._isBusy = true
+      s.sendMessage('q1')
+      s.sendMessage('q2')
+      s.sendMessage('q3')
+      assert.equal(s._pendingInput.length, 3, 'precondition: three messages queued')
+
+      // Flag flips mid-turn (e.g. SidecarProcess loses stdin while query is
+      // still streaming). Now any new sendMessage must reject AND drain the
+      // queue so the post-finally process.nextTick dequeue does not call
+      // sendMessage three more times.
+      s._stdinForwardingDisabled = true
+      s._isBusy = false  // turn finished, would normally trigger dequeue
+
+      await s.sendMessage('arriving while disabled')
+
+      assert.equal(captured.length, 0, '_callQuery must not be invoked')
+      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained')
+      assert.equal(errors.length, 1, 'a single error event covers the drained batch + new call')
+      assert.equal(errors[0].code, 'stdin_disabled')
+
+      s.destroy()
+    })
+
+    it('emits an error every time a fresh sendMessage is refused (no one-shot mute)', async () => {
+      // The #3502 emit on the stdin_disabled signal is gated by the flag
+      // itself (one warn / one error per session). The #3539 refusal at the
+      // sendMessage entry point is per-call: every refused write deserves a
+      // signal so callers can render "send failed" feedback per attempt.
+      const s = createSession()
+      s._processReady = true
+      s._stdinForwardingDisabled = true
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      await s.sendMessage('attempt 1')
+      await s.sendMessage('attempt 2')
+      await s.sendMessage('attempt 3')
+
+      assert.equal(errors.length, 3, 'each refused sendMessage call should emit its own error')
+      for (const err of errors) {
+        assert.equal(err.code, 'stdin_disabled')
+        assert.equal(err.recoverable, false)
+      }
+
+      s.destroy()
+    })
+  })
+
   // -- sandbox option in query --
 
   describe('sandbox option', () => {
