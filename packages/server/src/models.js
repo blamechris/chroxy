@@ -607,6 +607,36 @@ const CLAUDE_PROVIDER_NAMES = new Set([
   'docker-cli',
 ])
 
+/**
+ * True when the given provider name is a Claude-family provider (and so
+ * shares the default models registry, which is fed by the Agent SDK's live
+ * `supportedModels()` push). Non-Claude providers (Codex, Gemini, custom)
+ * have their own static allowlists and should be validated strictly.
+ *
+ * Used by `SessionManager.createSession` (#3403) to decide whether an
+ * unknown initial model should be a hard rejection or a soft fall-back to
+ * the provider default — Claude's allowlist is a moving target driven by
+ * a stale dashboard `defaultModel` (e.g. `opus-4-6` after `opus-4-7` ships)
+ * so a hard error breaks otherwise-valid session creation.
+ *
+ * Also honours an opt-in static flag on the provider class
+ * (`static claudeFamily = true`) so external/test providers can mark
+ * themselves as Claude-style without extending the hard-coded name set.
+ *
+ * @param {string|undefined|null} providerName
+ * @param {Function} [ProviderClass] - optional provider class for the name
+ * @returns {boolean}
+ */
+export function isClaudeProvider(providerName, ProviderClass = null) {
+  if (typeof providerName === 'string' && CLAUDE_PROVIDER_NAMES.has(providerName)) {
+    return true
+  }
+  if (ProviderClass && ProviderClass.claudeFamily === true) {
+    return true
+  }
+  return false
+}
+
 // Populated by providers.js at module load so models.js can resolve a
 // provider name to its ProviderClass without creating a circular import.
 // Keeping this module-local + async-free keeps `getRegistryForProvider()`
