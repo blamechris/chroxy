@@ -1241,15 +1241,17 @@ describe('PodAgent', () => {
         const ws = connect(port, TOKEN)
         await waitOpen(ws)
 
-        const msgsPromise = waitForDataMessages(ws, 1)
+        const msgsPromise = waitForDataMessages(ws, 2)
 
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const payload = { type: 'assistant', content: 'hi' }
         setTimeout(() => mock.controller.writeStdout(JSON.stringify(payload)), 10)
 
         const msgs = await msgsPromise
-        assert.equal(msgs[0].type, 'event')
-        assert.deepEqual(msgs[0].payload, payload)
+        // Skip the sentinel stderr frame from #3344 — find the event frame.
+        const eventMsg = msgs.find((m) => m.type === 'event')
+        assert.ok(eventMsg, `expected an 'event' frame, got: ${JSON.stringify(msgs.map((m) => m.type))}`)
+        assert.deepEqual(eventMsg.payload, payload)
 
         ws.close()
       } finally {
