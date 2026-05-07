@@ -240,6 +240,34 @@
  */
 
 /**
+ * Re-populate the backend's in-memory credential cache for a single environment
+ * after a server restart.  This method is OPTIONAL — the Backend interface does
+ * not require it.  EnvironmentManager.reconnect() checks for it via duck-typing:
+ *
+ * ```js
+ * if (typeof this._backend.reconnectAgentToken === 'function') {
+ *   await this._backend.reconnectAgentToken(env.containerId)
+ * }
+ * ```
+ *
+ * Backends that hold per-environment credentials in memory (e.g. K8sBackend
+ * stores agent tokens fetched from a K8s Secret) SHOULD implement this method
+ * so that streamCliInEnvironment() continues to work after the server process
+ * restarts.  Backends whose credentials are stateless or persisted to disk
+ * (e.g. DockerBackend) need not implement it.
+ *
+ * @function reconnectAgentToken
+ * @memberof Backend
+ * @param {string} handle - Opaque environment handle (container ID for Docker, Pod name for K8s)
+ * @param {Object} [opts] - Backend-specific options (e.g. {namespace} for K8sBackend)
+ * @returns {Promise<boolean>}
+ *   `true`  — credential was found and is now cached; the environment is usable
+ *   `false` — credential source is gone (e.g. the Pod/Secret was garbage-collected);
+ *             the caller should treat the environment as unreachable
+ * @throws {Error} On unexpected I/O errors (not on 404 / resource-not-found — return false instead)
+ */
+
+/**
  * Spawn a long-lived CLI process inside a running environment and return a
  * ChildProcess-shaped handle for streaming I/O.
  *
