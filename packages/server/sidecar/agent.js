@@ -72,6 +72,18 @@ const DEFAULT_MAX_SESSIONS = Number.isFinite(_PARSED_MAX_SESSIONS) && _PARSED_MA
   ? _PARSED_MAX_SESSIONS
   : FALLBACK_MAX_SESSIONS
 
+// Canonical `session_lost` frame `reason` field values. Documented in
+// packages/server/sidecar/PROTOCOL.md (sections "session_lost" and
+// "Hard Session Cap"). Centralised here so the call sites that emit the
+// frame, the eviction call site that forwards the same reason, and any
+// future log/assertion paths share one source of truth — preventing
+// drift/typos between the wire string and the code that produces it.
+const SESSION_LOST_REASONS = Object.freeze({
+  EVICTED_BY_CAP: 'evicted_by_cap',
+  BUFFER_OVERFLOW: 'buffer_overflow',
+  UNKNOWN_SESSION: 'unknown_session',
+})
+
 // --- Auth token -----------------------------------------------------------------
 // Read once at boot. If unset we stay up (dev convenience) but reject all WS
 // upgrades so the agent is fail-secure in production.
@@ -452,7 +464,7 @@ export class PodAgent {
     if (session.activeWs) {
       const ws = session.activeWs
       session.activeWs = null
-      this._send(ws, { type: 'session_lost', sessionId, reason: 'evicted_by_cap' }, () => {
+      this._send(ws, { type: 'session_lost', sessionId, reason: SESSION_LOST_REASONS.EVICTED_BY_CAP }, () => {
         try { ws.close(1001, 'session evicted') } catch {}
       })
     }
@@ -491,7 +503,12 @@ export class PodAgent {
 
     if (evictTarget) {
       this._cancelIdleTimer(evictTarget)
-      this._evictSession(evictTarget, 'max_sessions')
+      // Reason matches the `session_lost` frame `reason` field emitted from
+      // _evictSession when the session has an active WS (see
+      // packages/server/sidecar/PROTOCOL.md → "Hard Session Cap"). Both
+      // sites share SESSION_LOST_REASONS.EVICTED_BY_CAP so the argument
+      // and frame string can never drift.
+      this._evictSession(evictTarget, SESSION_LOST_REASONS.EVICTED_BY_CAP)
     }
   }
 
@@ -858,7 +875,7 @@ export class PodAgent {
 
     const session = this._sessions.get(sessionId)
     if (!session) {
-      this._send(ws, { type: 'session_lost', sessionId, reason: 'unknown_session' })
+      this._send(ws, { type: 'session_lost', sessionId, reason: SESSION_LOST_REASONS.UNKNOWN_SESSION })
       return
     }
 
@@ -883,7 +900,7 @@ export class PodAgent {
     // Close in the send callback so the session_lost frame is flushed first
     // (#3399).
     if (session.buffer.length > 0 && session.buffer[0].seq > lastSeq + 1) {
-      this._send(ws, { type: 'session_lost', sessionId, reason: 'buffer_overflow' }, () => {
+      this._send(ws, { type: 'session_lost', sessionId, reason: SESSION_LOST_REASONS.BUFFER_OVERFLOW }, () => {
         try { ws.close(1008, 'resume gap') } catch {}
       })
       return
