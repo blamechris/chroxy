@@ -38,8 +38,8 @@ const KILL_GRACE_MS = 5_000
 // a stuck child still receives SIGTERM promptly. (#3397)
 // Tunable at startup via CHROXY_AGENT_STDIN_CLOSE_GRACE_MS (default 500 ms).
 // Reject NaN / negative values so an invalid env var cannot disable the polite
-// shutdown path; setting 0 is allowed (skips stdin EOF and goes straight to
-// SIGTERM, matching the legacy hard-kill behaviour).
+// shutdown path; setting 0 is allowed (stdin EOF still fires, but SIGTERM
+// follows synchronously instead of after a grace delay — see _killChild).
 const FALLBACK_STDIN_CLOSE_GRACE_MS = 500
 const _PARSED_STDIN_CLOSE_GRACE_MS = parseInt(
   process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS ?? `${FALLBACK_STDIN_CLOSE_GRACE_MS}`,

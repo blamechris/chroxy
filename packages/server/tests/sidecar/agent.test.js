@@ -2264,9 +2264,10 @@ describe('PodAgent', () => {
       await agent.close()
     })
 
-    it('zero CHROXY_AGENT_STDIN_CLOSE_GRACE_MS is allowed (skips polite EOF)', async () => {
-      // 0 is a legitimate operator override — it disables the polite stdin
-      // EOF and goes straight to SIGTERM, matching legacy hard-kill behaviour.
+    it('zero CHROXY_AGENT_STDIN_CLOSE_GRACE_MS is allowed (synchronous SIGTERM)', async () => {
+      // 0 is a legitimate operator override — _killChild still closes the
+      // child's stdin (polite EOF) when present, but skips the grace timer
+      // and fires SIGTERM synchronously instead of after a delay.
       const { PodAgent: FreshPodAgent } = await loadAgentWith('0')
       const agent = new FreshPodAgent({ token: TOKEN })
       assert.equal(agent._stdinCloseGraceMs, 0,

@@ -620,8 +620,10 @@ closing stdin the agent waits a short grace period before escalating to
 
 **Override:** set `CHROXY_AGENT_STDIN_CLOSE_GRACE_MS` in the pod environment
 (parsed as a base-10 integer; NaN / negative values fall back to the 500 ms
-default).  Setting `0` is allowed and disables the polite EOF — the agent
-sends `SIGTERM` immediately, matching legacy hard-kill behaviour.
+default).  Setting `0` is allowed: the agent still closes the child's stdin
+(polite EOF), but `SIGTERM` follows synchronously rather than after a grace
+delay — useful for deployments where the child is known not to honour stdin
+EOF and the grace would just be wasted shutdown latency.
 
 ---
 
