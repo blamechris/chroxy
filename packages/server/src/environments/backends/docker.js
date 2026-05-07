@@ -207,7 +207,7 @@ export class DockerBackend {
    * @param {Object} opts  - See Backend interface in types.js
    * @param {string}   opts.cmd
    * @param {string[]} [opts.args]
-   * @param {Object}   [opts.env]
+   * @param {Object.<string,string>} [opts.env]
    * @param {string}   [opts.cwd]            - Host CWD (remapped to container path)
    * @param {AbortSignal} [opts.signal]
    * @param {string}   [opts.containerUser]  - Non-root user inside the container (default: 'chroxy')

@@ -295,7 +295,7 @@
  * @param {Object} opts
  * @param {string}   opts.cmd            - Binary to execute (e.g. 'node')
  * @param {string[]} [opts.args]         - Argument list (default [])
- * @param {Object}   [opts.env]          - Extra environment variables (merged on top of container env)
+ * @param {Object.<string,string>} [opts.env] - Extra environment variables (merged on top of container env)
  * @param {string}   [opts.cwd]          - Working directory inside the environment
  * @param {AbortSignal} [opts.signal]    - Abort signal; triggers SIGTERM on the child when fired
  * @returns {object} SpawnedProcess-like handle with:
