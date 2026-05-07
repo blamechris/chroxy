@@ -1096,6 +1096,9 @@ describe('SdkSession', () => {
       const entries = []
       const listener = (entry) => entries.push(entry)
       addLogListener(listener)
+      // #3502: stdin_disabled now also emits a session-level `error` event;
+      // attach a no-op listener so EventEmitter doesn't crash on emit.
+      session.on('error', () => {})
 
       try {
         session._attachSidecarProcessListeners(proc)
@@ -1146,6 +1149,32 @@ describe('SdkSession', () => {
         'must report unknown bytes when payload omits the count')
     })
 
+    // #3502 — surface the _stdinForwardingDisabled flag to clients via a
+    // session-level `error` event so dashboards / mobile apps can render a
+    // banner ("stdin forwarding lost — restart this session") instead of
+    // staring at a hung turn.  The session-manager already proxies the
+    // `error` event into the unified `session_event` envelope, so a single
+    // emit on first signal is enough.
+    it('emits an error event with code=stdin_disabled the first time the signal fires (#3502)', async () => {
+      const { EventEmitter } = await import('events')
+
+      const proc = new EventEmitter()
+      const errorEvents = []
+      session.on('error', (e) => errorEvents.push(e))
+
+      session._attachSidecarProcessListeners(proc)
+      proc.emit('stdin_disabled')
+
+      assert.equal(errorEvents.length, 1, 'exactly one error event should fire on first stdin_disabled signal')
+      assert.equal(errorEvents[0].code, 'stdin_disabled', 'error payload should carry the machine-readable code')
+      assert.equal(errorEvents[0].recoverable, false, 'stdin disabled is unrecoverable until session restart')
+      assert.match(errorEvents[0].message, /stdin/i, 'error message should mention stdin')
+
+      // Idempotent — second emission must NOT re-fire the error event.
+      proc.emit('stdin_disabled')
+      assert.equal(errorEvents.length, 1, 'error event must fire exactly once per session')
+    })
+
     it('is idempotent — repeated calls do not stack listeners', async () => {
       // Without the guard, calling _attachSidecarProcessListeners twice on
       // the same proc would attach two warn-log handlers and emit two log
@@ -1158,6 +1187,9 @@ describe('SdkSession', () => {
       const entries = []
       const listener = (entry) => entries.push(entry)
       addLogListener(listener)
+      // #3502: stdin_disabled now also emits a session-level `error` event;
+      // attach a no-op listener so EventEmitter doesn't crash on emit.
+      session.on('error', () => {})
 
       try {
         session._attachSidecarProcessListeners(proc)

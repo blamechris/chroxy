@@ -692,10 +692,27 @@ export class SdkSession extends BaseSession {
       // method or read `_stdinForwardingDisabled` directly.
       if (this._stdinForwardingDisabled) return
       this._stdinForwardingDisabled = true
-      log.warn(
-        'Sidecar stdin forwarding is disabled — further writes will be ' +
-        'silently dropped; reconnect or restart the session to resume'
-      )
+      // #3536 review: SidecarProcess explicitly does NOT re-wire stdin on
+      // WS reconnect (see k8s.js `stdin_disabled signal` block) — once this
+      // signal fires forwarding is permanently lost for the lifetime of the
+      // session.  Recommend a session restart only; mentioning reconnect
+      // contradicts `recoverable: false` and misleads users into a path
+      // that cannot work.
+      const message = 'Sidecar stdin forwarding is disabled — further writes will be ' +
+        'silently dropped; restart this session to recover'
+      log.warn(message)
+      // #3502: surface the disabled flag to paired clients via the session
+      // `error` channel.  SessionManager._wireSessionEvents proxies `error`
+      // into the unified `session_event` envelope, so dashboards and the
+      // mobile app receive a structured frame and can render a "stdin lost
+      // — restart this session" banner instead of seeing a hung turn.
+      // Single emit per session: gated by the same _stdinForwardingDisabled
+      // short-circuit above so a flapping sidecar can't spam errors.
+      this.emit('error', {
+        code: 'stdin_disabled',
+        message,
+        recoverable: false,
+      })
     })
   }
 
