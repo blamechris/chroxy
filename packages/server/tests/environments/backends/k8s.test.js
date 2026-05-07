@@ -877,6 +877,32 @@ describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
     assert.equal(api.calls.createSecret.length, 0)
   })
 
+  // Issue #3460: Windows *relative* drive paths like `C:foo` (drive letter +
+  // colon + path without leading slash) bypass the drive-letter prefix regex
+  // guard (which requires `\` or `/` after the colon) but still produce a
+  // 1-char hostPath after the colon split. Reject these via the post-split
+  // 1-char hostPath check with the same fail-loud Error so the misparse never
+  // reaches Pod scheduling.
+  it('rejects Windows-style relative drive-letter paths (#3460)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'win-mount-rel',
+        image: 'agent:latest',
+        mounts: ['C:foo:/container'],
+      }),
+      (err) => {
+        assert.match(err.message, /Windows path/)
+        assert.ok(err.message.includes('C:foo:/container'))
+        return true
+      }
+    )
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
+  })
+
   it('still parses normal POSIX mounts after the Windows-path guard (#3388)', async () => {
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api })
