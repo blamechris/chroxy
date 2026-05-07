@@ -24,6 +24,24 @@ export interface ToastItem {
   /** #3587: optional inline recovery action. When set, the toast
    * renders an action button between the message and the close button. */
   action?: ToastAction
+  /**
+   * #3603: when true, the action button renders disabled and clicks
+   * are no-ops. Used to surface "Reconnecting…" while the WS socket
+   * is closed — without this guard, action callbacks like
+   * `grantCommunitySkillTrust` silently no-op against a closed socket
+   * and the toast dismisses with no feedback.
+   *
+   * Has no effect when `action` is unset. The toast itself is NOT
+   * dismissed by the disabled state, so once the connection comes
+   * back the operator can click the (now re-enabled) button.
+   */
+  actionDisabled?: boolean
+  /**
+   * #3603: optional override label rendered while `actionDisabled` is
+   * true. Defaults to the original `action.label` if unset, so callers
+   * who only want the disabled visual without copy change can omit it.
+   */
+  actionDisabledLabel?: string
 }
 
 export interface ToastProps {
@@ -72,7 +90,16 @@ export function Toast({ items, onDismiss }: ToastProps) {
             <button
               className="toast-action"
               data-testid={`toast-action-${item.id}`}
+              disabled={item.actionDisabled === true}
+              aria-disabled={item.actionDisabled === true ? true : undefined}
               onClick={() => {
+                // #3603: ignore clicks while the parent has flagged the
+                // action as disabled (e.g. WS reconnecting). The button
+                // also renders with the native `disabled` attribute so
+                // the click handler shouldn't fire — this is a defensive
+                // double-guard for environments that synthesize click
+                // events on disabled buttons (jsdom, some a11y tools).
+                if (item.actionDisabled === true) return
                 // #3587: clear the auto-dismiss timer first so a slow
                 // click handler doesn't race the 5s timeout into a
                 // double-dismiss.
@@ -93,7 +120,9 @@ export function Toast({ items, onDismiss }: ToastProps) {
               }}
               type="button"
             >
-              {item.action.label}
+              {item.actionDisabled === true
+                ? (item.actionDisabledLabel ?? item.action.label)
+                : item.action.label}
             </button>
           ) : null}
           <button
