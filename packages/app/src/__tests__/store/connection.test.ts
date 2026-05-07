@@ -1165,10 +1165,10 @@ describe('createSession store action', () => {
     useConnectionStore.setState({ socket: null });
   });
 
-  it('sends create_session with name only when other params omitted', () => {
+  it('sends create_session with name only when other fields omitted', () => {
     const { socket, sent } = makeMockSocket();
     useConnectionStore.setState({ socket });
-    useConnectionStore.getState().createSession('NewSession');
+    useConnectionStore.getState().createSession({ name: 'NewSession' });
 
     expect(sent).toHaveLength(1);
     expect(JSON.parse(sent[0])).toEqual({ type: 'create_session', name: 'NewSession' });
@@ -1177,7 +1177,12 @@ describe('createSession store action', () => {
   it('sends cwd, worktree, provider when provided', () => {
     const { socket, sent } = makeMockSocket();
     useConnectionStore.setState({ socket });
-    useConnectionStore.getState().createSession('S', '/work', true, 'sdk');
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      cwd: '/work',
+      worktree: true,
+      provider: 'sdk',
+    });
 
     expect(JSON.parse(sent[0])).toEqual({
       type: 'create_session',
@@ -1191,14 +1196,14 @@ describe('createSession store action', () => {
   it('forwards model and permissionMode to the wire (#3599)', () => {
     const { socket, sent } = makeMockSocket();
     useConnectionStore.setState({ socket });
-    useConnectionStore.getState().createSession(
-      'S',
-      '/work',
-      false,
-      'sdk',
-      'claude-sonnet-4-5',
-      'plan',
-    );
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      cwd: '/work',
+      worktree: false,
+      provider: 'sdk',
+      model: 'claude-sonnet-4-5',
+      permissionMode: 'plan',
+    });
 
     expect(JSON.parse(sent[0])).toEqual({
       type: 'create_session',
@@ -1213,14 +1218,14 @@ describe('createSession store action', () => {
   it('omits model and permissionMode when undefined (no behaviour change)', () => {
     const { socket, sent } = makeMockSocket();
     useConnectionStore.setState({ socket });
-    useConnectionStore.getState().createSession(
-      'S',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      cwd: undefined,
+      worktree: undefined,
+      provider: undefined,
+      model: undefined,
+      permissionMode: undefined,
+    });
 
     const payload = JSON.parse(sent[0]);
     expect(payload.model).toBeUndefined();
@@ -1233,7 +1238,14 @@ describe('createSession store action', () => {
     // The restart handler passes `session.model || undefined` — but this also
     // verifies the action itself filters falsy values, defending against any
     // future caller that forwards an empty string.
-    useConnectionStore.getState().createSession('S', '/cwd', false, 'sdk', '', '');
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      cwd: '/cwd',
+      worktree: false,
+      provider: 'sdk',
+      model: '',
+      permissionMode: '',
+    });
 
     const payload = JSON.parse(sent[0]);
     expect(payload.model).toBeUndefined();
@@ -1243,7 +1255,14 @@ describe('createSession store action', () => {
   it('no-ops when socket is not connected', () => {
     useConnectionStore.setState({ socket: null });
     // Should not throw
-    useConnectionStore.getState().createSession('S', '/cwd', false, 'sdk', 'opus', 'plan');
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      cwd: '/cwd',
+      worktree: false,
+      provider: 'sdk',
+      model: 'opus',
+      permissionMode: 'plan',
+    });
   });
 });
 
@@ -1261,10 +1280,11 @@ describe('SessionScreen handleRestartStdinSession (#3599)', () => {
       path.resolve(__dirname, '../../screens/SessionScreen.tsx'),
       'utf-8',
     );
-    // The restart handler must pass model + permissionMode (5th and 6th args)
-    // so the recreated session preserves them. Match a flexible pattern that
-    // tolerates whitespace/comments but requires both fields.
-    expect(src).toMatch(/handleRestartStdinSession[\s\S]*?createSession\([\s\S]*?session\.model[\s\S]*?session\.permissionMode/);
+    // The restart handler must pass model + permissionMode in the options
+    // object so the recreated session preserves them. Match a flexible pattern
+    // that tolerates whitespace/comments but requires both fields. (#3611
+    // refactored this from 6 positional args to a single options object.)
+    expect(src).toMatch(/handleRestartStdinSession[\s\S]*?createSession\(\{[\s\S]*?session\.model[\s\S]*?session\.permissionMode/);
   });
 });
 

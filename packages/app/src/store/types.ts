@@ -324,16 +324,31 @@ export interface ConnectionActions {
  * switch / destroy / rename / forget), follow-mode toggle, and the
  * convenience accessor for the active session's state.
  */
+/**
+ * Options accepted by {@link MultiClientSessionActions.createSession}.
+ *
+ * Mirrors the dashboard's `createSession` signature
+ * (`packages/dashboard/src/store/types.ts`) so the shape stays identical
+ * across platforms — adding a new field is a single-place change. (#3611)
+ */
+export interface CreateSessionOptions {
+  name: string;
+  cwd?: string;
+  provider?: string;
+  model?: string;
+  permissionMode?: string;
+  worktree?: boolean;
+  /**
+   * Container/dev environment id. Reserved for parity with the dashboard
+   * (which manages environments); the mobile app currently has no UI for
+   * selecting one but forwards it on the wire if a future caller passes it.
+   */
+  environmentId?: string;
+}
+
 export interface MultiClientSessionActions {
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
-  createSession: (
-    name: string,
-    cwd?: string,
-    worktree?: boolean,
-    provider?: string,
-    model?: string,
-    permissionMode?: string,
-  ) => void;
+  createSession: (opts: CreateSessionOptions) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
