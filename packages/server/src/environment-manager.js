@@ -425,6 +425,16 @@ export class EnvironmentManager extends EventEmitter {
         env.status = 'error'
         log.warn(`Environment "${env.name}" container inspect failed: ${err.message}`)
       }
+      // For backends that hold per-environment credentials in memory (e.g.
+      // K8sBackend._agentTokens), re-populate them from the canonical source
+      // so that streamCliInEnvironment() works after a server restart.
+      if (typeof this._backend.reconnectAgentToken === 'function') {
+        try {
+          await this._backend.reconnectAgentToken(env.containerId)
+        } catch (err) {
+          log.warn(`Environment "${env.name}" token refresh failed: ${err.message}`)
+        }
+      }
       // Clear stale session references — sessions don't survive server restart
       env.sessions = []
     }

@@ -15,8 +15,8 @@ import { K8sBackend } from '../../../src/environments/backends/k8s.js'
  * @param {Function} [opts.createSecret] - Override for `createNamespacedSecret` call
  * @param {Function} [opts.deleteSecret] - Override for `deleteNamespacedSecret` call
  */
-function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret } = {}) {
-  const calls = { create: [], delete: [], read: [], createSecret: [], deleteSecret: [] }
+function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret } = {}) {
+  const calls = { create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [] }
 
   const api = {
     createNamespacedPod: createPod
@@ -38,6 +38,10 @@ function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecr
     deleteNamespacedSecret: deleteSecret
       ? async (args) => { calls.deleteSecret.push(args); return deleteSecret(args) }
       : async (args) => { calls.deleteSecret.push(args); return {} },
+
+    readNamespacedSecret: readSecret
+      ? async (args) => { calls.readSecret.push(args); return readSecret(args) }
+      : async (args) => { calls.readSecret.push(args); return {} },
   }
 
   api.calls = calls
@@ -310,6 +314,373 @@ describe('K8sBackend.createEnvironment()', () => {
       () => backend.createEnvironment({ envId: 'fail', image: 'agent:latest' }),
       /API server unreachable/
     )
+  })
+
+  it('omits imagePullPolicy from the Pod spec when not configured', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-policy', image: 'agent:latest' })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(container, 'imagePullPolicy'),
+      false,
+      'imagePullPolicy must not be present when unspecified (let K8s apply its own default)'
+    )
+  })
+
+  it('sets imagePullPolicy on the container when specified via constructor', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'IfNotPresent' })
+
+    await backend.createEnvironment({ envId: 'ctor-policy', image: 'agent:latest' })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.imagePullPolicy, 'IfNotPresent')
+  })
+
+  it('sets imagePullPolicy on the container when specified via per-call opt', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'call-policy',
+      image: 'agent:latest',
+      imagePullPolicy: 'Never',
+    })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.imagePullPolicy, 'Never')
+  })
+
+  it('per-call imagePullPolicy overrides the constructor-level option', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'Always' })
+
+    await backend.createEnvironment({
+      envId: 'override-policy',
+      image: 'agent:latest',
+      imagePullPolicy: 'IfNotPresent',
+    })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.imagePullPolicy, 'IfNotPresent',
+      'per-call option must take precedence over constructor option')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — workspace mount (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — workspace mount (#3316)', () => {
+  it('mounts opts.cwd as a hostPath volume named "workspace" at /workspace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'ws-test',
+      image: 'agent:latest',
+      cwd: '/home/user/myproject',
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const mounts = body.spec.containers[0].volumeMounts
+
+    assert.ok(Array.isArray(volumes), 'spec.volumes must be an array')
+    const wsVol = volumes.find(v => v.name === 'workspace')
+    assert.ok(wsVol, 'must have a volume named "workspace"')
+    assert.equal(wsVol.hostPath.path, '/home/user/myproject', 'hostPath.path must be opts.cwd')
+    assert.equal(wsVol.hostPath.type, 'DirectoryOrCreate')
+
+    assert.ok(Array.isArray(mounts), 'container.volumeMounts must be an array')
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount, 'volumeMounts must include the workspace volume')
+    assert.equal(wsMount.mountPath, '/workspace')
+  })
+
+  it('omits volumes and volumeMounts when opts.cwd is not provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-cwd', image: 'agent:latest' })
+
+    const { body } = api.calls.create[0]
+    assert.equal(body.spec.volumes, undefined, 'spec.volumes must be absent when no cwd')
+    assert.equal(
+      body.spec.containers[0].volumeMounts, undefined,
+      'volumeMounts must be absent when no cwd'
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — resource limits (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
+  it('sets resources.limits and resources.requests when memoryLimit is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'mem-only',
+      image: 'agent:latest',
+      memoryLimit: '2Gi',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(resources, 'container.resources must be present')
+    assert.equal(resources.limits.memory, '2Gi')
+    assert.equal(resources.requests.memory, '2Gi')
+    assert.equal(resources.limits.cpu, undefined, 'cpu must not be set when cpuLimit is absent')
+  })
+
+  it('sets resources.limits and resources.requests when cpuLimit is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'cpu-only',
+      image: 'agent:latest',
+      cpuLimit: '2',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(resources, 'container.resources must be present')
+    assert.equal(resources.limits.cpu, '2')
+    assert.equal(resources.requests.cpu, '2')
+    assert.equal(resources.limits.memory, undefined, 'memory must not be set when memoryLimit is absent')
+  })
+
+  it('sets both memory and cpu limits when both are provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'both-limits',
+      image: 'agent:latest',
+      memoryLimit: '512Mi',
+      cpuLimit: '0.5',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '512Mi')
+    assert.equal(resources.limits.cpu, '0.5')
+    assert.equal(resources.requests.memory, '512Mi')
+    assert.equal(resources.requests.cpu, '0.5')
+  })
+
+  it('normalises Docker-style memory suffix "g" to "Gi"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'mem-g',
+      image: 'agent:latest',
+      memoryLimit: '2g',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '2Gi', '"2g" must be normalised to "2Gi"')
+  })
+
+  it('normalises Docker-style memory suffix "m" to "Mi"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'mem-m',
+      image: 'agent:latest',
+      memoryLimit: '512m',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '512Mi', '"512m" must be normalised to "512Mi"')
+  })
+
+  it('omits container.resources when neither memoryLimit nor cpuLimit is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-limits', image: 'agent:latest' })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.resources, undefined, 'resources must be absent when no limits are set')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — additional mounts (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
+  it('translates opts.mounts into hostPath volumes and volumeMounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'extra-mounts',
+      image: 'agent:latest',
+      mounts: [
+        '/host/config:/etc/app-config',
+        '/host/data:/data',
+      ],
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const mounts = body.spec.containers[0].volumeMounts
+
+    assert.ok(Array.isArray(volumes))
+    const v0 = volumes.find(v => v.name === 'extra-vol-0')
+    assert.ok(v0, 'extra-vol-0 must exist')
+    assert.equal(v0.hostPath.path, '/host/config')
+
+    const v1 = volumes.find(v => v.name === 'extra-vol-1')
+    assert.ok(v1, 'extra-vol-1 must exist')
+    assert.equal(v1.hostPath.path, '/host/data')
+
+    const m0 = mounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m0)
+    assert.equal(m0.mountPath, '/etc/app-config')
+
+    const m1 = mounts.find(m => m.name === 'extra-vol-1')
+    assert.ok(m1)
+    assert.equal(m1.mountPath, '/data')
+  })
+
+  it('sets readOnly: true for ":ro" mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'ro-mount',
+      image: 'agent:latest',
+      mounts: ['/host/secrets:/run/secrets:ro'],
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const m = mounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m)
+    assert.equal(m.readOnly, true)
+  })
+
+  it('does not set readOnly for rw mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'rw-mount',
+      image: 'agent:latest',
+      mounts: ['/host/data:/data'],
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const m = mounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m)
+    assert.equal(m.readOnly, undefined)
+  })
+
+  it('combines workspace volume from cwd with extra mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'combined',
+      image: 'agent:latest',
+      cwd: '/home/user/project',
+      mounts: ['/host/certs:/certs:ro'],
+    })
+
+    const volumes = api.calls.create[0].body.spec.volumes
+    assert.ok(volumes.find(v => v.name === 'workspace'))
+    assert.ok(volumes.find(v => v.name === 'extra-vol-0'))
+    assert.equal(volumes.length, 2)
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    assert.ok(mounts.find(m => m.name === 'workspace'))
+    assert.ok(mounts.find(m => m.name === 'extra-vol-0'))
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — forwardPorts (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — forwardPorts (#3316)', () => {
+  it('adds extra containerPort entries from opts.forwardPorts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'ports-test',
+      image: 'agent:latest',
+      forwardPorts: [3000, 8080],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 3000))
+    assert.ok(ports.some(p => p.containerPort === 8080))
+  })
+
+  it('always includes the built-in AGENT_PORT (7681) even when forwardPorts is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'agent-port-present',
+      image: 'agent:latest',
+      forwardPorts: [9000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT 7681 must always be present')
+  })
+
+  it('deduplicates AGENT_PORT when forwardPorts includes it', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'dedup-port',
+      image: 'agent:latest',
+      forwardPorts: [7681, 4000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    const agentPorts = ports.filter(p => p.containerPort === 7681)
+    assert.equal(agentPorts.length, 1, 'AGENT_PORT must not be duplicated')
+  })
+
+  it('accepts "hostPort:containerPort" string format', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'colon-port',
+      image: 'agent:latest',
+      forwardPorts: ['9000:8080'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 8080), 'containerPort 8080 must be present')
+    assert.equal(ports.find(p => p.containerPort === 8080).hostPort, undefined,
+      'hostPort must not be set in the Pod spec (not supported at Pod level)')
+  })
+
+  it('pod spec has only AGENT_PORT when forwardPorts is absent', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-ports', image: 'agent:latest' })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'only AGENT_PORT when forwardPorts is absent')
+    assert.equal(ports[0].containerPort, 7681)
+    assert.equal(ports[0].name, 'agent')
   })
 })
 
@@ -687,13 +1058,29 @@ describe('K8sBackend.streamCliInEnvironment()', () => {
     assert.deepEqual(exitCodes, [-1])
   })
 
-  it('throws synchronously when agentToken is missing', () => {
-    const { backend } = makeBackendWithFakeWs()
+  it('emits exit(-1) when agentToken is missing (no Secret either)', async () => {
+    // After the lazy-fetch refactor the missing-token path is asynchronous:
+    // _readAgentToken is called, finds no CHROXY_AGENT_TOKEN in the Secret
+    // response, returns null, and the Promise chain emits exit(-1).
+    const api = createMockApi({
+      // Default mock returns {}, so data.CHROXY_AGENT_TOKEN is undefined → null
+      readSecret: async () => ({}),
+    })
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
 
-    assert.throws(
-      () => backend.streamCliInEnvironment('pod-x', { cmd: 'node', args: [] }),
-      /agentToken is required/
-    )
+    const proc = backend.streamCliInEnvironment('pod-x', { cmd: 'node', args: [] })
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.deepEqual(exitCodes, [-1],
+      'missing token must drive exit(-1) asynchronously via the lazy-fetch path')
+    proc.stdout.resume(); proc.stderr.resume()
   })
 
   it('kills by closing WS when abort signal fires', async () => {
@@ -770,12 +1157,21 @@ describe('K8sBackend.execInEnvironment()', () => {
     await assert.rejects(execPromise, /command failed/)
   })
 
-  it('rejects when agentToken is missing', async () => {
-    const { backend } = makeBackendCapturing()
+  it('rejects when agentToken is missing (no Secret either)', async () => {
+    // After the lazy-fetch refactor the missing-token path is async: the
+    // rejection surfaces as exit(-1) → execInEnvironment rejects.
+    const api = createMockApi({
+      readSecret: async () => ({}),
+    })
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
 
     await assert.rejects(
-      () => backend.execInEnvironment('pod-x', { cmd: 'echo', args: [] }),
-      /agentToken is required/
+      () => backend.execInEnvironment('pod-x', { cmd: 'echo', args: [], timeout: 500 }),
+      /Command exited with code -1/
     )
   })
 })
@@ -984,6 +1380,8 @@ describe('K8sBackend agentToken auto-registration', () => {
   it('destroyEnvironment removes the registered token', async () => {
     const api = createMockApi({
       readPod: async () => { throw make404Error() },
+      // After destroy the Secret is gone — 404 on readNamespacedSecret
+      readSecret: async () => { throw make404Error() },
     })
     const backend = new K8sBackend({
       _coreV1Api: api,
@@ -993,11 +1391,17 @@ describe('K8sBackend agentToken auto-registration', () => {
     const { containerId } = await backend.createEnvironment({ envId: 'gone', image: 'ignored' })
     await backend.destroyEnvironment(containerId)
 
-    // After destroy, calling streamCliInEnvironment without an explicit token must fail
-    assert.throws(
-      () => backend.streamCliInEnvironment(containerId, { cmd: 'node', args: [] }),
-      /agentToken is required/,
-    )
+    // After destroy, calling streamCliInEnvironment without an explicit token must
+    // fail. The lazy Secret fetch returns null (Secret was deleted), so the async
+    // chain emits exit(-1).
+    const proc = backend.streamCliInEnvironment(containerId, { cmd: 'node', args: [] })
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setTimeout(r, 20))
+    assert.deepEqual(exitCodes, [-1],
+      'after destroyEnvironment, missing Secret must drive exit(-1)')
+    proc.stdout.resume(); proc.stderr.resume()
   })
 
   it('destroyEnvironment derives the Secret name from podName when none is passed', async () => {
@@ -1262,7 +1666,6 @@ describe('K8sBackend Phase-1 stubs', () => {
     ['removeImage', b => b.removeImage('tag')],
     ['listEnvironments', b => b.listEnvironments()],
     ['commitEnvironment', b => b.commitEnvironment('id', 'tag')],
-    ['renameEnvironment', b => b.renameEnvironment('id', 'new')],
     ['restoreEnvironment', b => b.restoreEnvironment({})],
   ]
 
@@ -1279,6 +1682,13 @@ describe('K8sBackend Phase-1 stubs', () => {
       )
     })
   }
+
+  it('renameEnvironment() is a no-op — resolves without I/O (K8s pods have unique names)', async () => {
+    const backend = makeBackend()
+    // Must resolve, not reject — the restore flow calls this unconditionally and
+    // a rejection would abort the restore.  See Backend interface in types.js.
+    await assert.doesNotReject(() => backend.renameEnvironment('pod-id', 'new-name'))
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1782,5 +2192,211 @@ describe('SidecarProcess session_lost reasons', () => {
 
     assert.deepEqual(exitCodes, [-2],
       'buffer_overflow session_lost must surface as exit(-2) (unrecoverable)')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._readAgentToken() — Secret-backed token recovery (#3339)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._readAgentToken()', () => {
+  it('fetches the token from the Secret and caches it in _agentTokens', async () => {
+    const token = 'abc123-test-token'
+    // K8s API returns .data values as base64
+    const encoded = Buffer.from(token).toString('base64')
+
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const result = await backend._readAgentToken('chroxy-env-x', 'default')
+    assert.equal(result, token, 'should decode base64 and return the plaintext token')
+    assert.equal(backend._agentTokens.get('chroxy-env-x'), token,
+      '_agentTokens must be populated after fetch')
+  })
+
+  it('returns null and does not throw when Secret is not found (404)', async () => {
+    const api = createMockApi({
+      readSecret: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const result = await backend._readAgentToken('chroxy-env-missing', 'default')
+    assert.equal(result, null, 'should return null for 404')
+    assert.equal(backend._agentTokens.has('chroxy-env-missing'), false,
+      'should not cache on 404')
+  })
+
+  it('re-throws non-404 API errors', async () => {
+    const apiErr = Object.assign(new Error('Forbidden'), { code: 403 })
+    const api = createMockApi({
+      readSecret: async () => { throw apiErr },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend._readAgentToken('chroxy-env-perm', 'default'),
+      /Forbidden/,
+      'non-404 API errors must propagate'
+    )
+  })
+
+  it('returns null when Secret has no CHROXY_AGENT_TOKEN field', async () => {
+    const api = createMockApi({
+      readSecret: async () => ({ data: {} }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const result = await backend._readAgentToken('chroxy-env-empty', 'default')
+    assert.equal(result, null)
+  })
+
+  it('caches token so second call does not hit the API', async () => {
+    const token = 'cached-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let apiCalls = 0
+
+    const api = createMockApi({
+      readSecret: async () => { apiCalls++; return { data: { CHROXY_AGENT_TOKEN: encoded } } },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend._readAgentToken('chroxy-env-cache', 'default')
+    // Manually verify the map is populated so the second call short-circuits
+    assert.equal(backend._agentTokens.get('chroxy-env-cache'), token)
+    // The method itself does NOT short-circuit — it always reads the Secret.
+    // Caching is used by streamCliInEnvironment (|| tokenOrPromise chain).
+    assert.equal(apiCalls, 1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.reconnectAgentToken() (#3339)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.reconnectAgentToken()', () => {
+  it('returns true and populates _agentTokens when Secret exists', async () => {
+    const token = 'reconnect-token'
+    const encoded = Buffer.from(token).toString('base64')
+
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const ok = await backend.reconnectAgentToken('chroxy-env-r1')
+    assert.equal(ok, true, 'should return true when Secret found')
+    assert.equal(backend._agentTokens.get('chroxy-env-r1'), token,
+      '_agentTokens must be populated')
+  })
+
+  it('returns false when Secret does not exist (404)', async () => {
+    const api = createMockApi({
+      readSecret: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const ok = await backend.reconnectAgentToken('chroxy-env-r2')
+    assert.equal(ok, false, 'should return false for 404')
+  })
+
+  it('propagates non-404 API errors', async () => {
+    const apiErr = Object.assign(new Error('ServiceUnavailable'), { code: 503 })
+    const api = createMockApi({
+      readSecret: async () => { throw apiErr },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      () => backend.reconnectAgentToken('chroxy-env-r3'),
+      /ServiceUnavailable/
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend agentToken lazy-load via Secret on cache miss (#3339)
+// After a server restart _agentTokens is empty; streamCliInEnvironment must
+// transparently fetch the token from the K8s Secret and succeed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend agentToken lazy-load after server restart (#3339)', () => {
+  it('fetches token from Secret when cache is empty after restart', async () => {
+    const token = 'restart-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let dialCalledWith = null
+
+    const { ws } = createFakeWs()
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: (_url, tok) => { dialCalledWith = tok; return Promise.resolve(ws) },
+    })
+
+    // Simulate server restart: _agentTokens is empty, no opts.agentToken
+    assert.equal(backend._agentTokens.size, 0, 'precondition: cache empty on restart')
+
+    const proc = backend.streamCliInEnvironment('chroxy-env-lazy', { cmd: 'node', args: [] })
+
+    // Wait for async token fetch + dial to complete
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.equal(dialCalledWith, token,
+      'dial must use the token fetched from the Secret')
+    assert.equal(backend._agentTokens.get('chroxy-env-lazy'), token,
+      'token must be cached after lazy fetch')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('emits exit(-1) when Secret is not found (404) after restart', async () => {
+    const { ws } = createFakeWs()
+    const api = createMockApi({
+      readSecret: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('chroxy-env-gone', { cmd: 'node', args: [] })
+
+    const exitCodes = []
+    proc.on('exit', (code) => exitCodes.push(code))
+
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.deepEqual(exitCodes, [-1],
+      'Secret-not-found must surface as exit(-1) (same as any pre-session failure)')
+  })
+
+  it('after reconnect(), streamCliInEnvironment succeeds without opts.agentToken', async () => {
+    const token = 'post-reconnect-token'
+    const encoded = Buffer.from(token).toString('base64')
+    let dialCalledWith = null
+
+    const { ws } = createFakeWs()
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      _dialWs: (_url, tok) => { dialCalledWith = tok; return Promise.resolve(ws) },
+    })
+
+    // Simulate EnvironmentManager.reconnect() calling reconnectAgentToken
+    await backend.reconnectAgentToken('chroxy-env-post-rc')
+
+    // Now streamCliInEnvironment must succeed without any explicit agentToken
+    backend.streamCliInEnvironment('chroxy-env-post-rc', { cmd: 'node', args: [] })
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(dialCalledWith, token,
+      'after reconnectAgentToken, streamCliInEnvironment uses the cached token')
+
+    ws.close?.()
   })
 })

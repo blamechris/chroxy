@@ -2570,6 +2570,31 @@ describe('skills-loader', () => {
         assert.equal(_isCommunityNamespace(null, '/skills').isCommunity, false)
         assert.equal(_isCommunityNamespace('/skills/community/alice/x.md', null).isCommunity, false)
       })
+
+      // #3301: case-normalisation on HFS+/APFS/NTFS
+      const isCaseInsensitivePlatformCI = process.platform === 'darwin' || process.platform === 'win32'
+
+      it(
+        'detects Community/ (capital C) as community namespace on case-insensitive platforms',
+        { skip: !isCaseInsensitivePlatformCI },
+        () => {
+          const dirReal = '/skills'
+          const result = _isCommunityNamespace('/skills/Community/alice/x.md', dirReal)
+          assert.equal(result.isCommunity, true)
+          assert.equal(result.author, 'alice')
+        },
+      )
+
+      it(
+        'detects COMMUNITY/ (all-caps) as community namespace on case-insensitive platforms',
+        { skip: !isCaseInsensitivePlatformCI },
+        () => {
+          const dirReal = '/skills'
+          const result = _isCommunityNamespace('/skills/COMMUNITY/alice/x.md', dirReal)
+          assert.equal(result.isCommunity, true)
+          assert.equal(result.author, 'alice')
+        },
+      )
     })
 
     // ── Loader integration tests ──
@@ -2795,5 +2820,140 @@ describe('skills-loader', () => {
       assert.ok(!names.includes('config'), '.git/config must not be loaded as a skill')
       assert.ok(!names.includes('bad'), 'node_modules/bad.md must not be loaded as a skill')
     })
+
+    // ── Two-pass path tests (maxTotalBytes set → _collectCandidates invoked) ──
+    // The four tests below mirror the single-pass equivalents above but pass
+    // `maxTotalBytes` to activate the two-pass `_collectCandidates` code path
+    // (lines 510–536 cache-fast-path and lines 721–746 cache-miss-path). A
+    // regression in either copy would be caught here but not by the single-pass
+    // tests. The budget is set generously (1 MiB) so it never cuts skills
+    // from the result — we are testing gate logic, not budget enforcement.
+
+    it('two-pass path: pending community skill excluded from default-active set', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Community skill\n\nBody.\n')
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        includeInactive: false,
+        maxTotalBytes: 1024 * 1024,
+      })
+
+      assert.equal(skills.length, 0, 'pending community skill must not appear in default-active set (two-pass path)')
+    })
+
+    it('two-pass path: trustStore.inspect() not called for pending community skill', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Community skill\n\nBody.\n')
+
+      let inspectCallCount = 0
+      const stubTrustStore = {
+        mode: 'audit',
+        inspect: (_path, _body) => {
+          inspectCallCount++
+          return null
+        },
+      }
+
+      loadActiveSkills(communityDir, {
+        communityTrustChecker: () => false,
+        trustStore: stubTrustStore,
+        includeInactive: true,
+        maxTotalBytes: 1024 * 1024,
+      })
+
+      assert.equal(inspectCallCount, 0, 'inspect() must not be called for pending community skills (two-pass path)')
+    })
+
+    it('two-pass path (cache-miss): trusted community skill loads with trustState:trusted', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      writeFileSync(join(communityDir, 'community', 'alice', 'test.md'), '# Trusted skill\n\nBody.\n')
+
+      let inspectCallCount = 0
+      const stubTrustStore = {
+        mode: 'audit',
+        inspect: (_path, _body) => {
+          inspectCallCount++
+          return null
+        },
+      }
+
+      // No parseCache supplied → cache is always cold → cache-miss branch runs.
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        trustStore: stubTrustStore,
+        maxTotalBytes: 1024 * 1024,
+      })
+
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'test')
+      assert.equal(skills[0].active, true)
+      assert.equal(skills[0].trustState, 'trusted')
+      assert.equal(skills[0].communityAuthor, 'alice')
+      assert.equal(inspectCallCount, 1, 'inspect() must run for trusted community skills (two-pass cache-miss path)')
+    })
+
+    it('two-pass path (cache-fast-path): trusted community skill loads with trustState:trusted when parseCache is pre-populated', () => {
+      mkdirSync(join(communityDir, 'community', 'alice'), { recursive: true })
+      const skillContent = '# Cached trusted skill\n\nBody.\n'
+      writeFileSync(join(communityDir, 'community', 'alice', 'cached.md'), skillContent)
+
+      // Run once without a parseCache to populate on-disk state.
+      const warmCache = new Map()
+      loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        maxTotalBytes: 1024 * 1024,
+        parseCache: warmCache,
+      })
+
+      // warmCache is now populated. A second call with the same Map hits the
+      // cache-fast-path (lines 486–576) in the two-pass loop.
+      let inspectCallCount = 0
+      const stubTrustStore = {
+        mode: 'audit',
+        inspect: (_path, _body) => {
+          inspectCallCount++
+          return null
+        },
+      }
+
+      const skills = loadActiveSkills(communityDir, {
+        communityTrustChecker: () => true,
+        trustStore: stubTrustStore,
+        maxTotalBytes: 1024 * 1024,
+        parseCache: warmCache,
+      })
+
+      assert.equal(skills.length, 1)
+      assert.equal(skills[0].name, 'cached')
+      assert.equal(skills[0].active, true)
+      assert.equal(skills[0].trustState, 'trusted')
+      assert.equal(skills[0].communityAuthor, 'alice')
+      assert.equal(inspectCallCount, 1, 'inspect() must run for trusted community skills (two-pass cache-fast-path)')
+    })
+
+    // #3301: walk case-normalisation
+    it(
+      'walk discovers Community/ (capital C) as community namespace on case-insensitive platforms',
+      { skip: !(process.platform === 'darwin' || process.platform === 'win32') },
+      () => {
+        // On HFS+/APFS/NTFS the directory 'Community' (capital C) names the
+        // same inode as 'community' — the walk must match it case-insensitively.
+        mkdirSync(join(communityDir, 'Community', 'alice'), { recursive: true })
+        writeFileSync(
+          join(communityDir, 'Community', 'alice', 'caps.md'),
+          '# Caps skill\n\nBody.\n',
+        )
+
+        const skills = loadActiveSkills(communityDir, {
+          communityTrustChecker: () => true,
+        })
+
+        assert.equal(skills.length, 1, 'skill under Community/ must be discovered')
+        assert.equal(skills[0].name, 'caps')
+        assert.equal(skills[0].trustState, 'trusted')
+        assert.equal(skills[0].communityAuthor, 'alice')
+      },
+    )
   })
 })

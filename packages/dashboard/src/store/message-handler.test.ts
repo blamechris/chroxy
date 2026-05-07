@@ -198,6 +198,30 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('session_restore_failed dispatch', () => {
+    it('surfaces failed persisted sessions through addServerError', () => {
+      handleMessage(
+        {
+          type: 'session_restore_failed',
+          sessionId: 'sess-bad',
+          name: 'Codex-Test',
+          provider: 'codex',
+          model: 'opus-4-6',
+          errorCode: 'MODEL_NOT_SUPPORTED_BY_PROVIDER',
+          errorMessage: 'Model "opus-4-6" is not supported by provider "codex"',
+          originalHistoryPreserved: true,
+          historyLength: 2,
+        },
+        ctx() as any,
+      )
+
+      const state = store.getState() as any
+      expect(state.serverErrors).toEqual([
+        'Failed to restore Codex-Test: Model "opus-4-6" is not supported by provider "codex"',
+      ])
+    })
+  })
+
   describe('stream_delta dispatch', () => {
     // Fake timers for the 100ms delta batcher — runAllTimers() flushes
     // synchronously instead of waiting on real wall-clock setTimeout(150).
@@ -1484,6 +1508,69 @@ describe('dashboard message-handler dispatch', () => {
         const state = (store.getState() as any).sessionStates.s1
         expect(state.pendingCommunitySkills).toBeUndefined()
       })
+
+      // #3310: description and path are now captured from the wire payload.
+      it('captures description and path when present in the message', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({
+          type: 'skill_trust_request',
+          skillName: 'alice-skill',
+          author: 'alice',
+          description: 'Does useful things',
+          path: '/home/user/.chroxy/skills/community/alice/alice-skill.md',
+          sessionId: 's1',
+        }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{
+          name: 'alice-skill',
+          author: 'alice',
+          description: 'Does useful things',
+          path: '/home/user/.chroxy/skills/community/alice/alice-skill.md',
+        }])
+      })
+
+      it('omits description / path from entry when absent in the message', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_request', skillName: 'alice-skill', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        const entry = state.pendingCommunitySkills[0]
+        expect(entry.description).toBeUndefined()
+        expect(entry.path).toBeUndefined()
+      })
+
+      it('omits description / path when they are empty strings', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty } },
+        }))
+        setStore(store)
+        handleMessage({
+          type: 'skill_trust_request',
+          skillName: 'alice-skill',
+          author: 'alice',
+          description: '',
+          path: '',
+          sessionId: 's1',
+        }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        const entry = state.pendingCommunitySkills[0]
+        expect(entry.description).toBeUndefined()
+        expect(entry.path).toBeUndefined()
+      })
     })
 
     // #3298: community trust granted — remove from pendingCommunitySkills.
@@ -1538,6 +1625,24 @@ describe('dashboard message-handler dispatch', () => {
         const state = (store.getState() as any).sessionStates.s1
         // List should be unchanged (no valid match)
         expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-a', author: 'alice' }])
+      })
+
+      it('does not remove a same-name entry from a different author', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...empty, pendingCommunitySkills: [
+              { name: 'skill-x', author: 'alice' },
+              { name: 'skill-x', author: 'bob' },
+            ] },
+          },
+        }))
+        setStore(store)
+        handleMessage({ type: 'skill_trust_granted', skillName: 'skill-x', author: 'alice', sessionId: 's1' }, ctx() as any)
+
+        const state = (store.getState() as any).sessionStates.s1
+        expect(state.pendingCommunitySkills).toEqual([{ name: 'skill-x', author: 'bob' }])
       })
     })
 

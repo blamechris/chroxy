@@ -30,13 +30,13 @@ const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/cl
 
 // Per-method deferral tracking: each stub points to the issue/phase that owns it.
 // Keep this in sync with the Backend interface (types.js) and the K8s phase plan in #3191.
+// Note: renameEnvironment is intentionally absent — it is a documented no-op on K8s (see types.js).
 const NOT_IMPLEMENTED_REASON = {
   createComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   destroyComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   removeImage: 'N/A for K8s — image lifecycle is owned by the cluster registry/CRI',
   listEnvironments: 'deferred to Phase 2',
   commitEnvironment: 'deferred to Phase 2',
-  renameEnvironment: 'no-op pending #3313',
   restoreEnvironment: 'deferred to Phase 2',
 }
 
@@ -73,6 +73,10 @@ export class K8sBackend {
    * @param {boolean} [opts.inCluster]                  - Force in-cluster auth (default: auto-detect via KUBERNETES_SERVICE_HOST)
    * @param {string}  [opts.kubeconfigPath]             - Path to kubeconfig file (overrides default search)
    * @param {string}  [opts.sidecarImage]               - Sidecar image to use in createEnvironment (default: chroxy-pod-agent:latest)
+   * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - imagePullPolicy applied to all
+   *   containers in the Pod spec. When unset the field is omitted and Kubernetes applies its own default
+   *   ('Always' for :latest tags, 'IfNotPresent' otherwise). Set to 'IfNotPresent' for air-gapped
+   *   clusters or local kind-based CI where images are loaded directly into the cluster.
    * @param {'portforward'|'clusterip'} [opts.connectMode='portforward'] - How to reach the sidecar
    * @param {object}  [opts._coreV1Api]                 - Injected CoreV1Api for testing
    * @param {object}  [opts._portForward]               - Injected PortForward for testing
@@ -82,12 +86,13 @@ export class K8sBackend {
    * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
-  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage,
+  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, imagePullPolicy,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
+    this._imagePullPolicy = imagePullPolicy || null
     this._connectMode = connectMode || 'portforward'
 
     if (_coreV1Api) {
@@ -158,11 +163,36 @@ export class K8sBackend {
    * Returns as soon as `createNamespacedPod` resolves — the Pod has been accepted
    * by the API server but may not yet be scheduled or Running.
    *
+   * Workspace mount strategy — hostPath:
+   *   `opts.cwd` is mounted into the Pod as a `hostPath` volume at `/workspace`.
+   *   This is the simplest strategy for local clusters (kind, minikube, Docker
+   *   Desktop) where the Node running the Pod shares the host filesystem.  For
+   *   production clusters where Pods run on remote nodes the host path will not
+   *   exist; operators should provision a PVC pre-populated with the workspace and
+   *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
+   *   must be able to read the path provided in opts.cwd from its local filesystem.
+   *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
+   * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
+   * @param {string}   [opts.memoryLimit]  - K8s memory quantity string (e.g. "2Gi").
+   *   Applied to both `resources.limits.memory` and `resources.requests.memory`.
+   *   Accepts Docker-style suffixes ("g"/"m") and standard K8s suffixes ("Gi"/"Mi").
+   * @param {string}   [opts.cpuLimit]     - K8s CPU quantity string (e.g. "2" or "500m").
+   *   Applied to both `resources.limits.cpu` and `resources.requests.cpu`.
+   *   A plain integer or float (e.g. "2", "0.5") is valid K8s CPU quantity syntax.
+   * @param {number[]|string[]} [opts.forwardPorts] - Extra ports to expose from the container
+   *   (in addition to the built-in AGENT_PORT).  Each value may be a bare port number
+   *   or a "hostPort:containerPort" string; only the containerPort is used in the Pod spec.
+   * @param {string[]} [opts.mounts]       - Additional volume mounts in Docker-style
+   *   "hostPath:containerPath[:ro]" format.  Each entry is translated into a
+   *   `hostPath` volume + corresponding `volumeMount`.  The volume name is derived
+   *   from the entry index ("extra-vol-0", "extra-vol-1", …).
    * @param {Object}   [opts.containerEnv] - Extra environment variables
    * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
+   * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
+   *   container imagePullPolicy. Falls back to the constructor-level option when unset.
    * @returns {Promise<{ containerId: string, containerCliPath: string, agentToken: string, secretName: string }>}
    *   containerId  — the Pod name (used as handle on subsequent calls)
    *   containerCliPath — hardcoded default; sidecar-based discovery is future work
@@ -170,7 +200,11 @@ export class K8sBackend {
    *   secretName   — Secret name (stored by caller so destroyEnvironment can delete it)
    */
   async createEnvironment(opts) {
-    const { envId, containerEnv, namespace } = opts
+    const {
+      envId, cwd, containerEnv, namespace,
+      memoryLimit, cpuLimit, forwardPorts, mounts,
+      imagePullPolicy: callImagePullPolicy,
+    } = opts
     const ns = namespace || this._namespace
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
@@ -223,7 +257,120 @@ export class K8sBackend {
       }
     }
 
-    // 4. Create the Pod
+    // 4. Resolve imagePullPolicy: per-call opt > constructor opt > omit (K8s default)
+    const imagePullPolicy = callImagePullPolicy || this._imagePullPolicy
+
+    // 4. Build volumes + volumeMounts
+    // 4a. Workspace: mount opts.cwd as /workspace via hostPath.
+    //     Requirement: the K8s node must be able to read opts.cwd from its local
+    //     filesystem.  Satisfied automatically for single-node clusters (kind,
+    //     minikube, Docker Desktop).  For multi-node clusters operators must ensure
+    //     the path exists on the scheduled node or use a PVC passed via opts.mounts.
+    const volumes = []
+    const volumeMounts = []
+
+    if (cwd) {
+      volumes.push({
+        name: 'workspace',
+        hostPath: { path: cwd, type: 'DirectoryOrCreate' },
+      })
+      volumeMounts.push({
+        name: 'workspace',
+        mountPath: '/workspace',
+      })
+    }
+
+    // 4b. Additional mounts: Docker-style "hostPath:containerPath[:ro]" strings.
+    if (mounts && mounts.length > 0) {
+      for (let i = 0; i < mounts.length; i++) {
+        const parsed = _parseMountString(mounts[i])
+        if (!parsed) {
+          log.warn(`createEnvironment: ignoring unparseable mount entry "${mounts[i]}"`)
+          continue
+        }
+        const volName = `extra-vol-${i}`
+        volumes.push({
+          name: volName,
+          hostPath: { path: parsed.hostPath, type: 'DirectoryOrCreate' },
+        })
+        const vm = { name: volName, mountPath: parsed.containerPath }
+        if (parsed.readOnly) vm.readOnly = true
+        volumeMounts.push(vm)
+      }
+    }
+
+    // 5. Build ports list: AGENT_PORT is always present; forwardPorts adds more.
+    const ports = [{ containerPort: AGENT_PORT, name: 'agent' }]
+    if (forwardPorts && forwardPorts.length > 0) {
+      for (const entry of forwardPorts) {
+        // Accept bare port number or "hostPort:containerPort" strings.
+        const containerPort = _parseContainerPort(entry)
+        if (containerPort && containerPort !== AGENT_PORT) {
+          ports.push({ containerPort })
+        }
+      }
+    }
+
+    // 6. Build resource limits/requests.
+    //    Convert Docker-style suffixes (g → Gi, m → Mi) to K8s quantity strings.
+    //    A plain integer/float string (e.g. "2", "0.5") is already valid K8s CPU syntax.
+    const resources = {}
+    if (memoryLimit || cpuLimit) {
+      const limits = {}
+      const requests = {}
+      if (memoryLimit) {
+        const mem = _normaliseMemoryQuantity(memoryLimit)
+        limits.memory = mem
+        requests.memory = mem
+      }
+      if (cpuLimit) {
+        limits.cpu = String(cpuLimit)
+        requests.cpu = String(cpuLimit)
+      }
+      resources.limits = limits
+      resources.requests = requests
+    }
+
+    // 7. Assemble container spec
+    const containerSpec = {
+      name: 'agent',
+      image: sidecarImage,
+      env,
+      ports,
+      livenessProbe: {
+        httpGet: { path: '/healthz', port: AGENT_PORT },
+        initialDelaySeconds: 5,
+        periodSeconds: 10,
+      },
+      readinessProbe: {
+        httpGet: { path: '/healthz', port: AGENT_PORT },
+        initialDelaySeconds: 2,
+        periodSeconds: 5,
+      },
+    }
+
+    if (imagePullPolicy) {
+      containerSpec.imagePullPolicy = imagePullPolicy
+    }
+
+    if (volumeMounts.length > 0) {
+      containerSpec.volumeMounts = volumeMounts
+    }
+
+    if (Object.keys(resources).length > 0) {
+      containerSpec.resources = resources
+    }
+
+    // 8. Assemble Pod spec
+    const podSpec = {
+      restartPolicy: 'Never',
+      containers: [containerSpec],
+    }
+
+    if (volumes.length > 0) {
+      podSpec.volumes = volumes
+    }
+
     const pod = {
       apiVersion: 'v1',
       kind: 'Pod',
@@ -234,27 +381,7 @@ export class K8sBackend {
           'chroxy-env-id': envId,
         },
       },
-      spec: {
-        restartPolicy: 'Never',
-        containers: [
-          {
-            name: 'agent',
-            image: sidecarImage,
-            env,
-            ports: [{ containerPort: AGENT_PORT, name: 'agent' }],
-            livenessProbe: {
-              httpGet: { path: '/healthz', port: AGENT_PORT },
-              initialDelaySeconds: 5,
-              periodSeconds: 10,
-            },
-            readinessProbe: {
-              httpGet: { path: '/healthz', port: AGENT_PORT },
-              initialDelaySeconds: 2,
-              periodSeconds: 5,
-            },
-          },
-        ],
-      },
+      spec: podSpec,
     }
 
     log.info(`Creating Pod ${podName} in namespace ${ns}`)
@@ -504,17 +631,14 @@ export class K8sBackend {
       hostCwd,
     } = opts
     const ns = namespace || this._namespace
-    const agentToken = opts.agentToken || this._agentTokens.get(podName)
 
-    if (!agentToken) {
-      // Phrasing kept compatible with the existing /agentToken is required/
-      // assertion. The token is normally registered by createEnvironment();
-      // tests that bypass that path can still pass `opts.agentToken` directly.
-      throw new Error(
-        `K8sBackend.streamCliInEnvironment: agentToken is required for Pod "${podName}" ` +
-        '(register via createEnvironment(), or pass opts.agentToken)'
-      )
-    }
+    // Prefer explicit token (test seam), fall back to the in-memory cache, and
+    // lazily fetch from the K8s Secret when neither is available (e.g. after a
+    // server restart that cleared _agentTokens). The lazy path is async, so we
+    // wrap the entire dial in a Promise and let it proceed in the background.
+    const tokenOrPromise = opts.agentToken
+      || this._agentTokens.get(podName)
+      || this._readAgentToken(podName, ns)
 
     // Remap host cli.js path to container path, mirroring DockerBackend.
     const containerArgs = [...args]
@@ -541,14 +665,27 @@ export class K8sBackend {
     } = this
     const proc = new SidecarProcess({ reconnectDelays, maxRetries, setTimeoutImpl, clearTimeoutImpl })
 
-    // Bind a redial function so the reconnect loop inside _wireWsToProc can
-    // re-dial the same pod without holding a reference to this K8sBackend.
-    proc._redial = () => this._dial(podName, ns, agentToken)
+    // Resolve the token (synchronous fast path or async Secret fetch), then dial.
+    Promise.resolve(tokenOrPromise).then((agentToken) => {
+      if (!agentToken) {
+        // Phrasing kept compatible with the existing /agentToken is required/
+        // assertion. The token is normally registered by createEnvironment() or
+        // repopulated by reconnect(); tests can still pass opts.agentToken directly.
+        throw new Error(
+          `K8sBackend.streamCliInEnvironment: agentToken is required for Pod "${podName}" ` +
+          '(register via createEnvironment(), reconnect(), or pass opts.agentToken)'
+        )
+      }
 
-    // Dial asynchronously; the returned handle is usable immediately. We
-    // capture portforward cleanup callbacks so kill() / exit can tear down
-    // the local TCP listener even if dial completes after kill is called.
-    this._dial(podName, ns, agentToken).then((dialResult) => {
+      // Bind a redial function so the reconnect loop inside _wireWsToProc can
+      // re-dial the same pod without holding a reference to this K8sBackend.
+      proc._redial = () => this._dial(podName, ns, agentToken)
+
+      // Dial asynchronously; the returned handle is usable immediately. We
+      // capture portforward cleanup callbacks so kill() / exit can tear down
+      // the local TCP listener even if dial completes after kill is called.
+      return this._dial(podName, ns, agentToken)
+    }).then((dialResult) => {
       // dialResult is either { ws, cleanup? } (portforward bridge) or a bare
       // ws (clusterip / direct dial). Normalize.
       const ws = dialResult && dialResult.ws ? dialResult.ws : dialResult
@@ -587,6 +724,29 @@ export class K8sBackend {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // reconnectAgentToken — repopulate _agentTokens from the K8s Secret
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Reads the per-Pod Secret and registers the agent token in the in-memory
+   * cache.  Called by EnvironmentManager.reconnect() for K8s-backed
+   * environments so that streamCliInEnvironment() works after a server restart.
+   *
+   * Returns `true` when the token was successfully fetched and cached; `false`
+   * when the Secret no longer exists (Pod was externally garbage-collected).
+   *
+   * @param {string} podName - Pod name (the containerId handle)
+   * @param {Object} [opts]
+   * @param {string} [opts.namespace] - Overrides the constructor default namespace
+   * @returns {Promise<boolean>}
+   */
+  async reconnectAgentToken(podName, opts = {}) {
+    const ns = opts.namespace || this._namespace
+    const token = await this._readAgentToken(podName, ns)
+    return token !== null
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Phase-1 stubs — not yet implemented
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -610,8 +770,11 @@ export class K8sBackend {
     return Promise.reject(notImplemented('commitEnvironment'))
   }
 
+  // K8s pods have unique names by design — there is no mutable canonical name
+  // slot to free.  The restore flow tolerates a no-op here because the old pod
+  // is destroyed after the new one passes its health check.  See types.js.
   renameEnvironment(_containerId, _newName) {
-    return Promise.reject(notImplemented('renameEnvironment'))
+    return Promise.resolve()
   }
 
   restoreEnvironment(_opts) {
@@ -736,6 +899,53 @@ export class K8sBackend {
         }
       })
     })
+  }
+
+  /**
+   * Read the per-Pod Secret and return the agent token, caching it in
+   * `_agentTokens` for subsequent calls.  Returns `null` when the Secret
+   * does not exist (404) so callers can distinguish "gone" from errors.
+   *
+   * This is the recovery path for server restart: the Secret is the canonical
+   * source of truth for the token; the in-memory map is just a cache.
+   *
+   * @param {string} podName
+   * @param {string} ns
+   * @returns {Promise<string|null>}
+   */
+  async _readAgentToken(podName, ns) {
+    const secretName = _deriveSecretName(podName)
+    try {
+      const secret = await this._api.readNamespacedSecret({ name: secretName, namespace: ns })
+      // The K8s API decodes base64 stringData into `.data` as base64-encoded
+      // strings, but when we store via `stringData` the API may return the
+      // value under either field depending on the client version.  Prefer
+      // `data` (always present on read responses), fall back to `stringData`.
+      const raw = secret?.data?.CHROXY_AGENT_TOKEN
+        || secret?.stringData?.CHROXY_AGENT_TOKEN
+      if (!raw) {
+        log.warn(`Secret ${secretName} exists but has no CHROXY_AGENT_TOKEN — treating as missing`)
+        return null
+      }
+      // K8s stores Secret `.data` values as base64; decode unconditionally.
+      // If the value came via `stringData` it is already plaintext, but a
+      // base64-decode of a base64url-encoded token (no padding) is idempotent
+      // only when the token length is a multiple of 4.  Instead, detect the
+      // encoding: `data` values are padded base64; `stringData` values are not.
+      const token = secret?.data?.CHROXY_AGENT_TOKEN
+        ? Buffer.from(raw, 'base64').toString('utf8')
+        : raw
+      // Cache for subsequent calls so we only hit the API once per pod per process.
+      this._agentTokens.set(podName, token)
+      log.info(`Loaded agentToken for Pod ${podName} from Secret ${secretName}`)
+      return token
+    } catch (err) {
+      if (_isNotFound(err)) {
+        log.warn(`Secret ${secretName} not found — pod may have been externally deleted`)
+        return null
+      }
+      throw err
+    }
   }
 
   /**
@@ -1140,4 +1350,76 @@ function _deriveSecretName(podName) {
   }
   // Fallback: best-effort token cleanup name based on the pod name itself.
   return `chroxy-token-${podName}`
+}
+
+/**
+ * Parse a Docker-style volume mount string into its components.
+ *
+ * Supported formats:
+ *   "/host/path:/container/path"
+ *   "/host/path:/container/path:ro"
+ *
+ * Returns null for unrecognised input so the caller can log and skip.
+ *
+ * @param {string} mountStr
+ * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
+ */
+function _parseMountString(mountStr) {
+  if (typeof mountStr !== 'string') return null
+  const parts = mountStr.split(':')
+  if (parts.length < 2) return null
+  const hostPath = parts[0]
+  const containerPath = parts[1]
+  if (!hostPath || !containerPath) return null
+  const readOnly = parts[2] === 'ro'
+  return { hostPath, containerPath, readOnly }
+}
+
+/**
+ * Extract the container port from a forwardPorts entry.
+ *
+ * Accepts:
+ *   - A bare number or numeric string: "8080" → 8080
+ *   - A "hostPort:containerPort" string: "9000:8080" → 8080
+ *
+ * Returns null for non-numeric or zero values.
+ *
+ * @param {string|number} entry
+ * @returns {number | null}
+ */
+function _parseContainerPort(entry) {
+  const str = String(entry)
+  const colonIdx = str.indexOf(':')
+  const portStr = colonIdx >= 0 ? str.slice(colonIdx + 1) : str
+  const port = parseInt(portStr, 10)
+  return Number.isFinite(port) && port > 0 ? port : null
+}
+
+/**
+ * Normalise a memory quantity string to a valid Kubernetes quantity.
+ *
+ * Docker accepts lowercase suffixes ("g", "m", "k") while Kubernetes expects
+ * binary SI suffixes ("Gi", "Mi", "Ki").  This function converts Docker-style
+ * single-letter suffixes to their K8s equivalents.  Values that already use
+ * K8s suffixes (e.g. "2Gi", "512Mi") or plain integers (bytes) are returned
+ * unchanged.
+ *
+ * Mapping:
+ *   "2g"   → "2Gi"
+ *   "512m" → "512Mi"
+ *   "1024k"→ "1024Ki"
+ *   "2Gi"  → "2Gi"   (already valid)
+ *   "1024" → "1024"  (plain bytes, valid K8s quantity)
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function _normaliseMemoryQuantity(value) {
+  const str = String(value)
+  // Replace trailing lone-letter suffix (g/m/k, case-insensitive) with the
+  // K8s binary equivalent.  A trailing 'i' (already K8s-style) is left alone.
+  return str.replace(/^(\d+(?:\.\d+)?)\s*([gGmMkK])$/, (_, num, unit) => {
+    const map = { g: 'Gi', G: 'Gi', m: 'Mi', M: 'Mi', k: 'Ki', K: 'Ki' }
+    return num + (map[unit] || unit)
+  })
 }

@@ -386,10 +386,11 @@ export function loadActiveSkills(dir, opts = {}) {
   // itself and each author-level subdir to mirror the top-level entry filter.
   for (const entry of entries) {
     if (typeof entry !== 'string') continue
-    if (entry !== 'community') continue
-    // `entry` is the literal string 'community'. Verify it is actually a
-    // directory (not a file named 'community.md' would never reach here, but
-    // a file named 'community' might).
+    const entryCmp = _PATH_COMPARE_CASE_INSENSITIVE ? entry.toLowerCase() : entry
+    if (entryCmp !== 'community') continue
+    // `entry` is the (case-normalized) string 'community'. Verify it is
+    // actually a directory (not a file named 'community.md' would never reach
+    // here, but a file named 'community' might).
     const communityPath = join(dir, entry)
     let communityDirSt
     try {
@@ -1676,7 +1677,8 @@ export function _isCommunityNamespace(realPath, dirReal) {
   if (!rel || rel.startsWith('..')) return { isCommunity: false, author: null }
   const segments = rel.split(sep)
   if (segments.length < 3) return { isCommunity: false, author: null }
-  if (segments[0] !== 'community') return { isCommunity: false, author: null }
+  const seg0 = _PATH_COMPARE_CASE_INSENSITIVE ? segments[0].toLowerCase() : segments[0]
+  if (seg0 !== 'community') return { isCommunity: false, author: null }
   const author = segments[1]
   if (!author || author === '.' || author === '..' || author.startsWith('.')) {
     return { isCommunity: false, author: null }

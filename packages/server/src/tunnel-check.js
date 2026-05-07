@@ -2,14 +2,24 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('tunnel')
 
+export const QUICK_TUNNEL_DNS_SETTLE_MS = 20_000
+
 /**
  * Verify a Cloudflare tunnel is fully routable before exposing it to users.
  * New tunnel URLs need time for DNS propagation — Quick Tunnels can take
- * 30+ seconds. Uses linear backoff: 1s, 2s, 3s, 4s, 5s (cap), ...
+ * 30+ seconds. Uses an optional initial delay, then linear backoff:
+ * 1s, 2s, 3s, 4s, 5s (cap), ...
  */
-export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval = 1000, onAttempt } = {}) {
+export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval = 1000, initialDelay = 0, onAttempt } = {}) {
   log.info('Verifying tunnel is routable...')
   const startTime = Date.now()
+
+  if (initialDelay > 0) {
+    log.info(`Waiting ${(initialDelay / 1000).toFixed(0)}s before first tunnel verification attempt...`)
+    await new Promise((r) => setTimeout(r, initialDelay))
+  }
+
+  let lastFailure = null
 
   for (let i = 0; i < maxAttempts; i++) {
     const attempt = i + 1
@@ -23,8 +33,12 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval
         return
       }
       log.info(`Attempt ${attempt}/${maxAttempts} failed: HTTP ${res.status}`)
+      lastFailure = `HTTP ${res.status}`
     } catch (err) {
-      const reason = err.name === 'AbortError' ? 'timeout' : err.message
+      const reason = err.name === 'AbortError'
+        ? 'timeout'
+        : [err.cause?.code, err.message].filter(Boolean).join(': ')
+      lastFailure = reason
       // Only log every few attempts to reduce noise
       if (attempt <= 3 || attempt % 5 === 0 || attempt === maxAttempts) {
         log.info(`Attempt ${attempt}/${maxAttempts} failed: ${reason}`)
@@ -46,6 +60,7 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(0)
   const err = new Error(
     `Tunnel failed to become routable after ${maxAttempts} attempts (${elapsed}s). ` +
+    `${lastFailure ? `Last failure: ${lastFailure}. ` : ''}` +
     'This usually means your network is blocking Cloudflare, or DNS has not propagated yet. ' +
     'Try a named tunnel (--tunnel named) or run `npx chroxy doctor` for diagnostics.'
   )
