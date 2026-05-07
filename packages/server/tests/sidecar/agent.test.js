@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -303,6 +303,44 @@ describe('PodAgent', () => {
 
     it('first connection is unaffected by second connection attempt', () => {
       assert.equal(ws1.readyState, WebSocket.OPEN)
+    })
+  })
+
+  // #3473 — the duplicate-connection reject path must route through _send so
+  // it shares the readyState short-circuit and synchronous-send try/catch
+  // with every other reject/error path. Uses a fresh agent (not the one in
+  // the suite above) so we can install a spy on _send before any connection.
+  describe('second concurrent connection routes through _send (#3473)', () => {
+    let agent, port, ws1, sendSpy
+
+    before(async () => {
+      ;({ agent, port } = await startAgent())
+      sendSpy = mock.method(agent, '_send')
+      ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+    })
+    after(async () => {
+      mock.restoreAll()
+      ws1.close()
+      await agent.close()
+    })
+
+    it('invokes _send with the error frame for the duplicate connection', async () => {
+      const ws2 = connect(port, TOKEN)
+      const resultPromise = collectUntilClose(ws2)
+      await resultPromise
+
+      const errorCalls = sendSpy.mock.calls.filter((call) => {
+        const frame = call.arguments[1]
+        return frame && frame.type === 'error' && /already connected/.test(frame.message)
+      })
+      assert.ok(
+        errorCalls.length >= 1,
+        `expected _send to be invoked with the duplicate-connection error frame (got ${sendSpy.mock.calls.length} total calls)`,
+      )
+      // The third arg is the close-after-flush callback — must be a function so
+      // _send's readyState short-circuit / catch path still triggers the close.
+      assert.equal(typeof errorCalls[0].arguments[2], 'function')
     })
   })
 
