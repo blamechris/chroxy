@@ -31,9 +31,11 @@ export interface ToastItem {
    * `grantCommunitySkillTrust` silently no-op against a closed socket
    * and the toast dismisses with no feedback.
    *
-   * Has no effect when `action` is unset. The toast itself is NOT
-   * dismissed by the disabled state, so once the connection comes
-   * back the operator can click the (now re-enabled) button.
+   * Has no effect when `action` is unset. The 5s auto-dismiss timer
+   * is paused (and any in-flight timer cleared) while this is true, so
+   * the toast stays on screen for the full reconnect window — once the
+   * flag flips back to false the timer restarts fresh, giving the
+   * operator another full 5s to click the now re-enabled button.
    */
   actionDisabled?: boolean
   /**
@@ -54,6 +56,19 @@ export function Toast({ items, onDismiss }: ToastProps) {
 
   useEffect(() => {
     items.forEach(item => {
+      // #3603: pause the auto-dismiss timer while `actionDisabled` is
+      // true (e.g. WS reconnecting). The toast stays on screen so the
+      // operator can retry the action once the connection recovers.
+      // If a timer was already running before the disable, clear it so
+      // it doesn't fire mid-disconnect. When `actionDisabled` flips
+      // back to false the effect re-runs and the timer restarts fresh.
+      if (item.actionDisabled === true) {
+        if (timersRef.current.has(item.id)) {
+          clearTimeout(timersRef.current.get(item.id)!)
+          timersRef.current.delete(item.id)
+        }
+        return
+      }
       if (!timersRef.current.has(item.id)) {
         const timer = setTimeout(() => {
           onDismiss(item.id)

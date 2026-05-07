@@ -772,8 +772,10 @@ export function App() {
   // silently no-op — the operator clicks the button, sees the toast
   // dismiss, and gets no feedback that nothing happened. Flag the
   // action as disabled and swap the label to "Reconnecting…" so the
-  // state is visible. The toast itself stays on screen so the click
-  // can be retried once the connection recovers.
+  // state is visible. The Toast also pauses its 5s auto-dismiss timer
+  // while `actionDisabled` is true (and restarts a fresh 5s window on
+  // reconnect), so the toast survives the entire disconnect and stays
+  // clickable once the socket recovers.
   const isSocketConnected = connectionPhase === 'connected'
   const toastItems: ToastItem[] = useMemo(
     () => [
