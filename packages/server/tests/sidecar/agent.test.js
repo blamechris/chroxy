@@ -1835,6 +1835,106 @@ describe('PodAgent', () => {
         await capAgent.close()
       }
     })
+
+    it('falls back to evicting oldest active session when all sessions are active', async () => {
+      // Cap=2. Spawn A and B sequentially (each over its own WS connection so
+      // the single-connection policy is satisfied), then simulate both sessions
+      // being "active" by patching their activeWs to a mock WS with a close
+      // spy. Spawning C triggers the fallback path in _enforceSessionCap: no
+      // idle sessions → evict globally oldest by lastActiveAt → session A is
+      // evicted with ws.close(1001).
+      const children = []
+      const spawnFn = (_cmd, _args, _opts) => {
+        const mock = createMockSpawn()
+        children.push(mock.child)
+        return mock.child
+      }
+
+      const { agent: capAgent, port: capPort } = await startAgent({
+        spawnFn,
+        maxSessions: 2,
+        resumeTimeoutMs: 999_999,  // long TTL so idle timers don't race
+      })
+
+      try {
+        // --- Session A ---
+        const ws1 = connect(capPort, TOKEN)
+        await waitOpen(ws1)
+        const ws1Msgs = []
+        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const sidA = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        ws1.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // --- Session B (spawned after A so its lastActiveAt is naturally newer) ---
+        const ws2 = connect(capPort, TOKEN)
+        await waitOpen(ws2)
+        const ws2Msgs = []
+        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const sidB = ws2Msgs.find((m) => m.type === 'session_started').sessionId
+        ws2.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        assert.equal(capAgent._sessions.size, 2, 'two sessions present before patching')
+
+        // Simulate both sessions being actively connected: cancel idle timers,
+        // then set activeWs to a mock WS so _enforceSessionCap sees no idle
+        // sessions and must fall back to the oldest-active eviction path.
+        const closeCallsA = []
+        const fakeWsA = { close(code, reason) { closeCallsA.push({ code, reason }) } }
+        const closeCallsB = []
+        const fakeWsB = { close(code, reason) { closeCallsB.push({ code, reason }) } }
+
+        const sessionA = capAgent._sessions.get(sidA)
+        const sessionB = capAgent._sessions.get(sidB)
+
+        capAgent._cancelIdleTimer(sessionA)
+        capAgent._cancelIdleTimer(sessionB)
+        sessionA.activeWs = fakeWsA
+        sessionB.activeWs = fakeWsB
+
+        // Pin timestamps: A is definitively older than B. Without this the two
+        // spawns may happen within the same millisecond on fast machines.
+        sessionA.lastActiveAt = 1000
+        sessionB.lastActiveAt = 2000
+
+        // --- Session C: cap enforced, must evict session A (oldest active) ---
+        const ws3 = connect(capPort, TOKEN)
+        await waitOpen(ws3)
+        const ws3Msgs = []
+        ws3.on('message', (d) => { try { ws3Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws3.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Session count must stay at the cap.
+        assert.equal(capAgent._sessions.size, 2, 'session count stays at cap after eviction')
+
+        // Session A (oldest) must be gone; session B (newer) must survive.
+        assert.ok(!capAgent._sessions.has(sidA), 'oldest active session (A) must be evicted')
+        assert.ok(capAgent._sessions.has(sidB), 'newer active session (B) must survive')
+
+        // Session A's child must have been SIGTERMed.
+        assert.ok(
+          children[0].killSignals.includes('SIGTERM'),
+          `evicted child must be SIGTERMed, got ${JSON.stringify(children[0].killSignals)}`,
+        )
+
+        // Session A's fake WS must have been closed with code 1001.
+        assert.equal(closeCallsA.length, 1, 'evicted session WS must receive exactly one close call')
+        assert.equal(closeCallsA[0].code, 1001, 'evicted WS must be closed with code 1001')
+
+        // Session B's fake WS must NOT have been closed (it was not evicted).
+        assert.equal(closeCallsB.length, 0, 'surviving session WS must not be closed')
+
+        ws3.close()
+      } finally {
+        await capAgent.close()
+      }
+    })
   })
 
   // spawn stdin option (#3329)
