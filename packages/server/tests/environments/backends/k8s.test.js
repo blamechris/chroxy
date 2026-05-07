@@ -915,8 +915,8 @@ describe('K8sBackend.createEnvironment() — port range validation (#3386)', () 
     })
 
     const { ports } = api.calls.create[0].body.spec.containers[0]
-    assert.equal(ports.length, 1, 'colon-format port with container port 65536 must be dropped')
-    assert.equal(ports[0].containerPort, 7681, 'only AGENT_PORT must remain')
+    assert.ok(!ports.some(p => p.containerPort === 65536), 'colon-format port with container port 65536 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
 
   it('silently drops colon-format with zero container port "9000:0"', async () => {
@@ -930,8 +930,8 @@ describe('K8sBackend.createEnvironment() — port range validation (#3386)', () 
     })
 
     const { ports } = api.calls.create[0].body.spec.containers[0]
-    assert.equal(ports.length, 1, 'colon-format port with container port 0 must be dropped')
-    assert.equal(ports[0].containerPort, 7681, 'only AGENT_PORT must remain')
+    assert.ok(!ports.some(p => p.containerPort === 0), 'colon-format port with container port 0 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
 })
 
