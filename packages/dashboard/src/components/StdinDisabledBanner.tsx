@@ -8,10 +8,12 @@
  * so reconnecting clients can render this banner without waiting for a fresh
  * `error{code:'stdin_disabled'}` event (which only fires once on the original
  * process). Restarting the session is the only recovery path — clicking
- * "Restart Session" invokes the parent's `onRestart` handler which destroys
- * the broken session and immediately re-creates a fresh one with the same
- * cwd / name / provider / model / permissionMode (no confirm dialog — the
- * destruction is implicit in "restart").
+ * "Restart Session" invokes the parent's `onRestart` handler which creates a
+ * replacement session first (same cwd / name / provider / model /
+ * permissionMode) and then destroys the wedged one (#3602). Create-then-
+ * destroy avoids the server's "Cannot destroy the last session" rejection in
+ * the common single-session case. No confirm dialog — destruction is implicit
+ * in "restart".
  */
 
 export interface StdinDisabledBannerProps {

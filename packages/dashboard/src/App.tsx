@@ -420,16 +420,22 @@ export function App() {
     destroySession(sessionId)
   }, [destroySession])
 
-  // #3567: dedicated restart handler for the StdinDisabledBanner. Destroys
-  // the broken session and immediately re-creates a fresh one with the same
-  // cwd / name / provider / model / permissionMode so the user lands back
-  // where they started without going through the create-session modal. No
-  // confirm dialog — the destruction is implicit in "restart" and any
-  // in-flight Claude work was already wedged behind the broken stdin pipe.
+  // #3567 / #3602: dedicated restart handler for the StdinDisabledBanner.
+  // Creates a replacement session FIRST and then destroys the broken one so
+  // the swap never leaves the user with zero sessions. The server's
+  // `destroy_session` handler rejects "Cannot destroy the last session" (see
+  // `packages/server/src/handlers/session-handlers.js`), so a destroy-first
+  // ordering would fail in the common case where the wedged session is the
+  // only one open. Creating first also avoids an intermediate
+  // `session_switched` away from the restarted session when the active
+  // session is destroyed. The replacement keeps the same cwd / name /
+  // provider / model / permissionMode so the user lands back where they
+  // started without going through the create-session modal. No confirm
+  // dialog — destruction is implicit in "restart" and any in-flight Claude
+  // work was already wedged behind the broken stdin pipe.
   const handleRestartSession = useCallback((sessionId: string) => {
     const session = sessions.find(s => s.sessionId === sessionId)
     if (!session) return
-    destroySession(sessionId)
     createSession({
       name: session.name,
       cwd: session.cwd || undefined,
@@ -438,6 +444,7 @@ export function App() {
       permissionMode: session.permissionMode || undefined,
       worktree: session.worktree,
     })
+    destroySession(sessionId)
   }, [sessions, destroySession, createSession])
 
   useEffect(() => {
