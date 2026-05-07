@@ -210,6 +210,35 @@ const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
 const ERROR_RECONNECT_DELAY = 2000;
 
+/**
+ * #3605: Clear in-flight `pendingTrustGrants` arrays from every session.
+ *
+ * Per-session `pendingTrustGrants` (added in #3588/#3600) tracks the
+ * `requestId` of any skill_trust_grant WS request that hasn't received its
+ * matching ack/error yet. When the socket drops, the response will never
+ * arrive — leaving the entry would keep the SkillsPanel "Trust" button
+ * disabled/spinning indefinitely. The matching Map-based correlation in
+ * `message-handler.ts` is cleared separately via `clearPendingTrustGrants()`.
+ *
+ * Returns the cleaned `sessionStates` record. Caller is responsible for
+ * applying it via `set({ sessionStates: ... })`.
+ */
+function clearAllSessionPendingTrustGrants(
+  prev: Record<string, SessionState>,
+): Record<string, SessionState> {
+  const cleaned: Record<string, SessionState> = {};
+  for (const sid of Object.keys(prev)) {
+    const ss = prev[sid];
+    if (!ss) continue;
+    if (Array.isArray(ss.pendingTrustGrants) && ss.pendingTrustGrants.length > 0) {
+      cleaned[sid] = { ...ss, pendingTrustGrants: [] };
+    } else {
+      cleaned[sid] = ss;
+    }
+  }
+  return cleaned;
+}
+
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
@@ -673,9 +702,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // never), and a stale toast action would call grantCommunitySkillTrust
       // against a closed socket.
       clearPendingTrustGrants();
+      // #3605: also clear the per-session pendingTrustGrants arrays
+      // (added in #3588). disconnect() handles user-initiated closes, but
+      // an unexpected drop here would otherwise leave the SkillsPanel
+      // Trust button stuck across an auto-reconnect.
+      const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
       const wasConnected = get().connectionPhase === 'connected';
-      set({ socket: null });
+      set({ socket: null, sessionStates: cleanedSessionStates });
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -708,7 +742,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
-      set({ socket: null });
+      // #3605: an unexpected error means any in-flight skill_trust_grant
+      // request will never be acked. Clear both the Map-based correlation
+      // (#3587) and the per-session arrays (#3588) so the SkillsPanel
+      // Trust button doesn't hang across the reconnect.
+      rejectAllEvaluatorRequests('Connection errored before evaluator response arrived');
+      clearPendingTrustGrants();
+      const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
+
+      set({ socket: null, sessionStates: cleanedSessionStates });
 
       // Auto-reconnect on unexpected WS error (skip if user explicitly disconnected)
       if (!get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
@@ -761,17 +803,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // The WS request would be stale on reconnect anyway, and a stuck
     // entry would leave the SkillsPanel "Pending review" Trust button
     // disabled with no way to retry across the disconnect boundary.
-    const prevSessionStates = get().sessionStates;
-    const cleanedSessionStates: Record<string, SessionState> = {};
-    for (const sid of Object.keys(prevSessionStates)) {
-      const ss = prevSessionStates[sid];
-      if (!ss) continue;
-      if (Array.isArray(ss.pendingTrustGrants) && ss.pendingTrustGrants.length > 0) {
-        cleanedSessionStates[sid] = { ...ss, pendingTrustGrants: [] };
-      } else {
-        cleanedSessionStates[sid] = ss;
-      }
-    }
+    // #3605: same cleanup also runs in onclose/onerror — see
+    // clearAllSessionPendingTrustGrants() docstring.
+    const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',

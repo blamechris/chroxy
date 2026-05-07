@@ -4,7 +4,7 @@
  * Covers: persistence, utils, types, and store creation.
  * Message handler and connection tests require the ported files.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { stripAnsi, filterThinking, nextMessageId, withJitter, createEmptySessionState } from './utils';
 import type { ChatMessage, SessionState, ConnectionPhase } from './types';
 import {
@@ -1656,6 +1656,221 @@ describe('server_error toast scope filtering', () => {
         sessionStates: {},
         userDisconnected: false,
       });
+    });
+  });
+
+  // #3605: PR #3600 only cleared pendingTrustGrants in disconnect()
+  // (user-initiated). The auto-reconnect path (socket.onclose / socket.onerror)
+  // doesn't call disconnect(), so an in-flight entry could survive a transient
+  // drop and leave the SkillsPanel "Trust" button stuck after reconnect.
+  describe('pendingTrustGrants cleanup on auto-reconnect path (#3605)', () => {
+    /**
+     * Drives connect() far enough to wire up the real socket.onclose /
+     * socket.onerror handlers, then returns the captured socket so the test
+     * can fire the handler synchronously. We mock fetch (health check) and
+     * WebSocket so no real network IO happens.
+     */
+    async function setupCapturedSocket(): Promise<{
+      socket: { onclose: (() => void) | null; onerror: (() => void) | null; close: () => void };
+      teardown: () => void;
+    }> {
+      const { useConnectionStore } = await import('./connection');
+
+      // Mock health check so connect() advances to _connectWebSocket().
+      const fetchSpy = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok' }),
+      }));
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const captured: {
+        socket: { onclose: (() => void) | null; onerror: (() => void) | null; close: () => void } | null;
+      } = { socket: null };
+
+      class MockWebSocket {
+        onopen: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        onmessage: ((ev: { data: string }) => void) | null = null;
+        readyState = 0;
+        constructor(_url: string) {
+          captured.socket = this as unknown as {
+            onclose: (() => void) | null;
+            onerror: (() => void) | null;
+            close: () => void;
+          };
+        }
+        send(_data: string): void { /* no-op */ }
+        close(): void { this.readyState = 3; }
+      }
+      // Mirror the static OPEN constant the production code references.
+      (MockWebSocket as unknown as { OPEN: number }).OPEN = 1;
+      vi.stubGlobal('WebSocket', MockWebSocket);
+
+      // Pre-populate two sessions with in-flight pendingTrustGrants.
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            pendingTrustGrants: [
+              { requestId: 'req-1', skillName: 'alice-skill', author: 'alice' },
+            ],
+          },
+          s2: {
+            ...createEmptySessionState(),
+            pendingTrustGrants: [
+              { requestId: 'req-2', skillName: 'bob-skill', author: 'bob' },
+            ],
+          },
+        },
+        socket: null,
+        userDisconnected: false,
+        connectionPhase: 'connected',
+      });
+
+      // Kick off connect — health check and ws-construction both run async.
+      void useConnectionStore.getState().connect('wss://example.invalid', 'tok');
+
+      // Let the mocked fetch().then chain run so _connectWebSocket() executes.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      if (!captured.socket) throw new Error('MockWebSocket was never constructed');
+
+      const teardown = () => {
+        vi.unstubAllGlobals();
+        useConnectionStore.setState({
+          sessions: [],
+          activeSessionId: null,
+          sessionStates: {},
+          userDisconnected: true, // suppress further auto-reconnect attempts
+          socket: null,
+          connectionPhase: 'disconnected',
+        });
+      };
+
+      return { socket: captured.socket, teardown };
+    }
+
+    it('clears pendingTrustGrants when onclose fires (transport drop, not user disconnect)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const { socket, teardown } = await setupCapturedSocket();
+
+      try {
+        // Sanity: handlers wired up.
+        expect(typeof socket.onclose).toBe('function');
+
+        // Fire onclose to simulate a transient transport drop. This is the
+        // codepath PR #3600 missed — onclose triggers auto-reconnect, not
+        // disconnect(), so without #3605 the pendingTrustGrants arrays
+        // would survive the drop.
+        socket.onclose!();
+
+        const after = useConnectionStore.getState().sessionStates;
+        expect(after.s1!.pendingTrustGrants).toEqual([]);
+        expect(after.s2!.pendingTrustGrants).toEqual([]);
+      } finally {
+        teardown();
+      }
+    });
+
+    it('clears pendingTrustGrants when onerror fires', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const { socket, teardown } = await setupCapturedSocket();
+
+      try {
+        expect(typeof socket.onerror).toBe('function');
+
+        socket.onerror!();
+
+        const after = useConnectionStore.getState().sessionStates;
+        expect(after.s1!.pendingTrustGrants).toEqual([]);
+        expect(after.s2!.pendingTrustGrants).toEqual([]);
+      } finally {
+        teardown();
+      }
+    });
+
+    it('preserves other session state when clearing pendingTrustGrants on transport drop', async () => {
+      // Regression guard: the cleanup must only zero `pendingTrustGrants` —
+      // other session fields (messages, claudeReady, etc.) must survive an
+      // onclose so the auto-reconnect can replay history into them.
+      const { useConnectionStore } = await import('./connection');
+
+      // Pre-populate before connect() so setupCapturedSocket overwrite doesn't
+      // strip our marker fields. We can't go through setupCapturedSocket here
+      // because it uses createEmptySessionState; build manually instead.
+      const fetchSpy = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok' }),
+      }));
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const captured: { socket: { onclose: (() => void) | null; close: () => void } | null } = { socket: null };
+      class MockWebSocket {
+        onopen: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        onmessage: ((ev: { data: string }) => void) | null = null;
+        readyState = 0;
+        constructor(_url: string) {
+          captured.socket = this as unknown as { onclose: (() => void) | null; close: () => void };
+        }
+        send(): void { /* no-op */ }
+        close(): void { this.readyState = 3; }
+      }
+      (MockWebSocket as unknown as { OPEN: number }).OPEN = 1;
+      vi.stubGlobal('WebSocket', MockWebSocket);
+
+      const sentinel: ChatMessage = {
+        id: 'msg-keep',
+        type: 'response',
+        content: 'do not lose me',
+        timestamp: 42,
+      };
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [sentinel],
+            claudeReady: true,
+            pendingTrustGrants: [
+              { requestId: 'req-1', skillName: 'alice-skill', author: 'alice' },
+            ],
+          },
+        },
+        socket: null,
+        userDisconnected: false,
+        connectionPhase: 'connected',
+      });
+
+      void useConnectionStore.getState().connect('wss://example.invalid', 'tok');
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      try {
+        expect(captured.socket).not.toBeNull();
+        captured.socket!.onclose!();
+
+        const after = useConnectionStore.getState().sessionStates.s1!;
+        expect(after.pendingTrustGrants).toEqual([]);
+        expect(after.messages).toEqual([sentinel]);
+        expect(after.claudeReady).toBe(true);
+      } finally {
+        vi.unstubAllGlobals();
+        useConnectionStore.setState({
+          sessions: [],
+          activeSessionId: null,
+          sessionStates: {},
+          userDisconnected: true,
+          socket: null,
+          connectionPhase: 'disconnected',
+        });
+      }
     });
   });
 });
