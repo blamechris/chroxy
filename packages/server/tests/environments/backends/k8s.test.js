@@ -130,6 +130,37 @@ function createFakeClock() {
 /**
  * Fire all pending fake-clock callbacks then yield one event-loop tick so
  * any promise continuations scheduled inside those callbacks can resolve.
+ *
+ * Single-tick assumption
+ * ----------------------
+ * clock.tick() snapshots `pending`, clears the map, then iterates the
+ * snapshot.  If a callback enqueues a *new* timer during that iteration (e.g.
+ * scheduleReconnect → dial fails → .catch handler calls scheduleReconnect
+ * again), the new timer is added to `pending` *after* the snapshot was taken
+ * and is therefore NOT fired by the current tick() call.  The single
+ * setImmediate yield that follows does not drain it either.
+ *
+ * All current tests are unaffected because _dialWs always resolves
+ * successfully, so scheduleReconnect's .catch branch is never entered and no
+ * chained timer is ever queued.
+ *
+ * If a future test exercises a mid-retry dial failure (the .catch path in
+ * scheduleReconnect), it will need to call tickAndFlush() once per chained
+ * failure — or the helper should be extended with a loop that keeps ticking
+ * until pending is empty, guarded by a max-iterations cap to avoid infinite
+ * loops for genuinely self-rescheduling timers:
+ *
+ *   async function tickAndFlushAll(clock, maxIterations = 20) {
+ *     let iterations = 0
+ *     do {
+ *       clock.tick()
+ *       await new Promise(r => setImmediate(r))
+ *       iterations++
+ *       if (iterations >= maxIterations) throw new Error('tickAndFlushAll: max iterations reached')
+ *     } while (clock.hasPending())
+ *   }
+ *
+ * (hasPending() would need to be added to createFakeClock.)
  */
 async function tickAndFlush(clock) {
   clock.tick()
@@ -681,6 +712,102 @@ describe('K8sBackend.createEnvironment() — forwardPorts (#3316)', () => {
     assert.equal(ports.length, 1, 'only AGENT_PORT when forwardPorts is absent')
     assert.equal(ports[0].containerPort, 7681)
     assert.equal(ports[0].name, 'agent')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — port range validation (#3386)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — port range validation (#3386)', () => {
+  it('accepts a valid port (e.g. 8080)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'valid-port',
+      image: 'agent:latest',
+      forwardPorts: [8080],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 8080), 'port 8080 must be present')
+  })
+
+  it('silently drops port 0 — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-zero',
+      image: 'agent:latest',
+      forwardPorts: [0],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'port 0 must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops port 65536 — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-overflow',
+      image: 'agent:latest',
+      forwardPorts: [65536],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'port 65536 must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops a negative port — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-negative',
+      image: 'agent:latest',
+      forwardPorts: [-1],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'negative port must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('silently drops a non-integer string — only AGENT_PORT remains', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-nan',
+      image: 'agent:latest',
+      forwardPorts: ['abc'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'non-numeric port must be dropped')
+    assert.equal(ports[0].containerPort, 7681)
+  })
+
+  it('drops the out-of-range port but keeps a valid sibling port', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-mixed',
+      image: 'agent:latest',
+      forwardPorts: [99999, 3000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 99999), 'port 99999 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 3000), 'port 3000 must be kept')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
 })
 
