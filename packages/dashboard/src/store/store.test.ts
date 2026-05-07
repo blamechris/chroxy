@@ -1675,6 +1675,7 @@ describe('server_error toast scope filtering', () => {
       teardown: () => void;
     }> {
       const { useConnectionStore } = await import('./connection');
+      const { bumpConnectionAttemptId } = await import('./message-handler');
 
       // Mock health check so connect() advances to _connectWebSocket().
       const fetchSpy = vi.fn(async () => ({
@@ -1740,6 +1741,13 @@ describe('server_error toast scope filtering', () => {
       if (!captured.socket) throw new Error('MockWebSocket was never constructed');
 
       const teardown = () => {
+        // #3616: cancel any auto-reconnect setTimeout scheduled by
+        // socket.onclose/socket.onerror. The reconnect callback gates on
+        // `myAttemptId !== connectionAttemptId`, so bumping the attempt id
+        // here invalidates the captured `myAttemptId` and the timer becomes
+        // a no-op. Without this, a stale timer from one test could fire
+        // during the next test's setup phase and call connect() unexpectedly.
+        bumpConnectionAttemptId();
         vi.unstubAllGlobals();
         useConnectionStore.setState({
           sessions: [],
@@ -1870,6 +1878,51 @@ describe('server_error toast scope filtering', () => {
           socket: null,
           connectionPhase: 'disconnected',
         });
+      }
+    });
+
+    // #3616: setupCapturedSocket() teardown must cancel the auto-reconnect
+    // setTimeout scheduled by socket.onclose/socket.onerror. The reconnect
+    // callback only gates on `myAttemptId !== connectionAttemptId`; if
+    // teardown doesn't bump the attempt id, a stale timer from one test
+    // can fire mid-setup of the next.
+    it('cancels auto-reconnect timer in teardown so no stray timer fires', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const { socket, teardown } = await setupCapturedSocket();
+
+      // The auto-reconnect timer in socket.onclose only schedules when
+      // `wasConnected === true`. connect() sets phase to 'connecting' as it
+      // runs, so simulate the post-handshake state by promoting the phase
+      // back to 'connected' before firing onclose.
+      useConnectionStore.setState({ connectionPhase: 'connected' });
+
+      // Switch to fake timers AFTER setup (which uses real microtasks /
+      // setTimeout(0) to let the fetch chain run). Fake timers only need
+      // to cover the auto-reconnect setTimeout firing window.
+      vi.useFakeTimers();
+      try {
+        // Spy on connect() to detect any stray reconnect attempt. Zustand
+        // returns the same state object reference across getState() calls,
+        // so spying here also intercepts the closure's later get().connect.
+        const connectSpy = vi.spyOn(useConnectionStore.getState(), 'connect');
+
+        // Fire onclose to schedule the auto-reconnect setTimeout
+        // (AUTO_RECONNECT_DELAY = 1500ms).
+        socket.onclose!();
+
+        // Tear down before the timer's deadline. Must invalidate the
+        // captured `myAttemptId` so the queued callback no-ops.
+        teardown();
+
+        // Advance past both AUTO_RECONNECT_DELAY (1500ms) and
+        // ERROR_RECONNECT_DELAY (2000ms) — anything queued should now have
+        // fired. With teardown bumping connectionAttemptId, the gate fails
+        // and connect() is never called.
+        vi.advanceTimersByTime(5000);
+
+        expect(connectSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
       }
     });
   });
