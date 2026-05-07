@@ -97,6 +97,34 @@ export function buildServerBanner({ version, provider }) {
   return `Chroxy Server v${version} (${modeStr})`
 }
 
+/**
+ * Run `environmentManager.reconnect()` and log a startup summary (#3464).
+ *
+ * Always emits the existing `info` summary so the healthy-startup line stays
+ * unchanged. When `reconnect()` resolves `false` (one or more environments
+ * unreachable per PR #3462's contract), additionally emits a single aggregate
+ * `warn` summarising the unreachable count derived from
+ * `environmentManager.list()` — without this, the only signal was a buried
+ * per-env `warn`, which is invisible in startup logs and tray-app dashboards.
+ *
+ * Exported so tests can assert log behaviour without executing
+ * `startCliServer()` end-to-end.
+ *
+ * @param {{ reconnect: () => Promise<boolean>, list: () => Array<{status: string}> }} environmentManager
+ * @param {{ info: (msg: string) => void, warn: (msg: string) => void }} logger
+ * @returns {Promise<boolean>} The boolean returned by `reconnect()`.
+ */
+export async function logEnvironmentManagerReconnectResult(environmentManager, logger) {
+  const allHealthy = await environmentManager.reconnect()
+  const environments = environmentManager.list()
+  logger.info(`EnvironmentManager ready (${environments.length} environment(s))`)
+  if (!allHealthy) {
+    const unreachable = environments.filter(e => e.status === 'error').length
+    logger.warn(`EnvironmentManager reconnect: ${unreachable} environment(s) unreachable — see per-environment logs above for details`)
+  }
+  return allHealthy
+}
+
 function checkNoAuthWarnings({ authRequired, tunnel }) {
   if (authRequired) return
   log.warn('--no-auth disables all authentication. Only safe on isolated networks!')
@@ -240,8 +268,7 @@ export async function startCliServer(config) {
   if (config?.environments?.enabled) {
     const { EnvironmentManager } = await import('./environment-manager.js')
     environmentManager = new EnvironmentManager()
-    await environmentManager.reconnect()
-    log.info(`EnvironmentManager ready (${environmentManager.list().length} environment(s))`)
+    await logEnvironmentManagerReconnectResult(environmentManager, log)
   }
 
   // 1. Create session manager

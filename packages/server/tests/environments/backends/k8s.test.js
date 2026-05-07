@@ -526,6 +526,79 @@ describe('K8sBackend imagePullPolicy default assignment (#3446)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend constructor defaults use nullish coalescing (#3459)
+//
+// _namespace, _sidecarImage, _connectMode previously used `||` which would
+// stomp an explicitly-provided empty string with the default.  The fix is to
+// use `??` so empty string (and other falsy-but-non-nullish values) are
+// treated as caller-provided.  Empty string is not a *valid* K8s namespace
+// or pull policy at the API layer, but the constructor must not silently
+// rewrite the input — that's the caller's contract.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend constructor defaults use nullish coalescing (#3459)', () => {
+  it('omitted namespace defaults to "default"', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    assert.strictEqual(backend._namespace, 'default')
+  })
+
+  it('explicit namespace is preserved verbatim', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespace: 'staging' })
+    assert.strictEqual(backend._namespace, 'staging')
+  })
+
+  it('explicit empty-string namespace is preserved (not replaced by default)', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespace: '' })
+    assert.strictEqual(backend._namespace, '')
+  })
+
+  it('explicit null namespace falls back to "default"', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespace: null })
+    assert.strictEqual(backend._namespace, 'default')
+  })
+
+  it('omitted sidecarImage defaults to chroxy-pod-agent:latest', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    assert.strictEqual(backend._sidecarImage, 'chroxy-pod-agent:latest')
+  })
+
+  it('explicit sidecarImage is preserved verbatim', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, sidecarImage: 'my-registry/agent:1.2.3' })
+    assert.strictEqual(backend._sidecarImage, 'my-registry/agent:1.2.3')
+  })
+
+  it('explicit empty-string sidecarImage is preserved (not replaced by default)', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, sidecarImage: '' })
+    assert.strictEqual(backend._sidecarImage, '')
+  })
+
+  it('omitted connectMode defaults to "portforward"', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    assert.strictEqual(backend._connectMode, 'portforward')
+  })
+
+  it('explicit connectMode is preserved verbatim', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, connectMode: 'clusterip' })
+    assert.strictEqual(backend._connectMode, 'clusterip')
+  })
+
+  it('explicit empty-string connectMode is preserved (not replaced by default)', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, connectMode: '' })
+    assert.strictEqual(backend._connectMode, '')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — workspace mount (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 

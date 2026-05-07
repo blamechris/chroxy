@@ -122,10 +122,10 @@ export class K8sBackend {
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
-    this._namespace = namespace || 'default'
-    this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
+    this._namespace = namespace ?? 'default'
+    this._sidecarImage = sidecarImage ?? DEFAULT_SIDECAR_IMAGE
     this._imagePullPolicy = imagePullPolicy ?? null
-    this._connectMode = connectMode || 'portforward'
+    this._connectMode = connectMode ?? 'portforward'
 
     if (_coreV1Api) {
       this._api = _coreV1Api
@@ -254,7 +254,7 @@ export class K8sBackend {
    *   "hostPath:containerPath[:ro]" format.  Each entry is translated into a
    *   `hostPath` volume + corresponding `volumeMount`.  The volume name is derived
    *   from the entry index ("extra-vol-0", "extra-vol-1", …).
-   * @param {Object}   [opts.containerEnv] - Extra environment variables
+   * @param {Object.<string,string>} [opts.containerEnv] - Extra environment variables
    * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
    *   container imagePullPolicy. Falls back to the constructor-level option when unset.

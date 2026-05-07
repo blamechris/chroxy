@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -303,6 +303,44 @@ describe('PodAgent', () => {
 
     it('first connection is unaffected by second connection attempt', () => {
       assert.equal(ws1.readyState, WebSocket.OPEN)
+    })
+  })
+
+  // #3473 — the duplicate-connection reject path must route through _send so
+  // it shares the readyState short-circuit and synchronous-send try/catch
+  // with every other reject/error path. Uses a fresh agent (not the one in
+  // the suite above) so we can install a spy on _send before any connection.
+  describe('second concurrent connection routes through _send (#3473)', () => {
+    let agent, port, ws1, sendSpy
+
+    before(async () => {
+      ;({ agent, port } = await startAgent())
+      sendSpy = mock.method(agent, '_send')
+      ws1 = connect(port, TOKEN)
+      await waitOpen(ws1)
+    })
+    after(async () => {
+      mock.restoreAll()
+      ws1.close()
+      await agent.close()
+    })
+
+    it('invokes _send with the error frame for the duplicate connection', async () => {
+      const ws2 = connect(port, TOKEN)
+      const resultPromise = collectUntilClose(ws2)
+      await resultPromise
+
+      const errorCalls = sendSpy.mock.calls.filter((call) => {
+        const frame = call.arguments[1]
+        return frame && frame.type === 'error' && /already connected/.test(frame.message)
+      })
+      assert.ok(
+        errorCalls.length >= 1,
+        `expected _send to be invoked with the duplicate-connection error frame (got ${sendSpy.mock.calls.length} total calls)`,
+      )
+      // The third arg is the close-after-flush callback — must be a function so
+      // _send's readyState short-circuit / catch path still triggers the close.
+      assert.equal(typeof errorCalls[0].arguments[2], 'function')
     })
   })
 
@@ -2191,6 +2229,96 @@ describe('PodAgent', () => {
       } finally {
         await ttlAgent.close()
       }
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // stdin-close grace configuration (#3470)
+  // ---------------------------------------------------------------------------
+
+  describe('stdinCloseGraceMs configuration', () => {
+    // The agent.js module reads CHROXY_AGENT_STDIN_CLOSE_GRACE_MS at module
+    // load. Re-import via a cache-busting query string so each scenario can
+    // observe the parsed value through a fresh module instance.
+    async function loadAgentWith(envValue) {
+      const original = process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS
+      if (envValue === undefined) {
+        delete process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS
+      } else {
+        process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS = envValue
+      }
+      try {
+        const mod = await import(`../../sidecar/agent.js?stdinGrace=${Date.now()}-${Math.random()}`)
+        return mod
+      } finally {
+        if (original === undefined) delete process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS
+        else process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS = original
+      }
+    }
+
+    it('invalid stdinCloseGraceMs falls back to 500 ms default', async () => {
+      // Mirrors the FALLBACK_MAX_LINE_BYTES pattern (#3470 acceptance: invalid
+      // value at the constructor level snaps back to the documented default).
+      const agent = new PodAgent({ token: TOKEN, stdinCloseGraceMs: -1 })
+      assert.equal(agent._stdinCloseGraceMs, 500)
+      await agent.close()
+    })
+
+    it('NaN stdinCloseGraceMs falls back to 500 ms default', async () => {
+      const agent = new PodAgent({ token: TOKEN, stdinCloseGraceMs: Number.NaN })
+      assert.equal(agent._stdinCloseGraceMs, 500)
+      await agent.close()
+    })
+
+    it('CHROXY_AGENT_STDIN_CLOSE_GRACE_MS env var sets the constructor default', async () => {
+      const { PodAgent: FreshPodAgent } = await loadAgentWith('1234')
+      const agent = new FreshPodAgent({ token: TOKEN })
+      assert.equal(agent._stdinCloseGraceMs, 1234,
+        'env-var value must flow through DEFAULT_STDIN_CLOSE_GRACE_MS into the constructor default')
+      await agent.close()
+    })
+
+    it('invalid CHROXY_AGENT_STDIN_CLOSE_GRACE_MS falls back to 500 ms', async () => {
+      const { PodAgent: FreshPodAgent } = await loadAgentWith('not-a-number')
+      const agent = new FreshPodAgent({ token: TOKEN })
+      assert.equal(agent._stdinCloseGraceMs, 500,
+        'NaN env var must fall back to FALLBACK_STDIN_CLOSE_GRACE_MS (500)')
+      await agent.close()
+    })
+
+    it('negative CHROXY_AGENT_STDIN_CLOSE_GRACE_MS falls back to 500 ms', async () => {
+      const { PodAgent: FreshPodAgent } = await loadAgentWith('-100')
+      const agent = new FreshPodAgent({ token: TOKEN })
+      assert.equal(agent._stdinCloseGraceMs, 500,
+        'negative env var must fall back to FALLBACK_STDIN_CLOSE_GRACE_MS (500)')
+      await agent.close()
+    })
+
+    it('unset CHROXY_AGENT_STDIN_CLOSE_GRACE_MS keeps 500 ms default', async () => {
+      const { PodAgent: FreshPodAgent } = await loadAgentWith(undefined)
+      const agent = new FreshPodAgent({ token: TOKEN })
+      assert.equal(agent._stdinCloseGraceMs, 500,
+        'unset env var must keep the FALLBACK_STDIN_CLOSE_GRACE_MS default (500)')
+      await agent.close()
+    })
+
+    it('zero CHROXY_AGENT_STDIN_CLOSE_GRACE_MS is allowed (synchronous SIGTERM)', async () => {
+      // 0 is a legitimate operator override — _killChild still closes the
+      // child's stdin (polite EOF) when present, but skips the grace timer
+      // and fires SIGTERM synchronously instead of after a delay.
+      const { PodAgent: FreshPodAgent } = await loadAgentWith('0')
+      const agent = new FreshPodAgent({ token: TOKEN })
+      assert.equal(agent._stdinCloseGraceMs, 0,
+        '0 must be honoured (allowed; non-negative validation, not strictly positive)')
+      await agent.close()
+    })
+
+    it('explicit constructor stdinCloseGraceMs overrides env var', async () => {
+      const { PodAgent: FreshPodAgent } = await loadAgentWith('1234')
+      const agent = new FreshPodAgent({ token: TOKEN, stdinCloseGraceMs: 42 })
+      assert.equal(agent._stdinCloseGraceMs, 42,
+        'explicit constructor option must win over CHROXY_AGENT_STDIN_CLOSE_GRACE_MS')
+      await agent.close()
     })
   })
 
