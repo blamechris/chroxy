@@ -106,9 +106,9 @@ Community skills are subject to a first-activation trust prompt — Chroxy will 
 **Always name the directory `community/` in lowercase.** The behaviour differs by platform:
 
 - **macOS and Windows** — filesystems are case-insensitive by default. `Community/`, `COMMUNITY/`, and `community/` all refer to the same directory and are all recognised as the community namespace.
-- **Linux** — the filesystem is case-sensitive. Only the exact name `community/` is recognised. A directory named `Community/` or `COMMUNITY/` on Linux is silently treated as an ordinary top-level skills directory and is **not** subject to the community trust gate — its skills are either loaded without a trust prompt or rejected, depending on configuration.
+- **Linux** — the filesystem is case-sensitive. Only the exact name `community/` is recognised. A directory named `Community/` or `COMMUNITY/` on Linux is silently skipped: the loader does not recurse into it, so any skills inside (e.g. `Community/alice/foo.md`) are **not loaded at all** — they neither appear as community skills nor as ordinary top-level skills, and no warning is emitted. Top-level skill files alongside the wrongly-cased directory continue to load as normal.
 
-Using lowercase `community/` everywhere is the portable convention that works on all platforms.
+Using lowercase `community/` everywhere is the portable convention that works on all platforms. If your community skills are unexpectedly missing on a Linux machine, check the directory name first.
 
 ### Trust file migration between platforms
 
