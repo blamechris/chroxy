@@ -547,7 +547,7 @@ export class K8sBackend {
    * @param {Object} opts
    * @param {string}   opts.cmd            - Command to run
    * @param {string[]} [opts.args]         - Arguments
-   * @param {Object}   [opts.env]          - Extra env vars
+   * @param {Object.<string,string>} [opts.env] - Extra env vars
    * @param {string}   [opts.cwd]          - Working directory
    * @param {number}   [opts.timeout=30000] - Timeout in ms
    * @param {string}   opts.agentToken     - Auth token for the sidecar
@@ -649,7 +649,7 @@ export class K8sBackend {
    * @param {Object} opts
    * @param {string}   opts.cmd         - Binary to execute inside the Pod
    * @param {string[]} [opts.args]      - Argument list
-   * @param {Object}   [opts.env]       - Extra env vars for the child
+   * @param {Object.<string,string>} [opts.env] - Extra env vars for the child
    * @param {string}   [opts.cwd]       - Working directory for the child
    * @param {AbortSignal} [opts.signal] - Abort → SIGTERM the child (WS close)
    * @param {string}   [opts.agentToken] - Override the registered bearer token (test seam)
