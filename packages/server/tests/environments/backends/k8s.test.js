@@ -903,6 +903,36 @@ describe('K8sBackend.createEnvironment() — port range validation (#3386)', () 
     assert.ok(ports.some(p => p.containerPort === 3000), 'port 3000 must be kept')
     assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
+
+  it('silently drops colon-format with out-of-range container port "9000:65536"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-colon-overflow',
+      image: 'agent:latest',
+      forwardPorts: ['9000:65536'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 65536), 'colon-format port with container port 65536 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
+
+  it('silently drops colon-format with zero container port "9000:0"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-colon-zero',
+      image: 'agent:latest',
+      forwardPorts: ['9000:0'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 0), 'colon-format port with container port 0 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
