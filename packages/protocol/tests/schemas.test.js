@@ -924,6 +924,20 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(result.success, 'Should accept iteration 3 (max)')
     })
 
+    it('rejects evaluator_clarify with iteration above sanity ceiling (11)', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 11,
+      })
+      assert.ok(!result.success, 'iteration must be capped at the wire-schema sanity ceiling (10)')
+    })
+
     it('rejects evaluator_clarify with iteration 0', async () => {
       const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
       const result = ServerEvaluatorClarifySchema.safeParse({

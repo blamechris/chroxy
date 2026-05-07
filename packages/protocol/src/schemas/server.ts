@@ -662,9 +662,12 @@ export const ServerEvaluateDraftResultSchema = z.union([
 //
 // `evaluatorIterationId` is a server-generated monotonic-per-session id
 // used by the dashboard to dedup events received over a reconnect replay.
-// `evaluatorIteration` (clarify only) is the 1-based clarify-loop counter,
-// clamped to the server's `maxIterations` (currently 3) so the dashboard
-// can render `Iteration 2/3` style transparency.
+// `evaluatorIteration` (clarify only) is the 1-based clarify-loop counter.
+// The server clamps it to its configured `maxIterations` (currently 3, see
+// #3186) before emit; the wire schema enforces a 10-iteration sanity ceiling
+// so a misconfiguration or counter overflow can't surface as e.g.
+// "Iteration 999/3" in the dashboard. Tighten the ceiling in lock-step if
+// future server-side caps land below 10.
 
 export const ServerEvaluatorRewriteSchema = z.object({
   type: z.literal('evaluator_rewrite'),
@@ -682,7 +685,7 @@ export const ServerEvaluatorClarifySchema = z.object({
   clarification: z.string(),
   reasoning: z.string(),
   evaluatorIterationId: z.string(),
-  evaluatorIteration: z.number().int().min(1),
+  evaluatorIteration: z.number().int().min(1).max(10),
 })
 
 // -- Inferred TypeScript types --
