@@ -1540,11 +1540,27 @@ function _deriveSecretName(podName) {
  *
  * Returns null for unrecognised input so the caller can log and skip.
  *
+ * Windows-style paths with a drive letter (e.g. `C:\Users\foo:/workspace`) are
+ * rejected with an explicit Error: splitting on `:` would silently truncate the
+ * host path to the drive letter (`"C"`) and treat the rest of the Windows path
+ * as the container path, producing a misconfigured mount that fails later at
+ * Pod scheduling. K8s nodes are Linux-only, so Windows host paths are not
+ * supportable in any case — fail loudly at parse time.
+ *
  * @param {string} mountStr
  * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
+ * @throws {Error} when `mountStr` begins with a Windows drive-letter prefix.
  */
 function _parseMountString(mountStr) {
   if (typeof mountStr !== 'string') return null
+  // Reject Windows drive-letter paths up-front: `C:\…` or `C:/…` would split on
+  // `:` into a 1-char hostPath and a corrupted containerPath. K8s nodes only
+  // accept POSIX paths, so this can never produce a valid mount.
+  if (/^[A-Za-z]:[\\/]/.test(mountStr)) {
+    throw new Error(
+      `K8s mount path '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths`
+    )
+  }
   const parts = mountStr.split(':')
   if (parts.length < 2) return null
   const hostPath = parts[0]

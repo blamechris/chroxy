@@ -729,6 +729,66 @@ describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
     assert.ok(mounts.find(m => m.name === 'workspace'))
     assert.ok(mounts.find(m => m.name === 'extra-vol-0'))
   })
+
+  // Issue #3388: Windows-style drive-letter paths split on `:` would silently
+  // produce a 1-char hostPath ("C") and a corrupted containerPath. K8s nodes
+  // are Linux-only, so we reject them up-front with an explicit error rather
+  // than letting the misparse reach Pod scheduling.
+  it('rejects Windows-style backslash paths with an explicit error (#3388)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'win-mount-bs',
+        image: 'agent:latest',
+        mounts: ['C:\\Users\\foo:/workspace'],
+      }),
+      (err) => {
+        assert.match(err.message, /looks like a Windows path/)
+        assert.match(err.message, /POSIX paths/)
+        assert.ok(err.message.includes('C:\\Users\\foo:/workspace'))
+        return true
+      }
+    )
+
+    // No Pod should have been created when the mount parse fails.
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('rejects Windows-style forward-slash drive-letter paths (#3388)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'win-mount-fs',
+        image: 'agent:latest',
+        mounts: ['D:/data:/data'],
+      }),
+      /looks like a Windows path/
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('still parses normal POSIX mounts after the Windows-path guard (#3388)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'posix-sanity',
+      image: 'agent:latest',
+      mounts: ['/Users/foo:/workspace'],
+    })
+
+    const { body } = api.calls.create[0]
+    const v0 = body.spec.volumes.find(v => v.name === 'extra-vol-0')
+    assert.ok(v0)
+    assert.equal(v0.hostPath.path, '/Users/foo')
+    const m0 = body.spec.containers[0].volumeMounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m0)
+    assert.equal(m0.mountPath, '/workspace')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
