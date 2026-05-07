@@ -2527,7 +2527,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Log it and surface it as a server error notification.
       const { code: errCode, message: errMsg } = sharedError(msg);
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
-      get().addServerError(errMsg);
+      // #3570: skill_trust_grant INVALID_AUTHOR carries a structured
+      // `actualAuthor` field (#3568, locked by
+      // ServerSkillTrustGrantInvalidAuthorSchema) when the per-author
+      // resolve landed on a different community author than the caller
+      // claimed. Branch on the structured field instead of regex-parsing
+      // the (intentionally unstable) human-readable `message`, so the
+      // user sees a concrete "owned by alice — try the 'Trust alice'
+      // button instead" hint rather than the bare server text. The
+      // pending `skill_trust_request` row for the real owner is still on
+      // the panel — clicking THAT row's Trust button is the recovery
+      // path. Other INVALID_AUTHOR variants (empty `author` validation)
+      // do not include `actualAuthor` and fall through to the plain
+      // message — see schema comment.
+      const actualAuthor = typeof msg.actualAuthor === 'string' && msg.actualAuthor.length > 0
+        ? msg.actualAuthor
+        : null;
+      const surfaced = (errCode === 'INVALID_AUTHOR' && actualAuthor !== null)
+        ? `Skill is owned by '${actualAuthor}'. Use the 'Trust ${actualAuthor}' button on the pending entry instead.`
+        : errMsg;
+      get().addServerError(surfaced);
       break;
     }
 

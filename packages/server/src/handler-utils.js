@@ -419,6 +419,11 @@ export function sendError(ws, requestId, code, message, data) {
     for (const [key, value] of Object.entries(data)) {
       // Canonical fields are reserved — never let a caller clobber them.
       if (key === 'type' || key === 'requestId' || key === 'code' || key === 'message') continue
+      // #3578: block prototype-pollution keys. event-normalizer.js applies
+      // the same guard. sendError is a generic utility that may end up
+      // called with partially user-derived data, so harden defensively even
+      // though no current caller passes untrusted input.
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
       payload[key] = value
     }
   }

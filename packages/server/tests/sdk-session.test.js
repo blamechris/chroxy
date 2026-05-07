@@ -697,6 +697,58 @@ describe('SdkSession', () => {
       s.destroy()
     })
 
+    // #3562: short-circuit dequeue in finally when stdin forwarding is disabled.
+    //
+    // PR #3560 (closes #3539) drains _pendingInput at the *entry* of sendMessage
+    // when the flag is set. This handles the case "next caller hits the gate".
+    // But the post-turn dequeue path in sendMessage's finally block still has
+    // its own "shift + process.nextTick(sendMessage)" branch. If a turn is
+    // mid-flight when the SidecarProcess emits stdin_disabled, the entry-gate
+    // has already been passed, so the finally path will still schedule a
+    // recursive sendMessage for the queued follow-up — wasting an event-loop
+    // hop and a redundant function call before the entry gate finally rejects
+    // it.
+    //
+    // The fix: short-circuit at the dequeue site too. If the flag flips
+    // mid-turn, drain the queue, log a single warn, and skip the recursion.
+    it('short-circuits dequeue in finally when flag flips mid-turn (#3562)', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      let callCount = 0
+      s._callQuery = (_args) => {
+        callCount++
+        return (async function* () {
+          // Simulate the SidecarProcess latching stdin_disabled mid-turn —
+          // the flag flips while _callQuery is still streaming, before the
+          // result event finishes the turn. The finally block runs after
+          // this generator returns and must observe the flipped flag.
+          s._stdinForwardingDisabled = true
+          yield { type: 'result', session_id: 'mid-turn-flip', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      // Pre-queue a follow-up so the dequeue site has work to do.
+      s._pendingInput = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      await s.sendMessage('initial turn')
+
+      // Wait one process.nextTick and one event-loop turn (setImmediate
+      // schedules into the check phase) so the dequeue path has had the
+      // opportunity to recurse, if it were going to.
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assert.equal(callCount, 1, '_callQuery must only be invoked for the original turn — no recursive dequeue')
+      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained at the dequeue site')
+      assert.equal(errors.length, 0, 'dequeue-site short-circuit must not emit a per-message error (the warn is enough)')
+
+      s.destroy()
+    })
+
     it('emits an error every time a fresh sendMessage is refused (no one-shot mute)', async () => {
       // The #3502 emit on the stdin_disabled signal is gated by the flag
       // itself (one warn / one error per session). The #3539 refusal at the
@@ -718,6 +770,169 @@ describe('SdkSession', () => {
         assert.equal(err.code, 'stdin_disabled')
         assert.equal(err.recoverable, false)
       }
+
+      s.destroy()
+    })
+  })
+
+  // -- refused-sendMessage warn log rate-limit (#3575) --
+  //
+  // PR #3560 (#3539) logs a warn on every refused sendMessage when
+  // `_stdinForwardingDisabled` is latched. A stuck client that retries on
+  // every error event would otherwise flood operator logs. #3575 gates the
+  // warn behind a `_lastRefusedWarnTs` + Date.now() window
+  // (REFUSED_SENDMESSAGE_WARN_INTERVAL_MS, default 30s). The per-call
+  // `error` event continues to fire on every refused attempt so client UI
+  // feedback is unchanged — only the log line is rate-limited.
+  describe('refused-sendMessage warn log rate-limit (#3575)', () => {
+    it('logs the refusal warn on the first refused attempt', async () => {
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const s = createSession()
+      s._processReady = true
+      s._stdinForwardingDisabled = true
+      s.on('error', () => {})  // swallow expected error event
+
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await s.sendMessage('first refused')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const warns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Refusing sendMessage'),
+      )
+      assert.equal(warns.length, 1, 'first refused sendMessage must log the warn')
+      assert.ok(s._lastRefusedWarnTs > 0,
+        '_lastRefusedWarnTs must be stamped after the warn fires so the next call can be gated')
+
+      s.destroy()
+    })
+
+    it('suppresses the refusal warn on a second refused attempt within the window', async () => {
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { REFUSED_SENDMESSAGE_WARN_INTERVAL_MS } = await import('../src/sdk-session.js')
+
+      const s = createSession()
+      s._processReady = true
+      s._stdinForwardingDisabled = true
+      s.on('error', () => {})
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await s.sendMessage('attempt 1')
+        // Force the second call to land inside the rate-limit window by
+        // stamping the timestamp to "just now". Avoids relying on real-time
+        // ordering between two awaits.
+        s._lastRefusedWarnTs = Date.now()
+        await s.sendMessage('attempt 2')
+        await s.sendMessage('attempt 3')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const warns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Refusing sendMessage'),
+      )
+      assert.equal(warns.length, 1,
+        'subsequent refused sendMessage attempts within the window must be suppressed')
+      assert.equal(errors.length, 3,
+        'every refused sendMessage still emits an error event regardless of warn rate-limit')
+      assert.ok(REFUSED_SENDMESSAGE_WARN_INTERVAL_MS > 0,
+        'rate-limit interval constant must be a positive number of ms')
+
+      s.destroy()
+    })
+
+    it('logs the refusal warn again after the rate-limit window elapses', async () => {
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { REFUSED_SENDMESSAGE_WARN_INTERVAL_MS } = await import('../src/sdk-session.js')
+
+      const s = createSession()
+      s._processReady = true
+      s._stdinForwardingDisabled = true
+      s.on('error', () => {})
+
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await s.sendMessage('attempt 1')
+        // Simulate the window elapsing by backdating the timestamp far
+        // enough that `now - _lastRefusedWarnTs >= INTERVAL_MS`. Direct
+        // field manipulation avoids real-clock waits in the test.
+        s._lastRefusedWarnTs = Date.now() - REFUSED_SENDMESSAGE_WARN_INTERVAL_MS - 1
+        await s.sendMessage('attempt 2 — after window')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const warns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Refusing sendMessage'),
+      )
+      assert.equal(warns.length, 2,
+        'a refused sendMessage after the rate-limit window must log a fresh warn')
+
+      s.destroy()
+    })
+
+    it('also rate-limits the "Discarding queued follow-ups" warn so it does not bypass the gate', async () => {
+      // The drain warn fires alongside the refusal warn whenever queued
+      // follow-ups are present. It must share the same gate so a hot-loop
+      // retry (which can pile up + drain queues each turn) does not flood
+      // logs through the second warn channel.
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const s = createSession()
+      s._processReady = true
+      s._stdinForwardingDisabled = true
+      s.on('error', () => {})
+
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        // First refused call — both warns fire (refusal + drain of 0
+        // queued follow-ups won't fire; pre-load the queue to force the
+        // drain warn to be eligible).
+        s._pendingInput = [{ prompt: 'q1' }, { prompt: 'q2' }]
+        await s.sendMessage('attempt 1')
+        // Second refused call inside the window — re-queue and verify the
+        // drain warn is suppressed alongside the refusal warn.
+        s._pendingInput = [{ prompt: 'q3' }]
+        s._lastRefusedWarnTs = Date.now()
+        await s.sendMessage('attempt 2')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const drainWarns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Discarding'),
+      )
+      assert.equal(drainWarns.length, 1,
+        'drain warn must share the rate-limit gate with the refusal warn')
+      assert.equal(s._pendingInput.length, 0,
+        'queue must still be drained even when the warn is suppressed')
 
       s.destroy()
     })
@@ -1749,7 +1964,7 @@ describe('SdkSession', () => {
       const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
 
       // Mid-session interrupt — no active query so this is a no-op,
-      // but it exercises the public contract.
+      // but it exercises the public contract (early-return guard).
       await session.interrupt()
 
       assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
@@ -1758,6 +1973,61 @@ describe('SdkSession', () => {
         '_stdinDroppedCount must survive interrupt()')
       assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
         '_stdinDroppedThresholdLogged must survive interrupt()')
+    })
+
+    // The early-return test above only exercises `if (!this._query) return`.
+    // This sibling test stubs an active query so we cover the more meaningful
+    // active-query branch — counters must survive interrupt() even when it
+    // actually tears the query down (#3565).
+    it('preserves stdin_dropped counters across interrupt() with active query (#3565)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
+
+      // Stub `_callQuery` to return a long-running async iterable so the
+      // active-query branch of interrupt() is exercised. The iterable hangs
+      // on next() until `interrupt()` is called, which resolves a pending
+      // gate so the iterator can return cleanly.
+      let interruptCalled = false
+      let resolveGate
+      const gate = new Promise((resolve) => { resolveGate = resolve })
+      const longRunningQuery = {
+        [Symbol.asyncIterator]() { return this },
+        async next() {
+          await gate
+          return { value: undefined, done: true }
+        },
+        async interrupt() {
+          interruptCalled = true
+          resolveGate()
+        },
+      }
+      session._query = longRunningQuery
+
+      // Kick off iteration so the query is "mid-stream" when interrupt fires.
+      const iterationPromise = (async () => {
+        // eslint-disable-next-line no-unused-vars
+        for await (const _ of session._query) { /* drain */ }
+      })()
+
+      await session.interrupt()
+      await iterationPromise
+
+      assert.equal(interruptCalled, true,
+        'active query interrupt() must be awaited (active-query branch)')
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive active-query interrupt()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive active-query interrupt()')
+      assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
+        '_stdinDroppedThresholdLogged must survive active-query interrupt()')
     })
 
     it('does not re-escalate a fresh drop after _clearMessageState() to error (#3542)', async () => {

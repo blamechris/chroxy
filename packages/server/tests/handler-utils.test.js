@@ -1035,6 +1035,34 @@ describe('sendError', () => {
       assert.strictEqual(m.message, 'oops')
     }
   })
+
+  // #3578: sendError must block prototype-pollution keys when merging data, so
+  // a misbehaving (or partially user-derived) caller cannot mutate
+  // Object.prototype via the merge step. event-normalizer.js already treats
+  // these as reserved; sendError applies the same hardening.
+  it('blocks prototype-pollution keys in data merge (#3578)', () => {
+    const sent = []
+    const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
+    // Use a null-prototype object so we can attach __proto__ as an own key
+    // without accidentally setting the actual prototype on the literal.
+    const polluted = Object.create(null)
+    polluted.__proto__ = { polluted: true }
+    polluted.constructor = { polluted: true }
+    polluted.prototype = { polluted: true }
+    polluted.safeField = 'kept'
+    sendError(ws, 'req-10', 'HANDLER_ERROR', 'oops', polluted)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].type, 'error')
+    assert.strictEqual(sent[0].code, 'HANDLER_ERROR')
+    assert.strictEqual(sent[0].message, 'oops')
+    // Reserved keys must not appear on the payload.
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(sent[0], 'constructor'), false)
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(sent[0], 'prototype'), false)
+    // Non-reserved fields still merge through.
+    assert.strictEqual(sent[0].safeField, 'kept')
+    // And global Object.prototype must remain unpolluted.
+    assert.strictEqual({}.polluted, undefined)
+  })
 })
 
 describe('resolveSession', () => {
