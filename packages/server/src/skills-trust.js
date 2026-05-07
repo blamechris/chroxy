@@ -75,10 +75,18 @@
  *   - On case-insensitive filesystems (macOS APFS default, Windows NTFS
  *     by default), the same skill can resolve to different casings of
  *     the same path, which previously caused silent re-records. The
- *     ledger key is lowercased on those platforms via
- *     `_normalizePathKey`. The actual filesystem path used by callers
- *     stays verbatim — only the ledger lookup key is normalised, so
+ *     SHA records map (`_records`, the `skills` index on disk) is keyed
+ *     through `_normalizePathKey`, which lowercases keys on those
+ *     platforms. The actual filesystem path used by callers stays
+ *     verbatim — only the SHA-records lookup key is normalised, so
  *     case-sensitive Linux behaviour is unchanged.
+ *   - This case-folding applies ONLY to the SHA records map. The
+ *     `communityTrust.byPath` index is written verbatim from the
+ *     `realpathSync()`-canonicalised path passed by callers (#3297) and
+ *     is NOT run through `_normalizePathKey`. Cross-casing matches on
+ *     case-insensitive filesystems work because `realpathSync()` returns
+ *     the on-disk canonical casing, so the same inode resolves to the
+ *     same byPath key regardless of how the caller spelled it.
  */
 import { readFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
 import { dirname, join, basename } from 'path'
@@ -291,18 +299,37 @@ export class SkillsTrustStore {
         ? parsed.communityTrust
         : null
     } else {
-      // Detect v1: at least one top-level value has the v1 shape (sha256
-      // hex string + object). #3306: previously we required *every* entry
-      // to pass — a single corrupted record (missing / malformed sha256)
-      // made the whole file fall through to "unrecognised shape" and the
-      // user lost ALL trusted records on the next migration. We now treat
-      // the file as v1 if any entry looks valid; the per-entry loop below
-      // already drops malformed records, so a partially-corrupt v1 file
+      // Detect v1: at least one top-level value has the full v1 shape
+      // (object with sha256 hex string AND firstSeen string).
+      //
+      // #3306: previously we required *every* entry to pass — a single
+      // corrupted record (missing / malformed sha256) made the whole
+      // file fall through to "unrecognised shape" and the user lost ALL
+      // trusted records on the next migration. We now treat the file as
+      // v1 if any entry looks valid; the per-entry loop below already
+      // drops malformed records, so a partially-corrupt v1 file
       // self-heals to a clean v2 ledger keeping every legitimate hash.
+      //
+      // #3511: the classifier must match the same shape gate as the
+      // per-entry parse loop (sha256 + firstSeen). Without the
+      // firstSeen check, a file whose entries have a valid-looking
+      // sha256 but no firstSeen was classified as v1, then the
+      // per-entry loop dropped every record (no firstSeen) → migration
+      // proceeded with an empty ledger → the next flush wiped the file
+      // to an empty v2 shape. Requiring firstSeen here makes those
+      // files fall through to "unrecognised" and fail open instead.
+      // Arrays are also explicitly rejected as a defence-in-depth
+      // guard against accidentally array-valued entries passing
+      // `typeof === 'object'`.
       const topLevelKeys = Object.keys(parsed)
       const looksLikeV1Entry = (k) => {
         const v = parsed[k]
-        return v && typeof v === 'object' && typeof v.sha256 === 'string' && /^[0-9a-f]{64}$/.test(v.sha256)
+        return v
+          && typeof v === 'object'
+          && !Array.isArray(v)
+          && typeof v.sha256 === 'string'
+          && /^[0-9a-f]{64}$/.test(v.sha256)
+          && typeof v.firstSeen === 'string'
       }
       const hasAnyV1Entry = topLevelKeys.some(looksLikeV1Entry)
       if (hasAnyV1Entry) {

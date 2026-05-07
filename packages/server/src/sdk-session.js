@@ -675,7 +675,21 @@ export class SdkSession extends BaseSession {
     })
 
     proc.on('stdin_disabled', () => {
-      // #3468: flip read-only diagnostic flag for callers + log once.
+      // #3468 + #3501: SESSION-STICKY semantics.  Once any spawn under this
+      // session emits 'stdin_disabled' we latch `_stdinForwardingDisabled`
+      // and log a single warn for the lifetime of the session.  Subsequent
+      // spawns (next turn, post-reconnect retry) that fire their own
+      // 'stdin_disabled' are intentionally silenced.
+      //
+      // Trade-off (decided in #3501): per-spawn warns would surface every
+      // reconnect-induced loss but spam the operator log on a session that
+      // is already known to be in the disabled state — the actionable signal
+      // (reconnect/restart) was already delivered.  The session-sticky path
+      // keeps the warn high-signal: one warn = "this session lost stdin
+      // forwarding"; the latched flag is the persistent diagnostic for
+      // anything more granular (e.g. metrics, dashboards).  If a future
+      // K8s-aware subclass wants per-spawn visibility it can override this
+      // method or read `_stdinForwardingDisabled` directly.
       if (this._stdinForwardingDisabled) return
       this._stdinForwardingDisabled = true
       // #3536 review: SidecarProcess explicitly does NOT re-wire stdin on

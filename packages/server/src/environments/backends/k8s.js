@@ -271,7 +271,7 @@ export class K8sBackend {
       imagePullPolicy: callImagePullPolicy,
     } = opts
     validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
-    const ns = namespace || this._namespace
+    const ns = namespace ?? this._namespace
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
     // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
@@ -518,7 +518,7 @@ export class K8sBackend {
    * @returns {Promise<void>}
    */
   async destroyEnvironment(podName, opts = {}) {
-    const ns = opts.namespace || this._namespace
+    const ns = opts.namespace ?? this._namespace
     const secretName = opts.secretName || _deriveSecretName(podName)
 
     // Always drop the cached token first so a partial failure can't leave
@@ -579,7 +579,7 @@ export class K8sBackend {
    * @throws {Error} If the Pod does not exist
    */
   async getEnvironmentStatus(podName, opts = {}) {
-    const ns = opts.namespace || this._namespace
+    const ns = opts.namespace ?? this._namespace
     const result = await this._api.readNamespacedPod({ name: podName, namespace: ns })
     const phase = result?.status?.phase
     return phase === 'Running'
@@ -715,7 +715,7 @@ export class K8sBackend {
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
     } = opts
-    const ns = namespace || this._namespace
+    const ns = namespace ?? this._namespace
 
     // Prefer explicit token (test seam), fall back to the in-memory cache, and
     // lazily fetch from the K8s Secret when neither is available (e.g. after a
@@ -829,7 +829,7 @@ export class K8sBackend {
    * @returns {Promise<boolean>}
    */
   async reconnectAgentToken(podName, opts = {}) {
-    const ns = opts.namespace || this._namespace
+    const ns = opts.namespace ?? this._namespace
     const token = await this._readAgentToken(podName, ns)
     return token !== null
   }
