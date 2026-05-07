@@ -83,7 +83,31 @@ describe('logEnvironmentManagerReconnectResult (#3464)', () => {
     assert.match(infoCalls[0].msg, /EnvironmentManager ready \(4 environment\(s\)\)/)
 
     assert.equal(warnCalls.length, 1)
-    // The warn must surface the count of unreachable (status === 'error') envs.
+    // The warn surfaces the count of unreachable envs (status in
+    // UNREACHABLE_STATUSES — i.e. 'error' or 'stopped'). Per the #3492
+    // invariant, every reconnect() branch that flips allHealthy=false also
+    // sets env.status to one of those values, so this count is authoritative.
+    assert.match(warnCalls[0].msg, /3 environment\(s\) unreachable/)
+  })
+
+  it('counts both error and stopped statuses as unreachable (#3492)', async () => {
+    // After PR #3491 the `getEnvironmentStatus` returning false branch sets
+    // `env.status = 'stopped'` (not 'error') while flipping allHealthy=false.
+    // The aggregate warn must include 'stopped' in its count, otherwise a
+    // stopped-only failure surfaces as "0 environment(s) unreachable".
+    const logger = captureLogger()
+    const manager = makeManager({
+      allHealthy: false,
+      environments: [
+        { id: 'a', name: 'a', status: 'stopped' },
+        { id: 'b', name: 'b', status: 'stopped' },
+      ],
+    })
+
+    await logEnvironmentManagerReconnectResult(manager, logger)
+
+    const warnCalls = logger.calls.filter(c => c.level === 'warn')
+    assert.equal(warnCalls.length, 1)
     assert.match(warnCalls[0].msg, /2 environment\(s\) unreachable/)
   })
 

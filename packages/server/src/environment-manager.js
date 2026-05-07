@@ -19,6 +19,13 @@ const DEFAULT_CONTAINER_USER = 'chroxy'
 const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+// Re-export `UNREACHABLE_STATUSES` from the dedicated constants module so
+// existing importers (tests, future consumers) continue to work. The
+// canonical definition lives in `environment-statuses.js` so `server-cli.js`
+// can pull the set without eagerly loading this module's `DockerBackend`
+// transitive dependency — see the file header in environment-statuses.js.
+export { UNREACHABLE_STATUSES } from './environment-statuses.js'
+
 /**
  * Manages persistent container environments that outlive individual sessions.
  *
@@ -401,16 +408,33 @@ export class EnvironmentManager extends EventEmitter {
    * Reconnect to persisted environments on server restart.
    * Inspects each saved container and updates its status.
    *
+   * INVARIANT (#3492): every code path that flips `allHealthy = false` MUST
+   * also set `env.status` to a value in `UNREACHABLE_STATUSES` (currently
+   * `'error'` or `'stopped'`). The set is consumed by the boot-path
+   * aggregate-warn helper in
+   * `server-cli.js#logEnvironmentManagerReconnectResult`, which derives the
+   * unreachable count via
+   * `list().filter(e => UNREACHABLE_STATUSES.has(e.status)).length`. A future
+   * contributor adding a new `allHealthy = false` branch (quotas,
+   * partial-restore, metrics check, …) without a co-located unreachable
+   * status assignment would silently undercount and emit
+   * `0 environment(s) unreachable` at boot. If a new unreachable status is
+   * introduced (beyond `'error'`/`'stopped'`) it MUST be added to
+   * `UNREACHABLE_STATUSES` so the aggregate warn stays accurate. The
+   * invariant guard test in `tests/environment-manager.test.js` will fail CI
+   * if the count of `allHealthy = false` branches drifts from the count of
+   * unreachable status assignments.
+   *
    * @returns {Promise<boolean>} `true` if every environment reconnected
    *   successfully; `false` if at least one environment was marked unreachable.
    *   An environment is considered unreachable when any of the following hold:
-   *   - it has no `containerId`
-   *   - `getEnvironmentStatus` reports the container is stopped
-   *   - `getEnvironmentStatus` throws (container/handle not found)
+   *   - it has no `containerId` (status set to `'error'`)
+   *   - `getEnvironmentStatus` reports the container is stopped (status set to `'stopped'`)
+   *   - `getEnvironmentStatus` throws (status set to `'error'`)
    *   - `reconnectAgentToken` returns any non-`true` value, e.g. `false`
    *     (credential source GC'd) or `undefined` / `null` from a misbehaving
-   *     backend (#3495)
-   *   - `reconnectAgentToken` throws (transient error treated as same signal)
+   *     backend (#3495) — status set to `'error'`
+   *   - `reconnectAgentToken` throws (status set to `'error'`)
    */
   async reconnect() {
     this._restore()
@@ -421,7 +445,15 @@ export class EnvironmentManager extends EventEmitter {
     let allHealthy = true
 
     for (const env of this._environments.values()) {
+      // Clear stale session references unconditionally — in-memory session
+      // state never survives a server restart, regardless of whether the
+      // environment's container is reachable, stopped, or has no containerId
+      // at all. (#3494: this used to live at the bottom of the loop body and
+      // was skipped by the no-containerId `continue` below.)
+      env.sessions = []
+
       if (!env.containerId) {
+        // Invariant: allHealthy=false co-located with unreachable status (#3492)
         env.status = 'error'
         allHealthy = false
         continue
@@ -432,11 +464,15 @@ export class EnvironmentManager extends EventEmitter {
           env.status = 'running'
           log.info(`Environment "${env.name}" reconnected (container: ${env.containerId.slice(0, 12)})`)
         } else {
+          // Invariant: allHealthy=false co-located with unreachable status (#3492).
+          // 'stopped' is in UNREACHABLE_STATUSES — see the boot-path aggregate
+          // warn in server-cli.js#logEnvironmentManagerReconnectResult.
           env.status = 'stopped'
           allHealthy = false
           log.warn(`Environment "${env.name}" container is stopped`)
         }
       } catch (err) {
+        // Invariant: allHealthy=false co-located with unreachable status (#3492)
         env.status = 'error'
         allHealthy = false
         log.warn(`Environment "${env.name}" container inspect failed: ${err.message}`)
@@ -463,18 +499,18 @@ export class EnvironmentManager extends EventEmitter {
         try {
           const ok = await this._backend.reconnectAgentToken(env.containerId)
           if (ok !== true) {
+            // Invariant: allHealthy=false co-located with unreachable status (#3492)
             env.status = 'error'
             allHealthy = false
             log.warn(`Environment "${env.name}" (id: ${env.id}) credential source is gone — marking unreachable`)
           }
         } catch (err) {
+          // Invariant: allHealthy=false co-located with unreachable status (#3492)
           env.status = 'error'
           allHealthy = false
           log.warn(`Environment "${env.name}" (id: ${env.id}) token refresh failed: ${err.message}`)
         }
       }
-      // Clear stale session references — sessions don't survive server restart
-      env.sessions = []
     }
 
     this._persist()

@@ -19,6 +19,11 @@ import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { registerDockerProvider, resolveProviderLabel } from './providers.js'
 import { loadModelsCache, getModels } from './models.js'
+// Imported from a dedicated constants module rather than environment-manager.js
+// so we don't eagerly pull in DockerBackend when environments are disabled —
+// environment-manager.js itself remains behind the dynamic import below
+// (`if (config?.environments?.enabled)`).
+import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -107,6 +112,12 @@ export function buildServerBanner({ version, provider }) {
  * `environmentManager.list()` — without this, the only signal was a buried
  * per-env `warn`, which is invisible in startup logs and tray-app dashboards.
  *
+ * The unreachable count uses `UNREACHABLE_STATUSES` (currently `'error'` and
+ * `'stopped'`) and stays accurate only while every code path in
+ * `EnvironmentManager.reconnect()` that flips `allHealthy = false` also sets
+ * `env.status` to one of those values. See the INVARIANT block on
+ * `EnvironmentManager.reconnect()` JSDoc for details (#3492).
+ *
  * Exported so tests can assert log behaviour without executing
  * `startCliServer()` end-to-end.
  *
@@ -119,7 +130,11 @@ export async function logEnvironmentManagerReconnectResult(environmentManager, l
   const environments = environmentManager.list()
   logger.info(`EnvironmentManager ready (${environments.length} environment(s))`)
   if (!allHealthy) {
-    const unreachable = environments.filter(e => e.status === 'error').length
+    // Invariant (#3492): every reconnect() branch that flips allHealthy=false
+    // also sets env.status to a value in UNREACHABLE_STATUSES. If a future
+    // contributor adds a new branch without that co-located status assignment,
+    // this count will silently undercount — keep them in sync.
+    const unreachable = environments.filter(e => UNREACHABLE_STATUSES.has(e.status)).length
     logger.warn(`EnvironmentManager reconnect: ${unreachable} environment(s) unreachable — see per-environment logs above for details`)
   }
   return allHealthy
