@@ -5,6 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { getProvider } from './providers.js'
+import { isClaudeProvider } from './models.js'
 import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
@@ -350,7 +351,11 @@ export class SessionManager extends EventEmitter {
     }
 
     const baseCwd = cwd || this._defaultCwd
-    const resolvedModel = model || this._defaultModel
+    // Nullish-coalesce so an explicit `null` (the soft-fallback marker for a
+    // stale Claude model — see #3403) survives restore intact instead of
+    // re-applying `_defaultModel`. Only `undefined` (omitted/missing) falls
+    // back to the server-config default.
+    let resolvedModel = model ?? this._defaultModel
     const resolvedPermissionMode = permissionMode || this._defaultPermissionMode
 
     // Validate cwd exists
@@ -388,11 +393,29 @@ export class SessionManager extends EventEmitter {
         providerAllowedModels = null
       }
       if (providerAllowedModels && providerAllowedModels.length > 0 && !providerAllowedModels.includes(resolvedModel)) {
-        throw new ProviderModelNotSupportedError({
-          provider: resolvedProviderType,
-          model: resolvedModel,
-          supported: providerAllowedModels,
-        })
+        // Claude providers (claude-sdk, claude-cli, docker variants) share a
+        // dynamic model registry fed by the Agent SDK's `supportedModels()`.
+        // The dashboard caches `defaultModel` (e.g. `opus-4-6`) and ships it
+        // back on every `create_session` — when the model retires (e.g.
+        // opus-4-7 supersedes 4-6) the inherited id is no longer valid and
+        // a hard rejection breaks otherwise-valid session creation. Soft-
+        // fallback to the provider's own default (model:null, which both
+        // SdkSession and CliSession treat as "use the upstream default")
+        // and log a warning so operators can spot the drift in logs (#3403).
+        if (isClaudeProvider(resolvedProviderType, PreflightProviderClass)) {
+          log.warn(`Requested model '${resolvedModel}' is not in the current registry for provider '${resolvedProviderType}'; falling back to provider default. Supported: ${providerAllowedModels.slice(0, 8).join(', ')}${providerAllowedModels.length > 8 ? ', …' : ''}`)
+          resolvedModel = null
+        } else {
+          // Non-Claude providers (Codex, Gemini, custom) have small static
+          // allowlists — strict rejection still applies because falling
+          // back would otherwise mask a real misconfiguration (e.g. a
+          // Claude model id sent to a Gemini session).
+          throw new ProviderModelNotSupportedError({
+            provider: resolvedProviderType,
+            model: resolvedModel,
+            supported: providerAllowedModels,
+          })
+        }
       }
     }
 

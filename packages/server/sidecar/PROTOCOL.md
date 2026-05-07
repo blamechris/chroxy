@@ -486,8 +486,11 @@ When the WS connection drops with an active session, the agent starts an
 before the timer fires, the timer is cancelled and normal live-forwarding
 resumes.  If the timer fires first, the agent:
 
-1. Sends `SIGTERM` to the child (with a 5 s `SIGKILL` escalation).
-2. Deletes the session from `_sessions`.
+1. Closes the child's stdin (polite EOF) and waits up to
+   `CHROXY_AGENT_STDIN_CLOSE_GRACE_MS` (default 500 ms) for the child to exit
+   on its own.
+2. Sends `SIGTERM` to the child (with a 5 s `SIGKILL` escalation).
+3. Deletes the session from `_sessions`.
 
 A subsequent `resume` for the evicted session receives
 `session_lost(unknown_session)` — the same response as for a session that was
@@ -621,6 +624,26 @@ if a line exceeds the cap before a newline arrives it:
 **Override:** set `CHROXY_AGENT_MAX_LINE_BYTES` in the pod environment (parsed
 as a base-10 integer; non-positive / NaN values fall back to the 1 MiB
 default).
+
+---
+
+## Polite Shutdown Grace
+
+When the agent terminates a child process (idle-resume eviction, hard
+session-cap eviction, or `agent.close()` shutdown) it closes the child's
+stdin first so that CLIs which exit cleanly on EOF — including `claude
+--input-format stream-json` — can shut down without signal handling.  After
+closing stdin the agent waits a short grace period before escalating to
+`SIGTERM`, then a longer grace before `SIGKILL`.
+
+**Default stdin-close grace:** 500 ms.
+
+**Override:** set `CHROXY_AGENT_STDIN_CLOSE_GRACE_MS` in the pod environment
+(parsed as a base-10 integer; NaN / negative values fall back to the 500 ms
+default).  Setting `0` is allowed: the agent still closes the child's stdin
+(polite EOF), but `SIGTERM` follows synchronously rather than after a grace
+delay — useful for deployments where the child is known not to honour stdin
+EOF and the grace would just be wasted shutdown latency.
 
 ---
 
