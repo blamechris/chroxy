@@ -593,6 +593,93 @@ describe('EnvironmentManager.reconnect()', () => {
     await manager.reconnect() // Should not throw
     assert.equal(manager.list().length, 0)
   })
+
+  it('marks environment unreachable when reconnectAgentToken returns false', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-cred-gone',
+        name: 'cred-gone-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: 'pod-cred-gone',
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    // Mock backend: getEnvironmentStatus says "running" but reconnectAgentToken
+    // returns false (credential source GC'd).
+    const tokenCalls = []
+    const backend = {
+      async getEnvironmentStatus() { return true },
+      async reconnectAgentToken(handle) {
+        tokenCalls.push(handle)
+        return false
+      },
+    }
+
+    // Capture warn output so we can assert the operator-visible signal fires.
+    const capturedWarn = []
+    const originalWarn = console.warn
+    console.warn = (...args) => capturedWarn.push(args.join(' '))
+
+    let manager, result
+    try {
+      manager = new EnvironmentManager({ statePath, backend })
+      result = await manager.reconnect()
+    } finally {
+      console.warn = originalWarn
+    }
+
+    assert.equal(result, false, 'reconnect() should return false when a credential is gone')
+    assert.equal(manager.get('env-cred-gone').status, 'error', 'env should be marked error/unreachable')
+    assert.deepEqual(tokenCalls, ['pod-cred-gone'], 'reconnectAgentToken should have been called with the handle')
+    const warnHit = capturedWarn.find(line =>
+      line.includes('cred-gone-env') &&
+      line.includes('env-cred-gone') &&
+      line.includes('credential source is gone'))
+    assert.ok(warnHit,
+      `expected a warn log mentioning env name, env id, and "credential source is gone"; got: ${JSON.stringify(capturedWarn)}`)
+  })
+
+  it('returns true and leaves status running when reconnectAgentToken returns true', async () => {
+    const seedData = {
+      version: 1,
+      environments: [{
+        id: 'env-cred-ok',
+        name: 'cred-ok-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: 'pod-cred-ok',
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(seedData))
+
+    const backend = {
+      async getEnvironmentStatus() { return true },
+      async reconnectAgentToken() { return true },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const result = await manager.reconnect()
+
+    assert.equal(result, true, 'reconnect() should return true when all credentials refresh')
+    assert.equal(manager.get('env-cred-ok').status, 'running')
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────

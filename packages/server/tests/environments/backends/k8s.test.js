@@ -496,6 +496,36 @@ describe('K8sBackend imagePullPolicy validation (#3375)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend imagePullPolicy default assignment uses nullish coalescing (#3446)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend imagePullPolicy default assignment (#3446)', () => {
+  it('omitted imagePullPolicy resolves to null (not undefined)', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    // Field is internal but exercised here as a regression contract for the
+    // `imagePullPolicy ?? null` assignment in the constructor.  strictEqual
+    // is required because assert.equal(undefined, null) passes under loose
+    // equality and would not detect a constructor that forgets to default.
+    assert.strictEqual(backend._imagePullPolicy, null)
+  })
+
+  it('explicit null is preserved as null', () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: null })
+    assert.strictEqual(backend._imagePullPolicy, null)
+  })
+
+  it('valid policy values are preserved verbatim', () => {
+    const api = createMockApi()
+    for (const policy of ['Always', 'IfNotPresent', 'Never']) {
+      const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: policy })
+      assert.strictEqual(backend._imagePullPolicy, policy)
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — workspace mount (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -729,6 +759,69 @@ describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
     assert.ok(mounts.find(m => m.name === 'workspace'))
     assert.ok(mounts.find(m => m.name === 'extra-vol-0'))
   })
+
+  // Issue #3388: Windows-style drive-letter paths split on `:` would silently
+  // produce a 1-char hostPath ("C") and a corrupted containerPath. K8s nodes
+  // are Linux-only, so we reject them up-front with an explicit error rather
+  // than letting the misparse reach Pod scheduling.
+  it('rejects Windows-style backslash paths with an explicit error (#3388)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'win-mount-bs',
+        image: 'agent:latest',
+        mounts: ['C:\\Users\\foo:/workspace'],
+      }),
+      (err) => {
+        assert.match(err.message, /looks like a Windows path/)
+        assert.match(err.message, /POSIX paths/)
+        assert.ok(err.message.includes('C:\\Users\\foo:/workspace'))
+        return true
+      }
+    )
+
+    // No K8s resources should have been created when the mount parse fails —
+    // guard against resource-leak regressions on early validation failures.
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
+  })
+
+  it('rejects Windows-style forward-slash drive-letter paths (#3388)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'win-mount-fs',
+        image: 'agent:latest',
+        mounts: ['D:/data:/data'],
+      }),
+      /looks like a Windows path/
+    )
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
+  })
+
+  it('still parses normal POSIX mounts after the Windows-path guard (#3388)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'posix-sanity',
+      image: 'agent:latest',
+      mounts: ['/Users/foo:/workspace'],
+    })
+
+    const { body } = api.calls.create[0]
+    const v0 = body.spec.volumes.find(v => v.name === 'extra-vol-0')
+    assert.ok(v0)
+    assert.equal(v0.hostPath.path, '/Users/foo')
+    const m0 = body.spec.containers[0].volumeMounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m0)
+    assert.equal(m0.mountPath, '/workspace')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -901,6 +994,36 @@ describe('K8sBackend.createEnvironment() — port range validation (#3386)', () 
     const { ports } = api.calls.create[0].body.spec.containers[0]
     assert.ok(!ports.some(p => p.containerPort === 99999), 'port 99999 must be dropped')
     assert.ok(ports.some(p => p.containerPort === 3000), 'port 3000 must be kept')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
+
+  it('silently drops colon-format with out-of-range container port "9000:65536"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-colon-overflow',
+      image: 'agent:latest',
+      forwardPorts: ['9000:65536'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 65536), 'colon-format port with container port 65536 must be dropped')
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
+  })
+
+  it('silently drops colon-format with zero container port "9000:0"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'port-colon-zero',
+      image: 'agent:latest',
+      forwardPorts: ['9000:0'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(!ports.some(p => p.containerPort === 0), 'colon-format port with container port 0 must be dropped')
     assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT must be kept')
   })
 })
@@ -2918,6 +3041,306 @@ describe('SidecarProcess stdin wiring (#3336)', () => {
     const stdinOnReconnect = ws2FramesAfter.filter(f => f.type === 'stdin')
     assert.equal(stdinOnReconnect.length, 0,
       'stdin frames must NOT be forwarded on a reconnect WS — resume picks up output only')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess pre-dial stdin buffer cap (#3401)
+//
+// Without a cap, a fast producer writing to proc.stdin while the WS dial is
+// hung (slow cluster, DNS failure) would grow `_stdinBuffer` without bound
+// and OOM the server.  The constructor enforces `maxStdinBufferBytes`:
+// over-cap chunks are dropped with a single log.warn for the first drop.
+// kill() also clears the buffer to release memory immediately on the kill
+// path — otherwise it would be held until the proc object is GC'd.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess pre-dial stdin buffer cap (#3401)', () => {
+  /**
+   * Build a backend with a WS stuck in CONNECTING so writes accumulate in the
+   * pre-dial buffer instead of being forwarded.  Returns a { backend, openWs }
+   * pair — call openWs() to flip the WS to OPEN and trigger the spawn frame +
+   * buffer flush.
+   */
+  function makeBackendWithPendingDial({ maxStdinBufferBytes } = {}) {
+    const { ws: realWs } = createFakeWs()
+    const pendingOpenListeners = []
+    const connectingWs = {
+      readyState: 0,  // CONNECTING — never opens unless openWs() is called
+      sent: realWs.sent,
+      send: (data) => realWs.sent.push(data),
+      close: realWs.close,
+      once: (ev, fn) => {
+        if (ev === 'open') {
+          pendingOpenListeners.push(fn)
+        } else {
+          realWs.once(ev, fn)
+        }
+      },
+      on: (ev, fn) => realWs.on(ev, fn),
+    }
+
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(connectingWs),
+      _maxStdinBufferBytes: maxStdinBufferBytes,
+    })
+    backend._agentTokens.set('pod-x', 'tok')
+
+    const openWs = () => {
+      connectingWs.readyState = 1  // OPEN
+      for (const fn of pendingOpenListeners) fn()
+    }
+
+    return { backend, ws: connectingWs, openWs }
+  }
+
+  it('flushes all writes when buffered total stays within the cap', async () => {
+    // Cap: 100 bytes; three 21-byte writes = 63 total — well under the cap.
+    const { backend, ws, openWs } = makeBackendWithPendingDial({
+      maxStdinBufferBytes: 100,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const chunk = 'x'.repeat(20) + '\n'  // 21 bytes
+    proc.stdin.write(chunk)
+    proc.stdin.write(chunk)
+    proc.stdin.write(chunk)
+
+    await new Promise(r => setImmediate(r))
+    // No frames sent yet — WS is still connecting.
+    assert.equal(ws.sent.length, 0, 'no frames before WS opens')
+
+    openWs()
+    await new Promise(r => setImmediate(r))
+
+    const stdinFrames = ws.sent.map(s => JSON.parse(s)).filter(f => f.type === 'stdin')
+    assert.equal(stdinFrames.length, 3, 'all three under-cap writes must flush')
+    assert.equal(stdinFrames[0].data, chunk)
+    assert.equal(stdinFrames[1].data, chunk)
+    assert.equal(stdinFrames[2].data, chunk)
+  })
+
+  it('drops over-cap writes while preserving the bytes already buffered', async () => {
+    // Cap: 100 bytes.
+    //   write #1 (50 B) — fits  (running total 50).
+    //   write #2 (60 B) — would push to 110 B; dropped entirely (no truncation).
+    //   write #3 (80 B) — would push to 130 B; also dropped.
+    // Buffer should hold only write #1 when the dial finally resolves.
+    const { backend, ws, openWs } = makeBackendWithPendingDial({
+      maxStdinBufferBytes: 100,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    const fits = 'a'.repeat(50)
+    const overflowsOnce = 'b'.repeat(60)
+    const overflowsAgain = 'c'.repeat(80)
+    proc.stdin.write(fits)
+    proc.stdin.write(overflowsOnce)
+    proc.stdin.write(overflowsAgain)
+
+    await new Promise(r => setImmediate(r))
+
+    // The proc's internal buffer should hold ONLY the first chunk.
+    assert.equal(proc._stdinBufferBytes, 50,
+      'only the under-cap chunk should be buffered')
+    assert.equal(proc._stdinBuffer.length, 1,
+      'over-cap chunks must be dropped entirely, not truncated')
+    assert.equal(proc._stdinBufferDropped, true,
+      'overflow flag must be set after the first dropped chunk')
+
+    openWs()
+    await new Promise(r => setImmediate(r))
+
+    const stdinFrames = ws.sent.map(s => JSON.parse(s)).filter(f => f.type === 'stdin')
+    assert.equal(stdinFrames.length, 1,
+      'only the buffered (under-cap) chunk should be flushed')
+    assert.equal(stdinFrames[0].data, fits,
+      'flushed chunk must be the original 50-byte payload, not a truncation')
+  })
+
+  it('kill() before dial resolves clears the pre-dial buffer', async () => {
+    const { backend } = makeBackendWithPendingDial({
+      maxStdinBufferBytes: 1024,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    proc.stdin.write('hello\n')
+    proc.stdin.write('world\n')
+
+    await new Promise(r => setImmediate(r))
+    assert.ok(proc._stdinBufferBytes > 0, 'sanity: buffer should hold pre-kill writes')
+    assert.ok(proc._stdinBuffer.length > 0, 'sanity: buffer chunks should be present')
+
+    // kill() before the dial resolves — _wireStdin() will never run, so
+    // without an explicit clear the buffer would be held until GC.
+    proc.kill('SIGTERM')
+
+    assert.equal(proc._stdinBufferBytes, 0, 'kill() must reset the byte counter')
+    assert.equal(proc._stdinBuffer.length, 0, 'kill() must release the buffer chunks')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SidecarProcess stdin disabled signal (#3402)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SidecarProcess stdin disabled signal (#3402)', () => {
+  it('isStdinForwardingEnabled() is true on a fresh spawn', async () => {
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc.isStdinForwardingEnabled(), true,
+      'stdin forwarding must be enabled after the initial spawn')
+  })
+
+  it('emits stdin_disabled exactly once on reconnect', async () => {
+    const { ws: ws1, controller: ctrl1 } = createFakeWs()
+    const { ws: ws2 } = createFakeWs()
+
+    let dialCount = 0
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => {
+        dialCount += 1
+        return Promise.resolve(dialCount === 1 ? ws1 : ws2)
+      },
+      _reconnectDelays: [10],
+      _maxRetries: 5,
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+    proc.on('error', () => {})
+
+    let disabledCount = 0
+    proc.on('stdin_disabled', () => { disabledCount += 1 })
+
+    // Establish a session so reconnect is attempted on close.
+    await new Promise(r => setImmediate(r))
+    ctrl1.receive(JSON.stringify({ type: 'session_started', sessionId: 'rsid-1' }))
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc.isStdinForwardingEnabled(), true,
+      'forwarding still enabled before reconnect')
+
+    // Wait deterministically for the disabled signal — attach BEFORE
+    // triggering close so we can't miss the emit.  Avoids flaky timing
+    // under CI load (setTimeout-based waits can fire before the reconnect
+    // path runs on a busy event loop).
+    const disabledOnce = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('timeout waiting for stdin_disabled on reconnect')),
+        2000,
+      )
+      proc.once('stdin_disabled', () => { clearTimeout(timer); resolve() })
+    })
+
+    // Trigger reconnect.
+    ctrl1.triggerClose(1006)
+    await disabledOnce
+
+    assert.equal(proc.isStdinForwardingEnabled(), false,
+      'forwarding must be reported disabled after reconnect')
+    assert.equal(disabledCount, 1,
+      'stdin_disabled must fire exactly once on reconnect')
+
+    // Subsequent writes must NOT re-emit the event.
+    proc.stdin.write('post-reconnect data\n')
+    await new Promise(r => setImmediate(r))
+    assert.equal(disabledCount, 1,
+      'stdin_disabled must remain one-shot — additional writes are silent')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('emits stdin_disabled when WS closes mid-write before reconnect completes', async () => {
+    const { ws, controller } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+    // Swallow the existing 'error' event the listener emits.
+    proc.on('error', () => {})
+
+    let disabledCount = 0
+    proc.on('stdin_disabled', () => { disabledCount += 1 })
+
+    // Wait for spawn + _wireStdin to run.
+    await new Promise(r => setImmediate(r))
+
+    // Mark the WS as closed so the live-forwarding listener trips.
+    ws.readyState = 3  // CLOSED
+    controller.triggerClose(1006)
+
+    // Write something — the live listener detects the closed WS, signals
+    // disabled, and removes itself.
+    proc.stdin.write('after close\n')
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(proc.isStdinForwardingEnabled(), false,
+      'forwarding must be reported disabled after WS closes mid-write')
+    assert.equal(disabledCount, 1,
+      'stdin_disabled must fire exactly once on mid-write WS close')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('pre-wire writes after disabled flag is set still signal once (defensive)', async () => {
+    // Edge case: if the disabled flag is set before _wireStdin replaced the
+    // accumulator listener (extremely unlikely but defensible), a write
+    // hitting the accumulator while _stdinForwardingDisabled is already true
+    // must still trigger _signalStdinDisabled() — not silently buffer.
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      _coreV1Api: createMockApi(),
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    const proc = backend.streamCliInEnvironment('pod-x', {
+      cmd: 'claude', args: [], agentToken: 'tok',
+    })
+
+    let disabledCount = 0
+    proc.on('stdin_disabled', () => { disabledCount += 1 })
+
+    // Force into the disabled-but-not-wired state directly (simulates a race
+    // where the disabled flag was set before _wireStdin ran).
+    proc._stdinWired = false
+    proc._stdinForwardingDisabled = true
+
+    proc.stdin.write('writes after disabled flag set\n')
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(disabledCount, 1,
+      'pre-wire accumulator must invoke _signalStdinDisabled when disabled')
+    assert.equal(proc._stdinBuffer.length, 0,
+      'data must NOT be buffered once forwarding is disabled')
 
     proc.stdout.resume(); proc.stderr.resume()
   })

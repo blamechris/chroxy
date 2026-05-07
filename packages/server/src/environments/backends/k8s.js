@@ -15,6 +15,16 @@ const DESTROY_TIMEOUT_MS = 30_000
 const DEFAULT_RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 4_000, 8_000]
 const DEFAULT_MAX_RETRIES = 5
 
+/**
+ * Cap on bytes held in `_stdinBuffer` before the WS dial resolves (#3401).
+ * If the dial hangs (slow cluster, DNS failure) and the caller is piping
+ * large stdin payloads, an unbounded buffer would grow until the server
+ * OOMs.  Writes that would push the buffer past the cap are dropped with
+ * a warning.  1 MiB is generous for a few large prompts but bounds the
+ * worst-case memory hold at one process-worth.
+ */
+const DEFAULT_MAX_STDIN_BUFFER_BYTES = 1 * 1024 * 1024  // 1 MiB
+
 /** Default sidecar image — overridden via constructor option */
 const DEFAULT_SIDECAR_IMAGE = 'chroxy-pod-agent:latest'
 
@@ -103,17 +113,18 @@ export class K8sBackend {
    * @param {Function} [opts._dialWs]                   - Injected WS dial factory for testing: (url, token) => WebSocket
    * @param {number[]} [opts._reconnectDelays]          - Override backoff delays in ms for testing
    * @param {number}   [opts._maxRetries]               - Override max reconnect retries for testing
+   * @param {number}   [opts._maxStdinBufferBytes]      - Override SidecarProcess pre-dial stdin buffer cap (#3401)
    * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
   constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, imagePullPolicy,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
-    _reconnectDelays, _maxRetries,
+    _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace || 'default'
     this._sidecarImage = sidecarImage || DEFAULT_SIDECAR_IMAGE
-    this._imagePullPolicy = imagePullPolicy || null
+    this._imagePullPolicy = imagePullPolicy ?? null
     this._connectMode = connectMode || 'portforward'
 
     if (_coreV1Api) {
@@ -173,6 +184,10 @@ export class K8sBackend {
     this._maxRetries = Number.isFinite(_maxRetries) && _maxRetries >= 0
       ? _maxRetries
       : DEFAULT_MAX_RETRIES
+    // Pre-dial stdin buffer cap (#3401) — injectable for tests.
+    this._maxStdinBufferBytes = Number.isFinite(_maxStdinBufferBytes) && _maxStdinBufferBytes > 0
+      ? _maxStdinBufferBytes
+      : DEFAULT_MAX_STDIN_BUFFER_BYTES
     // Timer seam: allow tests to substitute a fake clock and avoid real-time polling.
     this._setTimeout = setTimeoutImpl || setTimeout
     this._clearTimeout = clearTimeoutImpl || clearTimeout
@@ -198,6 +213,29 @@ export class K8sBackend {
    *   exist; operators should provision a PVC pre-populated with the workspace and
    *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
    *   must be able to read the path provided in opts.cwd from its local filesystem.
+   *
+   * **Security warning — hostPath privilege escalation:**
+   *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
+   *   Pod direct access to the underlying node's filesystem. This is a
+   *   privilege-escalation vector on multi-tenant clusters: a malicious or
+   *   misconfigured workspace path could mount sensitive node paths such as
+   *   `/etc/kubernetes/pki`, `/var/run/docker.sock`, or `/var/lib/kubelet`,
+   *   allowing the workload to read cluster credentials or break out of the
+   *   container.
+   *
+   *   Most production clusters block `hostPath` via PodSecurity admission —
+   *   PSA `restricted` and `baseline` policies both prohibit it, so Pod
+   *   creation will be rejected by the PSA admission controller (the API
+   *   server returns a 4xx at create time, before the Pod ever reaches the
+   *   scheduler).
+   *
+   *   **This mode is not safe for shared / multi-tenant clusters.** Operators
+   *   running on shared infrastructure should use a PVC-based workspace
+   *   strategy (see follow-up #3385) instead of relying on `hostPath`. Use
+   *   this backend only on single-tenant clusters where you control every
+   *   workload, or on a namespace where Pod Security Admission is enforced
+   *   at the `privileged` level (or with an equivalent policy exemption) so
+   *   that `hostPath` volumes are explicitly permitted.
    *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
@@ -241,6 +279,17 @@ export class K8sBackend {
     // passes a workspace image (e.g. node:22-slim) which we deliberately
     // ignore here; only the constructor-configured sidecarImage is used.
     const sidecarImage = this._sidecarImage
+
+    // 0. Pre-flight: validate every mount string up-front. _parseMountString()
+    //    throws for Windows-style drive-letter paths (#3388); doing this BEFORE
+    //    the Secret/Pod create avoids leaking a half-provisioned Secret when a
+    //    caller passes a bad mount. Parse results are reused below.
+    const parsedMounts = []
+    if (mounts && mounts.length > 0) {
+      for (let i = 0; i < mounts.length; i++) {
+        parsedMounts.push(_parseMountString(mounts[i]))
+      }
+    }
 
     // 1. Generate per-Pod auth token
     const agentToken = randomBytes(32).toString('base64url')
@@ -309,9 +358,11 @@ export class K8sBackend {
     }
 
     // 4b. Additional mounts: Docker-style "hostPath:containerPath[:ro]" strings.
-    if (mounts && mounts.length > 0) {
-      for (let i = 0; i < mounts.length; i++) {
-        const parsed = _parseMountString(mounts[i])
+    //     Parse results were validated up-front (step 0); a `null` entry means
+    //     the input did not match any supported format and is logged + skipped.
+    if (parsedMounts.length > 0) {
+      for (let i = 0; i < parsedMounts.length; i++) {
+        const parsed = parsedMounts[i]
         if (!parsed) {
           log.warn(`createEnvironment: ignoring unparseable mount entry "${mounts[i]}"`)
           continue
@@ -694,10 +745,13 @@ export class K8sBackend {
     const {
       _reconnectDelays: reconnectDelays,
       _maxRetries: maxRetries,
+      _maxStdinBufferBytes: maxStdinBufferBytes,
       _setTimeout: setTimeoutImpl,
       _clearTimeout: clearTimeoutImpl,
     } = this
-    const proc = new SidecarProcess({ reconnectDelays, maxRetries, setTimeoutImpl, clearTimeoutImpl })
+    const proc = new SidecarProcess({
+      reconnectDelays, maxRetries, maxStdinBufferBytes, setTimeoutImpl, clearTimeoutImpl,
+    })
 
     // Resolve the token (synchronous fast path or async Secret fetch), then dial.
     Promise.resolve(tokenOrPromise).then((agentToken) => {
@@ -1051,18 +1105,36 @@ export class K8sBackend {
  * (an array of Buffer chunks) and flushed as `stdin` frames when `_wireStdin`
  * is called by `_wireWsToProc` after the connection opens.  If the process is
  * killed or exits before the dial resolves, the buffer is discarded silently.
+ *
+ * The pre-dial buffer is capped at `maxStdinBufferBytes` (default 1 MiB,
+ * #3401).  Writes that would push the buffer past the cap are dropped with
+ * a `log.warn`; this prevents unbounded memory growth when the WS dial
+ * hangs and a fast producer keeps writing.  `kill()` clears the buffer
+ * immediately so the bytes are not held until GC.
+ *
+ * ### stdin disabled signal (#3402)
+ *
+ * On WS reconnect (`resume` frame) stdin forwarding is intentionally NOT
+ * re-wired — see resume semantics above. To prevent silent data loss when a
+ * consumer keeps writing after reconnect, the proc emits a one-shot
+ * `'stdin_disabled'` event the moment forwarding becomes unrecoverable
+ * (reconnect dial succeeds, or WS closes mid-write before reconnect).  After
+ * that point further writes are dropped and the consumer can use
+ * `isStdinForwardingEnabled()` to poll the current state.
  */
 class SidecarProcess extends EventEmitter {
   /**
    * @param {Object} [opts]
-   * @param {number[]} [opts.reconnectDelays]  - Backoff delay schedule in ms
-   * @param {number}   [opts.maxRetries]       - Max reconnect attempts before giving up
-   * @param {Function} [opts.setTimeoutImpl]   - setTimeout override for deterministic testing
-   * @param {Function} [opts.clearTimeoutImpl] - clearTimeout override for deterministic testing
+   * @param {number[]} [opts.reconnectDelays]      - Backoff delay schedule in ms
+   * @param {number}   [opts.maxRetries]           - Max reconnect attempts before giving up
+   * @param {number}   [opts.maxStdinBufferBytes]  - Pre-dial stdin buffer cap in bytes (#3401)
+   * @param {Function} [opts.setTimeoutImpl]       - setTimeout override for deterministic testing
+   * @param {Function} [opts.clearTimeoutImpl]     - clearTimeout override for deterministic testing
    */
   constructor({
     reconnectDelays = DEFAULT_RECONNECT_DELAYS,
     maxRetries = DEFAULT_MAX_RETRIES,
+    maxStdinBufferBytes = DEFAULT_MAX_STDIN_BUFFER_BYTES,
     setTimeoutImpl,
     clearTimeoutImpl,
   } = {}) {
@@ -1091,8 +1163,18 @@ class SidecarProcess extends EventEmitter {
     // Once _wireStdin() is called the buffer is flushed and subsequent writes
     // go directly to the live WS.
     this._stdinBuffer = []       // Array<Buffer> — pre-dial write buffer
+    this._stdinBufferBytes = 0   // running total of bytes held in _stdinBuffer
+    this._stdinBufferDropped = false  // true once a write has been dropped due to cap
+    this._maxStdinBufferBytes = maxStdinBufferBytes
     this._stdinWired = false     // true once _wireStdin() has been called
     this._stdinEnded = false     // true once stdin 'end' has fired
+
+    // stdin disabled signal (#3402): set true once forwarding is permanently
+    // off (reconnect happened, or live WS dropped mid-write).  The first
+    // transition emits a one-shot 'stdin_disabled' event so consumers can
+    // surface the failure to the user instead of silently losing turns.
+    this._stdinForwardingDisabled = false
+    this._stdinDisabledSignaled = false
 
     // Accumulate stdin data until the WS is ready.
     this.stdin.on('data', (chunk) => {
@@ -1101,7 +1183,33 @@ class SidecarProcess extends EventEmitter {
         // reach here, but guard defensively.
         return
       }
-      this._stdinBuffer.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      if (this._stdinForwardingDisabled) {
+        // Reconnect happened before _wireStdin ran on this WS — surface the
+        // disabled state to the consumer rather than buffering forever.
+        this._signalStdinDisabled()
+        return
+      }
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      // Cap the pre-dial buffer (#3401). Without a cap a slow WS dial plus a
+      // fast producer would grow this array without bound and OOM the server.
+      // Drop the over-cap chunk entirely (rather than truncating) so we don't
+      // split frames mid-line — the consumer's NDJSON stream would become
+      // invalid otherwise.
+      if (this._stdinBufferBytes + buf.length > this._maxStdinBufferBytes) {
+        if (!this._stdinBufferDropped) {
+          // Log only the first drop to avoid log spam from a fast producer;
+          // smaller writes that still fit may continue to be buffered.
+          log.warn(
+            `SidecarProcess: pre-dial stdin buffer exceeded cap (` +
+            `${this._maxStdinBufferBytes} bytes) — dropping ${buf.length}-byte chunk; ` +
+            `further drops will be silent`
+          )
+          this._stdinBufferDropped = true
+        }
+        return
+      }
+      this._stdinBuffer.push(buf)
+      this._stdinBufferBytes += buf.length
     })
 
     this.stdin.on('end', () => {
@@ -1112,6 +1220,51 @@ class SidecarProcess extends EventEmitter {
       }
       // If not yet wired, _wireStdin() will send stdin_end after flushing.
     })
+  }
+
+  /**
+   * Whether writes to `proc.stdin` are currently being forwarded to the
+   * sidecar (#3402).  Returns `false` once a reconnect has occurred or the
+   * live WS dropped mid-write — at that point further writes are dropped
+   * silently, and the consumer should fall back to a different mechanism
+   * (or surface an error to the user).
+   *
+   * @returns {boolean}
+   */
+  isStdinForwardingEnabled() {
+    return !this._stdinForwardingDisabled
+  }
+
+  /**
+   * Mark stdin forwarding as disabled and emit `'stdin_disabled'` exactly
+   * once (#3402).  Idempotent — repeated calls are no-ops after the first
+   * emission.  Called by the reconnect path in `_wireWsToProc` and by the
+   * live-forwarding listener in `_wireStdin` when WS closes mid-write.
+   *
+   * On the first transition we also drop any pre-wire buffered chunks in
+   * `_stdinBuffer`: once forwarding is permanently off the buffer can never
+   * be flushed (no live WS will ever take it), so retaining it would leak
+   * memory.  Anything that was already buffered is unrecoverable from the
+   * sidecar's perspective; the consumer was just told via `'stdin_disabled'`
+   * and should fall back to a different mechanism.  The number of dropped
+   * chunks is logged so operators have a paper trail for lost input.
+   *
+   * @private
+   */
+  _signalStdinDisabled() {
+    this._stdinForwardingDisabled = true
+    if (this._stdinDisabledSignaled) return
+    this._stdinDisabledSignaled = true
+    if (this._stdinBuffer.length > 0) {
+      log.warn(
+        `SidecarProcess: dropping ${this._stdinBuffer.length} pre-wire stdin ` +
+        `chunk(s) (${this._stdinBufferBytes} bytes) — forwarding disabled ` +
+        'before flush could complete',
+      )
+      this._stdinBuffer = []
+      this._stdinBufferBytes = 0
+    }
+    this.emit('stdin_disabled')
   }
 
   kill(signal = 'SIGTERM') {
@@ -1134,6 +1287,11 @@ class SidecarProcess extends EventEmitter {
       try { this._cleanup() } catch (_) { /* ignore */ }
       this._cleanup = null
     }
+    // Release the pre-dial stdin buffer immediately (#3401). If kill() fires
+    // before the dial resolves, _wireStdin() will never run and the buffered
+    // bytes would otherwise be held until the proc is GC'd.
+    this._stdinBuffer = []
+    this._stdinBufferBytes = 0
     // If the WS was never wired (kill called before dial resolved), there
     // will be no `close` event to drive the exit. The post-dial wiring path
     // checks `proc.killed` and synthesizes exit(-1) in that case.
@@ -1272,9 +1430,13 @@ function _wireWsToProc(ws, proc, { cmd, args = [], env, cwd, signal, cleanup } =
     // Wire proc.stdin → WS after the first frame is sent so the agent has
     // already opened a piped stdin channel before we forward any data.
     // On reconnect we do NOT re-wire — stdin forwarding is not resumed
-    // (see class-level JSDoc on resume semantics).
+    // (see class-level JSDoc on resume semantics).  Surface the disabled
+    // state to the consumer so they can stop writing or surface an error
+    // (#3402).
     if (!isReconnect) {
       _wireStdin(ws, proc)
+    } else {
+      proc._signalStdinDisabled()
     }
   }
 
@@ -1435,9 +1597,21 @@ function _wireStdin(ws, proc) {
   proc.stdin.removeAllListeners('data')
   proc.stdin.on('data', (chunk) => {
     if (ws.readyState !== WebSocket.OPEN) {
-      // WS closed mid-stream. Emit an error on proc so the consumer knows
-      // stdin writes are being dropped, then swallow silently afterwards.
-      proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      // WS closed mid-stream. Surface the disabled state via the dedicated
+      // #3402 'stdin_disabled' signal first — that event is one-shot and
+      // explicit, and unlike 'error' it never throws when no listener is
+      // attached.
+      proc._signalStdinDisabled()
+      // Only emit 'error' if a consumer is actually listening — Node throws
+      // an unhandled 'error' otherwise, which would crash the process and
+      // defeat the point of the 'stdin_disabled' signal.  Consumers that
+      // care about errors should subscribe; consumers that only need the
+      // disabled signal listen on 'stdin_disabled' instead.
+      if (proc.listenerCount('error') > 0) {
+        proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      } else {
+        log.warn('SidecarProcess: WS closed while writing stdin — dropping further writes (no error listener)')
+      }
       // Stop forwarding — remove this listener so further writes are silent.
       proc.stdin.removeAllListeners('data')
       return
@@ -1460,6 +1634,7 @@ function _wireStdin(ws, proc) {
     }
   }
   proc._stdinBuffer = []  // release memory
+  proc._stdinBufferBytes = 0
 
   // stdin may have already ended while we were buffering.
   if (proc._stdinEnded) {
@@ -1538,13 +1713,32 @@ function _deriveSecretName(podName) {
  *   "/host/path:/container/path"
  *   "/host/path:/container/path:ro"
  *
- * Returns null for unrecognised input so the caller can log and skip.
+ * Returns null for unrecognised *formats* (so the caller can log and skip), but
+ * throws for inputs that are recognised as invalid — currently Windows-style
+ * drive-letter prefixes (see below). Callers must therefore tolerate both a
+ * `null` return and a thrown Error.
  *
- * @param {string} mountStr
+ * Windows-style paths with a drive letter (e.g. `C:\Users\foo:/workspace`) are
+ * rejected with an explicit Error: splitting on `:` would silently truncate the
+ * host path to the drive letter (`"C"`) and treat the rest of the Windows path
+ * as the container path, producing a misconfigured mount that fails later at
+ * Pod scheduling. K8s nodes are Linux-only, so Windows host paths are not
+ * supportable in any case — fail loudly at parse time.
+ *
+ * @param {string} mountStr Docker-style mount string in `<host>:<container>[:ro]` form.
  * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
+ * @throws {Error} when `mountStr` begins with a Windows drive-letter prefix.
  */
 function _parseMountString(mountStr) {
   if (typeof mountStr !== 'string') return null
+  // Reject Windows drive-letter paths up-front: `C:\…` or `C:/…` would split on
+  // `:` into a 1-char hostPath and a corrupted containerPath. K8s nodes only
+  // accept POSIX paths, so this can never produce a valid mount.
+  if (/^[A-Za-z]:[\\/]/.test(mountStr)) {
+    throw new Error(
+      `K8s mount string '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths (expected '<host>:<container>[:ro]' with a POSIX host path)`
+    )
+  }
   const parts = mountStr.split(':')
   if (parts.length < 2) return null
   const hostPath = parts[0]
