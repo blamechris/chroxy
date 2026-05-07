@@ -988,17 +988,17 @@ export function App() {
 
     // Permission prompt
     if (storeMsg.requestId && storeMsg.expiresAt && !storeMsg.answered) {
-      // #3619 wall-clock boundary at message receipt. `storeMsg.expiresAt`
-      // was computed once on receipt as `Date.now() + msg.remainingMs`
-      // (see `message-handler.ts` permission_request handler), so this
-      // subtraction is wall-clock-vs-wall-clock and stays consistent
-      // across NTP-driven changes that happen *after* receipt. The
-      // PermissionPrompt's local countdown then uses `performance.now()`
-      // for monotonic stability after mount — but inherits this initial
-      // value, so a clock jump between receipt and first render leaks in
-      // here exactly once. Switching this site to `performance.now()`
-      // would mix clocks against the wall-clock anchor and produce
-      // garbage; document the receipt-time boundary instead.
+      // #3619 wall-clock site (kept on `Date.now()` intentionally).
+      // `storeMsg.expiresAt` is computed at receipt as
+      // `Date.now() + msg.remainingMs` in `message-handler.ts`, so this
+      // subtraction is wall-clock-vs-wall-clock — both sides use the
+      // same clock, no mixing. Switching this site to `performance.now()`
+      // would subtract a process-local monotonic clock from a wall-clock
+      // anchor and produce garbage. Wall-clock jumps after receipt do
+      // change `Date.now()` and therefore affect each re-computation
+      // here — that is correct behavior for a wall-clock anchor.
+      // Whatever value falls out is what feeds `<PermissionPrompt>`'s
+      // local countdown anchor as its initial `remainingMs` prop.
       const remainingMs = Math.max(0, storeMsg.expiresAt - Date.now())
       return (
         <PermissionPrompt
