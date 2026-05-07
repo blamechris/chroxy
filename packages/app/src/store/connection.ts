@@ -1249,8 +1249,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #3611: options-object signature mirrors the dashboard's createSession.
   // Avoids 6+ positional optional args (the previous shape) and makes adding
   // future fields a one-place change. Server's `create_session` handler
-  // accepts the same set of fields
-  // (packages/server/src/handlers/session-handlers.js).
+  // accepts these fields plus others (e.g. `sandbox`) — see
+  // packages/server/src/handlers/session-handlers.js for the full set.
   createSession: ({ name, cwd, worktree, provider, model, permissionMode, environmentId }) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

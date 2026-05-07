@@ -1252,6 +1252,33 @@ describe('createSession store action', () => {
     expect(payload.permissionMode).toBeUndefined();
   });
 
+  it('forwards environmentId to the wire (#3611, dashboard parity)', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      environmentId: 'env-123',
+    });
+
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'create_session',
+      name: 'S',
+      environmentId: 'env-123',
+    });
+  });
+
+  it('omits empty-string environmentId (consistent with other fields)', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().createSession({
+      name: 'S',
+      environmentId: '',
+    });
+
+    const payload = JSON.parse(sent[0]);
+    expect(payload.environmentId).toBeUndefined();
+  });
+
   it('no-ops when socket is not connected', () => {
     useConnectionStore.setState({ socket: null });
     // Should not throw
