@@ -626,6 +626,50 @@ describe('stdin_dropped_totals event', () => {
     const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
     assert.equal(result.messages[0].msg.reason, 'unknown')
   })
+
+  it('clamps negative bytes to 0 (#3579)', () => {
+    const data = { bytes: -50, count: 1, reason: 'pre-dial-cap', escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.bytes, 0)
+  })
+
+  it('clamps negative count to 0 (#3579)', () => {
+    const data = { bytes: 100, count: -3, reason: 'pre-dial-cap', escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.count, 0)
+  })
+
+  it('truncates float bytes to integer (#3579)', () => {
+    const data = { bytes: 350.7, count: 1, reason: 'pre-dial-cap', escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.bytes, 350)
+    assert.equal(Number.isInteger(result.messages[0].msg.bytes), true)
+  })
+
+  it('truncates float count to integer (#3579)', () => {
+    const data = { bytes: 100, count: 2.9, reason: 'pre-dial-cap', escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.count, 2)
+    assert.equal(Number.isInteger(result.messages[0].msg.count), true)
+  })
+
+  it('coerces string "false" escalated to false via strict bool check (#3579)', () => {
+    const data = { bytes: 100, count: 1, reason: 'pre-dial-cap', escalated: 'false' }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.escalated, false)
+  })
+
+  it('coerces non-boolean truthy escalated to false via strict bool check (#3579)', () => {
+    const data = { bytes: 100, count: 1, reason: 'pre-dial-cap', escalated: 1 }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.escalated, false)
+  })
+
+  it('preserves empty-string sessionId via nullish coalesce (#3579)', () => {
+    const data = { bytes: 100, count: 1, reason: 'pre-dial-cap', escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: '' }))
+    assert.equal(result.messages[0].msg.sessionId, '')
+  })
 })
 
 // ---- EVENT_MAP completeness ----

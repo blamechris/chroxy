@@ -619,62 +619,57 @@ describe('K8sBackend constructor defaults use nullish coalescing (#3459)', () =>
 // sites used `||`, which would silently stomp an explicit empty string with
 // the constructor default.  Per #3459's rationale (no validation gate rejects
 // empty strings before this resolution), the contract is to use `??` so the
-// caller's empty string is preserved verbatim.  Empty string is not a valid
-// K8s namespace at the API layer, but the backend must surface that as an
-// API-side error rather than silently rewriting the input.
+// caller's empty string is preserved verbatim.
+//
+// As of #3571 a `_validateNamespace` step layered on `_resolveNamespace`
+// rejects empty strings (and other RFC 1123 violations) BEFORE any K8s API
+// call is issued.  The tests below assert the validator throws — verifying
+// the resolver still preserves '' verbatim is covered by the dedicated
+// `_resolveNamespace()` block below.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('K8sBackend per-call namespace resolution uses nullish coalescing (#3493)', () => {
-  it('createEnvironment preserves explicit empty-string namespace (not replaced by default)', async () => {
+describe('K8sBackend per-call namespace empty-string is rejected by _validateNamespace (#3571)', () => {
+  it('createEnvironment throws on empty-string namespace and never calls the K8s API', async () => {
     const api = createMockApi()
     const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
 
-    await backend.createEnvironment({ envId: 'env-empty', image: 'agent:latest', namespace: '' })
-
-    assert.strictEqual(api.calls.create[0].namespace, '',
-      'Pod create must use the caller-provided empty string verbatim')
-    assert.strictEqual(api.calls.createSecret[0].namespace, '',
-      'Secret create must use the caller-provided empty string verbatim')
+    await assert.rejects(
+      backend.createEnvironment({ envId: 'env-empty', image: 'agent:latest', namespace: '' }),
+      /createEnvironment: namespace must be a non-empty string/
+    )
+    assert.equal(api.calls.create.length, 0, 'Pod create must not be issued')
+    assert.equal(api.calls.createSecret.length, 0, 'Secret create must not be issued')
   })
 
-  it('destroyEnvironment preserves explicit empty-string namespace (not replaced by default)', async () => {
-    // Make `deleteNamespacedPod` itself 404 so destroyEnvironment exits via the
-    // idempotent fast-path without entering the 1s POLL_INTERVAL_MS poll loop
-    // (#3551). The mock still records the delete call before invoking the
-    // override, so the namespace assertion below remains valid.
-    const api = createMockApi({
-      deletePod: async () => { throw make404Error() },
-    })
+  it('destroyEnvironment throws on empty-string namespace and never calls the K8s API', async () => {
+    const api = createMockApi()
     const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
 
-    await backend.destroyEnvironment('chroxy-env-x', { namespace: '' })
-
-    assert.strictEqual(api.calls.delete[0].namespace, '',
-      'Pod delete must use the caller-provided empty string verbatim')
+    await assert.rejects(
+      backend.destroyEnvironment('chroxy-env-x', { namespace: '' }),
+      /destroyEnvironment: namespace must be a non-empty string/
+    )
+    assert.equal(api.calls.delete.length, 0, 'Pod delete must not be issued')
   })
 
-  it('getEnvironmentStatus preserves explicit empty-string namespace (not replaced by default)', async () => {
-    let observedNs
-    const api = createMockApi({
-      readPod: async (args) => {
-        observedNs = args.namespace
-        return { status: { phase: 'Running' } }
-      },
-    })
+  it('getEnvironmentStatus throws on empty-string namespace and never calls the K8s API', async () => {
+    const api = createMockApi()
     const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
 
-    await backend.getEnvironmentStatus('pod-x', { namespace: '' })
-
-    assert.strictEqual(observedNs, '',
-      'Pod read must use the caller-provided empty string verbatim')
+    await assert.rejects(
+      backend.getEnvironmentStatus('pod-x', { namespace: '' }),
+      /getEnvironmentStatus: namespace must be a non-empty string/
+    )
+    assert.equal(api.calls.read.length, 0, 'Pod read must not be issued')
   })
 
-  it('streamCliInEnvironment preserves explicit empty-string namespace via _readAgentToken', async () => {
-    const token = 'tok-empty-ns'
-    const encoded = Buffer.from(token).toString('base64')
-    const api = createMockApi({
-      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
-    })
+  it('streamCliInEnvironment surfaces empty-string namespace via the proc exit channel', async () => {
+    // streamCliInEnvironment is fire-and-forget — bad inputs cannot be thrown
+    // synchronously because the returned SidecarProcess is exposed
+    // immediately.  The _validateNamespace check lives in the synchronous
+    // pre-amble and throws BEFORE any dial is scheduled.  We assert the
+    // throw propagates synchronously and that no K8s API call was issued.
+    const api = createMockApi()
     const { ws } = createFakeWs()
     const backend = new K8sBackend({
       namespace: 'default',
@@ -682,32 +677,24 @@ describe('K8sBackend per-call namespace resolution uses nullish coalescing (#349
       _dialWs: () => Promise.resolve(ws),
     })
 
-    // Force the lazy Secret-read path (cache miss) so the namespace flows into
-    // _readAgentToken → readNamespacedSecret where we can observe it.
-    const proc = backend.streamCliInEnvironment('chroxy-env-empty', {
-      cmd: 'node', args: [], namespace: '',
-    })
-
-    await new Promise(r => setTimeout(r, 20))
-
-    assert.strictEqual(api.calls.readSecret[0].namespace, '',
-      'Secret read must use the caller-provided empty string verbatim')
-
-    proc.stdout.resume(); proc.stderr.resume()
+    assert.throws(
+      () => backend.streamCliInEnvironment('chroxy-env-empty', {
+        cmd: 'node', args: [], namespace: '',
+      }),
+      /streamCliInEnvironment: namespace must be a non-empty string/
+    )
+    assert.equal(api.calls.readSecret.length, 0, 'Secret read must not be issued')
   })
 
-  it('reconnectAgentToken preserves explicit empty-string namespace (not replaced by default)', async () => {
-    const token = 'reconnect-empty-ns'
-    const encoded = Buffer.from(token).toString('base64')
-    const api = createMockApi({
-      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
-    })
+  it('reconnectAgentToken throws on empty-string namespace and never calls the K8s API', async () => {
+    const api = createMockApi()
     const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
 
-    await backend.reconnectAgentToken('chroxy-env-r-empty', { namespace: '' })
-
-    assert.strictEqual(api.calls.readSecret[0].namespace, '',
-      'Secret read must use the caller-provided empty string verbatim')
+    await assert.rejects(
+      backend.reconnectAgentToken('chroxy-env-r-empty', { namespace: '' }),
+      /reconnectAgentToken: namespace must be a non-empty string/
+    )
+    assert.equal(api.calls.readSecret.length, 0, 'Secret read must not be issued')
   })
 })
 
@@ -737,6 +724,170 @@ describe('K8sBackend._resolveNamespace() (#3534)', () => {
     assert.strictEqual(backend._resolveNamespace(undefined), 'staging')
     assert.strictEqual(backend._resolveNamespace(null), 'staging')
     assert.strictEqual(backend._resolveNamespace(), 'staging')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend._validateNamespace() — RFC 1123 DNS label rules (#3571)
+//
+// Companion validator layered on top of `_resolveNamespace`. The five per-call
+// resolution sites use the chained pair `_validateNamespace(_resolveNamespace())`
+// so all sites gain validation atomically. Tests below pin the validator
+// itself; per-site rejection tests live in the #3571 block above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend._validateNamespace() RFC 1123 DNS label rules (#3571)', () => {
+  const makeBackend = () =>
+    new K8sBackend({ _coreV1Api: createMockApi(), namespace: 'default' })
+
+  // ─── Accepts valid namespaces ──────────────────────────────────────────────
+
+  it('accepts a typical lowercase alphanumeric namespace', () => {
+    const backend = makeBackend()
+    assert.strictEqual(backend._validateNamespace('production', 'ctx'), 'production')
+  })
+
+  it('accepts hyphens in the middle of the label', () => {
+    const backend = makeBackend()
+    assert.strictEqual(backend._validateNamespace('chroxy-prod-eu', 'ctx'), 'chroxy-prod-eu')
+  })
+
+  it('accepts a single alphanumeric character', () => {
+    const backend = makeBackend()
+    assert.strictEqual(backend._validateNamespace('a', 'ctx'), 'a')
+    assert.strictEqual(backend._validateNamespace('1', 'ctx'), '1')
+  })
+
+  it('accepts digits at start and end', () => {
+    const backend = makeBackend()
+    assert.strictEqual(backend._validateNamespace('1ns2', 'ctx'), '1ns2')
+  })
+
+  it('accepts the maximum length of 63 characters', () => {
+    const backend = makeBackend()
+    const ns = 'a'.repeat(63)
+    assert.strictEqual(backend._validateNamespace(ns, 'ctx'), ns)
+  })
+
+  // ─── Rejects empty / non-string ────────────────────────────────────────────
+
+  it('rejects an empty string with a "non-empty string" message', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('', 'createEnvironment'),
+      /createEnvironment: namespace must be a non-empty string/
+    )
+  })
+
+  it('rejects null with a "non-empty string" message', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace(null, 'destroyEnvironment'),
+      /destroyEnvironment: namespace must be a non-empty string/
+    )
+  })
+
+  it('rejects undefined with a "non-empty string" message', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace(undefined, 'getEnvironmentStatus'),
+      /getEnvironmentStatus: namespace must be a non-empty string/
+    )
+  })
+
+  it('rejects a non-string number', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace(123, 'ctx'),
+      /ctx: namespace must be a non-empty string/
+    )
+  })
+
+  // ─── Rejects too-long ─────────────────────────────────────────────────────
+
+  it('rejects a 64-character namespace as exceeding the 63-char RFC 1123 limit', () => {
+    const backend = makeBackend()
+    const ns = 'a'.repeat(64)
+    assert.throws(
+      () => backend._validateNamespace(ns, 'ctx'),
+      /ctx: namespace ".*" exceeds 63-char RFC 1123 limit/
+    )
+  })
+
+  // ─── Rejects bad character classes ─────────────────────────────────────────
+
+  it('rejects uppercase letters', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('Production', 'ctx'),
+      /ctx: namespace "Production" must match RFC 1123 label format/
+    )
+  })
+
+  it('rejects internal underscores', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('foo_bar', 'ctx'),
+      /ctx: namespace "foo_bar" must match RFC 1123 label format/
+    )
+  })
+
+  it('rejects internal dots', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('foo.bar', 'ctx'),
+      /ctx: namespace "foo.bar" must match RFC 1123 label format/
+    )
+  })
+
+  it('rejects whitespace', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('foo bar', 'ctx'),
+      /ctx: namespace "foo bar" must match RFC 1123 label format/
+    )
+  })
+
+  // ─── Rejects bad start/end positions ───────────────────────────────────────
+
+  it('rejects a leading hyphen', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('-foo', 'ctx'),
+      /ctx: namespace "-foo" must match RFC 1123 label format/
+    )
+  })
+
+  it('rejects a trailing hyphen', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('foo-', 'ctx'),
+      /ctx: namespace "foo-" must match RFC 1123 label format/
+    )
+  })
+
+  it('rejects a hyphen-only single-char namespace', () => {
+    const backend = makeBackend()
+    assert.throws(
+      () => backend._validateNamespace('-', 'ctx'),
+      /ctx: namespace "-" must match RFC 1123 label format/
+    )
+  })
+
+  // ─── Constructor-default-also-empty edge case ──────────────────────────────
+  // _resolveNamespace returns `''` when both the per-call override and the
+  // constructor default are empty.  The chained `_validateNamespace` step
+  // must reject that combined result before any API call.
+
+  it('rejects when both per-call override and constructor default are empty (#3571)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespace: '' })
+
+    await assert.rejects(
+      backend.createEnvironment({ envId: 'env-x', image: 'agent:latest' }),
+      /createEnvironment: namespace must be a non-empty string/
+    )
+    assert.equal(api.calls.create.length, 0, 'Pod create must not be issued')
   })
 })
 
