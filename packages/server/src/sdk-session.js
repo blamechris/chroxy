@@ -9,6 +9,7 @@ import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
 import { createLogger } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
+import { formatBytes } from './utils/format-bytes.js'
 
 const log = createLogger('sdk')
 
@@ -759,9 +760,13 @@ export class SdkSession extends BaseSession {
         this._stdinDroppedThresholdLogged = true
       }
 
+      // #3543: keep the raw byte count for scriptable log consumers and
+      // append a humanised KiB/MiB/GiB suffix so threshold-cross lines are
+      // easier to scan at a glance.  Format: `cumulative=N bytes (X.X MiB)`.
+      const cumulativeHuman = formatBytes(cumulative)
       const message =
         `Sidecar stdin chunk dropped (${bytesLabel}, reason=${reason}, ` +
-        `cumulative=${cumulative} bytes over ${dropCount} drops) — ` +
+        `cumulative=${cumulative} bytes (${cumulativeHuman}) over ${dropCount} drops) — ` +
         'turn input was truncated; consumer may need to retry'
 
       if (escalate) {
