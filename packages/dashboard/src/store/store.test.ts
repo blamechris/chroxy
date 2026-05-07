@@ -1441,6 +1441,7 @@ describe('reconnect scheduling dedupe (#3615)', () => {
   }
 
   it('arms exactly one reconnect timer for an error → close pair', async () => {
+    const { useConnectionStore } = await import('./connection');
     const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
 
     try {
@@ -1449,6 +1450,20 @@ describe('reconnect scheduling dedupe (#3615)', () => {
       socket.onclose!();
 
       expect(reconnectTimers).toHaveLength(1);
+      // #3633: pin the rest of the reconnecting-state patch from
+      // scheduleReconnect — first-write-wins on connectionError, and
+      // connectionRetryCount must be reset to 0 exactly once. Without
+      // these assertions a regression that double-fires the patch (or
+      // overwrites connectionError on the second event) would still
+      // pass the timer-count check but break the operator-visible UI.
+      const state = useConnectionStore.getState();
+      expect(state.connectionError).toBe('Connection error');
+      expect(state.connectionRetryCount).toBe(0);
+      // Note: connectionPhase after error → close is BLOCKED by the
+      // onclose-else-branch clobber tracked in #3632 (fixed in PR #3631
+      // — this PR can't assert phase here without depending on that fix
+      // landing). PR #3631's `preserves connectionPhase=reconnecting
+      // through error → close ordering` covers the missing assertion.
     } finally {
       teardown();
     }
@@ -1457,6 +1472,7 @@ describe('reconnect scheduling dedupe (#3615)', () => {
   it('arms exactly one reconnect timer for a close → error pair', async () => {
     // Some failure modes (e.g. server-initiated close) fire close-then-error.
     // Either way we want the dedupe to hold.
+    const { useConnectionStore } = await import('./connection');
     const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
 
     try {
@@ -1464,6 +1480,55 @@ describe('reconnect scheduling dedupe (#3615)', () => {
       socket.onerror!();
 
       expect(reconnectTimers).toHaveLength(1);
+      // #3633: full state-after-both assertions for the close → error
+      // path (the easier ordering — onclose's wasConnected gate runs
+      // first, schedule fires, onerror's reconnectScheduled flag
+      // short-circuits the second call cleanly).
+      const state = useConnectionStore.getState();
+      expect(state.connectionPhase).toBe('reconnecting');
+      expect(state.connectionError).toBe('Connection lost');
+      expect(state.connectionRetryCount).toBe(0);
+    } finally {
+      teardown();
+    }
+  });
+
+  it('repeated onerror fires after onclose do not drift the reconnecting-state patch (idempotent)', async () => {
+    // #3633: pin idempotency — additional onerror fires from the same
+    // transport drop must not change phase / error / retryCount. Today
+    // this holds because scheduleReconnect short-circuits via the
+    // per-socket `reconnectScheduled` flag, and onerror does no state
+    // mutation outside that call. A future regression that bypassed
+    // the flag would silently double-mutate state without changing
+    // the timer count.
+    //
+    // Note: we do NOT exercise repeated onclose fires here because
+    // onclose's else-branch clobbers phase to 'disconnected' on the
+    // second fire (separate bug, #3632 / fixed in PR #3631). That
+    // codepath isn't part of the idempotency contract — the contract
+    // is "the first event arms; subsequent events for the same drop
+    // are no-ops".
+    const { useConnectionStore } = await import('./connection');
+    const { socket, reconnectTimers, teardown } = await setupReconnectScenario();
+
+    try {
+      socket.onclose!();
+      const after1 = useConnectionStore.getState();
+      const snapshot = {
+        phase: after1.connectionPhase,
+        error: after1.connectionError,
+        retry: after1.connectionRetryCount,
+      };
+
+      socket.onerror!();
+      socket.onerror!();
+      socket.onerror!();
+      const after4 = useConnectionStore.getState();
+
+      expect(reconnectTimers).toHaveLength(1);
+      expect(after4.connectionPhase).toBe(snapshot.phase);
+      expect(after4.connectionError).toBe(snapshot.error);
+      expect(after4.connectionRetryCount).toBe(snapshot.retry);
     } finally {
       teardown();
     }
