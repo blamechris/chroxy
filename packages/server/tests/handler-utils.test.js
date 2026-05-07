@@ -986,6 +986,55 @@ describe('sendError', () => {
   it('does nothing when ws is undefined', () => {
     assert.doesNotThrow(() => sendError(undefined, 'req-4', 'HANDLER_ERROR', 'no socket'))
   })
+
+  // #3538: sendError accepts an optional `data` object whose fields are merged
+  // into the wire payload so handlers can attach structured context (e.g.
+  // actualAuthor on INVALID_AUTHOR) without forcing clients to regex-parse the
+  // human-readable `message`. The change is additive — the canonical four
+  // fields (type/requestId/code/message) remain.
+  it('merges optional data fields into the wire payload (#3538)', () => {
+    const sent = []
+    const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
+    sendError(ws, 'req-5', 'INVALID_AUTHOR', 'wrong author', { actualAuthor: 'alice' })
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].type, 'error')
+    assert.strictEqual(sent[0].requestId, 'req-5')
+    assert.strictEqual(sent[0].code, 'INVALID_AUTHOR')
+    assert.strictEqual(sent[0].message, 'wrong author')
+    assert.strictEqual(sent[0].actualAuthor, 'alice')
+  })
+
+  it('refuses data fields that would clobber canonical wire fields (#3538)', () => {
+    const sent = []
+    const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
+    // A misbehaving caller passes data keys that overlap canonical fields.
+    // Canonical fields must win — the data spread cannot override type/code/etc.
+    sendError(ws, 'req-6', 'INVALID_AUTHOR', 'wrong author', {
+      type: 'wat',
+      requestId: 'spoofed',
+      code: 'OTHER',
+      message: 'spoofed',
+      actualAuthor: 'alice',
+    })
+    assert.strictEqual(sent[0].type, 'error')
+    assert.strictEqual(sent[0].requestId, 'req-6')
+    assert.strictEqual(sent[0].code, 'INVALID_AUTHOR')
+    assert.strictEqual(sent[0].message, 'wrong author')
+    assert.strictEqual(sent[0].actualAuthor, 'alice')
+  })
+
+  it('ignores non-object data argument (#3538)', () => {
+    const sent = []
+    const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
+    sendError(ws, 'req-7', 'HANDLER_ERROR', 'oops', null)
+    sendError(ws, 'req-8', 'HANDLER_ERROR', 'oops', 'not-an-object')
+    sendError(ws, 'req-9', 'HANDLER_ERROR', 'oops', 42)
+    for (const m of sent) {
+      assert.strictEqual(m.type, 'error')
+      assert.strictEqual(m.code, 'HANDLER_ERROR')
+      assert.strictEqual(m.message, 'oops')
+    }
+  })
 })
 
 describe('resolveSession', () => {

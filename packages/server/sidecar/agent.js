@@ -943,6 +943,14 @@ export class PodAgent {
         message: `stdout line exceeded max length (${this._maxLineBytes} bytes) — child killed`,
       }, () => {
         if (session.activeWs && session.activeWs.readyState === 1) {
+          // The WS may still be paused from cooperative stdin backpressure
+          // (#3475). A graceful close() handshake requires reading the peer's
+          // CLOSE frame back, which is impossible while the underlying socket
+          // is paused — the close would hang. Resume before close so the
+          // handshake can complete normally. Mirrors _handleStdinDrainStalled
+          // (agent.js:563) which handles the same issue. (#3550)
+          try { session.activeWs.resume() } catch {}
+          session._stdinDraining = false
           session.activeWs.close(1008, 'line_too_long')
         }
         this._cancelIdleTimer(session)
@@ -992,6 +1000,14 @@ export class PodAgent {
       // buffer to avoid a race that can drop the frame (#3399).
       this._emitSessionFrame(session, exitFrame, () => {
         if (session.activeWs && session.activeWs.readyState === 1) {
+          // The WS may still be paused from cooperative stdin backpressure
+          // (#3475). A graceful close() handshake requires reading the peer's
+          // CLOSE frame back, which is impossible while the underlying socket
+          // is paused — the close would hang. Resume before close so the
+          // handshake can complete normally. Mirrors _handleStdinDrainStalled
+          // (agent.js:563) which handles the same issue. (#3550)
+          try { session.activeWs.resume() } catch {}
+          session._stdinDraining = false
           session.activeWs.close(1000, 'process exited')
         }
         // Cancel any pending idle / drain timers and remove session from map.

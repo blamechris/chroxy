@@ -265,6 +265,56 @@ describe('SessionManager.serializeState', () => {
     assert.equal(offEntry.promptEvaluator, false)
     assert.equal(typeof onEntry.promptEvaluator, 'boolean')
   })
+
+  // #3540: persisted stdin_disabled latch survives the round-trip so a
+  // server restart preserves the disabled state. Reconnecting clients
+  // observe the flag through session_list / listSessions metadata
+  // without waiting for a fresh `error` event (the original event was
+  // proxied once against the previous process and will not replay).
+  it('serializes stdinForwardingDisabled on each session entry (#3540)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionDisabled = new EventEmitter()
+    sessionDisabled.model = 'sonnet'
+    sessionDisabled.permissionMode = 'approve'
+    sessionDisabled._stdinForwardingDisabled = true
+    Object.defineProperty(sessionDisabled, 'resumeSessionId', { get: () => null })
+    sessionDisabled.destroy = () => {}
+    mgr._sessions.set('s-disabled', { session: sessionDisabled, name: 'Disabled', cwd: '/tmp' })
+
+    const sessionOk = new EventEmitter()
+    sessionOk.model = 'sonnet'
+    sessionOk.permissionMode = 'approve'
+    sessionOk._stdinForwardingDisabled = false
+    Object.defineProperty(sessionOk, 'resumeSessionId', { get: () => null })
+    sessionOk.destroy = () => {}
+    mgr._sessions.set('s-ok', { session: sessionOk, name: 'Ok', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions.length, 2)
+    const disabledEntry = state.sessions.find(s => s.name === 'Disabled')
+    const okEntry = state.sessions.find(s => s.name === 'Ok')
+    assert.equal(disabledEntry.stdinForwardingDisabled, true)
+    assert.equal(okEntry.stdinForwardingDisabled, false)
+    assert.equal(typeof disabledEntry.stdinForwardingDisabled, 'boolean')
+    assert.equal(typeof okEntry.stdinForwardingDisabled, 'boolean')
+
+    // Strict-boolean coerce: providers that never set the field
+    // (CLI sessions, Codex, Gemini) must round-trip as `false`, not
+    // `undefined` — JSON serialisation would otherwise omit the key
+    // entirely and break the `!!` guard on restore.
+    const sessionMissing = new EventEmitter()
+    sessionMissing.model = 'sonnet'
+    sessionMissing.permissionMode = 'approve'
+    Object.defineProperty(sessionMissing, 'resumeSessionId', { get: () => null })
+    sessionMissing.destroy = () => {}
+    mgr._sessions.set('s-missing', { session: sessionMissing, name: 'Missing', cwd: '/tmp' })
+
+    const state2 = mgr.serializeState()
+    const missingEntry = state2.sessions.find(s => s.name === 'Missing')
+    assert.equal(missingEntry.stdinForwardingDisabled, false)
+    assert.equal(typeof missingEntry.stdinForwardingDisabled, 'boolean')
+  })
 })
 
 describe('SessionManager.restoreState', () => {
@@ -397,6 +447,86 @@ describe('SessionManager.restoreState', () => {
     // `undefined` on the wire.
     assert.equal(withoutEval.promptEvaluator, false)
     assert.equal(typeof withoutEval.promptEvaluator, 'boolean')
+
+    mgr.destroyAll()
+  })
+
+  // #3540: the SidecarProcess `stdin_disabled` latch round-trips across a
+  // server restart. A state file written with the flag set must restore
+  // the SdkSession with the flag still set so a client connecting after
+  // restart sees the disabled state in the initial `session_list`
+  // payload — without this, the original transient `error` event fired
+  // against the previous process and is not replayed. Pre-#3540 state
+  // files (no field) restore as `false`.
+  it('restores stdinForwardingDisabled across the state cycle (#3540)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'StdinDisabled', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: true },
+        { name: 'StdinOk', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: false },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+
+    const disabled = sessions.find(s => s.name === 'StdinDisabled')
+    const ok = sessions.find(s => s.name === 'StdinOk')
+    const missing = sessions.find(s => s.name === 'NoField')
+
+    assert.equal(disabled.stdinForwardingDisabled, true,
+      'persisted stdin_disabled latch must hydrate onto the restored SdkSession so reconnecting clients observe the disabled state')
+    assert.equal(ok.stdinForwardingDisabled, false)
+    // Pre-#3540 state file without the field defaults to `false` so older
+    // snapshots round-trip cleanly without breaking the `!!` guard.
+    assert.equal(missing.stdinForwardingDisabled, false)
+    assert.equal(typeof missing.stdinForwardingDisabled, 'boolean')
+
+    // Round-trip the in-memory state back to disk to confirm the flag
+    // survives a second serialize cycle (catches a "hydrate at construct
+    // but never persist again" regression).
+    const state = mgr.serializeState()
+    const persistedDisabled = state.sessions.find(s => s.name === 'StdinDisabled')
+    const persistedOk = state.sessions.find(s => s.name === 'StdinOk')
+    const persistedMissing = state.sessions.find(s => s.name === 'NoField')
+    assert.equal(persistedDisabled.stdinForwardingDisabled, true,
+      'second serialize cycle must still emit the latched flag')
+    assert.equal(persistedOk.stdinForwardingDisabled, false)
+    assert.equal(persistedMissing.stdinForwardingDisabled, false)
+
+    mgr.destroyAll()
+  })
+
+  // #3540: restoring a session with stdinForwardingDisabled=true must NOT
+  // re-emit the `error{code:'stdin_disabled'}` event. The metadata field
+  // is the canonical signal for cold restarts; the original event already
+  // fired against the previous process and the `_attachSidecarProcessListeners`
+  // short-circuit (gated on `_stdinForwardingDisabled`) keeps a future
+  // SidecarProcess `stdin_disabled` from re-firing the warn/error.
+  it('does not replay error event when restoring a stdin-disabled session (#3540)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'StdinDisabled', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: true },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+
+    const errorEvents = []
+    mgr.on('session_event', (data) => {
+      if (data && data.event === 'error') errorEvents.push(data)
+    })
+
+    mgr.restoreState()
+
+    const stdinErrors = errorEvents.filter(e => e?.data?.code === 'stdin_disabled')
+    assert.equal(stdinErrors.length, 0,
+      'restoring a stdin-disabled session must NOT re-emit the error event — metadata field is the canonical signal for cold restart')
 
     mgr.destroyAll()
   })

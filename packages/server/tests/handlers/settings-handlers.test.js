@@ -1148,6 +1148,38 @@ describe('settings-handlers', () => {
       }
     })
 
+    // #3538: INVALID_AUTHOR must carry the real author as a structured field
+    // (`actualAuthor`) so dashboard clients can render "did you mean alice?"
+    // without regex-parsing the human-readable `message` text. Covers the
+    // shallow-scan branch (#3500) where a cross-author match is found.
+    it('carries actualAuthor as structured field on INVALID_AUTHOR (#3500 shallow-scan branch) (#3538)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-actual-author-scan-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.ok(err, 'expected INVALID_AUTHOR')
+        assert.equal(err.actualAuthor, 'alice', 'INVALID_AUTHOR must carry actualAuthor as a structured field')
+        // Wire shape stays additive: the canonical fields remain.
+        assert.equal(err.type, 'error')
+        assert.equal(err.code, 'INVALID_AUTHOR')
+        assert.equal(typeof err.message, 'string')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
     // #3500: cross-author detection must also work when the real skill uses
     // the .markdown extension (parity with the per-author lookup loop).
     it('returns INVALID_AUTHOR for cross-author match when real skill has .markdown extension (#3500)', () => {
@@ -1243,6 +1275,45 @@ describe('settings-handlers', () => {
         const wrong = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
         assert.equal(wrong, undefined, 'must not return SKILL_NOT_FOUND when a namespace mismatch is detected')
         assert.equal(trustStore.grants.length, 0, 'must not grant trust on namespace mismatch')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3538: the symlink (#3307) branch must also carry actualAuthor as a
+    // structured field so dashboards can branch on the field rather than
+    // regex-parsing the message string.
+    it('carries actualAuthor as structured field on INVALID_AUTHOR (#3307 symlink branch) (#3538)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-actual-author-symlink-'))
+      try {
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        mkdirSync(join(skillsDir, 'community', 'bob'), { recursive: true })
+        try {
+          symlinkSync(
+            join(skillsDir, 'community', 'alice', 'foo.md'),
+            join(skillsDir, 'community', 'bob', 'foo.md'),
+          )
+        } catch {
+          // Skip on platforms where symlink isn't permitted (mirrors siblings).
+          return
+        }
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.ok(err, 'expected INVALID_AUTHOR for symlink cross-author resolve')
+        assert.equal(err.actualAuthor, 'alice', 'INVALID_AUTHOR (symlink branch) must carry actualAuthor')
+        assert.equal(err.type, 'error')
+        assert.equal(err.code, 'INVALID_AUTHOR')
       } finally {
         rmSync(skillsDir, { recursive: true, force: true })
       }

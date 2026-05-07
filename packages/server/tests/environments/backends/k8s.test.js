@@ -638,8 +638,12 @@ describe('K8sBackend per-call namespace resolution uses nullish coalescing (#349
   })
 
   it('destroyEnvironment preserves explicit empty-string namespace (not replaced by default)', async () => {
+    // Make `deleteNamespacedPod` itself 404 so destroyEnvironment exits via the
+    // idempotent fast-path without entering the 1s POLL_INTERVAL_MS poll loop
+    // (#3551). The mock still records the delete call before invoking the
+    // override, so the namespace assertion below remains valid.
     const api = createMockApi({
-      readPod: async () => { throw make404Error() },
+      deletePod: async () => { throw make404Error() },
     })
     const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
 

@@ -762,6 +762,11 @@ function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
       // No community/ dir under this root — skip.
       continue
     }
+    // #3549: readdir order is filesystem/platform-dependent. Sort by name so
+    // that when multiple community authors expose a skill with the same name,
+    // the suggested `actualAuthor` is deterministic (matches the alphabetical
+    // ordering used by the skills loader's community walk).
+    authorEntries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     for (const ent of authorEntries) {
       const authorName = ent.name
       // Mirror _isCommunityNamespace's hidden-author guard. We also need the
@@ -822,10 +827,13 @@ function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
  *   - `INVALID_AUTHOR` — missing/empty author, OR (#3307) the skill resolves
  *      on disk under a different `community/<author>/` namespace than the
  *      caller claims (e.g. via a symlink that crosses author dirs), OR (#3500)
- *      a shallow scan of `community/*\/` finds the skillName under a different
+ *      a shallow scan of `community/<author>/` finds the skillName under a different
  *      author when the per-author lookup misses (the common no-symlink case).
- *      The error message surfaces the real author so clients can suggest
- *      "did you mean alice?".
+ *      For the cross-author cases the response carries `actualAuthor` as a
+ *      structured field (#3538) — clients can branch on `code` and read
+ *      `actualAuthor` directly to render "did you mean alice?" without
+ *      regex-parsing the human-readable `message`. The empty-author
+ *      validation case does NOT carry `actualAuthor` (no real author known).
  *   - `No active session` (session_error) — no bound session
  *   - `TRUST_NOT_ENABLED` — session has no trust store
  *   - `SKILL_NOT_FOUND` — can't find the skill on disk under any author
@@ -873,6 +881,9 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
   // a different namespace" (INVALID_AUTHOR) so clients can guide the
   // operator toward the correct author.
   let namespaceMismatchDetected = false
+  // #3538: capture the real author of the cross-namespace resolve so we can
+  // surface it as a structured field on INVALID_AUTHOR (no regex on message).
+  let mismatchActualAuthor = null
 
   for (const root of skillsRoots) {
     let rootReal
@@ -901,6 +912,11 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
       // author (e.g. via a symlink). Flag it so we can surface INVALID_AUTHOR
       // after the loop instead of the misleading SKILL_NOT_FOUND.
       namespaceMismatchDetected = true
+      // Remember the real author so the error response can carry it
+      // structurally (#3538). Keep the first hit — additional roots are
+      // unlikely to disagree but if they do, the first match is what the
+      // per-author lookup would have resolved to.
+      if (mismatchActualAuthor === null) mismatchActualAuthor = actualAuthor
       continue
     }
     resolvedPath = candidateReal
@@ -915,6 +931,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
         msg?.requestId,
         'INVALID_AUTHOR',
         `Community skill '${msg.skillName}' resolves to a different author than '${msg.author}'.`,
+        // #3538: structured field for client suggestions ("did you mean X?").
+        { actualAuthor: mismatchActualAuthor },
       )
       return
     }
@@ -929,6 +947,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
         msg?.requestId,
         'INVALID_AUTHOR',
         `Community skill '${msg.skillName}' is owned by '${actualAuthor}', not '${msg.author}'.`,
+        // #3538: structured field for client suggestions ("did you mean X?").
+        { actualAuthor },
       )
       return
     }
