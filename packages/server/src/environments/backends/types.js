@@ -54,6 +54,10 @@
  * @param {number[]|string[]} [opts.forwardPorts] - Ports to expose from the container
  * @param {string[]} [opts.mounts]        - Additional volume mounts (already validated)
  * @param {string}   [opts.postCreateCommand] - Shell command to run after setup completes
+ * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Container image pull policy.
+ *   Honoured only by K8sBackend — Docker and other backends silently ignore this field.
+ *   When absent, K8sBackend omits the field from the Pod spec and the K8s cluster default applies
+ *   (typically `IfNotPresent` for tagged images, `Always` for `latest`).
  * @returns {Promise<{ containerId: string, containerCliPath: string }>}
  *   containerId — the full container ID string returned by the runtime
  *   containerCliPath — absolute path inside the container where the CLI binary was installed
