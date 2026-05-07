@@ -1394,6 +1394,137 @@ describe('PodAgent', () => {
         await agent.close()
       }
     })
+
+    it('closes WS only after ws.send callback fires for line_too_long error (#3399)', async () => {
+      // Regression: previously the agent scheduled ws.close() on a fixed 50ms
+      // timer after _emitSessionFrame, which could race with ws.send() flushing
+      // the frame on a busy event loop and drop the frame on the floor.  After
+      // the fix, close() must run inside the ws.send completion callback so
+      // the order is: send → send-callback-fires → close.  Verified directly
+      // by patching the session's activeWs with an instrumented fake whose
+      // send() defers its callback by one macrotask.
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const realMsgs = []
+        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+        // Wait for session_started so we know the session exists.
+        await new Promise((r) => setTimeout(r, 20))
+        const started = realMsgs.find((m) => m.type === 'session_started')
+        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
+        const sessionId = started.sessionId
+
+        // Replace the session's activeWs with an instrumented fake that defers
+        // its send callback by one macrotask and records every operation.
+        // This widens the race window — without the fix, close() would run
+        // before sendCb fires and the assertion below would fail.
+        const callLog = []
+        const fakeWs = {
+          readyState: 1,
+          send(data, cb) {
+            const frame = JSON.parse(data)
+            callLog.push({ op: 'send', type: frame.type, code: frame.code })
+            if (cb) {
+              setTimeout(() => { callLog.push({ op: 'send_cb_fired' }); cb() }, 5)
+            }
+          },
+          close(code, reason) { callLog.push({ op: 'close', code, reason }) },
+          terminate() {},
+        }
+        const session = agent._sessions.get(sessionId)
+        assert.ok(session, 'expected session in _sessions')
+        session.activeWs = fakeWs
+
+        // Trigger the line cap.  The fake now drives the close-after-send
+        // path entirely, so we can deterministically assert ordering.
+        mock.child.stdout.write(Buffer.from('Z'.repeat(17)))
+
+        // Wait long enough for the deferred send cb (5ms) plus close to run.
+        await new Promise((r) => setTimeout(r, 30))
+
+        const sendIdx = callLog.findIndex((e) => e.op === 'send' && e.code === 'line_too_long')
+        const cbIdx = callLog.findIndex((e) => e.op === 'send_cb_fired')
+        const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1008)
+
+        assert.ok(sendIdx !== -1, `expected send(line_too_long); log=${JSON.stringify(callLog)}`)
+        assert.ok(cbIdx !== -1, `expected send callback to fire; log=${JSON.stringify(callLog)}`)
+        assert.ok(closeIdx !== -1, `expected close(1008); log=${JSON.stringify(callLog)}`)
+        assert.ok(
+          sendIdx < cbIdx,
+          `send must precede send_cb_fired (idx ${sendIdx} vs ${cbIdx}); log=${JSON.stringify(callLog)}`,
+        )
+        assert.ok(
+          cbIdx < closeIdx,
+          `close(1008) must run after send callback fires (cbIdx ${cbIdx} vs closeIdx ${closeIdx}); log=${JSON.stringify(callLog)}`,
+        )
+
+        try { ws.close() } catch {}
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('still closes WS even when ws.send throws synchronously (#3399)', async () => {
+      // If ws.send throws (e.g. socket already half-closed), the callback
+      // would never fire under naive `ws.send(json, cb)` usage.  The agent's
+      // _send wrapper invokes the callback in the catch path so the close-
+      // after-send sequence still progresses and the session is cleaned up.
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const realMsgs = []
+        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const started = realMsgs.find((m) => m.type === 'session_started')
+        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
+        const sessionId = started.sessionId
+
+        const callLog = []
+        const fakeWs = {
+          readyState: 1,
+          send() { callLog.push({ op: 'send_threw' }); throw new Error('socket already closed') },
+          close(code) { callLog.push({ op: 'close', code }) },
+          terminate() {},
+        }
+        const session = agent._sessions.get(sessionId)
+        session.activeWs = fakeWs
+
+        mock.child.stdout.write(Buffer.from('Q'.repeat(17)))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Even though send threw, the close-after-flush callback must still
+        // run so the session is evicted and the WS is closed.
+        assert.ok(
+          callLog.some((e) => e.op === 'close' && e.code === 1008),
+          `close(1008) must run even when send throws; log=${JSON.stringify(callLog)}`,
+        )
+        assert.ok(
+          !agent._sessions.has(sessionId),
+          'session should be deleted after line_too_long cleanup',
+        )
+
+        try { ws.close() } catch {}
+      } finally {
+        await agent.close()
+      }
+    })
   })
 
   // stdin forwarding (#3329)
@@ -2205,12 +2336,17 @@ describe('PodAgent', () => {
         const callLog = []
         const fakeWsA = {
           readyState: 1,  // WebSocket.OPEN
-          send(data) { callLog.push({ op: 'send', frame: JSON.parse(data) }) },
+          // Mirror the real ws.send(data, cb) shape so the callback-driven
+          // close-after-flush logic in _send / _evictSession progresses (#3399).
+          send(data, cb) {
+            callLog.push({ op: 'send', frame: JSON.parse(data) })
+            if (cb) cb()
+          },
           close(code, reason) { callLog.push({ op: 'close', code, reason }) },
         }
         const fakeWsB = {
           readyState: 1,
-          send() {},
+          send(_data, cb) { if (cb) cb() },
           close() {},
         }
 
