@@ -12,5 +12,14 @@
       "depNameTemplate": "@anthropic-ai/claude-code",
       "datasourceTemplate": "npm"
     }
+  ],
+  "packageRules": [
+    {
+      "description": "Throttle @anthropic-ai/claude-code bumps: weekly window + stability delay to avoid yanked releases",
+      "matchPackageNames": ["@anthropic-ai/claude-code"],
+      "schedule": ["before 9am on Monday"],
+      "prCreation": "not-pending",
+      "minimumReleaseAge": "3 days"
+    }
   ]
 }
