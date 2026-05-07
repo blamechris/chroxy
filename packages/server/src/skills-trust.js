@@ -95,15 +95,28 @@ export const TRUST_MODE_BLOCK = 'block'
 const VALID_TRUST_MODES = new Set([TRUST_MODE_WARN, TRUST_MODE_BLOCK])
 
 /**
- * Filesystems that fold case (case-insensitive lookup) by default. We treat
- * macOS (APFS / HFS+) and Windows (NTFS) as case-insensitive for ledger key
- * normalisation. Linux ext4 / btrfs / xfs are case-sensitive and keep keys
+ * Platform-default heuristic: returns `true` on macOS (APFS / HFS+) and
+ * Windows (NTFS), where filesystems fold case by default. Linux ext4 / btrfs /
+ * xfs are case-sensitive so this returns `false` there, keeping ledger keys
  * verbatim.
  *
- * This intentionally does NOT probe the actual mount — APFS can be created
- * case-sensitive and ext4 can be mounted case-insensitive, but those
- * configurations are rare and the platform-default heuristic matches the
- * common case while keeping the helper synchronous and dependency-free.
+ * This intentionally does NOT probe the actual mount — probing would require
+ * creating a temp file and stat-ing it with altered case, which adds startup
+ * I/O. The heuristic matches the common case and keeps the helper synchronous
+ * and dependency-free.
+ *
+ * Known non-conforming configurations that silently misbehave:
+ *
+ *   • macOS case-sensitive APFS volume (`diskutil apfs addVolume ...
+ *     "APFS (Case-sensitive)"`) — this function returns `true` so ledger keys
+ *     are lowercased, but `Foo.md` and `foo.md` are distinct inodes. The two
+ *     files would collide in the ledger to the same normalised key.
+ *
+ *   • Linux with a case-insensitive mount (ZFS `casesensitivity=insensitive`,
+ *     ciopfs, FAT/exFAT, WSL on NTFS) — this function returns `false` so
+ *     ledger keys are kept verbatim, but the filesystem folds case. A skill
+ *     stored as `Foo.md` and looked up as `foo.md` would be treated as a
+ *     different (untrusted) skill.
  *
  * @returns {boolean}
  */
