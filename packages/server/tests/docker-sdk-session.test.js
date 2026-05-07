@@ -1979,3 +1979,44 @@ describe('DockerSdkSession spawn callback wires _attachSidecarProcessListeners (
     assert.equal(spy.mock.calls[1].arguments[0], procs[1])
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────────
+// #3576 — DockerSdkSession must NOT clobber the hydrated
+// `_stdinForwardingDisabled` flag on restore. Regression guard for the bug
+// introduced when PR #3564 added persistence to SdkSession but left the
+// docker subclass constructor reassigning the field to `false`.
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession stdin_disabled hydration (#3576)', () => {
+  it('preserves hydrated _stdinForwardingDisabled when opt is true', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const session = new DockerSdkSession({
+      cwd: '/tmp/restore',
+      stdinForwardingDisabled: true,
+    })
+    assert.equal(
+      session._stdinForwardingDisabled,
+      true,
+      'hydrated true must survive subclass constructor (no clobber to false)'
+    )
+  })
+
+  it('defaults _stdinForwardingDisabled to false when opt is omitted', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const session = new DockerSdkSession({ cwd: '/tmp/fresh' })
+    assert.equal(
+      session._stdinForwardingDisabled,
+      false,
+      'fresh session (no opt) defaults to false via parent constructor'
+    )
+  })
+
+  it('coerces non-true opt values to false', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const session = new DockerSdkSession({
+      cwd: '/tmp/coerce',
+      stdinForwardingDisabled: false,
+    })
+    assert.equal(session._stdinForwardingDisabled, false)
+  })
+})
