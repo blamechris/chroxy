@@ -539,6 +539,41 @@ describe('SkillsPanel (#3209)', () => {
       expect(screen.queryByTestId('skill-pending-path-alice/alice-skill')).toBeNull()
     })
 
+    // #3368: path span must carry .skill-pending-path so CSS can zero the
+    // margin-left (no checkbox in pending rows) and enable overflow truncation.
+    it('path element carries skill-pending-path class for overflow truncation (#3368)', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          path: '/Users/chris/very/long/nested/project/.chroxy/skills/community/alice/skill.md',
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const pathEl = screen.getByTestId('skill-pending-path-alice/alice-skill')
+      expect(pathEl.classList.contains('skill-pending-path')).toBe(true)
+    })
+
+    // #3368: title tooltip must be present so the full path is accessible on
+    // hover even when the text is truncated by overflow: hidden / text-overflow.
+    it('path element has title tooltip with full path (#3368)', () => {
+      const longPath = '/Users/chris/very/long/nested/project/.chroxy/skills/community/alice/skill.md'
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          path: longPath,
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const pathEl = screen.getByTestId('skill-pending-path-alice/alice-skill')
+      expect(pathEl.getAttribute('title')).toBe(longPath)
+    })
+
     it('renders empty state when no skills loaded AND no pending', () => {
       renderPanel({
         skills: [],

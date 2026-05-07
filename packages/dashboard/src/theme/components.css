@@ -238,6 +238,19 @@
   margin: 0 4px;
   opacity: 0.6;
 }
+/* #3368: pending-row path span overrides. The shared .skill-meta rule
+   carries margin-left:22px to align under the checkbox in always-on /
+   manual rows. Pending rows have no checkbox, so that indent looks wrong.
+   Also adds overflow truncation: long absolute paths (e.g.
+   /Users/…/.chroxy/skills/community/alice/skill.md) must not spill
+   outside the panel — title tooltip preserves full-path accessibility. */
+.skill-pending-path {
+  margin-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* #3205: red-flag indicator when the trust store reported a hash
    mismatch for this skill during this session. Renders inline next
    to the skill name. */
