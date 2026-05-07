@@ -320,11 +320,6 @@ export interface ConnectionActions {
 }
 
 /**
- * Action group 2 — Sessions & multi-client. Session lifecycle (create /
- * switch / destroy / rename / forget), follow-mode toggle, and the
- * convenience accessor for the active session's state.
- */
-/**
  * Options accepted by {@link MultiClientSessionActions.createSession}.
  *
  * Mirrors the dashboard's `createSession` signature
@@ -346,6 +341,11 @@ export interface CreateSessionOptions {
   environmentId?: string;
 }
 
+/**
+ * Action group 2 — Sessions & multi-client. Session lifecycle (create /
+ * switch / destroy / rename / forget), follow-mode toggle, and the
+ * convenience accessor for the active session's state.
+ */
 export interface MultiClientSessionActions {
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
   createSession: (opts: CreateSessionOptions) => void;
