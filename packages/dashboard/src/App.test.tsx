@@ -12,6 +12,37 @@ vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
 }))
 
+// #3608: capture the `onRestart` prop the App passes into StdinDisabledBanner
+// so the no-op-guard test can invoke `handleRestartSession` directly with a
+// missing id (the real banner short-circuits its own render when the active
+// id has no matching session, hiding the button — but we still want to
+// exercise the handler-level `if (!session) return` guard).
+let capturedOnRestart: ((sessionId: string) => void) | null = null
+
+vi.mock('./components/StdinDisabledBanner', () => ({
+  StdinDisabledBanner: (props: {
+    visible: boolean
+    sessionId: string | null
+    onRestart: (sessionId: string) => void
+  }) => {
+    capturedOnRestart = props.onRestart
+    if (!props.visible || !props.sessionId) return null
+    // Mirror the real component's DOM contract so existing tests that click
+    // the restart button still work (data-testid + onClick behaviour).
+    return (
+      <div data-testid="stdin-disabled-banner" role="status" aria-live="polite">
+        <button
+          data-testid="stdin-disabled-restart-button"
+          onClick={() => props.onRestart(props.sessionId!)}
+          type="button"
+        >
+          Restart Session
+        </button>
+      </div>
+    )
+  },
+}))
+
 import { App } from './App'
 
 // Mutable state override — tests can change this before rendering
@@ -101,6 +132,7 @@ vi.mock('zustand/react/shallow', () => ({
 
 beforeEach(() => {
   stateOverrides = {}
+  capturedOnRestart = null
 })
 
 afterEach(cleanup)
@@ -624,6 +656,63 @@ describe('App', () => {
 
       // destroySession must target the wedged session id.
       expect(destroySessionFn).toHaveBeenCalledWith('s1')
+    })
+
+    // #3608: regression net for the `if (!session) return` guard in
+    // `handleRestartSession`. The guard has been in place since #3567 / #3593
+    // but had no dedicated test — a future refactor that drops it would
+    // silently start dispatching `createSession({ name: undefined, ... })` and
+    // `destroySession(undefined)` against the WS layer when the active session
+    // id no longer corresponds to any entry in `sessions` (e.g. a stale id
+    // referenced after the session was removed). Two layers protect against
+    // this: the banner's visibility check at the render site, and the
+    // handler's own guard. This test exercises both.
+    it('is a no-op when activeSessionId does not match any session in sessions', () => {
+      const createSessionFn = vi.fn()
+      const destroySessionFn = vi.fn()
+      stateOverrides = {
+        connectionPhase: 'connected',
+        // The wedged session exists but its id does NOT match activeSessionId,
+        // so `sessions.find(s => s.sessionId === activeSessionId)` returns
+        // undefined inside the handler — the exact branch the guard protects.
+        sessions: [
+          {
+            sessionId: 's1',
+            name: 'Wedged',
+            cwd: '/tmp/repo',
+            type: 'cli',
+            hasTerminal: true,
+            model: null,
+            permissionMode: null,
+            isBusy: false,
+            createdAt: Date.now(),
+            conversationId: null,
+            provider: 'claude-sdk',
+            worktree: false,
+            stdinForwardingDisabled: true,
+          },
+        ],
+        activeSessionId: 'missing-id',
+        createSession: createSessionFn,
+        destroySession: destroySessionFn,
+      }
+      render(<App />)
+
+      // Visibility-layer assertion: banner must not appear since the active
+      // id doesn't resolve to any session — the user has no button to click.
+      expect(screen.queryByTestId('stdin-disabled-banner')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('stdin-disabled-restart-button')).not.toBeInTheDocument()
+
+      // Handler-layer assertion: even if the banner *had* rendered (e.g. a
+      // future refactor surfaces it via a different code path), the handler's
+      // `if (!session) return` guard must short-circuit before either WS call.
+      // `capturedOnRestart` was wired into App via the StdinDisabledBanner
+      // mock at module top.
+      expect(capturedOnRestart).toBeTypeOf('function')
+      capturedOnRestart!('missing-id')
+
+      expect(createSessionFn).not.toHaveBeenCalled()
+      expect(destroySessionFn).not.toHaveBeenCalled()
     })
   })
 })
