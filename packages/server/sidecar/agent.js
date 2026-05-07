@@ -447,10 +447,14 @@ export class PodAgent {
     // without a preceding frame).  The frame is sent directly — not through
     // _emitSessionFrame — because we are mid-eviction and do not want the
     // frame buffered or seq-stamped as session output.
+    // Close in the send callback so the session_lost frame is flushed to the
+    // socket buffer before the WS close handshake (#3399).
     if (session.activeWs) {
-      this._send(session.activeWs, { type: 'session_lost', sessionId, reason: 'evicted_by_cap' })
-      try { session.activeWs.close(1001, 'session evicted') } catch {}
+      const ws = session.activeWs
       session.activeWs = null
+      this._send(ws, { type: 'session_lost', sessionId, reason: 'evicted_by_cap' }, () => {
+        try { ws.close(1001, 'session evicted') } catch {}
+      })
     }
 
     this._sessions.delete(sessionId)
@@ -658,15 +662,15 @@ export class PodAgent {
       this._emitSessionFrame(session, { type: 'error', message: `spawn failed: ${err.message}` })
       // Async spawn never produced a child — there will be no 'close' event
       // to clean up the session. Synthesize an exit and drop the session
-      // entry so the agent does not leak it indefinitely.
-      this._emitSessionFrame(session, { type: 'exit', code: -1 })
-      setTimeout(() => {
+      // entry so the agent does not leak it indefinitely.  Closing in the
+      // ws.send callback for the exit frame avoids a flush race (#3399).
+      this._emitSessionFrame(session, { type: 'exit', code: -1 }, () => {
         if (session.activeWs && session.activeWs.readyState === 1) {
           session.activeWs.close(1000, 'spawn failed')
         }
         this._cancelIdleTimer(session)
         this._sessions.delete(sessionId)
-      }, 50)
+      })
     })
 
     // stdout — read line-by-line; each NDJSON line becomes one 'event' frame.
@@ -685,17 +689,20 @@ export class PodAgent {
         this._killChild(child)
         session.child = null
       }
+      // Close the WS only after ws.send() has flushed the error frame to the
+      // socket buffer; closing earlier (e.g. on a fixed 50ms timer) can race
+      // with the send and drop the frame on a busy event loop (#3399).
       this._emitSessionFrame(session, {
         type: 'error',
         code: 'line_too_long',
         message: `stdout line exceeded max length (${this._maxLineBytes} bytes) — child killed`,
-      })
-      setTimeout(() => {
+      }, () => {
         if (session.activeWs && session.activeWs.readyState === 1) {
           session.activeWs.close(1008, 'line_too_long')
         }
+        this._cancelIdleTimer(session)
         this._sessions.delete(sessionId)
-      }, 50)
+      })
     })
     child.stdout.pipe(lineGuard)
 
@@ -727,16 +734,16 @@ export class PodAgent {
       if (session.child === child) session.child = null
       if (session._oversized) return
       const exitFrame = { type: 'exit', code: code ?? 1 }
-      this._emitSessionFrame(session, exitFrame)
-      // Small delay so the exit frame is flushed before we close.
-      setTimeout(() => {
+      // Close the WS only after the exit frame has been flushed to the socket
+      // buffer to avoid a race that can drop the frame (#3399).
+      this._emitSessionFrame(session, exitFrame, () => {
         if (session.activeWs && session.activeWs.readyState === 1) {
           session.activeWs.close(1000, 'process exited')
         }
         // Cancel any pending idle timer and remove session from map.
         this._cancelIdleTimer(session)
         this._sessions.delete(sessionId)
-      }, 50)
+      })
     })
   }
 
@@ -827,9 +834,11 @@ export class PodAgent {
 
     // Single-client policy: if the session already has a live WS attached,
     // reject the second connection (same error behaviour as _handleConnection).
+    // Close in the send callback so the error frame is flushed first (#3399).
     if (session.activeWs) {
-      this._send(ws, { type: 'error', message: 'another client is already connected' })
-      ws.close(1008, 'already connected')
+      this._send(ws, { type: 'error', message: 'another client is already connected' }, () => {
+        try { ws.close(1008, 'already connected') } catch {}
+      })
       return
     }
 
@@ -841,9 +850,12 @@ export class PodAgent {
     // some events between (lastSeq, oldestSeq) were evicted by buffer overflow.
     // Silent partial replay would corrupt the client's NDJSON stream — surface
     // it as session_lost so the consumer can take recovery action (exit -2).
+    // Close in the send callback so the session_lost frame is flushed first
+    // (#3399).
     if (session.buffer.length > 0 && session.buffer[0].seq > lastSeq + 1) {
-      this._send(ws, { type: 'session_lost', sessionId, reason: 'buffer_overflow' })
-      ws.close(1008, 'resume gap')
+      this._send(ws, { type: 'session_lost', sessionId, reason: 'buffer_overflow' }, () => {
+        try { ws.close(1008, 'resume gap') } catch {}
+      })
       return
     }
 
@@ -877,7 +889,15 @@ export class PodAgent {
   // Session-scoped frame emission — assigns seq, ring-buffers, and sends
   // ---------------------------------------------------------------------------
 
-  _emitSessionFrame(session, frame) {
+  /**
+   * Assigns a sequence number, appends to the ring buffer, and sends on the
+   * active WS (if any).  Optional `cb` is invoked when the underlying ws.send()
+   * callback fires — used by callers that need to close the socket only after
+   * the frame has been flushed (#3399).  When the session has no activeWs the
+   * callback fires on the next microtask so the caller's close-after-flush
+   * logic still progresses (otherwise the socket would dangle).
+   */
+  _emitSessionFrame(session, frame, cb) {
     session.seq += 1
     session.lastActiveAt = Date.now()
     const seqFrame = { ...frame, seq: session.seq }
@@ -889,7 +909,11 @@ export class PodAgent {
     session.buffer.push({ seq: session.seq, frame: seqFrame })
 
     if (session.activeWs) {
-      this._send(session.activeWs, seqFrame)
+      this._send(session.activeWs, seqFrame, cb)
+    } else if (cb) {
+      // Defer to next microtask so behaviour matches the async ws.send()
+      // callback (callers may rely on the cb not firing synchronously).
+      queueMicrotask(cb)
     }
   }
 
@@ -919,12 +943,24 @@ export class PodAgent {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  _send(ws, obj) {
-    if (ws.readyState !== 1) return
+  /**
+   * Send a JSON-serialised frame on the given WS.  When `cb` is provided it is
+   * invoked once the underlying ws.send() callback fires — this lets callers
+   * close the socket only after the frame has been flushed to the network
+   * buffer (#3399). The callback is also invoked when the socket is not in the
+   * OPEN state or when ws.send() throws synchronously, so callers can use it
+   * as a uniform "now safe to close" signal regardless of the send outcome.
+   */
+  _send(ws, obj, cb) {
+    if (ws.readyState !== 1) {
+      if (cb) cb()
+      return
+    }
     try {
-      ws.send(JSON.stringify(obj))
+      ws.send(JSON.stringify(obj), () => { if (cb) cb() })
     } catch {
       // ignore send errors on a closing socket
+      if (cb) cb()
     }
   }
 }
