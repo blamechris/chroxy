@@ -36,7 +36,18 @@ const KILL_GRACE_MS = 5_000
 // stream-json) exit cleanly when stdin EOFs — closing stdin first is the
 // polite way to terminate before falling back to signals. Short enough that
 // a stuck child still receives SIGTERM promptly. (#3397)
-const STDIN_CLOSE_GRACE_MS = 500
+// Tunable at startup via CHROXY_AGENT_STDIN_CLOSE_GRACE_MS (default 500 ms).
+// Reject NaN / negative values so an invalid env var cannot disable the polite
+// shutdown path; setting 0 is allowed (stdin EOF still fires, but SIGTERM
+// follows synchronously instead of after a grace delay — see _killChild).
+const FALLBACK_STDIN_CLOSE_GRACE_MS = 500
+const _PARSED_STDIN_CLOSE_GRACE_MS = parseInt(
+  process.env.CHROXY_AGENT_STDIN_CLOSE_GRACE_MS ?? `${FALLBACK_STDIN_CLOSE_GRACE_MS}`,
+  10,
+)
+const DEFAULT_STDIN_CLOSE_GRACE_MS = Number.isFinite(_PARSED_STDIN_CLOSE_GRACE_MS) && _PARSED_STDIN_CLOSE_GRACE_MS >= 0
+  ? _PARSED_STDIN_CLOSE_GRACE_MS
+  : FALLBACK_STDIN_CLOSE_GRACE_MS
 
 // Ring-buffer capacity: number of output frames retained per session for
 // replay on resume. Tunable at startup via CHROXY_AGENT_BUFFER_SIZE.
@@ -194,7 +205,8 @@ export class PodAgent {
    * @param {Function} [opts.spawnFn]              Override child_process.spawn for tests.
    * @param {string}   [opts.token]                Override CHROXY_AGENT_TOKEN for tests.
    * @param {number}   [opts.killGraceMs]          Override SIGTERM→SIGKILL grace (tests).
-   * @param {number}   [opts.stdinCloseGraceMs]    Override stdin-close→SIGTERM grace (tests).
+   * @param {number}   [opts.stdinCloseGraceMs]    Override stdin-close→SIGTERM grace (default
+   *                                                CHROXY_AGENT_STDIN_CLOSE_GRACE_MS or 500 ms).
    * @param {number}   [opts.bufferSize]           Override ring-buffer capacity per session (tests).
    * @param {number}   [opts.maxLineBytes]         Override NDJSON line length cap (tests).
    * @param {number}   [opts.resumeTimeoutMs]      Override idle resume window in ms (tests).
@@ -203,7 +215,7 @@ export class PodAgent {
    * @param {Function} [opts.clearTimeoutFn]       Override clearTimeout for deterministic timer tests.
    */
   constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS,
-    stdinCloseGraceMs = STDIN_CLOSE_GRACE_MS,
+    stdinCloseGraceMs = DEFAULT_STDIN_CLOSE_GRACE_MS,
     bufferSize = DEFAULT_BUFFER_SIZE,
     maxLineBytes = DEFAULT_MAX_LINE_BYTES,
     resumeTimeoutMs = DEFAULT_RESUME_TIMEOUT_MS,
@@ -215,7 +227,7 @@ export class PodAgent {
     this._killGraceMs = killGraceMs
     this._stdinCloseGraceMs = Number.isFinite(stdinCloseGraceMs) && stdinCloseGraceMs >= 0
       ? stdinCloseGraceMs
-      : STDIN_CLOSE_GRACE_MS
+      : FALLBACK_STDIN_CLOSE_GRACE_MS
     // Validate bufferSize defensively — a NaN or non-positive value would
     // disable eviction (NaN >= length is always false) and let the buffer
     // grow without bound.
@@ -371,9 +383,13 @@ export class PodAgent {
     // Reject second concurrent connection with a clear error frame, then close.
     // We send the error frame first and close only after the send is flushed so
     // the client reliably receives the frame before the WS close handshake.
+    // Routed through _send so the readyState short-circuit and try/catch around
+    // the synchronous send call apply uniformly to every reject/error path
+    // (#3473).
     if (this._activeWs) {
-      const msg = JSON.stringify({ type: 'error', message: 'another client is already connected' })
-      ws.send(msg, () => ws.close(1008, 'already connected'))
+      this._send(ws, { type: 'error', message: 'another client is already connected' }, () => {
+        try { ws.close(1008, 'already connected') } catch {}
+      })
       return
     }
 

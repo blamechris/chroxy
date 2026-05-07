@@ -291,13 +291,21 @@ export class SkillsTrustStore {
         ? parsed.communityTrust
         : null
     } else {
-      // Detect v1: every top-level value has a `sha256` string.
+      // Detect v1: at least one top-level value has the v1 shape (sha256
+      // hex string + object). #3306: previously we required *every* entry
+      // to pass — a single corrupted record (missing / malformed sha256)
+      // made the whole file fall through to "unrecognised shape" and the
+      // user lost ALL trusted records on the next migration. We now treat
+      // the file as v1 if any entry looks valid; the per-entry loop below
+      // already drops malformed records, so a partially-corrupt v1 file
+      // self-heals to a clean v2 ledger keeping every legitimate hash.
       const topLevelKeys = Object.keys(parsed)
-      const looksLikeV1 = topLevelKeys.length === 0 || topLevelKeys.every((k) => {
+      const looksLikeV1Entry = (k) => {
         const v = parsed[k]
         return v && typeof v === 'object' && typeof v.sha256 === 'string' && /^[0-9a-f]{64}$/.test(v.sha256)
-      })
-      if (looksLikeV1 && topLevelKeys.length > 0) {
+      }
+      const hasAnyV1Entry = topLevelKeys.some(looksLikeV1Entry)
+      if (hasAnyV1Entry) {
         log.info('Trust file is v1 format; migrating to v2 on next flush')
         rawSkillsMap = parsed
         migratedLegacy = true
