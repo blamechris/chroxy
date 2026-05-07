@@ -26,9 +26,12 @@ function formatTimestamp(ms: number): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + time
 }
 
-// #3619: see ServerPicker.tsx (formatLastConnected) for rationale —
-// wall-clock relative-time renderer; switching to performance.now()
-// would mix clocks against the persisted-wall-clock input timestamp.
+// #3619: wall-clock relative-time renderer kept on `Date.now()`
+// intentionally. The input `ms` is itself wall-clock (persisted across
+// browser refreshes / reconnects); switching to `performance.now()`
+// would subtract a process-local monotonic clock from a wall-clock
+// input and produce nonsense. Same rationale applies to the analogous
+// renderers in `WelcomeScreen.tsx` and `ServerPicker.tsx`.
 function formatRelativeTime(ms: number): string {
   const diff = Date.now() - ms
   if (diff < 60_000) return 'just now'
