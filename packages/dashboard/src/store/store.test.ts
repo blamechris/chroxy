@@ -1331,19 +1331,25 @@ describe('reconnect scheduling dedupe (#3624)', () => {
   /**
    * Browsers fire `error` → `close` for the same transport drop, so without
    * dedupe both `socket.onerror` and `socket.onclose` would each schedule a
-   * `setTimeout(connect)`. Dedupe is via `connectionPhase`: the first
-   * scheduleReconnect call transitions to 'reconnecting'; the second event
-   * sees that phase and short-circuits (onclose via its `wasConnected`
-   * check, onerror via the phase guard inside scheduleReconnect itself).
-   * These tests pin the contract that a single transport drop arms exactly
-   * ONE reconnect timer regardless of event ordering, and that the
-   * `connectionError` message is set by whichever event runs first
-   * (first-write-wins — both messages are equally generic, flipping
-   * mid-display would just be visual churn).
+   * `setTimeout(connect)`. Dedupe is per-socket via `reconnectScheduled`
+   * inside `scheduleReconnect`: the first call arms the timer; the second
+   * call (from the same socket's other event) short-circuits.
    *
-   * Originally landed as #3615 (with a per-socket `reconnectScheduled`
-   * flag); refactored under #3624 to drop the redundant flag and rely on
-   * phase as the single source of truth.
+   * Why per-socket and not phase-only: `connectionPhase: 'reconnecting'`
+   * is overloaded — `connect()` sets it for in-flight reconnect attempts
+   * BEFORE the new socket has finished the auth handshake. If that new
+   * socket then fails, phase-only gating would skip arming a fresh retry
+   * (because phase is already 'reconnecting') and leave the UI stuck.
+   * Each new socket gets its own scheduler with `reconnectScheduled=false`,
+   * so failed reconnects can still arm subsequent retries.
+   *
+   * `connectionError` is first-write-wins: both events carry equally
+   * generic messages, so flipping mid-display would just be visual churn.
+   *
+   * History: originally landed as #3615 (introduced the flag); audit
+   * under #3624 confirmed the flag closes a real gap that phase-only
+   * dedupe cannot. The dedupe sites also stop the error→close ordering
+   * from clobbering 'reconnecting' back to 'disconnected'.
    */
   type ReconnectMockSocket = {
     onclose: (() => void) | null;
@@ -1526,6 +1532,23 @@ describe('reconnect scheduling dedupe (#3624)', () => {
       socket.onclose!();
       // onclose after onerror must NOT clobber the message
       expect(useConnectionStore.getState().connectionError).toBe('Connection error');
+    } finally {
+      teardown();
+    }
+  });
+
+  // #3624: when onerror runs first, it transitions phase to 'reconnecting'
+  // and arms the timer. The subsequent onclose for the same drop must NOT
+  // clobber phase back to 'disconnected' — that briefly flashes the wrong
+  // status until the retry timer fires.
+  it('preserves connectionPhase=reconnecting through error → close ordering', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { socket, teardown } = await setupReconnectScenario();
+    try {
+      socket.onerror!();
+      expect(useConnectionStore.getState().connectionPhase).toBe('reconnecting');
+      socket.onclose!();
+      expect(useConnectionStore.getState().connectionPhase).toBe('reconnecting');
     } finally {
       teardown();
     }
