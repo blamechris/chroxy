@@ -523,6 +523,16 @@ export class PodAgent {
       return
     }
 
+    if (msg.type === 'stdin') {
+      this._handleStdin(ws, msg)
+      return
+    }
+
+    if (msg.type === 'stdin_end') {
+      this._handleStdinEnd(ws)
+      return
+    }
+
     this._send(ws, { type: 'error', message: `unknown message type: ${msg.type}` })
   }
 
@@ -531,7 +541,7 @@ export class PodAgent {
   // ---------------------------------------------------------------------------
 
   _handleSpawn(ws, msg) {
-    const { cmd, args = [], env = {}, cwd } = msg
+    const { cmd, args = [], env = {}, cwd, stdin: stdinMode = 'pipe' } = msg
 
     if (!cmd) {
       this._send(ws, { type: 'error', message: 'spawn: cmd is required' })
@@ -556,6 +566,16 @@ export class PodAgent {
     // the oldest idle session if needed so the Map never exceeds _maxSessions.
     this._enforceSessionCap()
 
+    // stdin option controls how the child's stdin is set up (#3329):
+    //   'pipe'    — (default) writable stdin; client feeds data via stdin frames.
+    //               Required for --input-format stream-json workflows.
+    //   'inherit' — child inherits the agent's stdin (useful when running
+    //               interactively; not meaningful when the agent has no tty).
+    //   'ignore'  — child stdin is /dev/null; correct for fire-and-forget -p runs.
+    // Any unrecognised value falls back to 'pipe'.
+    const validStdinModes = ['pipe', 'inherit', 'ignore']
+    const resolvedStdin = validStdinModes.includes(stdinMode) ? stdinMode : 'pipe'
+
     // Build the child env: start from the agent's env, strip agent-only
     // secrets, then layer the per-spawn env on top. This prevents the auth
     // token (and any future agent-internal credentials) from leaking into
@@ -565,7 +585,7 @@ export class PodAgent {
       delete sanitizedAgentEnv[key]
     }
     const spawnOpts = {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [resolvedStdin, 'pipe', 'pipe'],
       env: { ...sanitizedAgentEnv, ...env },
     }
     if (cwd) spawnOpts.cwd = cwd
@@ -694,6 +714,78 @@ export class PodAgent {
         this._sessions.delete(sessionId)
       }, 50)
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // stdin — forward data from the client into the child's stdin stream (#3329).
+  //
+  // Sequencing rules:
+  //   - Must come AFTER spawn (ws._sessionId must be set and session must exist).
+  //   - Must come BEFORE exit (session.child must still be alive).
+  //   - Only usable when the child was spawned with stdin: 'pipe'; if stdin is
+  //     'ignore' or 'inherit', child.stdin is null and the write is silently dropped.
+  // ---------------------------------------------------------------------------
+
+  _handleStdin(ws, msg) {
+    const sessionId = ws._sessionId
+    if (!sessionId) {
+      this._send(ws, { type: 'error', message: 'stdin: no active session (send spawn first)' })
+      return
+    }
+
+    const session = this._sessions.get(sessionId)
+    if (!session) {
+      this._send(ws, { type: 'error', message: 'stdin: no active session (send spawn first)' })
+      return
+    }
+
+    const { data } = msg
+    if (typeof data !== 'string') {
+      this._send(ws, { type: 'error', message: 'stdin: data must be a string' })
+      return
+    }
+
+    // child.stdin is null when spawned with stdin: 'ignore' or 'inherit'.
+    // Silently drop — the caller may not know the mode.
+    if (!session.child || !session.child.stdin) return
+
+    try {
+      session.child.stdin.write(data)
+    } catch {
+      // Ignore write errors — child may have closed its stdin already.
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // stdin_end — signal EOF on the child's stdin (#3329).
+  //
+  // After this the child sees EOF on stdin. For --input-format stream-json this
+  // causes claude to stop reading and begin processing the buffered input.
+  // Subsequent stdin frames after stdin_end are silently dropped (stdin.end()
+  // is idempotent on a WritableStream).
+  // ---------------------------------------------------------------------------
+
+  _handleStdinEnd(ws) {
+    const sessionId = ws._sessionId
+    if (!sessionId) {
+      this._send(ws, { type: 'error', message: 'stdin_end: no active session (send spawn first)' })
+      return
+    }
+
+    const session = this._sessions.get(sessionId)
+    if (!session) {
+      this._send(ws, { type: 'error', message: 'stdin_end: no active session (send spawn first)' })
+      return
+    }
+
+    // No-op if stdin was not piped.
+    if (!session.child || !session.child.stdin) return
+
+    try {
+      session.child.stdin.end()
+    } catch {
+      // Ignore — child may have already closed.
+    }
   }
 
   // ---------------------------------------------------------------------------
