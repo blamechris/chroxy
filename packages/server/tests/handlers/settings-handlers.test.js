@@ -1216,10 +1216,17 @@ describe('settings-handlers', () => {
         // handler resolves it via realpathSync, sees actualAuthor='alice', and
         // detects the namespace mismatch against the claimed author 'bob'.
         mkdirSync(join(skillsDir, 'community', 'bob'), { recursive: true })
-        symlinkSync(
-          join(skillsDir, 'community', 'alice', 'foo.md'),
-          join(skillsDir, 'community', 'bob', 'foo.md'),
-        )
+        // Match the existing "symlink defense" tests: skip silently on
+        // platforms (Windows / restricted CI) where symlinkSync isn't
+        // permitted, rather than failing the suite.
+        try {
+          symlinkSync(
+            join(skillsDir, 'community', 'alice', 'foo.md'),
+            join(skillsDir, 'community', 'bob', 'foo.md'),
+          )
+        } catch {
+          return
+        }
         const trustStore = makeCommunityTrustStore()
         const sessions = new Map()
         const session = createMockSession()
