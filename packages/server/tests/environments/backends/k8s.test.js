@@ -2976,9 +2976,21 @@ describe('SidecarProcess stdin disabled signal (#3402)', () => {
     assert.equal(proc.isStdinForwardingEnabled(), true,
       'forwarding still enabled before reconnect')
 
+    // Wait deterministically for the disabled signal — attach BEFORE
+    // triggering close so we can't miss the emit.  Avoids flaky timing
+    // under CI load (setTimeout-based waits can fire before the reconnect
+    // path runs on a busy event loop).
+    const disabledOnce = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('timeout waiting for stdin_disabled on reconnect')),
+        2000,
+      )
+      proc.once('stdin_disabled', () => { clearTimeout(timer); resolve() })
+    })
+
     // Trigger reconnect.
     ctrl1.triggerClose(1006)
-    await new Promise(r => setTimeout(r, 30))
+    await disabledOnce
 
     assert.equal(proc.isStdinForwardingEnabled(), false,
       'forwarding must be reported disabled after reconnect')

@@ -1156,12 +1156,27 @@ class SidecarProcess extends EventEmitter {
    * emission.  Called by the reconnect path in `_wireWsToProc` and by the
    * live-forwarding listener in `_wireStdin` when WS closes mid-write.
    *
+   * On the first transition we also drop any pre-wire buffered chunks in
+   * `_stdinBuffer`: once forwarding is permanently off the buffer can never
+   * be flushed (no live WS will ever take it), so retaining it would leak
+   * memory.  Anything that was already buffered is unrecoverable from the
+   * sidecar's perspective; the consumer was just told via `'stdin_disabled'`
+   * and should fall back to a different mechanism.  The number of dropped
+   * chunks is logged so operators have a paper trail for lost input.
+   *
    * @private
    */
   _signalStdinDisabled() {
     this._stdinForwardingDisabled = true
     if (this._stdinDisabledSignaled) return
     this._stdinDisabledSignaled = true
+    if (this._stdinBuffer.length > 0) {
+      log.warn(
+        `SidecarProcess: dropping ${this._stdinBuffer.length} pre-wire stdin ` +
+        'chunk(s) — forwarding disabled before flush could complete',
+      )
+      this._stdinBuffer = []
+    }
     this.emit('stdin_disabled')
   }
 
@@ -1490,13 +1505,21 @@ function _wireStdin(ws, proc) {
   proc.stdin.removeAllListeners('data')
   proc.stdin.on('data', (chunk) => {
     if (ws.readyState !== WebSocket.OPEN) {
-      // WS closed mid-stream. Emit an error on proc so the consumer knows
-      // stdin writes are being dropped, then swallow silently afterwards.
-      proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
-      // Surface the disabled state via the dedicated #3402 signal as well —
-      // 'error' may be unhandled by the consumer, but 'stdin_disabled' is
-      // explicit and one-shot.
+      // WS closed mid-stream. Surface the disabled state via the dedicated
+      // #3402 'stdin_disabled' signal first — that event is one-shot and
+      // explicit, and unlike 'error' it never throws when no listener is
+      // attached.
       proc._signalStdinDisabled()
+      // Only emit 'error' if a consumer is actually listening — Node throws
+      // an unhandled 'error' otherwise, which would crash the process and
+      // defeat the point of the 'stdin_disabled' signal.  Consumers that
+      // care about errors should subscribe; consumers that only need the
+      // disabled signal listen on 'stdin_disabled' instead.
+      if (proc.listenerCount('error') > 0) {
+        proc.emit('error', new Error('SidecarProcess: WS closed while writing stdin'))
+      } else {
+        log.warn('SidecarProcess: WS closed while writing stdin — dropping further writes (no error listener)')
+      }
       // Stop forwarding — remove this listener so further writes are silent.
       proc.stdin.removeAllListeners('data')
       return
