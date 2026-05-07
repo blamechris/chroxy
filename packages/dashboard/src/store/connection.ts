@@ -643,12 +643,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     const socket = new WebSocket(url);
 
-    // #3615: shared reconnect scheduler used by both onclose and onerror.
+    // #3624: shared reconnect scheduler used by both onclose and onerror.
     // Browsers fire `error` → `close` for the same transport drop, so without
-    // this guard we'd queue two setTimeouts for one underlying failure. The
-    // attempt-id checks downstream still cancel the redundant timer, but
-    // letting only the first scheduling site arm a timer is cleaner and is
-    // robust against future regressions in the attempt-id logic.
+    // dedupe we'd queue two setTimeouts for one underlying failure.
+    //
+    // Why a per-socket flag instead of phase-only dedupe (audit outcome):
+    // `connectionPhase: 'reconnecting'` is overloaded — it covers BOTH "timer
+    // just armed by this socket's failure" AND "mid-reconnect, a *new* socket
+    // is auth-handshaking after a prior drop" (set by `connect()` when
+    // `lastConnectedUrl === url`). If the new socket then fails, phase is
+    // already 'reconnecting' so phase-only gating would short-circuit and no
+    // fresh retry timer would arm — leaving the UI stuck. The per-socket flag
+    // is bounded to this socket's lifetime: each new socket gets a fresh
+    // scheduler with `reconnectScheduled = false`, so its failure can arm a
+    // new timer regardless of the persistent global phase.
+    //
+    // First-write-wins on `connectionError`: both events carry equally generic
+    // messages, so flipping mid-display would just be visual churn.
     let reconnectScheduled = false;
     const scheduleReconnect = (
       reasonText: string,
@@ -756,7 +767,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         scheduleReconnect('Connection lost', 'Connection lost', AUTO_RECONNECT_DELAY);
       } else if (disconnectedAttemptId === myAttemptId || get().userDisconnected) {
         set({ connectionPhase: 'disconnected' });
-      } else {
+      } else if (get().connectionPhase !== 'reconnecting') {
+        // #3624: in error → close ordering, onerror has already transitioned
+        // phase to 'reconnecting' and armed a retry timer. Clobbering to
+        // 'disconnected' here would briefly flash the wrong status until
+        // the timer fires — preserve 'reconnecting' so the UI stays
+        // consistent through the retry.
         set({ connectionPhase: 'disconnected' });
       }
     };
@@ -775,10 +791,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       set({ socket: null, sessionStates: cleanedSessionStates });
 
-      // Auto-reconnect on unexpected WS error (skip if user explicitly disconnected)
-      // scheduleReconnect() short-circuits if onclose already armed a timer for
-      // this transport drop (browsers fire `error` → `close` for the same
-      // failure, see #3615).
+      // #3624: auto-reconnect on unexpected WS error (skip if user
+      // explicitly disconnected). scheduleReconnect's per-socket
+      // `reconnectScheduled` flag short-circuits the close → error
+      // ordering (onclose already armed the timer); the error → close
+      // ordering is covered symmetrically by onclose's `wasConnected`
+      // gate (handler defined above).
       scheduleReconnect('WebSocket error', 'Connection error', ERROR_RECONNECT_DELAY);
     };
     } // end _connectWebSocket
