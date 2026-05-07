@@ -400,16 +400,23 @@ export class EnvironmentManager extends EventEmitter {
   /**
    * Reconnect to persisted environments on server restart.
    * Inspects each saved container and updates its status.
+   *
+   * @returns {Promise<boolean>} `true` if every environment reconnected
+   *   successfully; `false` if at least one environment was marked unreachable
+   *   because its backend credential source is gone (e.g. K8s Secret GC'd).
    */
   async reconnect() {
     this._restore()
-    if (this._environments.size === 0) return
+    if (this._environments.size === 0) return true
 
     log.info(`Reconnecting to ${this._environments.size} persisted environment(s)`)
+
+    let allHealthy = true
 
     for (const env of this._environments.values()) {
       if (!env.containerId) {
         env.status = 'error'
+        allHealthy = false
         continue
       }
       try {
@@ -428,9 +435,20 @@ export class EnvironmentManager extends EventEmitter {
       // For backends that hold per-environment credentials in memory (e.g.
       // K8sBackend._agentTokens), re-populate them from the canonical source
       // so that streamCliInEnvironment() works after a server restart.
+      //
+      // Per the Backend JSDoc, reconnectAgentToken returns:
+      //   true  — credential found and cached; environment is usable
+      //   false — credential source is gone (Pod/Secret GC'd); the environment
+      //           is unreachable and must be marked accordingly so future
+      //           streamCliInEnvironment calls don't fail without warning.
       if (typeof this._backend.reconnectAgentToken === 'function') {
         try {
-          await this._backend.reconnectAgentToken(env.containerId)
+          const ok = await this._backend.reconnectAgentToken(env.containerId)
+          if (ok === false) {
+            env.status = 'error'
+            allHealthy = false
+            log.warn(`Environment "${env.name}" (id: ${env.id}) credential source is gone — marking unreachable`)
+          }
         } catch (err) {
           log.warn(`Environment "${env.name}" token refresh failed: ${err.message}`)
         }
@@ -441,6 +459,7 @@ export class EnvironmentManager extends EventEmitter {
 
     this._persist()
     this.emit('environments_reconnected', this.list())
+    return allHealthy
   }
 
   /**
