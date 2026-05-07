@@ -620,9 +620,18 @@ export class PodAgent {
     // code specifically handled the spawn (not a shorter path that bypasses
     // the agent). The format `[chroxy-pod-agent] spawn cmd=…` is distinct
     // from real child stderr and stable enough to grep reliably. See #3344.
+    //
+    // Args are truncated to the first 3 elements to avoid leaking sensitive
+    // values that callers may pass as CLI flags (e.g. --api-key, --password).
+    // Callers MUST NOT pass secret material in args — the sentinel is buffered
+    // and replayed to reconnecting clients. See #3393.
+    const SENTINEL_MAX_ARGS = 3
+    const sentinelArgs = args.length > SENTINEL_MAX_ARGS
+      ? [...args.slice(0, SENTINEL_MAX_ARGS), `...[${args.length - SENTINEL_MAX_ARGS} more]`]
+      : args
     this._emitSessionFrame(session, {
       type: 'stderr',
-      data: `[chroxy-pod-agent] spawn cmd=${cmd} args=${JSON.stringify(args)} sessionId=${sessionId}\n`,
+      data: `[chroxy-pod-agent] spawn cmd=${cmd} args=${JSON.stringify(sentinelArgs)} sessionId=${sessionId}\n`,
     })
 
     // Handle async spawn failures (ENOENT, EACCES) so an unhandled 'error'

@@ -249,10 +249,18 @@ per-spawn sentinel line, emitted by the agent immediately after the child is
 spawned.  Its format is:
 
 ```
-[chroxy-pod-agent] spawn cmd=<cmd> args=<json-args> sessionId=<uuid>
+[chroxy-pod-agent] spawn cmd=<cmd> args=<truncated-json-args> sessionId=<uuid>
 ```
 
-Example:
+`args` is **truncated to the first 3 elements**.  If the full args array has
+more than 3 elements the remainder is replaced with a summary string
+`"...[N more]"`:
+
+```
+args=["-e","console.log(1)","...[2 more]"]
+```
+
+Example sentinel frame (≤ 3 args — shown in full):
 
 ```json
 {
@@ -261,6 +269,23 @@ Example:
   "seq": 1
 }
 ```
+
+Example sentinel frame (> 3 args — remainder elided):
+
+```json
+{
+  "type": "stderr",
+  "data": "[chroxy-pod-agent] spawn cmd=claude args=[\"--input-format\",\"stream-json\",\"--output-format\",\"...[2 more]\"] sessionId=550e8400-e29b-41d4-a716-446655440000\n",
+  "seq": 1
+}
+```
+
+**Security note:** The sentinel is buffered in the agent's ring buffer and
+replayed to reconnecting clients.  Callers **must not** pass secret material
+(e.g. `--api-key`, `--password`) as CLI flags — even truncated, the first 3
+args appear in the sentinel line and could surface in `execInEnvironment`'s
+returned `{ stderr }` string or in any consumer that reads `proc.stderr` from
+`streamCliInEnvironment`.  Pass secrets via `env` instead (see #3393).
 
 This line is intentionally distinct from real child stderr so integration tests
 can assert that the sidecar code — not a shorter path that bypasses the agent —
