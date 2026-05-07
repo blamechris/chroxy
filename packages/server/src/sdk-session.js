@@ -205,7 +205,7 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator } = {}) {
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, stdinForwardingDisabled } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
@@ -262,6 +262,17 @@ export class SdkSession extends BaseSession {
     this._stdinDroppedBytesTotal = 0
     this._stdinDroppedCount = 0
     this._stdinDroppedThresholdLogged = false
+
+    // #3540: SESSION-STICKY stdin_disabled flag (latched by the
+    // _attachSidecarProcessListeners 'stdin_disabled' handler, see #3501).
+    // Initialised here so SessionManager.serializeState can read the field
+    // unconditionally and so a hydrated value from restoreState survives
+    // until the next process tick.  The metadata field is the canonical
+    // signal for restored sessions: clients connecting after restart see
+    // the disabled state in session_list / listSessions, no replayed
+    // `error` event needed (the original event already fired and was
+    // proxied; cold restart treats the persisted flag as authoritative).
+    this._stdinForwardingDisabled = !!stdinForwardingDisabled
   }
 
   get sessionId() {
