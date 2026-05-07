@@ -423,22 +423,27 @@ export function SessionScreen() {
     useConnectionStore.getState().resize(cols, rows);
   }, []);
 
-  // #3595: dedicated restart handler for the StdinDisabledBanner. Destroys
-  // the broken session and immediately re-creates a fresh one with the same
-  // name / cwd / provider / worktree so the user lands back where they
-  // started. No confirm dialog — destruction is implicit in "restart" and
-  // any in-flight Claude work was already wedged behind the broken stdin
-  // pipe. Mirrors the dashboard's `handleRestartSession` (PR #3593).
+  // #3595: dedicated restart handler for the StdinDisabledBanner. Creates a
+  // replacement session FIRST and then destroys the broken one so the swap
+  // never leaves the user with zero sessions. The server's `destroy_session`
+  // handler rejects "Cannot destroy the last session" (see
+  // `packages/server/src/handlers/session-handlers.js`), so a destroy-first
+  // ordering would fail in the common case where the wedged session is the
+  // only one open. Creating first also avoids an intermediate
+  // `session_switched` away from the restarted session when the active
+  // session is destroyed. No confirm dialog — destruction is implicit in
+  // "restart" and any in-flight Claude work was already wedged behind the
+  // broken stdin pipe.
   const handleRestartStdinSession = useCallback((sessionId: string) => {
     const session = sessions.find((s) => s.sessionId === sessionId);
     if (!session) return;
-    destroySession(sessionId);
     createSession(
       session.name,
       session.cwd || undefined,
       session.worktree,
       session.provider,
     );
+    destroySession(sessionId);
   }, [sessions, destroySession, createSession]);
 
   // Multi-select state

@@ -8,10 +8,12 @@
  * so reconnecting clients can render this banner without waiting for a fresh
  * `error{code:'stdin_disabled'}` event (which only fires once on the original
  * process). Restarting the session is the only recovery path — tapping
- * "Restart Session" invokes the parent's `onRestart` handler which destroys
- * the broken session and immediately re-creates a fresh one with the same
- * cwd / name / provider / worktree (no confirm dialog — the destruction is
- * implicit in "restart").
+ * "Restart" invokes the parent's `onRestart` handler which creates a fresh
+ * replacement session (same cwd / name / provider / worktree) and then
+ * destroys the broken one (create-first ordering avoids the server's
+ * "Cannot destroy the last session" rejection when the wedged session is
+ * the only one open). No confirm dialog — the destruction is implicit in
+ * "restart".
  *
  * Mirrors `packages/dashboard/src/components/StdinDisabledBanner.tsx` for
  * the React Native mobile app.
