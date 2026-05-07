@@ -445,6 +445,13 @@ export class EnvironmentManager extends EventEmitter {
     let allHealthy = true
 
     for (const env of this._environments.values()) {
+      // Clear stale session references unconditionally — in-memory session
+      // state never survives a server restart, regardless of whether the
+      // environment's container is reachable, stopped, or has no containerId
+      // at all. (#3494: this used to live at the bottom of the loop body and
+      // was skipped by the no-containerId `continue` below.)
+      env.sessions = []
+
       if (!env.containerId) {
         // Invariant: allHealthy=false co-located with unreachable status (#3492)
         env.status = 'error'
@@ -504,8 +511,6 @@ export class EnvironmentManager extends EventEmitter {
           log.warn(`Environment "${env.name}" (id: ${env.id}) token refresh failed: ${err.message}`)
         }
       }
-      // Clear stale session references — sessions don't survive server restart
-      env.sessions = []
     }
 
     this._persist()
