@@ -201,51 +201,52 @@ describe('SessionManager.createSession — preflight', () => {
     assert.equal(mgr.listSessions().length, 0)
   })
 
-  it('rejects stale Claude SDK model before constructing the session', () => {
+  it('falls back to provider default when stale Claude SDK model is supplied (#3403)', () => {
     const noBinaryPreflightMgr = new SessionManager({
       maxSessions: 5,
       stateFilePath: tmpStateFile(),
       defaultCwd: tmpdir(),
       skipPreflight: true,
     })
-    assert.throws(
-      () => noBinaryPreflightMgr.createSession({ provider: 'claude-sdk', model: 'opus-4-6', skipPersist: true }),
-      (err) => {
-        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
-        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
-        assert.equal(err.provider, 'claude-sdk')
-        assert.equal(err.model, 'opus-4-6')
-        assert.ok(err.supported.includes('opus'))
-        assert.ok(err.supported.includes('claude-opus-4-7'))
-        assert.ok(!err.supported.includes('opus-4-6'))
-        assert.match(err.message, /opus/)
-        return true
-      },
-    )
-    assert.equal(noBinaryPreflightMgr.listSessions().length, 0)
+    // A retired model id ('opus-4-6' after opus-4-7 ships) gets soft-cleared
+    // to null so the underlying SdkSession picks the SDK's own default,
+    // rather than crashing the create flow with a hard rejection that
+    // surfaces as the unhelpful "There's an issue with the selected model"
+    // message in the dashboard.
+    const id = noBinaryPreflightMgr.createSession({ provider: 'claude-sdk', model: 'opus-4-6', skipPersist: true })
+    assert.ok(id, 'session id should be returned')
+    const entry = noBinaryPreflightMgr.getSession(id)
+    assert.equal(entry.session.model, null, 'stale model must be cleared to null (use provider default)')
+    noBinaryPreflightMgr.destroySession(id)
   })
 
-  it('rejects stale Claude CLI model before constructing the session', () => {
+  it('falls back to provider default when stale Claude CLI model is supplied (#3403)', () => {
     const noBinaryPreflightMgr = new SessionManager({
       maxSessions: 5,
       stateFilePath: tmpStateFile(),
       defaultCwd: tmpdir(),
       skipPreflight: true,
     })
-    assert.throws(
-      () => noBinaryPreflightMgr.createSession({ provider: 'claude-cli', model: 'opus-4-6', skipPersist: true }),
-      (err) => {
-        assert.ok(err instanceof ProviderModelNotSupportedError, `got ${err?.name}: ${err?.message}`)
-        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
-        assert.equal(err.provider, 'claude-cli')
-        assert.equal(err.model, 'opus-4-6')
-        assert.ok(err.supported.includes('opus'))
-        assert.ok(err.supported.includes('claude-opus-4-7'))
-        assert.ok(!err.supported.includes('opus-4-6'))
-        return true
-      },
-    )
-    assert.equal(noBinaryPreflightMgr.listSessions().length, 0)
+    const id = noBinaryPreflightMgr.createSession({ provider: 'claude-cli', model: 'opus-4-6', skipPersist: true })
+    assert.ok(id, 'session id should be returned')
+    const entry = noBinaryPreflightMgr.getSession(id)
+    assert.equal(entry.session.model, null, 'stale model must be cleared to null (use provider default)')
+    noBinaryPreflightMgr.destroySession(id)
+  })
+
+  it('keeps a valid Claude model on the session when it is in the registry (#3403)', () => {
+    const noBinaryPreflightMgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      skipPreflight: true,
+    })
+    // 'opus' is a short alias seeded by FALLBACK_MODELS — must pass through.
+    const id = noBinaryPreflightMgr.createSession({ provider: 'claude-sdk', model: 'opus', skipPersist: true })
+    assert.ok(id, 'session id should be returned')
+    const entry = noBinaryPreflightMgr.getSession(id)
+    assert.ok(entry.session.model && typeof entry.session.model === 'string', `expected a resolved model string, got ${entry.session.model}`)
+    noBinaryPreflightMgr.destroySession(id)
   })
 
   it('proceeds when initial model is valid for the provider', () => {
