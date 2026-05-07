@@ -1391,5 +1391,126 @@ describe('SdkSession', () => {
       assert.equal(proc.listenerCount('stdin_disabled'), 1,
         'only one stdin_disabled listener should be attached')
     })
+
+    // -- #3542 — session-lifetime counter contract --
+    //
+    // The cumulative `_stdinDroppedBytesTotal`, `_stdinDroppedCount`, and
+    // `_stdinDroppedThresholdLogged` flags are session-lifetime by design
+    // (see #3506).  They MUST survive a `_clearMessageState()` / mid-session
+    // interrupt — otherwise the loud-signal escalation would re-fire on
+    // every turn (each turn would treat its first drop as "first drop ever")
+    // and the threshold-cross one-shot would silently regress.  These tests
+    // pin the contract so a future refactor of `_clearMessageState()` can't
+    // accidentally reset the counters.
+    it('preserves stdin_dropped counters across _clearMessageState() (#3542)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 100, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 250, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      assert.equal(bytesBefore, 350)
+      assert.equal(countBefore, 2)
+
+      session._clearMessageState()
+
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive _clearMessageState()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive _clearMessageState()')
+    })
+
+    it('preserves _stdinDroppedThresholdLogged across _clearMessageState() (#3542)', async () => {
+      const { EventEmitter } = await import('events')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', {
+        bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+        reason: 'pre-dial-cap',
+      })
+      assert.equal(session._stdinDroppedThresholdLogged, true,
+        'precondition: threshold-crossed flag must be set after the big drop')
+
+      session._clearMessageState()
+
+      assert.equal(session._stdinDroppedThresholdLogged, true,
+        '_stdinDroppedThresholdLogged must survive _clearMessageState()')
+    })
+
+    it('preserves stdin_dropped counters across interrupt() (#3542)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
+
+      // Mid-session interrupt — no active query so this is a no-op,
+      // but it exercises the public contract.
+      await session.interrupt()
+
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive interrupt()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive interrupt()')
+      assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
+        '_stdinDroppedThresholdLogged must survive interrupt()')
+    })
+
+    it('does not re-escalate a fresh drop after _clearMessageState() to error (#3542)', async () => {
+      // The "first drop" error is one-shot per session.  After a turn ends
+      // and `_clearMessageState()` runs, the next turn's first drop must
+      // log at warn — otherwise operators would see a fresh "first drop"
+      // error every turn and the loud-signal contract would regress.
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      // Turn 1 — first drop fires the one-shot error.
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      // End of turn 1.
+      session._clearMessageState()
+
+      // Turn 2 — capture only the logs that happen AFTER the clear so we
+      // can assert the post-clear drop does NOT escalate.
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errs = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      const warns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.equal(errs.length, 0,
+        'post-clear drop must not re-escalate to error — first-drop is one-shot per session')
+      assert.equal(warns.length, 1,
+        'post-clear drop must still log at warn level')
+    })
   })
 })
