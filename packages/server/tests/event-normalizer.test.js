@@ -577,6 +577,57 @@ describe('registerEventType()', () => {
   })
 })
 
+// ---- EVENT_MAP: stdin_dropped_totals (#3544) ----
+
+describe('stdin_dropped_totals event', () => {
+  let normalizer
+
+  beforeEach(() => {
+    normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+  })
+
+  afterEach(() => {
+    normalizer.destroy()
+  })
+
+  it('maps the SdkSession event to a wire-shape stdin_dropped_totals message', () => {
+    const data = {
+      bytes: 350,
+      count: 2,
+      reason: 'pre-dial-cap',
+      escalated: true,
+    }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 'sess-1' }))
+    assert.ok(result, 'normalizer must return a result')
+    const msg = result.messages[0].msg
+    assert.equal(msg.type, 'stdin_dropped_totals')
+    assert.equal(msg.sessionId, 'sess-1')
+    assert.equal(msg.bytes, 350)
+    assert.equal(msg.count, 2)
+    assert.equal(msg.reason, 'pre-dial-cap')
+    assert.equal(msg.escalated, true)
+  })
+
+  it('emits null sessionId for legacy single-CLI mode', () => {
+    const data = { bytes: 1, count: 1, reason: 'pre-dial-cap', escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: null }))
+    const msg = result.messages[0].msg
+    assert.equal(msg.sessionId, null)
+  })
+
+  it('preserves escalated=false for warn-level totals', () => {
+    const data = { bytes: 200, count: 4, reason: 'pre-dial-cap', escalated: false }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.escalated, false)
+  })
+
+  it('falls back to "unknown" when reason is missing', () => {
+    const data = { bytes: 50, count: 1, escalated: true }
+    const result = normalizer.normalize('stdin_dropped_totals', data, makeCtx({ sessionId: 's1' }))
+    assert.equal(result.messages[0].msg.reason, 'unknown')
+  })
+})
+
 // ---- EVENT_MAP completeness ----
 
 describe('EVENT_MAP', () => {
@@ -586,6 +637,7 @@ describe('EVENT_MAP', () => {
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
       'mcp_servers', 'plan_started', 'plan_ready', 'result',
       'user_question', 'permission_request', 'error', 'skill_changed',
+      'stdin_dropped_totals',
     ]
     for (const event of expectedEvents) {
       assert.ok(EVENT_MAP[event], `EVENT_MAP missing handler for '${event}'`)
@@ -614,6 +666,7 @@ describe('EVENT_MAP', () => {
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
       error: { message: 'err' },
       skill_changed: { name: 'coding-style', oldHash: 'a'.repeat(64), newHash: 'b'.repeat(64), blocked: false },
+      stdin_dropped_totals: { bytes: 100, count: 1, reason: 'pre-dial-cap', escalated: true },
     }
     for (const [event, data] of Object.entries(testData)) {
       const result = EVENT_MAP[event](data, ctx)

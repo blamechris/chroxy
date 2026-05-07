@@ -105,6 +105,24 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Custom event names this provider emits beyond the BaseSession defaults.
+   *
+   * #3544: `stdin_dropped_totals` carries the cumulative running total of
+   * bytes dropped at the SidecarProcess pre-dial cap so operators (mobile
+   * users, dashboard-only operators) who can't tail the server log still
+   * see how much input has been silently lost. SessionManager forwards
+   * customEvents as transient session_events — they aren't recorded in
+   * history and aren't replayed on reconnect, but the cumulative counters
+   * are session-lifetime so a fresh emit on the next drop re-publishes
+   * the running total.
+   *
+   * @returns {string[]}
+   */
+  static get customEvents() {
+    return ['stdin_dropped_totals']
+  }
+
+  /**
    * #3209: SDK is the only provider that rebuilds the system prompt
    * each turn, so manual-skill toggles propagate to the wire here.
    * Subprocess providers (CliSession, CodexSession, GeminiSession)
@@ -283,6 +301,23 @@ export class SdkSession extends BaseSession {
   /** Public accessor for the SDK session ID used to resume conversations. */
   get resumeSessionId() {
     return this._sdkSessionId
+  }
+
+  /**
+   * Public accessor for the cumulative stdin_dropped totals (#3544).
+   *
+   * Returns a snapshot of the session-lifetime counters maintained by
+   * `_attachSidecarProcessListeners`. Operators can poll this from a test
+   * client or session-info handler; the same numbers are published as a
+   * `stdin_dropped_totals` session_event whenever a fresh drop arrives.
+   *
+   * @returns {{ bytes: number, count: number }}
+   */
+  get stdinDroppedTotals() {
+    return {
+      bytes: this._stdinDroppedBytesTotal,
+      count: this._stdinDroppedCount,
+    }
   }
 
 
@@ -785,6 +820,20 @@ export class SdkSession extends BaseSession {
       } else {
         log.warn(message)
       }
+
+      // #3544: surface the cumulative totals as a session-level event so
+      // SessionManager can proxy it onto the unified `session_event`
+      // envelope. Dashboards and the mobile app see "X bytes lost over N
+      // drops" instead of a hung turn. Emitted on every drop (not only
+      // escalations) so the dashboard counter stays live; the `escalated`
+      // flag lets the UI distinguish a "first drop / threshold-cross /
+      // every-Nth" loud signal from routine warn-level updates.
+      this.emit('stdin_dropped_totals', {
+        bytes: cumulative,
+        count: dropCount,
+        reason,
+        escalated: escalate,
+      })
     })
 
     proc.on('stdin_disabled', () => {

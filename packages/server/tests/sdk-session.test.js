@@ -1804,5 +1804,117 @@ describe('SdkSession', () => {
       assert.equal(warns.length, 1,
         'post-clear drop must still log at warn level')
     })
+
+    // -- #3544 — surface stdin_dropped totals over the WS protocol --
+    //
+    // Operators not tailing the server log (mobile users, dashboard-only
+    // operators) have no visibility into how much input has been lost.
+    // Each escalation point (first drop, every Nth drop, byte threshold
+    // cross) must also emit a session-level `stdin_dropped_totals` event
+    // carrying the running cumulative counters so SessionManager can
+    // proxy it onto the unified `session_event` envelope.
+    it('exposes stdinDroppedTotals via a public getter (#3544)', () => {
+      assert.deepEqual(session.stdinDroppedTotals, { bytes: 0, count: 0 },
+        'getter returns zeroed totals before any drops')
+    })
+
+    it('reflects accumulated drops in the public getter (#3544)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 100, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 250, reason: 'pre-dial-cap' })
+
+      assert.deepEqual(session.stdinDroppedTotals, { bytes: 350, count: 2 },
+        'getter must mirror the cumulative counters')
+    })
+
+    it('emits stdin_dropped_totals on the first drop with cumulative counters (#3544)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      const totalsEvents = []
+      session.on('stdin_dropped_totals', (data) => totalsEvents.push(data))
+
+      session._attachSidecarProcessListeners(proc)
+      proc.emit('stdin_dropped', { bytes: 75, reason: 'pre-dial-cap' })
+
+      assert.equal(totalsEvents.length, 1,
+        'first drop must emit exactly one stdin_dropped_totals event')
+      assert.equal(totalsEvents[0].bytes, 75,
+        'event must carry the cumulative byte total')
+      assert.equal(totalsEvents[0].count, 1,
+        'event must carry the cumulative drop count')
+      assert.equal(totalsEvents[0].reason, 'pre-dial-cap',
+        'event must echo the drop reason')
+      assert.equal(totalsEvents[0].escalated, true,
+        'first drop is escalated — flag must be true')
+    })
+
+    it('emits stdin_dropped_totals on every drop, not just escalations (#3544)', async () => {
+      // The dashboard needs to render a live "X bytes lost" counter, so
+      // even non-escalated warn-level drops must surface a totals event.
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      const totalsEvents = []
+      session.on('stdin_dropped_totals', (data) => totalsEvents.push(data))
+
+      session._attachSidecarProcessListeners(proc)
+      proc.emit('stdin_dropped', { bytes: 50, reason: 'pre-dial-cap' })   // first → escalated
+      proc.emit('stdin_dropped', { bytes: 50, reason: 'pre-dial-cap' })   // warn → not escalated
+      proc.emit('stdin_dropped', { bytes: 50, reason: 'pre-dial-cap' })   // warn → not escalated
+
+      assert.equal(totalsEvents.length, 3,
+        'every drop must emit a stdin_dropped_totals event')
+      assert.deepEqual(
+        totalsEvents.map((e) => ({ bytes: e.bytes, count: e.count, escalated: e.escalated })),
+        [
+          { bytes: 50, count: 1, escalated: true },
+          { bytes: 100, count: 2, escalated: false },
+          { bytes: 150, count: 3, escalated: false },
+        ],
+        'cumulative counters and escalation flag must reflect each drop',
+      )
+    })
+
+    it('marks escalated=true when the cumulative byte threshold is crossed (#3544)', async () => {
+      const { EventEmitter } = await import('events')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+      const proc = new EventEmitter()
+      const totalsEvents = []
+      session.on('stdin_dropped_totals', (data) => totalsEvents.push(data))
+
+      session._attachSidecarProcessListeners(proc)
+      proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' }) // first → escalated
+      proc.emit('stdin_dropped', {
+        bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+        reason: 'pre-dial-cap',
+      }) // crosses threshold → escalated
+
+      assert.equal(totalsEvents.length, 2)
+      assert.equal(totalsEvents[0].escalated, true,
+        'first drop is always escalated')
+      assert.equal(totalsEvents[1].escalated, true,
+        'threshold-cross drop must also be marked escalated')
+    })
+
+    it('treats unknown bytes as zero in the emitted totals (#3544)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      const totalsEvents = []
+      session.on('stdin_dropped_totals', (data) => totalsEvents.push(data))
+
+      session._attachSidecarProcessListeners(proc)
+      proc.emit('stdin_dropped', { bytes: 100, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped')                  // unknown bytes
+      proc.emit('stdin_dropped', { reason: 'x' }) // unknown bytes
+
+      assert.equal(totalsEvents.length, 3,
+        'every drop emits a totals event regardless of payload completeness')
+      assert.equal(totalsEvents[0].bytes, 100)
+      assert.equal(totalsEvents[1].bytes, 100, 'unknown bytes must not mutate the running total')
+      assert.equal(totalsEvents[2].bytes, 100)
+      assert.equal(totalsEvents[2].count, 3, 'count still increments on unknown payloads')
+    })
   })
 })
