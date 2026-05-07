@@ -762,6 +762,11 @@ function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
       // No community/ dir under this root — skip.
       continue
     }
+    // #3549: readdir order is filesystem/platform-dependent. Sort by name so
+    // that when multiple community authors expose a skill with the same name,
+    // the suggested `actualAuthor` is deterministic (matches the alphabetical
+    // ordering used by the skills loader's community walk).
+    authorEntries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     for (const ent of authorEntries) {
       const authorName = ent.name
       // Mirror _isCommunityNamespace's hidden-author guard. We also need the
@@ -822,7 +827,7 @@ function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
  *   - `INVALID_AUTHOR` — missing/empty author, OR (#3307) the skill resolves
  *      on disk under a different `community/<author>/` namespace than the
  *      caller claims (e.g. via a symlink that crosses author dirs), OR (#3500)
- *      a shallow scan of `community/*\/` finds the skillName under a different
+ *      a shallow scan of `community/<author>/` finds the skillName under a different
  *      author when the per-author lookup misses (the common no-symlink case).
  *      For the cross-author cases the response carries `actualAuthor` as a
  *      structured field (#3538) — clients can branch on `code` and read
