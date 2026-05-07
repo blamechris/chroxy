@@ -338,13 +338,17 @@ export class SessionManager extends EventEmitter {
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
    * @param {boolean} [options.promptEvaluator] - Per-session toggle for the auto-evaluator
    *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
+   * @param {boolean} [options.stdinForwardingDisabled] - Internal: hydrate the SidecarProcess
+   *   stdin_disabled latch (#3540) on a session being restored from disk. Only used by
+   *   `restoreState()`. Truthy = the prior process latched the flag; the new SdkSession
+   *   reports it via `listSessions` and `serializeState` round-trips it on the next write.
    * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
    *   `restoreState()`, which must seed history and budget after createSession before the
    *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
    *   empty history and destroy the very data we're restoring.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, stdinForwardingDisabled, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -494,6 +498,15 @@ export class SessionManager extends EventEmitter {
     if (typeof promptEvaluator === 'boolean') {
       providerOpts.promptEvaluator = promptEvaluator
     }
+    // #3540: hydrate the persisted stdin_disabled flag onto the new
+    // session so restoreState() round-trips correctly. Only forwarded
+    // when explicitly true — undefined/false uses the SdkSession
+    // constructor default (`false`). Forwarded blindly to providerOpts
+    // (non-Sdk providers ignore the unknown key via destructuring; the
+    // signal only originates from SidecarProcess paths).
+    if (stdinForwardingDisabled === true) {
+      providerOpts.stdinForwardingDisabled = true
+    }
     // Sandbox: per-session overrides server-level default
     const resolvedSandbox = sandbox || this._sandbox
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
@@ -604,7 +617,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * List all sessions with summary info.
-   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt }>}
+   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt, stdinForwardingDisabled }>}
    */
   listSessions() {
     const list = []
@@ -631,6 +644,14 @@ export class SessionManager extends EventEmitter {
         // separate round-trip. Defensive coerce in case a custom
         // provider class skips the BaseSession field initialiser.
         promptEvaluator: !!entry.session.promptEvaluator,
+        // #3540: surface the latched stdin_disabled flag so reconnecting
+        // clients (and clients connecting after a server restart) see
+        // the disabled state without waiting for a fresh `error` event.
+        // This is the canonical signal for cold restarts — the runtime
+        // `error` event remains the live signal for newly-disabled
+        // sessions in the same process. Strict-boolean coerce so
+        // non-Sdk providers round-trip as `false`.
+        stdinForwardingDisabled: !!entry.session._stdinForwardingDisabled,
       })
     }
     return list
@@ -837,6 +858,13 @@ export class SessionManager extends EventEmitter {
         // older state files (pre-#3185) round-trip as `false` rather
         // than `undefined` after restore.
         promptEvaluator: !!entry.session.promptEvaluator,
+        // #3540: persist the SidecarProcess `stdin_disabled` latch so a
+        // server restart preserves the disabled state. Without this, a
+        // client connecting after restart would not see the banner — the
+        // original `error` event fired against the previous process and
+        // was not replayed. Strict-boolean coerce so non-Sdk providers
+        // (which never set this field) round-trip as `false`.
+        stdinForwardingDisabled: !!entry.session._stdinForwardingDisabled,
       })
     }
 
@@ -892,6 +920,14 @@ export class SessionManager extends EventEmitter {
           // pathway. createSession ignores non-boolean inputs (older
           // state files lack the field), so this round-trips cleanly.
           promptEvaluator: typeof saved.promptEvaluator === 'boolean' ? saved.promptEvaluator : undefined,
+          // #3540: forward the persisted stdin_disabled latch. Only
+          // truthy values flip the flag; pre-#3540 state files (no
+          // field) restore as `false`. The SdkSession constructor
+          // initialises `_stdinForwardingDisabled` from this opt and
+          // the existing `_attachSidecarProcessListeners` short-circuit
+          // ensures no warn/error is re-emitted on restore — clients
+          // observe the disabled state via session_list metadata.
+          stdinForwardingDisabled: saved.stdinForwardingDisabled === true ? true : undefined,
           skipPersist: true,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)

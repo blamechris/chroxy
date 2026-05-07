@@ -62,6 +62,40 @@ describe('SdkSession', () => {
       assert.equal(session._sandbox, null)
     })
 
+    // #3540: the SidecarProcess `stdin_disabled` latch is persisted to
+    // session metadata so a server restart preserves the disabled
+    // state. Restored sessions are constructed with the persisted value
+    // forwarded as the `stdinForwardingDisabled` opt; the constructor
+    // initialises `_stdinForwardingDisabled` from it so listSessions
+    // and the existing _attachSidecarProcessListeners short-circuit
+    // both observe the latched flag immediately.
+    it('defaults _stdinForwardingDisabled to false when not provided (#3540)', () => {
+      assert.equal(session._stdinForwardingDisabled, false,
+        'fresh sessions must start with the latch off so the warn/error fires on the first SidecarProcess signal')
+    })
+
+    it('hydrates _stdinForwardingDisabled from the constructor opt (#3540)', () => {
+      const s = createSession({ stdinForwardingDisabled: true })
+      assert.equal(s._stdinForwardingDisabled, true,
+        'restored sessions must start with the latch on so reconnecting clients see the disabled state in listSessions')
+      s.destroy()
+    })
+
+    it('coerces non-boolean stdinForwardingDisabled values to a strict boolean (#3540)', () => {
+      // Defensive coerce: a stray `null` / numeric / undefined from a
+      // mangled state file must not produce `_stdinForwardingDisabled`
+      // values that fail strict-equality checks downstream (the
+      // `if (this._stdinForwardingDisabled) return` short-circuit in
+      // _attachSidecarProcessListeners depends on truthy semantics, but
+      // listSessions / serializeState round-trip through `!!`).
+      const sNull = createSession({ stdinForwardingDisabled: null })
+      assert.equal(sNull._stdinForwardingDisabled, false)
+      sNull.destroy()
+      const sUndef = createSession({ stdinForwardingDisabled: undefined })
+      assert.equal(sUndef._stdinForwardingDisabled, false)
+      sUndef.destroy()
+    })
+
     // #3209/#3246: SDK is the only provider that rebuilds the system
     // prompt each turn (see _callQuery), so manual-skill toggles
     // propagate to the wire. Subprocess providers inherit
@@ -557,6 +591,132 @@ describe('SdkSession', () => {
       assert.equal(session._pendingInput.length, 1)
       session.destroy()
       assert.equal(session._pendingInput.length, 0)
+    })
+  })
+
+  // -- sendMessage when stdin forwarding is disabled (#3539) --
+  //
+  // PR #3536 (closes #3502) latches `_stdinForwardingDisabled` and surfaces it
+  // to clients via a session-level `error` event. The flag is now visible, but
+  // until #3539 sendMessage still accepted further writes that disappeared
+  // into the SidecarProcess PassThrough. These tests cover the contract: send
+  // before the flag flips succeeds; send after the flag flips is refused with
+  // the same machine-readable `code: 'stdin_disabled'` and never reaches the
+  // underlying SDK query.
+  describe('sendMessage when stdin forwarding is disabled (#3539)', () => {
+    it('accepts sendMessage before the flag flips (regression guard)', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-pre', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('before disable')
+      s.destroy()
+
+      assert.equal(captured.length, 1, 'pre-disable sendMessage should reach the SDK')
+      assert.equal(s._stdinForwardingDisabled, undefined, 'flag must remain unset on a healthy turn')
+    })
+
+    it('refuses sendMessage after the flag is set and never invokes _callQuery', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'should-not-run', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      // Simulate the SidecarProcess having latched the flag (e.g. via
+      // #3502's stdin_disabled signal handler) before this sendMessage call.
+      s._stdinForwardingDisabled = true
+
+      await s.sendMessage('after disable')
+
+      assert.equal(captured.length, 0, '_callQuery must NOT be invoked when stdin forwarding is disabled')
+      assert.equal(errors.length, 1, 'exactly one error event should fire on refused sendMessage')
+      assert.equal(errors[0].code, 'stdin_disabled', 'error must carry the same machine-readable code as #3502')
+      assert.equal(errors[0].recoverable, false, 'stdin_disabled is unrecoverable until session restart')
+      assert.match(errors[0].message, /stdin/i, 'error message should mention stdin')
+      assert.equal(s._isBusy, false, 'refused sendMessage must not flip _isBusy')
+
+      s.destroy()
+    })
+
+    it('drains queued follow-ups when the flag flips so the dequeue path does not re-trigger writes', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'drain', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      // Queue up a few follow-ups while the session is busy (mirrors a real
+      // turn that has the dequeue-on-finish path active).
+      s._isBusy = true
+      s.sendMessage('q1')
+      s.sendMessage('q2')
+      s.sendMessage('q3')
+      assert.equal(s._pendingInput.length, 3, 'precondition: three messages queued')
+
+      // Flag flips mid-turn (e.g. SidecarProcess loses stdin while query is
+      // still streaming). Now any new sendMessage must reject AND drain the
+      // queue so the post-finally process.nextTick dequeue does not call
+      // sendMessage three more times.
+      s._stdinForwardingDisabled = true
+      s._isBusy = false  // turn finished, would normally trigger dequeue
+
+      await s.sendMessage('arriving while disabled')
+
+      assert.equal(captured.length, 0, '_callQuery must not be invoked')
+      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained')
+      assert.equal(errors.length, 1, 'a single error event covers the drained batch + new call')
+      assert.equal(errors[0].code, 'stdin_disabled')
+
+      s.destroy()
+    })
+
+    it('emits an error every time a fresh sendMessage is refused (no one-shot mute)', async () => {
+      // The #3502 emit on the stdin_disabled signal is gated by the flag
+      // itself (one warn / one error per session). The #3539 refusal at the
+      // sendMessage entry point is per-call: every refused write deserves a
+      // signal so callers can render "send failed" feedback per attempt.
+      const s = createSession()
+      s._processReady = true
+      s._stdinForwardingDisabled = true
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      await s.sendMessage('attempt 1')
+      await s.sendMessage('attempt 2')
+      await s.sendMessage('attempt 3')
+
+      assert.equal(errors.length, 3, 'each refused sendMessage call should emit its own error')
+      for (const err of errors) {
+        assert.equal(err.code, 'stdin_disabled')
+        assert.equal(err.recoverable, false)
+      }
+
+      s.destroy()
     })
   })
 
@@ -1256,6 +1416,93 @@ describe('SdkSession', () => {
         'threshold-crossing escalation must be one-shot')
     })
 
+    // #3543 — the cumulative byte total is hard to scan as raw bytes once a
+    // session crosses MiB scale.  The log line keeps the raw count for
+    // scriptable consumers and appends a humanised KiB/MiB/GiB suffix so
+    // operators can triage at a glance.
+    it('formats the cumulative byte total as a humanised KiB/MiB suffix (#3543)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      // Drive the cumulative total through three magnitudes (B → KiB → MiB)
+      // in a single attach, asserting the suffix on each emit so we lock the
+      // log-line shape for every range we care about.
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        // First emit: 500 B total — bytes range.
+        proc.emit('stdin_dropped', { bytes: 500, reason: 'pre-dial-cap' })
+        // Second emit: +2000 B → 2500 B total — KiB range (2.4 KiB).
+        proc.emit('stdin_dropped', { bytes: 2000, reason: 'pre-dial-cap' })
+        // Third emit: bump to MiB scale — 2500 + 1 MiB = 1051076 → "1.0 MiB".
+        proc.emit('stdin_dropped', { bytes: 1024 * 1024, reason: 'pre-dial-cap' })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const drops = entries.filter(
+        (e) => e.component === 'sdk' &&
+          (e.level === 'error' || e.level === 'warn') &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.equal(drops.length, 3, 'expected one log per stdin_dropped emit')
+
+      // Raw byte count is preserved on every line — scriptable consumers
+      // (regex log scrapers, dashboards) keep working unchanged.
+      for (const entry of drops) {
+        assert.ok(/cumulative=\d+ bytes /.test(entry.message),
+          `line must keep the raw "cumulative=N bytes" prefix, got: ${entry.message}`)
+      }
+
+      // Humanised suffix per magnitude.
+      assert.ok(drops[0].message.includes('cumulative=500 bytes (500 B)'),
+        `bytes-range line must show "500 B", got: ${drops[0].message}`)
+      assert.ok(drops[1].message.includes('cumulative=2500 bytes (2.4 KiB)'),
+        `KiB-range line must show "2.4 KiB", got: ${drops[1].message}`)
+      // 2500 + 1048576 = 1051076 bytes → 1.0 MiB once formatted.
+      assert.ok(/cumulative=1051076 bytes \(1\.0 MiB\)/.test(drops[2].message),
+        `MiB-range line must show "1.0 MiB", got: ${drops[2].message}`)
+    })
+
+    // #3543 — the load-bearing case: at the 10 MiB error-escalation
+    // threshold the line must read "10.0 MiB" so triage operators can spot
+    // the threshold crossing without doing arithmetic in their head.
+    it('renders the 10 MiB error-escalation threshold as "10.0 MiB" (#3543)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        // Single drop big enough to cross the threshold immediately so the
+        // first-drop error log is also the threshold-cross log.
+        proc.emit('stdin_dropped', {
+          bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+          reason: 'pre-dial-cap',
+        })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errorEntry = entries.find(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.ok(errorEntry, 'expected error log on threshold-cross drop')
+      assert.ok(errorEntry.message.includes(`cumulative=${STDIN_DROPPED_BYTES_ERROR_THRESHOLD} bytes (10.0 MiB)`),
+        `threshold line must show "10.0 MiB" alongside raw byte count, got: ${errorEntry.message}`)
+    })
+
     it('logs a warning when stdin_disabled fires on the proc', async () => {
       const { EventEmitter } = await import('events')
       const { addLogListener, removeLogListener } = await import('../src/logger.js')
@@ -1344,6 +1591,48 @@ describe('SdkSession', () => {
       assert.equal(errorEvents.length, 1, 'error event must fire exactly once per session')
     })
 
+    // #3540: when a session is restored from disk with the latch already
+    // set (the prior process recorded `stdin_disabled` and persisted it),
+    // a fresh SidecarProcess `stdin_disabled` signal MUST stay silenced —
+    // no warn, no error event, no double-banner on the dashboard.  The
+    // existing `if (this._stdinForwardingDisabled) return` short-circuit
+    // already handles this; the test pins the contract so a future
+    // refactor cannot regress.
+    it('does not warn or emit error when the latch was hydrated at construct time (#3540)', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      // Construct with the persisted latch already set.
+      const restored = new SdkSession({ cwd: '/tmp', stdinForwardingDisabled: true })
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+      const errorEvents = []
+      restored.on('error', (e) => errorEvents.push(e))
+
+      try {
+        restored._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_disabled')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const disabledWarns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin forwarding is disabled'),
+      )
+      assert.equal(disabledWarns.length, 0,
+        'restored sessions must not re-warn — the user already saw this banner before the restart')
+      assert.equal(errorEvents.length, 0,
+        'restored sessions must not re-emit the error event — metadata field is the canonical signal for cold restart')
+      assert.equal(restored._stdinForwardingDisabled, true,
+        'latch stays on across the (suppressed) signal')
+
+      restored.destroy()
+    })
+
     it('is idempotent — repeated calls do not stack listeners', async () => {
       // Without the guard, calling _attachSidecarProcessListeners twice on
       // the same proc would attach two warn-log handlers and emit two log
@@ -1390,6 +1679,127 @@ describe('SdkSession', () => {
         'only one stdin_dropped listener should be attached')
       assert.equal(proc.listenerCount('stdin_disabled'), 1,
         'only one stdin_disabled listener should be attached')
+    })
+
+    // -- #3542 — session-lifetime counter contract --
+    //
+    // The cumulative `_stdinDroppedBytesTotal`, `_stdinDroppedCount`, and
+    // `_stdinDroppedThresholdLogged` flags are session-lifetime by design
+    // (see #3506).  They MUST survive a `_clearMessageState()` / mid-session
+    // interrupt — otherwise the loud-signal escalation would re-fire on
+    // every turn (each turn would treat its first drop as "first drop ever")
+    // and the threshold-cross one-shot would silently regress.  These tests
+    // pin the contract so a future refactor of `_clearMessageState()` can't
+    // accidentally reset the counters.
+    it('preserves stdin_dropped counters across _clearMessageState() (#3542)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 100, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 250, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      assert.equal(bytesBefore, 350)
+      assert.equal(countBefore, 2)
+
+      session._clearMessageState()
+
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive _clearMessageState()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive _clearMessageState()')
+    })
+
+    it('preserves _stdinDroppedThresholdLogged across _clearMessageState() (#3542)', async () => {
+      const { EventEmitter } = await import('events')
+      const { STDIN_DROPPED_BYTES_ERROR_THRESHOLD } = await import('../src/sdk-session.js')
+
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 1, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', {
+        bytes: STDIN_DROPPED_BYTES_ERROR_THRESHOLD,
+        reason: 'pre-dial-cap',
+      })
+      assert.equal(session._stdinDroppedThresholdLogged, true,
+        'precondition: threshold-crossed flag must be set after the big drop')
+
+      session._clearMessageState()
+
+      assert.equal(session._stdinDroppedThresholdLogged, true,
+        '_stdinDroppedThresholdLogged must survive _clearMessageState()')
+    })
+
+    it('preserves stdin_dropped counters across interrupt() (#3542)', async () => {
+      const { EventEmitter } = await import('events')
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      const bytesBefore = session._stdinDroppedBytesTotal
+      const countBefore = session._stdinDroppedCount
+      const thresholdLoggedBefore = session._stdinDroppedThresholdLogged
+
+      // Mid-session interrupt — no active query so this is a no-op,
+      // but it exercises the public contract.
+      await session.interrupt()
+
+      assert.equal(session._stdinDroppedBytesTotal, bytesBefore,
+        '_stdinDroppedBytesTotal must survive interrupt()')
+      assert.equal(session._stdinDroppedCount, countBefore,
+        '_stdinDroppedCount must survive interrupt()')
+      assert.equal(session._stdinDroppedThresholdLogged, thresholdLoggedBefore,
+        '_stdinDroppedThresholdLogged must survive interrupt()')
+    })
+
+    it('does not re-escalate a fresh drop after _clearMessageState() to error (#3542)', async () => {
+      // The "first drop" error is one-shot per session.  After a turn ends
+      // and `_clearMessageState()` runs, the next turn's first drop must
+      // log at warn — otherwise operators would see a fresh "first drop"
+      // error every turn and the loud-signal contract would regress.
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      session._attachSidecarProcessListeners(proc)
+
+      // Turn 1 — first drop fires the one-shot error.
+      proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+
+      // End of turn 1.
+      session._clearMessageState()
+
+      // Turn 2 — capture only the logs that happen AFTER the clear so we
+      // can assert the post-clear drop does NOT escalate.
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const errs = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'error' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      const warns = entries.filter(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.equal(errs.length, 0,
+        'post-clear drop must not re-escalate to error — first-drop is one-shot per session')
+      assert.equal(warns.length, 1,
+        'post-clear drop must still log at warn level')
     })
   })
 })
