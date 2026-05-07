@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
@@ -1130,6 +1130,71 @@ describe('settings-handlers', () => {
         settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
         const err = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
         assert.ok(err, 'expected SKILL_NOT_FOUND when author does not match directory')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3307: when a skill exists under community/alice/ and the request claims
+    // author 'bob', the handler must return INVALID_AUTHOR (not SKILL_NOT_FOUND)
+    // so clients can distinguish "skill exists, wrong author" from "skill missing".
+    it('returns INVALID_AUTHOR when skill exists under a different community author (#3307)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-mismatch-'))
+      try {
+        // Real skill lives under community/alice/foo.md
+        mkdirSync(join(skillsDir, 'community', 'alice'), { recursive: true })
+        writeFileSync(join(skillsDir, 'community', 'alice', 'foo.md'), '# Skill\nbody\n')
+        // community/bob/foo.md is a symlink that points to alice's file. The
+        // handler resolves it via realpathSync, sees actualAuthor='alice', and
+        // detects the namespace mismatch against the claimed author 'bob'.
+        mkdirSync(join(skillsDir, 'community', 'bob'), { recursive: true })
+        symlinkSync(
+          join(skillsDir, 'community', 'alice', 'foo.md'),
+          join(skillsDir, 'community', 'bob', 'foo.md'),
+        )
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'foo', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.ok(err, 'expected INVALID_AUTHOR when skill resolves to a different community author')
+        const wrong = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.equal(wrong, undefined, 'must not return SKILL_NOT_FOUND when a namespace mismatch is detected')
+        assert.equal(trustStore.grants.length, 0, 'must not grant trust on namespace mismatch')
+      } finally {
+        rmSync(skillsDir, { recursive: true, force: true })
+      }
+    })
+
+    // #3307: a truly-missing skill (no namespace mismatch detected) must still
+    // surface as SKILL_NOT_FOUND, not INVALID_AUTHOR.
+    it('returns SKILL_NOT_FOUND when no skill exists for any author (#3307)', () => {
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-grant-truly-missing-'))
+      try {
+        // Empty community tree — no symlinks, no files.
+        mkdirSync(join(skillsDir, 'community'), { recursive: true })
+        const trustStore = makeCommunityTrustStore()
+        const sessions = new Map()
+        const session = createMockSession()
+        session.getTrustStore = () => trustStore
+        session._skillsDir = skillsDir
+        session._repoSkillsDir = null
+        session.cwd = '/tmp'
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1' }), { skillName: 'ghost', author: 'bob' }, ctx)
+        const err = ws._messages.find(m => m.code === 'SKILL_NOT_FOUND')
+        assert.ok(err, 'expected SKILL_NOT_FOUND when no skill exists on disk')
+        const wrong = ws._messages.find(m => m.code === 'INVALID_AUTHOR')
+        assert.equal(wrong, undefined, 'must not return INVALID_AUTHOR when no mismatch was detected')
       } finally {
         rmSync(skillsDir, { recursive: true, force: true })
       }
