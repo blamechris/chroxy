@@ -13,7 +13,7 @@ permissions:
 jobs:
   k8s-sidecar-integration:
     name: K8s Sidecar Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 15 min: cluster boot (~2 min) + image build/load (~2 min) + test suite
     # (~3 min) + cleanup (~1 min) + generous headroom for slow runners.
     timeout-minutes: 15
