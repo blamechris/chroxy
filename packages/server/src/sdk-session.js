@@ -9,6 +9,7 @@ import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
 import { createLogger } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
+import { formatBytes } from './utils/format-bytes.js'
 
 const log = createLogger('sdk')
 
@@ -300,6 +301,39 @@ export class SdkSession extends BaseSession {
    * Each call creates a new query() with resume to maintain conversation.
    */
   async sendMessage(prompt, attachments, sendOptions = {}) {
+    // #3539: once `_stdinForwardingDisabled` latches (see #3502/#3402), any
+    // further sendMessage calls would be silently dropped on the SidecarProcess
+    // PassThrough — the user sees a hung turn instead of an error. Refuse the
+    // write up front, surface the same machine-readable `code: 'stdin_disabled'`
+    // contract that #3502 established, and drain any queued follow-ups so the
+    // post-finally dequeue path (#3541) does not re-trigger writes after the
+    // flag flips. Decision: one-shot reject (per-call). The session is
+    // unrecoverable until restart, so queueing for "flush on resume" would only
+    // hide the problem; clients must handle the error and prompt for restart.
+    if (this._stdinForwardingDisabled) {
+      log.warn(
+        'Refusing sendMessage — stdin forwarding is disabled for this session; ' +
+        'restart the session to recover'
+      )
+      // Drop any messages that piled up in the queue while the flag was
+      // flipping. Without this, the post-turn dequeue would call
+      // sendMessage(...) once per queued item and emit one error per message —
+      // noisy, and pointless because none of them can be sent.
+      if (this._pendingInput?.length) {
+        log.warn(
+          `Discarding ${this._pendingInput.length} queued follow-up message(s) — ` +
+          'stdin forwarding is disabled'
+        )
+        this._pendingInput.length = 0
+      }
+      this.emit('error', {
+        code: 'stdin_disabled',
+        message: 'Cannot send message — stdin forwarding is disabled; restart this session',
+        recoverable: false,
+      })
+      return
+    }
+
     if (this._isBusy) {
       // Queue the message — it will be sent after the current turn completes
       if (!this._pendingInput) this._pendingInput = []
@@ -737,9 +771,13 @@ export class SdkSession extends BaseSession {
         this._stdinDroppedThresholdLogged = true
       }
 
+      // #3543: keep the raw byte count for scriptable log consumers and
+      // append a humanised KiB/MiB/GiB suffix so threshold-cross lines are
+      // easier to scan at a glance.  Format: `cumulative=N bytes (X.X MiB)`.
+      const cumulativeHuman = formatBytes(cumulative)
       const message =
         `Sidecar stdin chunk dropped (${bytesLabel}, reason=${reason}, ` +
-        `cumulative=${cumulative} bytes over ${dropCount} drops) — ` +
+        `cumulative=${cumulative} bytes (${cumulativeHuman}) over ${dropCount} drops) — ` +
         'turn input was truncated; consumer may need to retry'
 
       if (escalate) {

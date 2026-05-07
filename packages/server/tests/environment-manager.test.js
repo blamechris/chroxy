@@ -2513,7 +2513,8 @@ describe('EnvironmentManager.reconnect() — reconnectAgentToken delegation (#33
 })
 
 /**
- * Issue #3492 — invariant guard for the reconnect() unreachable-count helper.
+ * Issue #3492 / #3545 — invariant guard for the reconnect() unreachable-count
+ * helper.
  *
  * The boot-path aggregate-warn helper in
  * `server-cli.js#logEnvironmentManagerReconnectResult` derives the unreachable
@@ -2524,20 +2525,26 @@ describe('EnvironmentManager.reconnect() — reconnectAgentToken delegation (#33
  * `allHealthy = false` branch (quotas, partial-restore, metrics, …) without
  * a co-located status assignment would silently undercount.
  *
- * This test inspects the source of `reconnect()` and asserts that the count
- * of `allHealthy = false` lines matches the count of preceding/adjacent
- * `env.status = '<unreachable status>'` assignments. It also asserts the
- * exported `UNREACHABLE_STATUSES` set contains every literal status string
- * actually written by `reconnect()` on its `allHealthy=false` paths.
+ * Original guard (#3492) inspected counts only — it asserted that the number
+ * of `allHealthy = false` flips equals (status assignments − 1) and that every
+ * literal status was 'running' or in UNREACHABLE_STATUSES. The count check
+ * misses a narrower contributor bug (#3545): a new branch that flips
+ * `allHealthy = false` AND assigns `env.status = 'running'` (or any other
+ * reachable status) — internally inconsistent, yet the count balances.
+ *
+ * Strengthened guard (#3545) walks the body line-by-line and pairs each
+ * `allHealthy = false` with the most-recent preceding `env.status` literal,
+ * asserting the literal is in UNREACHABLE_STATUSES. Failure messages quote the
+ * exact pairing so the broken branch is obvious.
  */
-describe('EnvironmentManager.reconnect() invariant guard (#3492)', () => {
+describe('EnvironmentManager.reconnect() invariant guard (#3492, #3545)', () => {
   it('UNREACHABLE_STATUSES contains expected statuses', () => {
     assert.ok(UNREACHABLE_STATUSES.has('error'), '\'error\' must be unreachable')
     assert.ok(UNREACHABLE_STATUSES.has('stopped'), '\'stopped\' must be unreachable')
     assert.ok(!UNREACHABLE_STATUSES.has('running'), '\'running\' must NOT be unreachable')
   })
 
-  it('every allHealthy=false branch in reconnect() co-locates env.status assignment to an UNREACHABLE_STATUSES value', () => {
+  it('every allHealthy=false branch in reconnect() pairs with the nearest preceding env.status assignment to an UNREACHABLE_STATUSES value', () => {
     const srcPath = resolve(__dirname, '../src/environment-manager.js')
     const src = readFileSync(srcPath, 'utf-8')
 
@@ -2566,20 +2573,25 @@ describe('EnvironmentManager.reconnect() invariant guard (#3492)', () => {
 
     // Strip line comments so the regexes below count actual code, not the
     // inline invariant docstrings (which intentionally mention
-    // `allHealthy = false` and the status literals).
-    const body = src
+    // `allHealthy = false` and the status literals). Preserve original line
+    // numbers — needed for failure messages.
+    const bodyLines = src
       .slice(startIdx, endIdx + 1)
       .split('\n')
       .map(line => line.replace(/\/\/.*$/, ''))
-      .join('\n')
+    const bodyOffsetLine = src.slice(0, startIdx).split('\n').length // 1-based first line of body
 
-    // Count `allHealthy = false` flips
+    const body = bodyLines.join('\n')
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Top-level sanity (preserved from #3492)
+    // ──────────────────────────────────────────────────────────────────────
     const flipMatches = body.match(/allHealthy\s*=\s*false/g) || []
-    // Count `env.status = '<unreachable>'` assignments (only literal strings —
-    // anything else would be a contributor bug)
     const statusMatches = body.match(/env\.status\s*=\s*['"]([^'"]+)['"]/g) || []
 
     assert.ok(flipMatches.length > 0, 'reconnect() must contain at least one allHealthy=false branch')
+    // Count check still useful: catches a branch with no env.status assignment
+    // at all (the most-likely contributor mistake).
     assert.equal(
       statusMatches.length,
       flipMatches.length + 1, // +1 for the success-path 'running' assignment
@@ -2597,5 +2609,62 @@ describe('EnvironmentManager.reconnect() invariant guard (#3492)', () => {
         'Either the new status is reachable (use \'running\') or add it to UNREACHABLE_STATUSES — see #3492 invariant.',
       )
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Per-branch pairing (#3545)
+    //
+    // Walk the body line-by-line. Track the most-recent `env.status =
+    // '<literal>'` assignment. On each line that flips `allHealthy = false`,
+    // assert the tracked literal exists and is in UNREACHABLE_STATUSES.
+    //
+    // After consuming an assignment in a flip pairing, clear the tracker so
+    // a subsequent flip cannot reuse a stale assignment from a sibling
+    // branch.
+    //
+    // The success-path `env.status = 'running'` assignment is allowed to
+    // exist without a paired flip — it overwrites the tracker but, if the
+    // next event in the body is the function returning rather than a flip,
+    // it's discarded harmlessly.
+    // ──────────────────────────────────────────────────────────────────────
+    const statusLineRe = /env\.status\s*=\s*['"]([^'"]+)['"]/
+    const flipLineRe = /allHealthy\s*=\s*false/
+
+    let lastStatus = null // { literal, lineNo }
+    let pairingsChecked = 0
+
+    for (let i = 0; i < bodyLines.length; i++) {
+      const line = bodyLines[i]
+      const lineNo = bodyOffsetLine + i
+
+      const statusMatch = line.match(statusLineRe)
+      if (statusMatch) {
+        lastStatus = { literal: statusMatch[1], lineNo }
+      }
+
+      if (flipLineRe.test(line)) {
+        assert.ok(
+          lastStatus !== null,
+          `[#3545] reconnect() line ${lineNo}: 'allHealthy = false' has no preceding 'env.status = ...' assignment in scope. ` +
+          'Every allHealthy=false flip must be co-located with an unreachable env.status assignment so the boot-path aggregate-warn count stays accurate.',
+        )
+        assert.ok(
+          UNREACHABLE_STATUSES.has(lastStatus.literal),
+          `[#3545] reconnect() line ${lineNo}: 'allHealthy = false' is paired with 'env.status = '${lastStatus.literal}'' ` +
+          `(line ${lastStatus.lineNo}), which is NOT in UNREACHABLE_STATUSES. ` +
+          'An env reported unhealthy must be assigned an unreachable status (\'error\' or \'stopped\') — ' +
+          'otherwise the boot-path aggregate-warn helper undercounts. See #3492/#3545 invariant.',
+        )
+        pairingsChecked += 1
+        lastStatus = null // consume — sibling branches cannot reuse this assignment
+      }
+    }
+
+    // Belt-and-braces: the per-branch loop must have inspected every flip.
+    assert.equal(
+      pairingsChecked,
+      flipMatches.length,
+      `[#3545] expected to pair ${flipMatches.length} 'allHealthy = false' branches, but only inspected ${pairingsChecked}. ` +
+      'The line-pairing walk diverged from the top-level count — likely a regex/source-extraction bug in the test itself.',
+    )
   })
 })
