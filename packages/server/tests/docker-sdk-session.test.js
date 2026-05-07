@@ -1846,6 +1846,9 @@ describe('DockerSdkSession stdin_disabled handler (#3468)', () => {
       containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
     })
     session._backend = fakeBackend
+    // #3502: stdin_disabled now also emits a session-level `error` event;
+    // attach a no-op listener so EventEmitter doesn't crash on emit.
+    session.on('error', () => {})
 
     const warns = []
     const listener = (entry) => {
