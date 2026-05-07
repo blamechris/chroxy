@@ -701,17 +701,18 @@ describe('skills-trust', () => {
       )
     })
 
-    // #3511 defence-in-depth: array-valued entries with a sha256 string
-    // would have passed the previous classifier's `typeof === 'object'` check.
-    // The tightened predicate explicitly rejects arrays.
+    // #3511 defence-in-depth: array-valued entries pass the bare
+    // `typeof === 'object'` check so the tightened predicate
+    // explicitly rejects them with `!Array.isArray(v)`. Standard
+    // JSON serialisation cannot round-trip a `sha256` property onto
+    // an array (named array properties are dropped), so the array
+    // branch is unreachable from a normal JSON file — the guard
+    // exists to catch a hand-crafted or out-of-band parser path.
+    // This test verifies a JSON array in the entry slot is treated
+    // as unrecognised rather than partially matching v1 shape.
     it('treats v1 file with array-valued entries as unrecognised (fail open)', () => {
-      const sha = sha256Hex('body')
-      const arr = [sha, '2024-01-01T00:00:00.000Z']
-      arr.sha256 = sha
-      arr.firstSeen = '2024-01-01T00:00:00.000Z'
-      writeFileSync(trustPath, JSON.stringify({
-        '/abs/a.md': arr,
-      }))
+      // Direct JSON literal so the parsed value is a real array.
+      writeFileSync(trustPath, '{"/abs/a.md": ["a", "b"]}')
       const store = new SkillsTrustStore({ filePath: trustPath })
       assert.equal(store._dirty, false, 'array-valued entry must not classify as v1')
       assert.equal(store.inspect('/abs/a.md', 'body').status, 'recorded')
