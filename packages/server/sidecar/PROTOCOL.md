@@ -333,10 +333,13 @@ Sent in response to a `resume` frame when the session is unrecoverable.
 |---------------------|------------------------------------------------------------|
 | `unknown_session`   | No record of the given `sessionId` (agent restarted, etc.) |
 | `buffer_overflow`   | `lastSeq` predates the oldest buffered frame — gap detected |
+| `evicted_by_cap`    | Session was forcibly evicted because all slots were active and the hard session cap was hit by a new spawn |
 
 For `unknown_session` the connection stays open so the client can open a fresh
 session with `spawn`.  For `buffer_overflow` the agent closes the WS with code
-`1008` because continuing on the same WS would still see a partial stream.
+`1008` because continuing on the same WS would still see a partial stream.  For
+`evicted_by_cap` the agent closes the WS with code `1001`; the session is
+unrecoverable (the child has been killed).
 
 ```json
 {
@@ -470,8 +473,13 @@ It is not intended as durable session persistence.
 The agent limits concurrent sessions to `CHROXY_AGENT_MAX_SESSIONS` (default
 8).  When a new `spawn` would exceed the cap, the agent evicts the idle session
 (no active WS) with the oldest `lastActiveAt` timestamp before inserting the
-new one.  If all sessions are active, the globally oldest session is evicted
-(and its live WS is closed with code `1001`).
+new one.  If all sessions are active, the globally oldest session is evicted:
+the agent sends `{ type: 'session_lost', sessionId, reason: 'evicted_by_cap' }`
+to the live consumer before closing the WS with code `1001`.
+
+`K8sBackend` maps `session_lost` to `exit(-2)` regardless of reason, so the
+caller can distinguish a cap eviction (session-loss semantics) from a
+pre-session connection failure (which maps to `exit(-1)`).
 
 This cap is defense-in-depth against a buggy K8sBackend that reconnects
 repeatedly without resuming.
@@ -555,6 +563,7 @@ replies with `{ type: 'pong' }`.
 | `resume` with stale lastSeq (gap)            | `session_lost` frame (`reason: buffer_overflow`) + close `1008` |
 | `resume` while session has active client     | `error` frame + close `1008`                                     |
 | stdout line exceeds `CHROXY_AGENT_MAX_LINE_BYTES` | `error` frame (`code: line_too_long`) + child SIGTERM + close `1000` |
+| active session evicted by hard session cap   | `session_lost` frame (`reason: evicted_by_cap`) + child SIGTERM + close `1001` |
 | `stdin` before `spawn`                       | `error` frame (`stdin: no active session (send spawn first)`), connection stays open |
 | `stdin_end` before `spawn`                   | `error` frame (`stdin_end: no active session (send spawn first)`), connection stays open |
 | `stdin` with non-string `data`               | `error` frame (`stdin: data must be a string`), connection stays open |

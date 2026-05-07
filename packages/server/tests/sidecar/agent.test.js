@@ -1992,6 +1992,102 @@ describe('PodAgent', () => {
 
         // Session B's fake WS must NOT have been closed (it was not evicted).
         assert.equal(closeCallsB.length, 0, 'surviving session WS must not be closed')
+      } finally {
+        await capAgent.close()
+      }
+    })
+
+    it('sends session_lost(evicted_by_cap) frame BEFORE ws.close when evicting an active session (#3390)', async () => {
+      // Cap=2. Sessions A and B are both active (live WS attached). Spawning C
+      // triggers the fallback path: no idle sessions → oldest-active eviction.
+      // fakeWsA records each send/close call in insertion order so we can
+      // assert that session_lost arrives BEFORE the close handshake.
+      const children = []
+      const spawnFn = (_cmd, _args, _opts) => {
+        const mock = createMockSpawn()
+        children.push(mock.child)
+        return mock.child
+      }
+
+      const { agent: capAgent, port: capPort } = await startAgent({
+        spawnFn,
+        maxSessions: 2,
+        resumeTimeoutMs: 999_999,
+      })
+
+      try {
+        // --- Session A (will be the oldest) ---
+        const ws1 = connect(capPort, TOKEN)
+        await waitOpen(ws1)
+        const ws1Msgs = []
+        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const sidA = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        ws1.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // --- Session B (newer) ---
+        const ws2 = connect(capPort, TOKEN)
+        await waitOpen(ws2)
+        const ws2Msgs = []
+        ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
+        ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+        const sidB = ws2Msgs.find((m) => m.type === 'session_started').sessionId
+        ws2.close()
+        await new Promise((r) => setTimeout(r, 30))
+
+        // Patch both sessions with fake WS instances so the cap enforcer sees
+        // no idle sessions and must fall back to evicting the oldest active one.
+        const callLog = []
+        const fakeWsA = {
+          readyState: 1,  // WebSocket.OPEN
+          send(data) { callLog.push({ op: 'send', frame: JSON.parse(data) }) },
+          close(code, reason) { callLog.push({ op: 'close', code, reason }) },
+        }
+        const fakeWsB = {
+          readyState: 1,
+          send() {},
+          close() {},
+        }
+
+        const sessionA = capAgent._sessions.get(sidA)
+        const sessionB = capAgent._sessions.get(sidB)
+        capAgent._cancelIdleTimer(sessionA)
+        capAgent._cancelIdleTimer(sessionB)
+        sessionA.activeWs = fakeWsA
+        sessionB.activeWs = fakeWsB
+        sessionA.lastActiveAt = 1000  // older → evicted
+        sessionB.lastActiveAt = 2000  // newer → survives
+
+        // --- Session C: triggers cap → A is evicted ---
+        const ws3 = connect(capPort, TOKEN)
+        await waitOpen(ws3)
+        ws3.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        await new Promise((r) => setTimeout(r, 20))
+
+        // Verify frame ordering: session_lost must precede ws.close(1001).
+        const sendIdx = callLog.findIndex((e) => e.op === 'send' && e.frame.type === 'session_lost')
+        const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1001)
+
+        assert.ok(
+          sendIdx !== -1,
+          `session_lost frame must be sent to evicted WS; log=${JSON.stringify(callLog)}`,
+        )
+        assert.ok(
+          closeIdx !== -1,
+          `evicted WS must be closed with code 1001; log=${JSON.stringify(callLog)}`,
+        )
+        assert.ok(
+          sendIdx < closeIdx,
+          `session_lost (idx ${sendIdx}) must precede ws.close(1001) (idx ${closeIdx})`,
+        )
+
+        const lostFrame = callLog[sendIdx].frame
+        assert.equal(lostFrame.type, 'session_lost')
+        assert.equal(lostFrame.sessionId, sidA, 'session_lost must carry the evicted sessionId')
+        assert.equal(lostFrame.reason, 'evicted_by_cap', 'reason must be evicted_by_cap')
 
         ws3.close()
       } finally {
