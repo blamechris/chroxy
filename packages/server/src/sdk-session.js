@@ -651,23 +651,30 @@ export class SdkSession extends BaseSession {
   }
 
   /**
-   * Attach default warn-log listeners for SidecarProcess stdin failure
-   * signals (#3402, #3474).
+   * Attach default log listeners for SidecarProcess stdin failure
+   * signals (#3402, #3474, #3506).
    *
    * SidecarProcess (used by container/k8s spawnClaudeCodeProcess paths)
    * emits two stdin failure events the SDK itself does not surface:
    *
    *   - `stdin_disabled`  — fired when forwarding becomes unrecoverable
    *     (post-reconnect or live WS close mid-write). One-shot.
+   *     Logged at warn level.
    *   - `stdin_dropped`   — fired for every chunk that exceeds the 1 MiB
    *     pre-dial cap. Payload: `{ bytes, reason: 'pre-dial-cap' }`.
+   *     #3506: every drop logs with a cumulative running total
+   *     (`_stdinDroppedBytesTotal` + `_stdinDroppedCount`); the level
+   *     escalates to error on the first drop, every Nth drop
+   *     (`STDIN_DROPPED_ESCALATION_EVERY_N`), and when the cumulative
+   *     byte total crosses `STDIN_DROPPED_BYTES_ERROR_THRESHOLD`. All
+   *     other drops log at warn.
    *
    * Both signal silent data loss from the consumer's perspective: the
    * underlying PassThrough still accepts writes, so without an explicit
    * listener the user sees a hung turn instead of an error.  This helper
-   * provides the "warn log at minimum" guarantee — subclasses or future
-   * K8s-aware paths may override to escalate (e.g. emit error, abort the
-   * turn).
+   * provides the "log at minimum" guarantee — subclasses or future
+   * K8s-aware paths may override to escalate further (e.g. emit a
+   * session error event, abort the turn).
    *
    * Idempotent on two axes:
    *   1. Safe on non-SidecarProcess procs — Node ChildProcess (Docker path)
@@ -675,7 +682,7 @@ export class SdkSession extends BaseSession {
    *   2. Safe on repeat calls — the proc is stamped with a Symbol marker
    *      after the first wiring; subsequent calls short-circuit so a
    *      resume/reconnect caller cannot accumulate duplicate listeners
-   *      (and therefore duplicate warn logs) on the same proc.
+   *      (and therefore duplicate logs) on the same proc.
    *
    * @param {EventEmitter|null|undefined} proc — the spawned process from
    *   `spawnClaudeCodeProcess`.  May be a Node ChildProcess (Docker path)
