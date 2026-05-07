@@ -24,6 +24,26 @@ export interface ToastItem {
   /** #3587: optional inline recovery action. When set, the toast
    * renders an action button between the message and the close button. */
   action?: ToastAction
+  /**
+   * #3603: when true, the action button renders disabled and clicks
+   * are no-ops. Used to surface "Reconnecting…" while the WS socket
+   * is closed — without this guard, action callbacks like
+   * `grantCommunitySkillTrust` silently no-op against a closed socket
+   * and the toast dismisses with no feedback.
+   *
+   * Has no effect when `action` is unset. The 5s auto-dismiss timer
+   * is paused (and any in-flight timer cleared) while this is true, so
+   * the toast stays on screen for the full reconnect window — once the
+   * flag flips back to false the timer restarts fresh, giving the
+   * operator another full 5s to click the now re-enabled button.
+   */
+  actionDisabled?: boolean
+  /**
+   * #3603: optional override label rendered while `actionDisabled` is
+   * true. Defaults to the original `action.label` if unset, so callers
+   * who only want the disabled visual without copy change can omit it.
+   */
+  actionDisabledLabel?: string
 }
 
 export interface ToastProps {
@@ -36,6 +56,19 @@ export function Toast({ items, onDismiss }: ToastProps) {
 
   useEffect(() => {
     items.forEach(item => {
+      // #3603: pause the auto-dismiss timer while `actionDisabled` is
+      // true (e.g. WS reconnecting). The toast stays on screen so the
+      // operator can retry the action once the connection recovers.
+      // If a timer was already running before the disable, clear it so
+      // it doesn't fire mid-disconnect. When `actionDisabled` flips
+      // back to false the effect re-runs and the timer restarts fresh.
+      if (item.actionDisabled === true) {
+        if (timersRef.current.has(item.id)) {
+          clearTimeout(timersRef.current.get(item.id)!)
+          timersRef.current.delete(item.id)
+        }
+        return
+      }
       if (!timersRef.current.has(item.id)) {
         const timer = setTimeout(() => {
           onDismiss(item.id)
@@ -72,7 +105,16 @@ export function Toast({ items, onDismiss }: ToastProps) {
             <button
               className="toast-action"
               data-testid={`toast-action-${item.id}`}
+              disabled={item.actionDisabled === true}
+              aria-disabled={item.actionDisabled === true ? true : undefined}
               onClick={() => {
+                // #3603: ignore clicks while the parent has flagged the
+                // action as disabled (e.g. WS reconnecting). The button
+                // also renders with the native `disabled` attribute so
+                // the click handler shouldn't fire — this is a defensive
+                // double-guard for environments that synthesize click
+                // events on disabled buttons (jsdom, some a11y tools).
+                if (item.actionDisabled === true) return
                 // #3587: clear the auto-dismiss timer first so a slow
                 // click handler doesn't race the 5s timeout into a
                 // double-dismiss.
@@ -93,7 +135,9 @@ export function Toast({ items, onDismiss }: ToastProps) {
               }}
               type="button"
             >
-              {item.action.label}
+              {item.actionDisabled === true
+                ? (item.actionDisabledLabel ?? item.action.label)
+                : item.action.label}
             </button>
           ) : null}
           <button

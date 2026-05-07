@@ -1246,7 +1246,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: (name: string, cwd?: string, worktree?: boolean, provider?: string) => {
+  createSession: (
+    name: string,
+    cwd?: string,
+    worktree?: boolean,
+    provider?: string,
+    model?: string,
+    permissionMode?: string,
+  ) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
@@ -1254,6 +1261,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (cwd) msg.cwd = cwd;
       if (worktree) msg.worktree = true;
       if (provider) msg.provider = provider;
+      // #3599: forward optional model/permissionMode so the StdinDisabledBanner
+      // restart handler can preserve user-customized values from the broken
+      // session. Server's `create_session` handler accepts both
+      // (packages/server/src/handlers/session-handlers.js).
+      if (model) msg.model = model;
+      if (permissionMode) msg.permissionMode = permissionMode;
       wsSend(socket, msg);
     }
   },

@@ -437,11 +437,16 @@ export function SessionScreen() {
   const handleRestartStdinSession = useCallback((sessionId: string) => {
     const session = sessions.find((s) => s.sessionId === sessionId);
     if (!session) return;
+    // #3599: forward model + permissionMode so the recreated session
+    // preserves any non-default values the user had switched to on the
+    // broken session. Mirrors the dashboard's handleRestartSession (#3593).
     createSession(
       session.name,
       session.cwd || undefined,
       session.worktree,
       session.provider,
+      session.model || undefined,
+      session.permissionMode || undefined,
     );
     destroySession(sessionId);
   }, [sessions, destroySession, createSession]);

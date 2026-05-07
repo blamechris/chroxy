@@ -326,7 +326,14 @@ export interface ConnectionActions {
  */
 export interface MultiClientSessionActions {
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
-  createSession: (name: string, cwd?: string, worktree?: boolean, provider?: string) => void;
+  createSession: (
+    name: string,
+    cwd?: string,
+    worktree?: boolean,
+    provider?: string,
+    model?: string,
+    permissionMode?: string,
+  ) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;

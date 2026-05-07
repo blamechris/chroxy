@@ -559,4 +559,71 @@ describe('App', () => {
       expect(readyBanner).toHaveClass('tunnel-warming-banner')
     })
   })
+
+  describe('StdinDisabledBanner restart ordering (#3602)', () => {
+    // The server rejects `destroy_session` when it would destroy the last
+    // remaining session ("Cannot destroy the last session" — see
+    // `packages/server/src/handlers/session-handlers.js`). Destroying the
+    // broken session first would therefore fail in the common single-session
+    // case. The handler must create the replacement first, then destroy.
+    it('calls createSession BEFORE destroySession when the banner restart is clicked', () => {
+      const callOrder: string[] = []
+      const createSessionFn = vi.fn(() => {
+        callOrder.push('create')
+      })
+      const destroySessionFn = vi.fn(() => {
+        callOrder.push('destroy')
+      })
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [
+          {
+            sessionId: 's1',
+            name: 'Wedged',
+            cwd: '/tmp/repo',
+            type: 'cli',
+            hasTerminal: true,
+            model: null,
+            permissionMode: null,
+            isBusy: false,
+            createdAt: Date.now(),
+            conversationId: null,
+            provider: 'claude-sdk',
+            worktree: false,
+            stdinForwardingDisabled: true,
+          },
+        ],
+        activeSessionId: 's1',
+        createSession: createSessionFn,
+        destroySession: destroySessionFn,
+      }
+      render(<App />)
+
+      // Banner must be rendered for the wedged session.
+      expect(screen.getByTestId('stdin-disabled-banner')).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('stdin-disabled-restart-button'))
+
+      // Both must have been invoked.
+      expect(createSessionFn).toHaveBeenCalledTimes(1)
+      expect(destroySessionFn).toHaveBeenCalledTimes(1)
+
+      // Strict ordering: create then destroy. Destroy-first would fail when
+      // the wedged session is the only one open.
+      expect(callOrder).toEqual(['create', 'destroy'])
+
+      // createSession must receive the original session's spawn options so
+      // the user lands back in the same cwd / provider / etc.
+      expect(createSessionFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'Wedged',
+          cwd: '/tmp/repo',
+          provider: 'claude-sdk',
+          worktree: false,
+        }),
+      )
+
+      // destroySession must target the wedged session id.
+      expect(destroySessionFn).toHaveBeenCalledWith('s1')
+    })
+  })
 })
