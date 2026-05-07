@@ -752,8 +752,10 @@ describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
       }
     )
 
-    // No Pod should have been created when the mount parse fails.
+    // No K8s resources should have been created when the mount parse fails —
+    // guard against resource-leak regressions on early validation failures.
     assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
   })
 
   it('rejects Windows-style forward-slash drive-letter paths (#3388)', async () => {
@@ -769,6 +771,7 @@ describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
       /looks like a Windows path/
     )
     assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
   })
 
   it('still parses normal POSIX mounts after the Windows-path guard (#3388)', async () => {

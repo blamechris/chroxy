@@ -242,6 +242,17 @@ export class K8sBackend {
     // ignore here; only the constructor-configured sidecarImage is used.
     const sidecarImage = this._sidecarImage
 
+    // 0. Pre-flight: validate every mount string up-front. _parseMountString()
+    //    throws for Windows-style drive-letter paths (#3388); doing this BEFORE
+    //    the Secret/Pod create avoids leaking a half-provisioned Secret when a
+    //    caller passes a bad mount. Parse results are reused below.
+    const parsedMounts = []
+    if (mounts && mounts.length > 0) {
+      for (let i = 0; i < mounts.length; i++) {
+        parsedMounts.push(_parseMountString(mounts[i]))
+      }
+    }
+
     // 1. Generate per-Pod auth token
     const agentToken = randomBytes(32).toString('base64url')
 
@@ -309,9 +320,11 @@ export class K8sBackend {
     }
 
     // 4b. Additional mounts: Docker-style "hostPath:containerPath[:ro]" strings.
-    if (mounts && mounts.length > 0) {
-      for (let i = 0; i < mounts.length; i++) {
-        const parsed = _parseMountString(mounts[i])
+    //     Parse results were validated up-front (step 0); a `null` entry means
+    //     the input did not match any supported format and is logged + skipped.
+    if (parsedMounts.length > 0) {
+      for (let i = 0; i < parsedMounts.length; i++) {
+        const parsed = parsedMounts[i]
         if (!parsed) {
           log.warn(`createEnvironment: ignoring unparseable mount entry "${mounts[i]}"`)
           continue
@@ -1538,7 +1551,10 @@ function _deriveSecretName(podName) {
  *   "/host/path:/container/path"
  *   "/host/path:/container/path:ro"
  *
- * Returns null for unrecognised input so the caller can log and skip.
+ * Returns null for unrecognised *formats* (so the caller can log and skip), but
+ * throws for inputs that are recognised as invalid — currently Windows-style
+ * drive-letter prefixes (see below). Callers must therefore tolerate both a
+ * `null` return and a thrown Error.
  *
  * Windows-style paths with a drive letter (e.g. `C:\Users\foo:/workspace`) are
  * rejected with an explicit Error: splitting on `:` would silently truncate the
@@ -1547,7 +1563,7 @@ function _deriveSecretName(podName) {
  * Pod scheduling. K8s nodes are Linux-only, so Windows host paths are not
  * supportable in any case — fail loudly at parse time.
  *
- * @param {string} mountStr
+ * @param {string} mountStr Docker-style mount string in `<host>:<container>[:ro]` form.
  * @returns {{ hostPath: string, containerPath: string, readOnly: boolean } | null}
  * @throws {Error} when `mountStr` begins with a Windows drive-letter prefix.
  */
@@ -1558,7 +1574,7 @@ function _parseMountString(mountStr) {
   // accept POSIX paths, so this can never produce a valid mount.
   if (/^[A-Za-z]:[\\/]/.test(mountStr)) {
     throw new Error(
-      `K8s mount path '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths`
+      `K8s mount string '${mountStr}' looks like a Windows path; K8s nodes only accept POSIX paths (expected '<host>:<container>[:ro]' with a POSIX host path)`
     )
   }
   const parts = mountStr.split(':')
