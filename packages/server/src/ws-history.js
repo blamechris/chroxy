@@ -140,9 +140,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
           sessionId: failed.sessionId,
           name: failed.name,
           provider: failed.provider,
+          cwd: failed.cwd,
+          model: failed.model,
+          permissionMode: failed.permissionMode,
           errorCode: failed.errorCode,
           errorMessage: failed.errorMessage,
           originalHistoryPreserved: true,
+          historyLength: failed.historyLength,
         })
       }
     }

@@ -5,6 +5,7 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback, useRef } from 'react'
+import type { SessionVisualStatus } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import type { SearchResult } from '../store/types'
@@ -13,6 +14,7 @@ export interface ActiveSessionNode {
   sessionId: string
   name: string
   isBusy: boolean
+  status?: SessionVisualStatus
   provider?: string
   worktree?: boolean
 }
@@ -325,38 +327,42 @@ export function Sidebar({
                   {!isCollapsed && (
                     <div className="sidebar-repo-children" role="group">
                       {/* Active sessions */}
-                      {repo.activeSessions.map(session => (
-                        <div
-                          key={session.sessionId}
-                          role="treeitem"
-                          aria-selected={activeSessionId === session.sessionId}
-                          tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
-                          className={`sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}`}
-                          data-testid={`session-item-${session.sessionId}`}
-                          onClick={() => onSessionClick(session.sessionId)}
-                          onContextMenu={e => {
-                            e.preventDefault()
-                            onContextMenu({ type: 'session', sessionId: session.sessionId }, e)
-                          }}
-                        >
-                          {session.isBusy ? (
-                            <span className="sidebar-busy-dot" title="Session busy — processing..." />
-                          ) : (
-                            <span className="sidebar-idle-dot" title="Session idle — ready for input" />
-                          )}
-                          <span className="sidebar-session-name">{session.name}</span>
-                          {session.worktree && (
-                            <span className="sidebar-worktree-badge" title="Isolated git worktree">
-                              W
-                            </span>
-                          )}
-                          {session.provider && session.provider !== 'claude-sdk' && (
-                            <span className="sidebar-provider-badge" title={session.provider}>
-                              {session.provider.replace(/^claude-/, '').toUpperCase()}
-                            </span>
-                          )}
-                        </div>
-                      ))}
+                      {repo.activeSessions.map(session => {
+                        const status = session.status ?? (session.isBusy ? 'working' : 'idle')
+                        const statusTitle = status === 'working'
+                          ? 'Session working — response, tool, or agent active'
+                          : status === 'stale'
+                            ? 'Session stale — idle for 1 hour or more'
+                            : 'Session idle — ready for input'
+                        return (
+                          <div
+                            key={session.sessionId}
+                            role="treeitem"
+                            aria-selected={activeSessionId === session.sessionId}
+                            tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
+                            className={`sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}`}
+                            data-testid={`session-item-${session.sessionId}`}
+                            onClick={() => onSessionClick(session.sessionId)}
+                            onContextMenu={e => {
+                              e.preventDefault()
+                              onContextMenu({ type: 'session', sessionId: session.sessionId }, e)
+                            }}
+                          >
+                            <span className={`sidebar-session-dot status-${status}`} title={statusTitle} />
+                            <span className="sidebar-session-name">{session.name}</span>
+                            {session.worktree && (
+                              <span className="sidebar-worktree-badge" title="Isolated git worktree">
+                                W
+                              </span>
+                            )}
+                            {session.provider && session.provider !== 'claude-sdk' && (
+                              <span className="sidebar-provider-badge" title={session.provider}>
+                                {session.provider.replace(/^claude-/, '').toUpperCase()}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
 
                       {/* Resumable sessions */}
                       {repo.resumableSessions.map(conv => (

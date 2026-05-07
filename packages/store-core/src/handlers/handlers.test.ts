@@ -1893,14 +1893,22 @@ describe('handleSessionRestoreFailed', () => {
       sessionId: 'sess-1',
       name: 'Editor',
       provider: 'claude',
+      cwd: '/repo',
+      model: 'sonnet-4-5',
+      permissionMode: 'approve',
       errorCode: 'NO_API_KEY',
       errorMessage: 'API key missing',
+      historyLength: 2,
     })
     expect(result.sessionId).toBe('sess-1')
     expect(result.name).toBe('Editor')
     expect(result.provider).toBe('claude')
+    expect(result.cwd).toBe('/repo')
+    expect(result.model).toBe('sonnet-4-5')
+    expect(result.permissionMode).toBe('approve')
     expect(result.errorCode).toBe('NO_API_KEY')
     expect(result.errorMessage).toBe('API key missing')
+    expect(result.historyLength).toBe(2)
     expect(result.systemMessage.type).toBe('system')
     expect(result.systemMessage.content).toBe('Failed to restore Editor: API key missing')
   })
@@ -1936,14 +1944,22 @@ describe('handleSessionRestoreFailed', () => {
       sessionId: 42,
       name: false,
       provider: { x: 1 },
+      cwd: 123,
+      model: null,
+      permissionMode: true,
       errorCode: null,
       errorMessage: 99,
+      historyLength: '2',
     })
     expect(result.sessionId).toBeNull()
     expect(result.name).toBeNull()
     expect(result.provider).toBeNull()
+    expect(result.cwd).toBeNull()
+    expect(result.model).toBeNull()
+    expect(result.permissionMode).toBeNull()
     expect(result.errorCode).toBeNull()
     expect(result.errorMessage).toBeNull()
+    expect(result.historyLength).toBeNull()
   })
 })
 

@@ -833,6 +833,12 @@ function handleSkillTrustRequest(msg: Record<string, unknown>, get: MsgGet, _set
   const skillName = typeof msg.skillName === 'string' ? msg.skillName : null;
   const author = typeof msg.author === 'string' ? msg.author : null;
   if (!skillName || !author) return;
+  // #3310: capture optional description / path from the wire payload so
+  // the SkillsPanel "Pending review" row can surface them for the operator.
+  // Defensive typed — absent or non-string values become undefined so the
+  // type matches PendingCommunitySkill's optional fields.
+  const description = typeof msg.description === 'string' && msg.description ? msg.description : undefined;
+  const path = typeof msg.path === 'string' && msg.path ? msg.path : undefined;
   const targetId = resolveSessionId(msg, get().activeSessionId);
   if (!targetId || !get().sessionStates[targetId]) return;
   updateSession(targetId, (state) => {
@@ -840,7 +846,10 @@ function handleSkillTrustRequest(msg: Record<string, unknown>, get: MsgGet, _set
       ? state.pendingCommunitySkills
       : [];
     if (existing.some(p => p.name === skillName && p.author === author)) return {};
-    return { pendingCommunitySkills: [...existing, { name: skillName, author }] };
+    const entry: PendingCommunitySkill = { name: skillName, author };
+    if (description !== undefined) entry.description = description;
+    if (path !== undefined) entry.path = path;
+    return { pendingCommunitySkills: [...existing, entry] };
   });
 }
 
@@ -1961,7 +1970,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'available_models': {
       if (Array.isArray(msg.models)) {
         const { models, defaultModelId } = sharedAvailableModels(msg);
-        set({ availableModels: models, defaultModelId });
+        const availableModelsProvider = typeof msg.provider === 'string' ? msg.provider : null;
+        set({ availableModels: models, availableModelsProvider, defaultModelId });
       }
       break;
     }
@@ -2306,15 +2316,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'session_restore_failed': {
       // Server couldn't restart a persisted session (e.g. missing API key).
-      // History is preserved on disk. Full UI is a follow-up; log for now.
+      // History is preserved on disk; surface this visibly instead of making
+      // the saved session look like it silently disappeared after restart.
       const restoreFailed = sharedSessionRestoreFailed(msg);
+      get().addServerError(restoreFailed.systemMessage.content);
       // eslint-disable-next-line no-console
       console.warn('[session_restore_failed]', {
         sessionId: restoreFailed.sessionId,
         name: restoreFailed.name,
         provider: restoreFailed.provider,
+        cwd: restoreFailed.cwd,
+        model: restoreFailed.model,
+        permissionMode: restoreFailed.permissionMode,
         errorCode: restoreFailed.errorCode,
         errorMessage: restoreFailed.errorMessage,
+        historyLength: restoreFailed.historyLength,
       });
       break;
     }

@@ -139,26 +139,15 @@ if (!SHOULD_RUN || !KIND_AVAILABLE) {
 
       // Instantiate K8sBackend with portforward mode (we are outside the cluster).
       // kind writes a context to ~/.kube/config so loadFromDefault() picks it up.
+      // imagePullPolicy: 'IfNotPresent' prevents kind from trying to pull the
+      // locally-loaded image from a remote registry (which would fail for a
+      // test-only image that doesn't exist in any public registry).
       const { K8sBackend } = await import('../../src/environments/backends/k8s.js')
       backend = new K8sBackend({
         connectMode: 'portforward',
         sidecarImage: SIDECAR_IMAGE,
+        imagePullPolicy: 'IfNotPresent',
       })
-
-      // createEnvironment uses imagePullPolicy defaulting to Always in the spec,
-      // but our image is local — we need IfNotPresent so it isn't pulled from a
-      // registry that doesn't have it. Patch via a small monkey-patch of the
-      // internal api so we can set imagePullPolicy without modifying the backend.
-      // We wrap the real createNamespacedPod to inject imagePullPolicy.
-      const realCreate = backend._api.createNamespacedPod.bind(backend._api)
-      backend._api.createNamespacedPod = ({ namespace, body }) => {
-        if (body && body.spec && body.spec.containers) {
-          for (const c of body.spec.containers) {
-            c.imagePullPolicy = 'IfNotPresent'
-          }
-        }
-        return realCreate({ namespace, body })
-      }
 
     })
 

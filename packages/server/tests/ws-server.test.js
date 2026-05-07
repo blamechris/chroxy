@@ -1931,6 +1931,13 @@ describe('encryption integration (end-to-end)', () => {
     return decrypted
   }
 
+  async function waitForEncryptedMessageType(messages, clientEncryption, type, timeout = 2000) {
+    return waitFor(() => {
+      const decrypted = drainEncryptedMessages(messages, clientEncryption)
+      return decrypted.find(m => m.type === type)
+    }, { timeoutMs: timeout, label: `encrypted message type: ${type}` })
+  }
+
   /**
    * Helper: collect and decrypt all pending encrypted messages.
    */
@@ -2007,7 +2014,7 @@ describe('encryption integration (end-to-end)', () => {
     sendEncrypted(ws, { type: 'ping' }, clientEncryption)
 
     // The pong should arrive as an encrypted envelope
-    const pong = await waitForEncryptedMessage(messages, clientEncryption, 2000)
+    const pong = await waitForEncryptedMessageType(messages, clientEncryption, 'pong', 2000)
     assert.equal(pong.type, 'pong', 'Server should process encrypted ping and respond with encrypted pong')
 
     ws.close()
@@ -4248,4 +4255,3 @@ describe('WsServer linking-mode pairing default (#3079)', () => {
     ws.close()
   })
 })
-
