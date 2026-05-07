@@ -75,10 +75,18 @@
  *   - On case-insensitive filesystems (macOS APFS default, Windows NTFS
  *     by default), the same skill can resolve to different casings of
  *     the same path, which previously caused silent re-records. The
- *     ledger key is lowercased on those platforms via
- *     `_normalizePathKey`. The actual filesystem path used by callers
- *     stays verbatim — only the ledger lookup key is normalised, so
+ *     SHA records map (`_records`, the `skills` index on disk) is keyed
+ *     through `_normalizePathKey`, which lowercases keys on those
+ *     platforms. The actual filesystem path used by callers stays
+ *     verbatim — only the SHA-records lookup key is normalised, so
  *     case-sensitive Linux behaviour is unchanged.
+ *   - This case-folding applies ONLY to the SHA records map. The
+ *     `communityTrust.byPath` index is written verbatim from the
+ *     `realpathSync()`-canonicalised path passed by callers (#3297) and
+ *     is NOT run through `_normalizePathKey`. Cross-casing matches on
+ *     case-insensitive filesystems work because `realpathSync()` returns
+ *     the on-disk canonical casing, so the same inode resolves to the
+ *     same byPath key regardless of how the caller spelled it.
  */
 import { readFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
 import { dirname, join, basename } from 'path'
