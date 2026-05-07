@@ -246,7 +246,16 @@ export function SkillsPanel({
               <li key={s.name} data-testid={`skill-item-${s.name}`}>
                 <div className="skill-row">
                   <span className="skill-name">{s.name}</span>
-                  {s.description && <span className="skill-desc">{s.description}</span>}
+                  {/* #3444: trim guard suppresses whitespace-only descriptions
+                      that would otherwise render a blank <span> with skill-desc
+                      layout (margins, color). The trim is only used as a
+                      boolean predicate — `s.description` is rendered untrimmed
+                      so we don't mutate the authored value. Note: HTML text
+                      nodes collapse runs of whitespace by default (no
+                      `white-space: pre*` on `.skill-desc`), so any preserved
+                      leading/trailing whitespace will collapse visually.
+                      Mirrors the pending-row guard added in #3441. */}
+                  {s.description?.trim() && <span className="skill-desc" data-testid={`skill-desc-${s.name}`}>{s.description}</span>}
                   {/* #3251: auto skills have no <label>, so label-
                       association doesn't apply here — keep the flag
                       inside the existing flex row so it renders
@@ -297,7 +306,9 @@ export function SkillsPanel({
                       data-testid={`skill-toggle-${s.name}`}
                     />
                     <span className="skill-name">{s.name}</span>
-                    {s.description && <span className="skill-desc">{s.description}</span>}
+                    {/* #3444: trim guard — see auto-skill section above for
+                        rationale. Mirrors the pending-row guard from #3441. */}
+                    {s.description?.trim() && <span className="skill-desc" data-testid={`skill-desc-${s.name}`}>{s.description}</span>}
                   </label>
                   <MismatchFlag name={s.name} />
                   {/* #3270: AcceptTrustButton sits as a sibling to
