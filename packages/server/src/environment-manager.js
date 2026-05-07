@@ -402,8 +402,13 @@ export class EnvironmentManager extends EventEmitter {
    * Inspects each saved container and updates its status.
    *
    * @returns {Promise<boolean>} `true` if every environment reconnected
-   *   successfully; `false` if at least one environment was marked unreachable
-   *   because its backend credential source is gone (e.g. K8s Secret GC'd).
+   *   successfully; `false` if at least one environment was marked unreachable.
+   *   An environment is considered unreachable when any of the following hold:
+   *   - it has no `containerId`
+   *   - `getEnvironmentStatus` reports the container is stopped
+   *   - `getEnvironmentStatus` throws (container/handle not found)
+   *   - `reconnectAgentToken` returns `false` (credential source GC'd)
+   *   - `reconnectAgentToken` throws (transient error treated as same signal)
    */
   async reconnect() {
     this._restore()
@@ -426,10 +431,12 @@ export class EnvironmentManager extends EventEmitter {
           log.info(`Environment "${env.name}" reconnected (container: ${env.containerId.slice(0, 12)})`)
         } else {
           env.status = 'stopped'
+          allHealthy = false
           log.warn(`Environment "${env.name}" container is stopped`)
         }
       } catch (err) {
         env.status = 'error'
+        allHealthy = false
         log.warn(`Environment "${env.name}" container inspect failed: ${err.message}`)
       }
       // For backends that hold per-environment credentials in memory (e.g.
@@ -441,6 +448,10 @@ export class EnvironmentManager extends EventEmitter {
       //   false — credential source is gone (Pod/Secret GC'd); the environment
       //           is unreachable and must be marked accordingly so future
       //           streamCliInEnvironment calls don't fail without warning.
+      //
+      // A thrown error is treated as the same unreachable signal as returning
+      // false (#3478): the operator cannot rely on the credential, so the
+      // environment must be marked error and reconnect() must report failure.
       if (typeof this._backend.reconnectAgentToken === 'function') {
         try {
           const ok = await this._backend.reconnectAgentToken(env.containerId)
@@ -450,6 +461,8 @@ export class EnvironmentManager extends EventEmitter {
             log.warn(`Environment "${env.name}" (id: ${env.id}) credential source is gone — marking unreachable`)
           }
         } catch (err) {
+          env.status = 'error'
+          allHealthy = false
           log.warn(`Environment "${env.name}" token refresh failed: ${err.message}`)
         }
       }
