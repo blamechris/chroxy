@@ -26,6 +26,9 @@ function formatTimestamp(ms: number): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + time
 }
 
+// #3619: see ServerPicker.tsx (formatLastConnected) for rationale —
+// wall-clock relative-time renderer; switching to performance.now()
+// would mix clocks against the persisted-wall-clock input timestamp.
 function formatRelativeTime(ms: number): string {
   const diff = Date.now() - ms
   if (diff < 60_000) return 'just now'

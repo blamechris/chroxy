@@ -31,6 +31,9 @@ function abbreviatePath(path: string): string {
 }
 
 /** Format a timestamp as relative time */
+// #3619: see ServerPicker.tsx (formatLastConnected) for rationale —
+// wall-clock relative-time renderer; switching to performance.now()
+// would mix clocks against the persisted-wall-clock input timestamp.
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts
   if (diffMs < 0) return 'just now'
