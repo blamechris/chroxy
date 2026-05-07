@@ -76,10 +76,12 @@ function baseStateWithSession(
     activeSessionId: sessionId,
     sessionStates: { [sessionId]: { ...createEmptySessionState(), ...overrides } },
     messages: [],
+    myClientId: 'client-1',
     terminalBuffer: '',
     terminalRawBuffer: '',
     serverErrors: [],
     addServerError: () => {},
+    appendTerminalData: () => {},
     serverProtocolVersion: null,
   } as unknown as Partial<ConnectionState>
 }
@@ -381,6 +383,73 @@ describe('dashboard message-handler — auto-evaluator (#3188)', () => {
       const after = (store.getState() as any).sessionStates.s1.messages as ChatMessage[]
       expect(after).toHaveLength(1)
       expect(after[0]!.evaluator?.evaluatorIterationId).toBe('iter-replay-1')
+    })
+  })
+
+  // #3188 — pendingEvaluatorClarify lifecycle hardening (Copilot review on PR #3643).
+  // The clarify prompt must drop on:
+  //   - cross-client user_input echo (a remote client answered)
+  // and stay PUT on:
+  //   - failed local send (queue full, etc.) — covered by sendInput tests
+  describe('pendingEvaluatorClarify lifecycle', () => {
+    it('clears pendingEvaluatorClarify when a remote client answers (user_input echo)', () => {
+      // Set up a pending clarify on s1.
+      handleMessage({
+        type: 'evaluator_clarify',
+        sessionId: 's1',
+        originalDraft: 'remove it',
+        clarification: 'Which file?',
+        reasoning: 'Ambiguous.',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 1,
+      }, ctx() as any)
+      let session = (store.getState() as any).sessionStates.s1 as SessionState
+      expect(session.pendingEvaluatorClarify).toBeDefined()
+
+      // Simulate a remote client (different clientId) answering.
+      handleMessage({
+        type: 'user_input',
+        sessionId: 's1',
+        clientId: 'other-client',
+        text: 'src/utils.js',
+        messageId: 'remote-1',
+        timestamp: Date.now(),
+      }, ctx() as any)
+
+      session = (store.getState() as any).sessionStates.s1 as SessionState
+      expect(session.pendingEvaluatorClarify).toBeNull()
+    })
+
+    it('does NOT clear pendingEvaluatorClarify when the echo is from this client (no-op)', () => {
+      // sharedUserInput skips echoes from the local clientId — that path
+      // is covered by the existing user_input handler test. Here we just
+      // pin that the clarify clear is gated behind sharedUserInput's
+      // null-result short-circuit.
+      handleMessage({
+        type: 'evaluator_clarify',
+        sessionId: 's1',
+        originalDraft: 'remove it',
+        clarification: 'Which file?',
+        reasoning: 'Ambiguous.',
+        evaluatorIterationId: 'iter-2',
+        evaluatorIteration: 1,
+      }, ctx() as any)
+
+      // myClientId in baseStateWithSession is 'client-1'; emit a
+      // user_input echo from the same id — sharedUserInput returns null,
+      // handler returns early, pendingEvaluatorClarify is preserved.
+      handleMessage({
+        type: 'user_input',
+        sessionId: 's1',
+        clientId: 'client-1',
+        text: 'self-echo',
+        messageId: 'self-1',
+        timestamp: Date.now(),
+      }, ctx() as any)
+
+      const session = (store.getState() as any).sessionStates.s1 as SessionState
+      expect(session.pendingEvaluatorClarify).toBeDefined()
+      expect(session.pendingEvaluatorClarify?.evaluatorIterationId).toBe('iter-2')
     })
   })
 })

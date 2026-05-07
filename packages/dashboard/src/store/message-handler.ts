@@ -2075,9 +2075,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (userInput.content) {
         get().appendTerminalData(`\r\n\x1b[33m> ${userInput.content}\x1b[0m\r\n\r\n`);
       }
-      updateSession(userInput.sessionId, (ss) => ({
-        messages: [...ss.messages, userInput.chatMessage],
-      }));
+      // #3188: a remote client just answered (or otherwise sent a fresh
+      // user_input for this session). Any locally-rendered evaluator
+      // clarify prompt is now stale — clear it so two paired clients
+      // don't both keep showing the question after one has responded.
+      updateSession(userInput.sessionId, (ss) => {
+        const patch: Partial<SessionState> = {
+          messages: [...ss.messages, userInput.chatMessage],
+        };
+        if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+        return patch;
+      });
       break;
     }
 
