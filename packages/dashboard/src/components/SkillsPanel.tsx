@@ -248,10 +248,13 @@ export function SkillsPanel({
                   <span className="skill-name">{s.name}</span>
                   {/* #3444: trim guard suppresses whitespace-only descriptions
                       that would otherwise render a blank <span> with skill-desc
-                      layout. Display value preserved (`s.description`, not the
-                      trimmed result) so leading/trailing whitespace renders as
-                      authored when there's actual content. Mirrors the
-                      pending-row guard added in #3441. */}
+                      layout (margins, color). The trim is only used as a
+                      boolean predicate — `s.description` is rendered untrimmed
+                      so we don't mutate the authored value. Note: HTML text
+                      nodes collapse runs of whitespace by default (no
+                      `white-space: pre*` on `.skill-desc`), so any preserved
+                      leading/trailing whitespace will collapse visually.
+                      Mirrors the pending-row guard added in #3441. */}
                   {s.description?.trim() && <span className="skill-desc" data-testid={`skill-desc-${s.name}`}>{s.description}</span>}
                   {/* #3251: auto skills have no <label>, so label-
                       association doesn't apply here — keep the flag
