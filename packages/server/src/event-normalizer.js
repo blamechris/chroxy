@@ -285,20 +285,20 @@ Object.assign(EVENT_MAP, {
   // so the UI can use a louder treatment for the loud-signal moments.
   stdin_dropped_totals: (data, ctx) => {
     const bytes = typeof data?.bytes === 'number' && Number.isFinite(data.bytes)
-      ? data.bytes
+      ? Math.max(0, Math.trunc(data.bytes))
       : 0
     const count = typeof data?.count === 'number' && Number.isFinite(data.count)
-      ? data.count
+      ? Math.max(0, Math.trunc(data.count))
       : 0
     const reason = typeof data?.reason === 'string' && data.reason.length > 0
       ? data.reason
       : 'unknown'
-    const escalated = !!data?.escalated
+    const escalated = typeof data?.escalated === 'boolean' ? data.escalated : false
     return {
       messages: [{
         msg: {
           type: 'stdin_dropped_totals',
-          sessionId: ctx.sessionId || null,
+          sessionId: ctx.sessionId ?? null,
           bytes,
           count,
           reason,
