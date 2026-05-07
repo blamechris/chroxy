@@ -425,6 +425,72 @@ describe('PodAgent', () => {
       assert.equal(closeCode, 1000)
     })
 
+    it('resumes paused WS before close on natural exit (#3550)', async () => {
+      // Regression: PR #3475 added cooperative stdin backpressure that calls
+      // ws.pause() on the underlying socket. If the child exits naturally
+      // while the WS is still paused, the close() handshake stalls because
+      // the peer's CLOSE frame can't be read back from a paused socket.
+      // _handleStdinDrainStalled already handles this (agent.js:563); the
+      // child 'close' / natural-exit path must too.
+      //
+      // After the fix the post-flush callback for the exit frame must call
+      // ws.resume() (and clear session._stdinDraining) BEFORE ws.close(1000).
+      const ws = connect(port, TOKEN)
+      const realMsgs = []
+      ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
+      await waitOpen(ws)
+      ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+      await new Promise((r) => setTimeout(r, 20))
+      const started = realMsgs.find((m) => m.type === 'session_started')
+      assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
+      const sessionId = started.sessionId
+
+      // Replace activeWs with an instrumented fake. Defer the send callback
+      // by a macrotask so we can observe the post-flush close-cleanup callback
+      // in isolation.
+      const callLog = []
+      const fakeWs = {
+        readyState: 1,
+        send(data, cb) {
+          const frame = JSON.parse(data)
+          callLog.push({ op: 'send', type: frame.type, code: frame.code })
+          if (cb) setTimeout(() => { callLog.push({ op: 'send_cb_fired' }); cb() }, 5)
+        },
+        pause() { callLog.push({ op: 'pause' }) },
+        resume() { callLog.push({ op: 'resume' }) },
+        close(code, reason) { callLog.push({ op: 'close', code, reason }) },
+        terminate() {},
+      }
+      const session = agent._sessions.get(sessionId)
+      assert.ok(session, 'expected session in _sessions')
+      session.activeWs = fakeWs
+      // Simulate the cooperative-backpressure state from #3475 — the WS was
+      // paused mid-stream and the draining flag is still set when the child
+      // exits naturally.
+      session._stdinDraining = true
+
+      // Trigger natural exit.
+      controller.exit(0)
+
+      // Wait long enough for the deferred send cb (5ms) plus close to run.
+      await new Promise((r) => setTimeout(r, 30))
+
+      const resumeIdx = callLog.findIndex((e) => e.op === 'resume')
+      const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1000)
+
+      assert.ok(resumeIdx !== -1,
+        `expected ws.resume() before close; log=${JSON.stringify(callLog)}`)
+      assert.ok(closeIdx !== -1,
+        `expected close(1000); log=${JSON.stringify(callLog)}`)
+      assert.ok(resumeIdx < closeIdx,
+        `resume() must precede close() (resumeIdx ${resumeIdx} vs closeIdx ${closeIdx}); log=${JSON.stringify(callLog)}`)
+      assert.equal(session._stdinDraining, false,
+        'session._stdinDraining must be cleared before close')
+
+      try { ws.close() } catch {}
+    })
+
     it('returns error frame when cmd is missing', async () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
@@ -1598,6 +1664,82 @@ describe('PodAgent', () => {
           !agent._sessions.has(sessionId),
           'session should be deleted after line_too_long cleanup',
         )
+
+        try { ws.close() } catch {}
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('resumes paused WS before close on line_too_long (#3550)', async () => {
+      // Regression: PR #3475 added cooperative stdin backpressure that calls
+      // ws.pause() on the underlying socket. If line_too_long fires while the
+      // WS is paused, the close() handshake stalls because the peer's CLOSE
+      // frame can't be read back from a paused socket. _handleStdinDrainStalled
+      // already handles this (agent.js:563); the line_too_long path must too.
+      //
+      // After the fix the post-flush callback must call ws.resume() (and clear
+      // session._stdinDraining) BEFORE ws.close(1008, ...).
+      const mock = createMockSpawn()
+      const { agent, port } = await startAgent({
+        spawnFn: mock.spawnFn,
+        maxLineBytes: 16,
+        killGraceMs: 25,
+      })
+
+      try {
+        const ws = connect(port, TOKEN)
+        const realMsgs = []
+        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
+        await waitOpen(ws)
+        ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+
+        await new Promise((r) => setTimeout(r, 20))
+        const started = realMsgs.find((m) => m.type === 'session_started')
+        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
+        const sessionId = started.sessionId
+
+        // Replace activeWs with an instrumented fake that records pause/resume/
+        // close ordering. Defer the send callback by a macrotask so we can
+        // observe the post-flush close-cleanup callback in isolation.
+        const callLog = []
+        const fakeWs = {
+          readyState: 1,
+          send(data, cb) {
+            const frame = JSON.parse(data)
+            callLog.push({ op: 'send', type: frame.type, code: frame.code })
+            if (cb) setTimeout(() => { callLog.push({ op: 'send_cb_fired' }); cb() }, 5)
+          },
+          pause() { callLog.push({ op: 'pause' }) },
+          resume() { callLog.push({ op: 'resume' }) },
+          close(code, reason) { callLog.push({ op: 'close', code, reason }) },
+          terminate() {},
+        }
+        const session = agent._sessions.get(sessionId)
+        assert.ok(session, 'expected session in _sessions')
+        session.activeWs = fakeWs
+        // Simulate the cooperative-backpressure state from #3475 — the WS was
+        // paused mid-stream and the draining flag is still set when the line
+        // cap is exceeded.
+        session._stdinDraining = true
+
+        // Trigger the line cap.
+        mock.child.stdout.write(Buffer.from('Z'.repeat(17)))
+
+        // Wait long enough for the deferred send cb (5ms) plus close to run.
+        await new Promise((r) => setTimeout(r, 30))
+
+        const resumeIdx = callLog.findIndex((e) => e.op === 'resume')
+        const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1008)
+
+        assert.ok(resumeIdx !== -1,
+          `expected ws.resume() before close; log=${JSON.stringify(callLog)}`)
+        assert.ok(closeIdx !== -1,
+          `expected close(1008); log=${JSON.stringify(callLog)}`)
+        assert.ok(resumeIdx < closeIdx,
+          `resume() must precede close() (resumeIdx ${resumeIdx} vs closeIdx ${closeIdx}); log=${JSON.stringify(callLog)}`)
+        assert.equal(session._stdinDraining, false,
+          'session._stdinDraining must be cleared before close')
 
         try { ws.close() } catch {}
       } finally {
