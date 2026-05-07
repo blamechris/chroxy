@@ -643,22 +643,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     const socket = new WebSocket(url);
 
-    // #3615: shared reconnect scheduler used by both onclose and onerror.
+    // #3624: shared reconnect scheduler used by both onclose and onerror.
     // Browsers fire `error` → `close` for the same transport drop, so without
-    // this guard we'd queue two setTimeouts for one underlying failure. The
-    // attempt-id checks downstream still cancel the redundant timer, but
-    // letting only the first scheduling site arm a timer is cleaner and is
-    // robust against future regressions in the attempt-id logic.
-    let reconnectScheduled = false;
+    // dedupe we'd queue two setTimeouts for one underlying failure. Dedupe is
+    // via `connectionPhase` — the first scheduleReconnect call transitions to
+    // 'reconnecting'; the second event sees that and bails (onclose via its
+    // `wasConnected` gate, onerror via the inline check at the call site).
+    // First-write-wins on `connectionError`: both events carry equally generic
+    // messages, so flipping mid-display would just be visual churn.
     const scheduleReconnect = (
       reasonText: string,
       errorMessage: string,
       delayMs: number,
     ): void => {
-      if (reconnectScheduled) return;
       if (get().userDisconnected) return;
       if (disconnectedAttemptId === myAttemptId) return;
-      reconnectScheduled = true;
+      const phase = get().connectionPhase;
+      if (phase === 'reconnecting' || phase === 'disconnected') return;
       console.log(`[ws] ${reasonText}, reconnecting...`);
       set({
         connectionPhase: 'reconnecting',
@@ -775,10 +776,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       set({ socket: null, sessionStates: cleanedSessionStates });
 
-      // Auto-reconnect on unexpected WS error (skip if user explicitly disconnected)
-      // scheduleReconnect() short-circuits if onclose already armed a timer for
-      // this transport drop (browsers fire `error` → `close` for the same
-      // failure, see #3615).
+      // #3624: auto-reconnect on unexpected WS error (skip if user
+      // explicitly disconnected). scheduleReconnect short-circuits when
+      // phase is already 'reconnecting' / 'disconnected' — covers the
+      // close→error ordering where onclose ran first and already armed a
+      // timer. The error→close ordering is covered symmetrically by
+      // onclose's `wasConnected` gate below.
       scheduleReconnect('WebSocket error', 'Connection error', ERROR_RECONNECT_DELAY);
     };
     } // end _connectWebSocket

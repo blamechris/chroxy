@@ -1327,13 +1327,23 @@ describe('SSR safety', () => {
 // ---------------------------------------------------------------------------
 // App.tsx toast filtering — session-scoped server_error (#1804)
 // ---------------------------------------------------------------------------
-describe('reconnect scheduling dedupe (#3615)', () => {
+describe('reconnect scheduling dedupe (#3624)', () => {
   /**
    * Browsers fire `error` → `close` for the same transport drop, so without
    * dedupe both `socket.onerror` and `socket.onclose` would each schedule a
-   * `setTimeout(connect)`. The downstream attempt-id guard cancels the
-   * redundant timer, but that is fragile — this test pins the contract that
-   * a single transport drop arms exactly ONE reconnect timer.
+   * `setTimeout(connect)`. Dedupe is via `connectionPhase`: the first
+   * scheduleReconnect call transitions to 'reconnecting'; the second event
+   * sees that phase and short-circuits (onclose via its `wasConnected`
+   * check, onerror via the phase guard inside scheduleReconnect itself).
+   * These tests pin the contract that a single transport drop arms exactly
+   * ONE reconnect timer regardless of event ordering, and that the
+   * `connectionError` message is set by whichever event runs first
+   * (first-write-wins — both messages are equally generic, flipping
+   * mid-display would just be visual churn).
+   *
+   * Originally landed as #3615 (with a per-socket `reconnectScheduled`
+   * flag); refactored under #3624 to drop the redundant flag and rely on
+   * phase as the single source of truth.
    */
   type ReconnectMockSocket = {
     onclose: (() => void) | null;
@@ -1482,6 +1492,40 @@ describe('reconnect scheduling dedupe (#3615)', () => {
       socket.onerror?.();
 
       expect(reconnectTimers).toHaveLength(0);
+    } finally {
+      teardown();
+    }
+  });
+
+  // #3624: pin connectionError first-write-wins. When onerror fires after
+  // onclose for the same transport drop, the second event must NOT
+  // overwrite the connectionError that onclose already set — both messages
+  // are equally generic, so flipping mid-display would just be visual
+  // churn. Conversely, when onerror fires first, its "Connection error"
+  // message stays put and onclose's "Connection lost" is suppressed.
+  it('connectionError is set by whichever event runs first (close → error)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { socket, teardown } = await setupReconnectScenario();
+    try {
+      socket.onclose!();
+      expect(useConnectionStore.getState().connectionError).toBe('Connection lost');
+      socket.onerror!();
+      // onerror after onclose must NOT clobber the message
+      expect(useConnectionStore.getState().connectionError).toBe('Connection lost');
+    } finally {
+      teardown();
+    }
+  });
+
+  it('connectionError is set by whichever event runs first (error → close)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { socket, teardown } = await setupReconnectScenario();
+    try {
+      socket.onerror!();
+      expect(useConnectionStore.getState().connectionError).toBe('Connection error');
+      socket.onclose!();
+      // onclose after onerror must NOT clobber the message
+      expect(useConnectionStore.getState().connectionError).toBe('Connection error');
     } finally {
       teardown();
     }
