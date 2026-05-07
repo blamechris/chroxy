@@ -409,6 +409,11 @@ describe('input-handlers', () => {
       assert.equal(ev.msg.reasoning, 'Ambiguous "it".')
       assert.equal(ev.msg.evaluatorIteration, 1, 'first clarify is iteration 1')
       assert.ok(typeof ev.msg.evaluatorIterationId === 'string' && ev.msg.evaluatorIterationId.length > 0)
+      // Primary must be updated even on the clarify path so input-conflict
+      // and primary-changed bookkeeping reflects the user's intent — see
+      // Copilot review on PR #3634.
+      assert.equal(ctx.updatePrimary.callCount, 1, 'updatePrimary must be called even on clarify path')
+      assert.deepEqual(ctx.updatePrimary.lastCall, ['s1', client.id])
     })
 
     it('force-forwards original draft after 3 consecutive clarify verdicts (max iteration cap)', async () => {

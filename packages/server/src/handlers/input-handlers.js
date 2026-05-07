@@ -184,6 +184,13 @@ async function handleInput(ws, client, msg, ctx) {
         // DO NOT forward to the session — return early. We've already
         // recorded the user input in history and touched activity above
         // so the dashboard sees the draft + the clarification.
+        //
+        // Update primary even though the message wasn't forwarded — the
+        // user's intent was to drive the session, and the input-conflict
+        // and primary-changed bookkeeping that downstream clients depend
+        // on should reflect that. Without this, two paired clients can
+        // both have stale "you're primary" views during a clarify cycle.
+        ctx.updatePrimary(targetSessionId, client.id)
         ctx.broadcast(
           { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
           (c) => c.id !== client.id,
