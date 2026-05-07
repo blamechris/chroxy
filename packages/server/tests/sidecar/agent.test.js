@@ -2112,6 +2112,16 @@ describe('PodAgent', () => {
           'second backpressured write must not replace the drain timer handle',
         )
 
+        // Mirror the sibling backpressure assertion (#3509): the once-listener
+        // for 'drain' must remain at exactly one. If a refactor of
+        // _armStdinDrainTimer ever drops the _stdinDraining guard around the
+        // listener registration, this catches the leak immediately.
+        assert.equal(
+          fakeStdin.listenerCount('drain'),
+          1,
+          'second backpressured write must not stack a duplicate drain listener',
+        )
+
         ws.close()
       } finally {
         await agent.close()
