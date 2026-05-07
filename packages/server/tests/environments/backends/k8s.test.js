@@ -611,6 +611,103 @@ describe('K8sBackend constructor defaults use nullish coalescing (#3459)', () =>
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend per-call namespace resolution uses nullish coalescing (#3493)
+//
+// Five call sites (createEnvironment, destroyEnvironment, getEnvironmentStatus,
+// streamCliInEnvironment, reconnectAgentToken) resolve a per-call namespace
+// override against the constructor-stored `this._namespace`.  Previously these
+// sites used `||`, which would silently stomp an explicit empty string with
+// the constructor default.  Per #3459's rationale (no validation gate rejects
+// empty strings before this resolution), the contract is to use `??` so the
+// caller's empty string is preserved verbatim.  Empty string is not a valid
+// K8s namespace at the API layer, but the backend must surface that as an
+// API-side error rather than silently rewriting the input.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend per-call namespace resolution uses nullish coalescing (#3493)', () => {
+  it('createEnvironment preserves explicit empty-string namespace (not replaced by default)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'env-empty', image: 'agent:latest', namespace: '' })
+
+    assert.strictEqual(api.calls.create[0].namespace, '',
+      'Pod create must use the caller-provided empty string verbatim')
+    assert.strictEqual(api.calls.createSecret[0].namespace, '',
+      'Secret create must use the caller-provided empty string verbatim')
+  })
+
+  it('destroyEnvironment preserves explicit empty-string namespace (not replaced by default)', async () => {
+    const api = createMockApi({
+      readPod: async () => { throw make404Error() },
+    })
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
+
+    await backend.destroyEnvironment('chroxy-env-x', { namespace: '' })
+
+    assert.strictEqual(api.calls.delete[0].namespace, '',
+      'Pod delete must use the caller-provided empty string verbatim')
+  })
+
+  it('getEnvironmentStatus preserves explicit empty-string namespace (not replaced by default)', async () => {
+    let observedNs
+    const api = createMockApi({
+      readPod: async (args) => {
+        observedNs = args.namespace
+        return { status: { phase: 'Running' } }
+      },
+    })
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
+
+    await backend.getEnvironmentStatus('pod-x', { namespace: '' })
+
+    assert.strictEqual(observedNs, '',
+      'Pod read must use the caller-provided empty string verbatim')
+  })
+
+  it('streamCliInEnvironment preserves explicit empty-string namespace via _readAgentToken', async () => {
+    const token = 'tok-empty-ns'
+    const encoded = Buffer.from(token).toString('base64')
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const { ws } = createFakeWs()
+    const backend = new K8sBackend({
+      namespace: 'default',
+      _coreV1Api: api,
+      _dialWs: () => Promise.resolve(ws),
+    })
+
+    // Force the lazy Secret-read path (cache miss) so the namespace flows into
+    // _readAgentToken → readNamespacedSecret where we can observe it.
+    const proc = backend.streamCliInEnvironment('chroxy-env-empty', {
+      cmd: 'node', args: [], namespace: '',
+    })
+
+    await new Promise(r => setTimeout(r, 20))
+
+    assert.strictEqual(api.calls.readSecret[0].namespace, '',
+      'Secret read must use the caller-provided empty string verbatim')
+
+    proc.stdout.resume(); proc.stderr.resume()
+  })
+
+  it('reconnectAgentToken preserves explicit empty-string namespace (not replaced by default)', async () => {
+    const token = 'reconnect-empty-ns'
+    const encoded = Buffer.from(token).toString('base64')
+    const api = createMockApi({
+      readSecret: async () => ({ data: { CHROXY_AGENT_TOKEN: encoded } }),
+    })
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
+
+    await backend.reconnectAgentToken('chroxy-env-r-empty', { namespace: '' })
+
+    assert.strictEqual(api.calls.readSecret[0].namespace, '',
+      'Secret read must use the caller-provided empty string verbatim')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — workspace mount (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
