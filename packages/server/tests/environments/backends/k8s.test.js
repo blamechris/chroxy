@@ -87,6 +87,56 @@ function createFakeWs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fake-clock helpers (used by reconnect-loop and kill-semantics tests)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Minimal hand-rolled fake clock.
+ *
+ * Returns { setTimeout, clearTimeout, tick } where:
+ *   - setTimeout(fn, _delay) queues fn (delay is ignored — all timers are
+ *     considered immediately due).  Returns an opaque handle.
+ *   - clearTimeout(handle) cancels a pending callback.
+ *   - tick() fires every pending callback in FIFO order then returns.
+ *
+ * Because the reconnect callback is asynchronous (it calls proc._redial()
+ * which returns a Promise) the caller must follow tick() with a
+ * setImmediate yield so the promise chain can resolve before any assertions.
+ * The tickAndFlush() helper below packages that pair.
+ */
+function createFakeClock() {
+  const pending = new Map()
+  let nextId = 1
+
+  const fakeSetTimeout = (fn) => {
+    const id = nextId++
+    pending.set(id, fn)
+    return id
+  }
+
+  const fakeClearTimeout = (id) => {
+    pending.delete(id)
+  }
+
+  const tick = () => {
+    const callbacks = [...pending.values()]
+    pending.clear()
+    for (const fn of callbacks) fn()
+  }
+
+  return { setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, tick }
+}
+
+/**
+ * Fire all pending fake-clock callbacks then yield one event-loop tick so
+ * any promise continuations scheduled inside those callbacks can resolve.
+ */
+async function tickAndFlush(clock) {
+  clock.tick()
+  await new Promise(r => setImmediate(r))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1651,11 +1701,13 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
    * fake WS + controller pairs.  Each call to _dialWs pops the next item from
    * the sequence.
    *
-   * Returns { backend, dials } where dials[i] = { ws, controller }.
+   * Returns { backend, dials, clock } where dials[i] = { ws, controller } and
+   * clock exposes tick() to advance the reconnect timer deterministically.
    */
   function makeBackendWithDials(count) {
     let callIndex = 0
     const dials = Array.from({ length: count }, () => createFakeWs())
+    const clock = createFakeClock()
 
     const backend = new K8sBackend({
       _coreV1Api: createMockApi(),
@@ -1665,20 +1717,17 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
         if (!d) throw new Error(`unexpected extra dial (${callIndex - 1})`)
         return Promise.resolve(d.ws)
       },
-      _reconnectDelays: [10],  // 10ms for tests (setImmediate-safe)
+      _reconnectDelays: [0],  // delay value is irrelevant — fake clock fires immediately
       _maxRetries: 5,
+      _setTimeout: clock.setTimeout,
+      _clearTimeout: clock.clearTimeout,
     })
 
-    return { backend, dials }
-  }
-
-  /** Yield enough event-loop ticks to let a 10ms timer fire and a promise chain resolve. */
-  async function waitTicks() {
-    await new Promise(r => setTimeout(r, 30))
+    return { backend, dials, clock }
   }
 
   it('retries after unexpected WS close, sends resume with correct lastSeq', async () => {
-    const { backend, dials } = makeBackendWithDials(2)
+    const { backend, dials, clock } = makeBackendWithDials(2)
     const [dial1, dial2] = dials
 
     const proc = backend.streamCliInEnvironment('pod-x', {
@@ -1701,8 +1750,8 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
 
     // Unexpected close (code 1006 — abnormal closure)
     dial1.controller.triggerClose(1006)
-    // Allow reconnect timer (10ms) to fire and second dial to complete
-    await waitTicks()
+    // Advance fake clock so the reconnect timer fires, then yield for the dial promise.
+    await tickAndFlush(clock)
 
     // Second connection should send a resume frame with lastSeq=1
     const sent2 = dial2.ws.sent
@@ -1723,9 +1772,10 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
   })
 
   it('gives up after max retries and emits exit(-2)', async () => {
-    // 1 initial dial + 5 reconnect dials = 6 total; _maxRetries=3 so we need 4
+    // 1 initial dial + 3 reconnect dials = 4 total; _maxRetries=3 so we need 4
     let callIndex = 0
     const dials = Array.from({ length: 4 }, () => createFakeWs())
+    const clock = createFakeClock()
     const backend = new K8sBackend({
       _coreV1Api: createMockApi(),
       _dialWs: () => {
@@ -1734,8 +1784,10 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
         if (!d) throw new Error(`unexpected extra dial (${callIndex - 1})`)
         return Promise.resolve(d.ws)
       },
-      _reconnectDelays: [10],
+      _reconnectDelays: [0],
       _maxRetries: 3,
+      _setTimeout: clock.setTimeout,
+      _clearTimeout: clock.clearTimeout,
     })
 
     const proc = backend.streamCliInEnvironment('pod-x', {
@@ -1754,12 +1806,12 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     // Trigger 3 successive unexpected closes (matching _maxRetries)
     for (let i = 0; i < 3; i++) {
       dials[i].controller.triggerClose(1006)
-      await waitTicks()
+      await tickAndFlush(clock)
     }
 
     // After 3 reconnect attempts dials[3] is open; closing it should exceed max
     dials[3].controller.triggerClose(1006)
-    await waitTicks()
+    await new Promise(r => setImmediate(r))
 
     assert.deepEqual(exitCodes, [-2],
       `expected exit(-2) after max retries, got ${JSON.stringify(exitCodes)}`)
@@ -1794,7 +1846,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
   })
 
   it('does not reconnect when kill() is called before unexpected close', async () => {
-    const { backend, dials } = makeBackendWithDials(1)
+    const { backend, dials, clock } = makeBackendWithDials(1)
     const [dial1] = dials
 
     const proc = backend.streamCliInEnvironment('pod-x', {
@@ -1810,9 +1862,10 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     // Kill proc — sets proc.killed = true and cancels retry timer
     proc.kill()
 
-    // Unexpected close should not trigger reconnect because proc.killed is true
+    // Unexpected close should not trigger reconnect because proc.killed is true.
+    // Advance the fake clock to confirm no reconnect timer was queued.
     dial1.controller.triggerClose(1006)
-    await waitTicks()
+    await tickAndFlush(clock)
 
     // dials only has 1 entry — if a second dial were attempted, the test would
     // throw "unexpected extra dial".
@@ -1827,7 +1880,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     // session_started — to reset its per-blip retry budget. This test mirrors
     // real wire behaviour: only `session_started` on the FIRST dial, and
     // `resumed` on every subsequent successful reconnect.
-    const { backend, dials } = makeBackendWithDials(2)
+    const { backend, dials, clock } = makeBackendWithDials(2)
     const [dial1, dial2] = dials
 
     const proc = backend.streamCliInEnvironment('pod-x', {
@@ -1848,7 +1901,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
 
     // Disconnect and reconnect
     dial1.controller.triggerClose(1006)
-    await waitTicks()
+    await tickAndFlush(clock)
 
     // Second dial should have sent a resume frame
     const sent2 = dial2.ws.sent
@@ -1879,6 +1932,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
     // resume succeeded. With per-blip reset all 3 cycles can succeed.
     const dials = Array.from({ length: 4 }, () => createFakeWs())
     let callIndex = 0
+    const clock = createFakeClock()
     const backend = new K8sBackend({
       _coreV1Api: createMockApi(),
       _dialWs: () => {
@@ -1887,8 +1941,10 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
         if (!d) throw new Error(`unexpected extra dial (${callIndex - 1})`)
         return Promise.resolve(d.ws)
       },
-      _reconnectDelays: [10],
+      _reconnectDelays: [0],
       _maxRetries: 2,  // tight budget — would fail on cycle 3 without per-blip reset
+      _setTimeout: clock.setTimeout,
+      _clearTimeout: clock.clearTimeout,
     })
 
     const proc = backend.streamCliInEnvironment('pod-x', {
@@ -1906,7 +1962,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
 
     // Cycle 1 reconnect → resumed
     dials[0].controller.triggerClose(1006)
-    await new Promise(r => setTimeout(r, 30))
+    await tickAndFlush(clock)
     dials[1].controller.receive(JSON.stringify({
       type: 'resumed', sessionId: 'sess-life', lastSeq: 0, replayedCount: 0,
     }))
@@ -1915,7 +1971,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
 
     // Cycle 2 reconnect → resumed
     dials[1].controller.triggerClose(1006)
-    await new Promise(r => setTimeout(r, 30))
+    await tickAndFlush(clock)
     dials[2].controller.receive(JSON.stringify({
       type: 'resumed', sessionId: 'sess-life', lastSeq: 0, replayedCount: 0,
     }))
@@ -1924,7 +1980,7 @@ describe('K8sBackend.streamCliInEnvironment() reconnect loop', () => {
 
     // Cycle 3 reconnect → resumed
     dials[2].controller.triggerClose(1006)
-    await new Promise(r => setTimeout(r, 30))
+    await tickAndFlush(clock)
     dials[3].controller.receive(JSON.stringify({
       type: 'resumed', sessionId: 'sess-life', lastSeq: 0, replayedCount: 0,
     }))
@@ -2063,6 +2119,7 @@ describe('SidecarProcess.kill() exit semantics', () => {
     const { ws, controller } = fakeWsWithCloseCode(1006)
     const dial2 = createFakeWs()
     let dialCount = 0
+    const clock = createFakeClock()
     const backend = new K8sBackend({
       _coreV1Api: createMockApi(),
       _dialWs: () => {
@@ -2071,8 +2128,10 @@ describe('SidecarProcess.kill() exit semantics', () => {
         if (dialCount === 2) return Promise.resolve(dial2.ws)
         throw new Error(`unexpected extra dial (${dialCount})`)
       },
-      _reconnectDelays: [10],
+      _reconnectDelays: [0],
       _maxRetries: 5,
+      _setTimeout: clock.setTimeout,
+      _clearTimeout: clock.clearTimeout,
     })
 
     const proc = backend.streamCliInEnvironment('pod-x', {
@@ -2089,9 +2148,9 @@ describe('SidecarProcess.kill() exit semantics', () => {
     controller.triggerError(new Error('ECONNRESET'))
     controller.triggerClose(1006)
 
-    // Yield so the timer has a chance to fire — second dial would be
-    // attempted twice without the guard.
-    await new Promise(r => setTimeout(r, 30))
+    // Advance the fake clock — the idempotency guard means only one timer
+    // should have been queued despite two failure events.
+    await tickAndFlush(clock)
 
     assert.equal(proc._retryAttempt, 1,
       `retry counter must increment by 1 per drop, got ${proc._retryAttempt}`)
