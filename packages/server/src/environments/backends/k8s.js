@@ -1112,6 +1112,12 @@ export class K8sBackend {
  * hangs and a fast producer keeps writing.  `kill()` clears the buffer
  * immediately so the bytes are not held until GC.
  *
+ * Each over-cap drop also emits a `'stdin_dropped'` event on the proc with
+ * `{ bytes, reason: 'pre-dial-cap' }` so consumers (`SdkSession`) get a
+ * runtime signal instead of silent loss (#3474).  The event fires once per
+ * dropped chunk; the log.warn spam guard only suppresses repeat log lines,
+ * not the event itself.
+ *
  * ### stdin disabled signal (#3402)
  *
  * On WS reconnect (`resume` frame) stdin forwarding is intentionally NOT
@@ -1206,6 +1212,14 @@ class SidecarProcess extends EventEmitter {
           )
           this._stdinBufferDropped = true
         }
+        // Emit 'stdin_dropped' for every over-cap chunk (#3474). The log.warn
+        // above is one-shot to avoid spam, but the event must fire each time
+        // so structured consumers (e.g. SdkSession) can sum lost bytes,
+        // surface the failure to the user, or fall back to a different
+        // delivery path. Payload mirrors the 'stdin_disabled' shape: a small
+        // object with the dropped byte count and a reason tag callers can
+        // switch on if more drop reasons are added later.
+        this.emit('stdin_dropped', { bytes: buf.length, reason: 'pre-dial-cap' })
         return
       }
       this._stdinBuffer.push(buf)

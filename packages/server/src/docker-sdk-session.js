@@ -56,7 +56,7 @@ export class DockerSdkSession extends SdkSession {
     this._containerCliPath = containerCliPath
     // #3468: set true once the SidecarProcess emits 'stdin_disabled' for any
     // spawn under this session. Read-only diagnostic flag — flipped by
-    // _wireStdinDisabledListener and never reset.
+    // _attachSidecarProcessListeners (sdk-session.js base) and never reset.
     this._stdinForwardingDisabled = false
   }
 
@@ -290,43 +290,14 @@ export class DockerSdkSession extends SdkSession {
         containerCliPath,
         hostCwd,
       })
-      this._wireStdinDisabledListener(proc)
+      // Attach default warn-log listeners for SidecarProcess stdin failure
+      // signals (#3402, #3468, #3474).  Docker procs are plain ChildProcess
+      // and never fire these events; the helper no-ops on them so this is
+      // safe to wire unconditionally.  Future K8s session class will inherit
+      // the same hook.
+      this._attachSidecarProcessListeners(proc)
       return proc
     }
-  }
-
-  /**
-   * Subscribe to the SidecarProcess `'stdin_disabled'` signal (#3402, #3468).
-   *
-   * The K8s sidecar bridge emits this exactly once when stdin forwarding
-   * becomes unrecoverable — either because a WS reconnect succeeded (resume
-   * frames intentionally do NOT replay stdin) or the live WS dropped
-   * mid-write. After that point further writes to `proc.stdin` are dropped
-   * silently by the bridge.
-   *
-   * We surface the transition with a structured warn and set a session-level
-   * flag (`_stdinForwardingDisabled`) so callers can later decide whether to
-   * abort the in-flight turn or surface a user-visible error. Idempotent —
-   * the bridge guarantees a single emission, but we guard defensively in case
-   * a non-K8s backend re-emits.
-   *
-   * Procs that aren't EventEmitters (e.g. raw Docker ChildProcess) don't
-   * emit this signal; this method is a no-op in that case.
-   *
-   * @param {object} proc Spawned process returned by `streamCliInEnvironment`.
-   * @private
-   */
-  _wireStdinDisabledListener(proc) {
-    if (!proc || typeof proc.on !== 'function') return
-    proc.on('stdin_disabled', () => {
-      if (this._stdinForwardingDisabled) return
-      this._stdinForwardingDisabled = true
-      log.warn(
-        'SidecarProcess stdin_disabled — stdin forwarding to the sidecar has ' +
-        'been permanently disabled (WS reconnect or mid-write close); ' +
-        'subsequent writes will be dropped silently.'
-      )
-    })
   }
 
   /**

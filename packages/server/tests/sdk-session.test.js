@@ -1051,4 +1051,99 @@ describe('SdkSession', () => {
       assert.equal(session.isReady, false)
     })
   })
+
+  // -- _attachSidecarProcessListeners (#3402, #3474) --
+  //
+  // SidecarProcess emits stdin_dropped (#3474) and stdin_disabled (#3402)
+  // when stdin forwarding fails or over-cap chunks are dropped.  Without a
+  // consumer the SDK's PassThrough silently swallows the data and the user
+  // sees a hung turn.  SdkSession provides a default warn-log listener so
+  // the failure surfaces in operator logs at minimum.
+  describe('_attachSidecarProcessListeners', () => {
+    it('logs a warning when stdin_dropped fires on the proc', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_dropped', { bytes: 60, reason: 'pre-dial-cap' })
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const warn = entries.find(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.ok(warn, 'expected a warn-level log on stdin_dropped')
+      assert.ok(warn.message.includes('60 bytes'),
+        'log must include the dropped byte count')
+      assert.ok(warn.message.includes('pre-dial-cap'),
+        'log must include the drop reason tag')
+    })
+
+    it('logs a warning when stdin_disabled fires on the proc', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_disabled')
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const warn = entries.find(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin forwarding is disabled'),
+      )
+      assert.ok(warn, 'expected a warn-level log on stdin_disabled')
+    })
+
+    it('handles a missing proc safely', () => {
+      // ChildProcess paths or test stubs may pass null/undefined — must
+      // not throw because the helper runs unconditionally.
+      assert.doesNotThrow(() => session._attachSidecarProcessListeners(null))
+      assert.doesNotThrow(() => session._attachSidecarProcessListeners(undefined))
+      assert.doesNotThrow(() => session._attachSidecarProcessListeners({}))
+    })
+
+    it('logs unknown payload values when info is missing', async () => {
+      const { EventEmitter } = await import('events')
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+
+      const proc = new EventEmitter()
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        session._attachSidecarProcessListeners(proc)
+        proc.emit('stdin_dropped')  // no payload
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const warn = entries.find(
+        (e) => e.component === 'sdk' &&
+          e.level === 'warn' &&
+          e.message.includes('Sidecar stdin chunk dropped'),
+      )
+      assert.ok(warn, 'must still log when payload is missing')
+      assert.ok(warn.message.includes('unknown bytes'),
+        'must report unknown bytes when payload omits the count')
+    })
+  })
 })

@@ -619,6 +619,54 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Attach default warn-log listeners for SidecarProcess stdin failure
+   * signals (#3402, #3474).
+   *
+   * SidecarProcess (used by container/k8s spawnClaudeCodeProcess paths)
+   * emits two stdin failure events the SDK itself does not surface:
+   *
+   *   - `stdin_disabled`  — fired when forwarding becomes unrecoverable
+   *     (post-reconnect or live WS close mid-write). One-shot.
+   *   - `stdin_dropped`   — fired for every chunk that exceeds the 1 MiB
+   *     pre-dial cap. Payload: `{ bytes, reason: 'pre-dial-cap' }`.
+   *
+   * Both signal silent data loss from the consumer's perspective: the
+   * underlying PassThrough still accepts writes, so without an explicit
+   * listener the user sees a hung turn instead of an error.  This helper
+   * provides the "warn log at minimum" guarantee — subclasses or future
+   * K8s-aware paths may override to escalate (e.g. emit error, abort the
+   * turn).  Idempotent: safe to call on a non-SidecarProcess proc (the
+   * listeners simply never fire because the events are SidecarProcess-
+   * specific).
+   *
+   * @param {EventEmitter|null|undefined} proc — the spawned process from
+   *   `spawnClaudeCodeProcess`.  May be a Node ChildProcess (Docker path)
+   *   or a SidecarProcess (K8s path); only the latter emits these events.
+   */
+  _attachSidecarProcessListeners(proc) {
+    if (!proc || typeof proc.on !== 'function') return
+
+    proc.on('stdin_dropped', (info) => {
+      const bytes = info?.bytes ?? 'unknown'
+      const reason = info?.reason ?? 'unknown'
+      log.warn(
+        `Sidecar stdin chunk dropped (${bytes} bytes, reason=${reason}) — ` +
+        'turn input was truncated; consumer may need to retry'
+      )
+    })
+
+    proc.on('stdin_disabled', () => {
+      // #3468: flip read-only diagnostic flag for callers + log once.
+      if (this._stdinForwardingDisabled) return
+      this._stdinForwardingDisabled = true
+      log.warn(
+        'Sidecar stdin forwarding is disabled — further writes will be ' +
+        'silently dropped; reconnect or restart the session to resume'
+      )
+    })
+  }
+
+  /**
    * Handle tool_use blocks from assistant messages.
    * Detects Task tool for agent monitoring.
    *
