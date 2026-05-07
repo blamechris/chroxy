@@ -345,4 +345,31 @@ describe('SessionBar', () => {
       expect(dot).toHaveClass('status-idle')
     })
   })
+
+  describe('stdin forwarding disabled badge (#3567)', () => {
+    it('shows the badge on tabs whose session has the latched flag', () => {
+      const sessions: SessionTabData[] = [
+        { sessionId: 's1', name: 'Healthy', isBusy: false, isActive: true },
+        { sessionId: 's2', name: 'Broken', isBusy: false, isActive: false, stdinForwardingDisabled: true },
+      ]
+      render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+      const broken = screen.getByTestId('session-tab-s2')
+      expect(within(broken).getByTestId('tab-stdin-disabled-badge')).toBeInTheDocument()
+      const healthy = screen.getByTestId('session-tab-s1')
+      expect(within(healthy).queryByTestId('tab-stdin-disabled-badge')).not.toBeInTheDocument()
+    })
+
+    it('omits the badge when the flag is undefined or false', () => {
+      const sessions: SessionTabData[] = [
+        { sessionId: 's1', name: 'NoFlag', isBusy: false, isActive: true },
+        { sessionId: 's2', name: 'FalseFlag', isBusy: false, isActive: false, stdinForwardingDisabled: false },
+      ]
+      render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+      expect(screen.queryByTestId('tab-stdin-disabled-badge')).not.toBeInTheDocument()
+    })
+  })
 })
