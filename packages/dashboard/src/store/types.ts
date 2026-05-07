@@ -25,6 +25,7 @@ export type {
   SessionContext,
   McpServer,
   ServerError,
+  ServerErrorAction,
   DevPreview,
   WebTask,
   WebFeatureStatus,
@@ -74,6 +75,7 @@ import type {
   SavedConnection,
   SearchResult,
   ServerError,
+  ServerErrorAction,
   SessionInfo,
   SlashCommand,
   WebFeatureStatus,
@@ -643,8 +645,11 @@ export interface ConnectionState {
   // Log entry actions
   clearLogEntries: () => void;
 
-  // Server error actions
-  addServerError: (message: string) => void;
+  // Server error actions. #3587: optional `action` attaches a one-click
+  // recovery button to the toast. Existing call sites that pass only
+  // `message` keep working — `action` is undefined and the toast renders
+  // message-only as before.
+  addServerError: (message: string, action?: ServerErrorAction) => void;
   dismissServerError: (id: string) => void;
 
   // Info notification actions

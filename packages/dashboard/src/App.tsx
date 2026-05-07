@@ -763,11 +763,20 @@ export function App() {
   }, [isPlanPending, storeMessages])
 
   // Toast items from server errors + info notifications
+  // #3587: pass through optional `action` so INVALID_AUTHOR errors with
+  // a corrected `actualAuthor` render an inline "Try as <author>" button
+  // that re-issues skill_trust_grant. Info notifications never carry
+  // actions today, so the spread covers only the error path.
   const toastItems: ToastItem[] = useMemo(
     () => [
       ...serverErrors
         .filter(e => !e.sessionId || e.sessionId === activeSessionId)
-        .map(e => ({ id: e.id, message: e.message, level: 'error' as const })),
+        .map(e => ({
+          id: e.id,
+          message: e.message,
+          level: 'error' as const,
+          ...(e.action ? { action: e.action } : {}),
+        })),
       ...infoNotifications
         .map(e => ({ id: e.id, message: e.message, level: 'info' as const })),
     ],

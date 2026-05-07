@@ -115,4 +115,94 @@ describe('Toast', () => {
       expect(onDismiss).toHaveBeenCalledTimes(1)
     })
   })
+
+  // #3587: optional inline recovery action — rendered as a button
+  // between the message and the close affordance. Click invokes the
+  // callback and dismisses the toast.
+  describe('action button (#3587)', () => {
+    it('does not render an action button when item.action is undefined', () => {
+      render(<Toast items={makeItems('No action')} onDismiss={vi.fn()} />)
+      expect(screen.queryByTestId('toast-action-toast-0')).not.toBeInTheDocument()
+    })
+
+    it('renders the action button label when item.action is set', () => {
+      const items: ToastItem[] = [{
+        id: 'a1',
+        message: 'Owned by alice',
+        level: 'error',
+        action: { label: 'Try as alice', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      const btn = screen.getByTestId('toast-action-a1')
+      expect(btn).toBeInTheDocument()
+      expect(btn).toHaveTextContent('Try as alice')
+    })
+
+    it('invokes action.onClick when the action button is clicked', () => {
+      const onAction = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'a2',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: onAction },
+      }]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('toast-action-a2'))
+      expect(onAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('dismisses the toast after the action runs', () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{
+        id: 'a3',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: vi.fn() },
+      }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      fireEvent.click(screen.getByTestId('toast-action-a3'))
+      expect(onDismiss).toHaveBeenCalledWith('a3')
+    })
+
+    it('dismisses the toast even if the action handler throws (swallowed)', () => {
+      const onDismiss = vi.fn()
+      const onAction = vi.fn(() => { throw new Error('grant failed') })
+      const items: ToastItem[] = [{
+        id: 'a4',
+        message: 'Owned by alice',
+        action: { label: 'Try as alice', onClick: onAction },
+      }]
+      // Quiet the expected console.error from the swallow path so the
+      // test doesn't pollute output.
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        render(<Toast items={items} onDismiss={onDismiss} />)
+        fireEvent.click(screen.getByTestId('toast-action-a4'))
+        expect(onAction).toHaveBeenCalled()
+        expect(onDismiss).toHaveBeenCalledWith('a4')
+        // Error was logged, not thrown.
+        expect(errSpy).toHaveBeenCalled()
+      } finally {
+        errSpy.mockRestore()
+      }
+    })
+
+    describe('with timers', () => {
+      beforeEach(() => { vi.useFakeTimers() })
+      afterEach(() => { vi.runOnlyPendingTimers(); vi.useRealTimers() })
+
+      it('clearing the auto-dismiss timer prevents a duplicate dismiss after click', async () => {
+        const onDismiss = vi.fn()
+        const items: ToastItem[] = [{
+          id: 'a5',
+          message: 'Owned by alice',
+          action: { label: 'Try as alice', onClick: vi.fn() },
+        }]
+        render(<Toast items={items} onDismiss={onDismiss} />)
+        fireEvent.click(screen.getByTestId('toast-action-a5'))
+        expect(onDismiss).toHaveBeenCalledTimes(1)
+        // Advance past the 5s auto-dismiss — must not double-fire.
+        await act(async () => { vi.advanceTimersByTime(6000) })
+        expect(onDismiss).toHaveBeenCalledTimes(1)
+      })
+    })
+  })
 })

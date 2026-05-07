@@ -102,6 +102,8 @@ import {
   registerEvaluatorRequest,
   cancelEvaluatorRequest,
   rejectAllEvaluatorRequests,
+  registerTrustGrantRequest,
+  clearPendingTrustGrants,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
@@ -666,6 +668,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // reject them so awaiters get a fast error instead of waiting 60s for
       // the timeout to fire.
       rejectAllEvaluatorRequests('Connection closed before evaluator response arrived');
+      // #3587: drop any pending skill_trust_grant correlations — the
+      // matching error (if any) will arrive on a different socket (or
+      // never), and a stale toast action would call grantCommunitySkillTrust
+      // against a closed socket.
+      clearPendingTrustGrants();
 
       const wasConnected = get().connectionPhase === 'connected';
       set({ socket: null });
@@ -728,6 +735,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // here (user-initiated) and in onclose (transport drop) because we null
     // out socket.onclose below to suppress auto-reconnect.
     rejectAllEvaluatorRequests('Disconnected before evaluator response arrived');
+    // #3587: paired with rejectAllEvaluatorRequests — clear any pending
+    // skill_trust_grant correlations so a stale toast button can't fire
+    // against the disconnected socket.
+    clearPendingTrustGrants();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -1292,6 +1303,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const requestId = `trust-grant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // #3587: remember the request locally so the message-handler can
+      // pair the resulting INVALID_AUTHOR error (if any) with the
+      // original `skillName` and offer a "Try as <actualAuthor>" toast
+      // action. The wire error doesn't echo `skillName`, so client-side
+      // tracking is the only correlation path. Cleared on success ack
+      // (`skill_trust_grant_ok`) or on error processing.
+      registerTrustGrantRequest(requestId, { skillName, author });
       const payload: Record<string, unknown> = {
         type: 'skill_trust_grant',
         skillName,
@@ -1646,7 +1664,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ logEntries: [] });
   },
 
-  addServerError: (message: string) => {
+  addServerError: (message, action) => {
     const now = Date.now();
     const err = {
       id: nextMessageId('info'),
@@ -1654,6 +1672,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       message,
       recoverable: true,
       timestamp: now,
+      // #3587: optional inline recovery action (e.g. "Try as alice").
+      // Only attached when the caller has enough context to offer a
+      // one-click retry — undefined for the common path so the toast
+      // renders message-only as before.
+      ...(action ? { action } : {}),
     };
     set((state) => ({
       serverErrors: [...state.serverErrors, err].slice(-10),

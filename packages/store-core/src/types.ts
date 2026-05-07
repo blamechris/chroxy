@@ -141,6 +141,22 @@ export interface McpServer {
 }
 
 /**
+ * Optional one-click recovery action attached to a ServerError.
+ *
+ * #3587: surfaces an actionable button inside the toast so the operator can
+ * recover from a structured error (e.g. INVALID_AUTHOR with a corrected
+ * `actualAuthor`) without leaving the toast and hunting for the matching
+ * row in another panel. The callback is invoked at click time; the
+ * notification is dismissed by the consumer afterwards.
+ */
+export interface ServerErrorAction {
+  /** Short button label, e.g. "Try as alice". Rendered verbatim. */
+  label: string;
+  /** Click handler. Throwing is allowed but does not auto-dismiss. */
+  onClick: () => void;
+}
+
+/**
  * Server-emitted error captured for the notification/toast UI.
  *
  * Produced by the shared `handleServerError` helper from a `server_error`
@@ -155,6 +171,14 @@ export interface ServerError {
   timestamp: number;
   /** Set when the server scoped the error to a specific session. */
   sessionId?: string;
+  /**
+   * #3587: optional inline action rendered as a button inside the toast.
+   * When unset (the common path) the toast renders message-only as before.
+   * Not part of the wire shape — populated client-side by handlers that
+   * have enough context to offer a one-click recovery (e.g. INVALID_AUTHOR
+   * suggesting a retry with the correct author).
+   */
+  action?: ServerErrorAction;
 }
 
 export interface DevPreview {
