@@ -107,7 +107,12 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const handleCreate = () => {
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
     const sessionCwd = cwd.trim() || undefined;
-    createSession(sessionName, sessionCwd, worktree || undefined, provider || undefined);
+    createSession({
+      name: sessionName,
+      cwd: sessionCwd,
+      worktree: worktree || undefined,
+      provider: provider || undefined,
+    });
     setName('');
     setCwd('');
     setWorktree(false);
