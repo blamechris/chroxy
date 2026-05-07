@@ -256,4 +256,24 @@ describe('SessionManager.createSession — preflight', () => {
     assert.equal(entry.session.model, 'allowed-model')
     mgr.destroySession(id)
   })
+
+  it('preserves explicit null model on restore even when defaultModel is configured (#3403)', () => {
+    // Regression: nullish coalescing in createSession means an explicit
+    // `null` (the soft-fallback marker for a stale Claude model) survives
+    // restoreState() instead of being clobbered by the server config's
+    // _defaultModel. Without `??`, every previously-soft-cleared session
+    // would silently re-acquire the stale config default on restart.
+    const restoredMgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      defaultModel: 'opus-4-6', // a stale config default
+      skipPreflight: true,
+    })
+    const id = restoredMgr.createSession({ provider: 'claude-sdk', model: null, skipPersist: true })
+    assert.ok(id, 'session id should be returned')
+    const entry = restoredMgr.getSession(id)
+    assert.equal(entry.session.model, null, 'explicit null must NOT fall back to _defaultModel')
+    restoredMgr.destroySession(id)
+  })
 })

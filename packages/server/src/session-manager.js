@@ -351,7 +351,11 @@ export class SessionManager extends EventEmitter {
     }
 
     const baseCwd = cwd || this._defaultCwd
-    let resolvedModel = model || this._defaultModel
+    // Nullish-coalesce so an explicit `null` (the soft-fallback marker for a
+    // stale Claude model — see #3403) survives restore intact instead of
+    // re-applying `_defaultModel`. Only `undefined` (omitted/missing) falls
+    // back to the server-config default.
+    let resolvedModel = model ?? this._defaultModel
     const resolvedPermissionMode = permissionMode || this._defaultPermissionMode
 
     // Validate cwd exists
