@@ -1,10 +1,14 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { tmpdir, homedir } from 'os'
+import { fileURLToPath } from 'url'
 
-import { EnvironmentManager } from '../src/environment-manager.js'
+import { EnvironmentManager, UNREACHABLE_STATUSES } from '../src/environment-manager.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 
 /**
  * Creates a mock execFile that records calls and returns configured results.
@@ -2505,5 +2509,93 @@ describe('EnvironmentManager.reconnect() — reconnectAgentToken delegation (#33
     // Should not throw even without reconnectAgentToken on the backend
     await assert.doesNotReject(() => manager.reconnect())
     assert.equal(manager.get('env-docker-1').status, 'running')
+  })
+})
+
+/**
+ * Issue #3492 — invariant guard for the reconnect() unreachable-count helper.
+ *
+ * The boot-path aggregate-warn helper in
+ * `server-cli.js#logEnvironmentManagerReconnectResult` derives the unreachable
+ * count via `list().filter(e => UNREACHABLE_STATUSES.has(e.status)).length`.
+ * This stays accurate only while every code path in `reconnect()` that flips
+ * `allHealthy = false` also sets `env.status` to a value in
+ * `UNREACHABLE_STATUSES`. A future contributor adding a new
+ * `allHealthy = false` branch (quotas, partial-restore, metrics, …) without
+ * a co-located status assignment would silently undercount.
+ *
+ * This test inspects the source of `reconnect()` and asserts that the count
+ * of `allHealthy = false` lines matches the count of preceding/adjacent
+ * `env.status = '<unreachable status>'` assignments. It also asserts the
+ * exported `UNREACHABLE_STATUSES` set contains every literal status string
+ * actually written by `reconnect()` on its `allHealthy=false` paths.
+ */
+describe('EnvironmentManager.reconnect() invariant guard (#3492)', () => {
+  it('UNREACHABLE_STATUSES contains expected statuses', () => {
+    assert.ok(UNREACHABLE_STATUSES.has('error'), '\'error\' must be unreachable')
+    assert.ok(UNREACHABLE_STATUSES.has('stopped'), '\'stopped\' must be unreachable')
+    assert.ok(!UNREACHABLE_STATUSES.has('running'), '\'running\' must NOT be unreachable')
+  })
+
+  it('every allHealthy=false branch in reconnect() co-locates env.status assignment to an UNREACHABLE_STATUSES value', () => {
+    const srcPath = resolve(__dirname, '../src/environment-manager.js')
+    const src = readFileSync(srcPath, 'utf-8')
+
+    // Extract the body of reconnect() — from `async reconnect() {` to the
+    // matching closing brace of the method.
+    const startIdx = src.indexOf('async reconnect() {')
+    assert.notEqual(startIdx, -1, 'reconnect() not found in source')
+
+    let depth = 0
+    let endIdx = -1
+    let started = false
+    for (let i = startIdx; i < src.length; i++) {
+      const ch = src[i]
+      if (ch === '{') {
+        depth += 1
+        started = true
+      } else if (ch === '}') {
+        depth -= 1
+        if (started && depth === 0) {
+          endIdx = i
+          break
+        }
+      }
+    }
+    assert.notEqual(endIdx, -1, 'closing brace for reconnect() not found')
+
+    // Strip line comments so the regexes below count actual code, not the
+    // inline invariant docstrings (which intentionally mention
+    // `allHealthy = false` and the status literals).
+    const body = src
+      .slice(startIdx, endIdx + 1)
+      .split('\n')
+      .map(line => line.replace(/\/\/.*$/, ''))
+      .join('\n')
+
+    // Count `allHealthy = false` flips
+    const flipMatches = body.match(/allHealthy\s*=\s*false/g) || []
+    // Count `env.status = '<unreachable>'` assignments (only literal strings —
+    // anything else would be a contributor bug)
+    const statusMatches = body.match(/env\.status\s*=\s*['"]([^'"]+)['"]/g) || []
+
+    assert.ok(flipMatches.length > 0, 'reconnect() must contain at least one allHealthy=false branch')
+    assert.equal(
+      statusMatches.length,
+      flipMatches.length + 1, // +1 for the success-path 'running' assignment
+      `expected ${flipMatches.length + 1} env.status assignments (one per allHealthy=false branch + the running success path), found ${statusMatches.length}. ` +
+      'A new allHealthy=false branch was added without a co-located env.status assignment — see #3492 invariant.',
+    )
+
+    // Every literal status string written must be either 'running' or a
+    // value in UNREACHABLE_STATUSES.
+    for (const match of statusMatches) {
+      const literal = match.match(/['"]([^'"]+)['"]/)[1]
+      assert.ok(
+        literal === 'running' || UNREACHABLE_STATUSES.has(literal),
+        `env.status = '${literal}' is not 'running' and not in UNREACHABLE_STATUSES. ` +
+        'Either the new status is reachable (use \'running\') or add it to UNREACHABLE_STATUSES — see #3492 invariant.',
+      )
+    }
   })
 })
