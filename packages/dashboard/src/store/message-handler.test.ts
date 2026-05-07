@@ -1741,9 +1741,12 @@ describe('dashboard message-handler dispatch', () => {
       })
     })
 
-    // #3298: skill_trust_grant_ok is a no-op ack — state unchanged.
-    describe('skill_trust_grant_ok (#3298)', () => {
-      it('is a no-op — does not modify session state', () => {
+    // #3298: skill_trust_grant_ok ack — leaves pendingCommunitySkills
+    // untouched (that's cleared by the skill_trust_granted broadcast).
+    // #3588: also clears the matching pendingTrustGrants entry so the
+    // SkillsPanel in-flight state lifts.
+    describe('skill_trust_grant_ok (#3298 / #3588)', () => {
+      it('does not modify pendingCommunitySkills (cleared by skill_trust_granted broadcast)', () => {
         const empty = createEmptySessionState()
         store = createMockStore(baseState({
           activeSessionId: 's1',
@@ -1760,6 +1763,165 @@ describe('dashboard message-handler dispatch', () => {
 
         const stateAfter = (store.getState() as any).sessionStates.s1.pendingCommunitySkills
         expect(stateAfter).toEqual(stateBefore)
+      })
+
+      // #3588: success ack clears the in-flight `pendingTrustGrants`
+      // entry whose requestId matches.
+      it('clears the matching pendingTrustGrants entry on success ack', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: {
+              ...empty,
+              pendingTrustGrants: [
+                { requestId: 'req-1', skillName: 'skill-a', author: 'alice' },
+                { requestId: 'req-2', skillName: 'skill-b', author: 'bob' },
+              ],
+            },
+          },
+        }))
+        setStore(store)
+
+        handleMessage(
+          { type: 'skill_trust_grant_ok', requestId: 'req-1', sessionId: 's1' },
+          ctx() as any,
+        )
+
+        const after = (store.getState() as any).sessionStates.s1.pendingTrustGrants
+        expect(after).toEqual([
+          { requestId: 'req-2', skillName: 'skill-b', author: 'bob' },
+        ])
+      })
+
+      it('is idempotent when requestId is missing or unrecognised', () => {
+        const empty = createEmptySessionState()
+        const initial = [
+          { requestId: 'req-1', skillName: 'skill-a', author: 'alice' },
+        ]
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty, pendingTrustGrants: initial } },
+        }))
+        setStore(store)
+
+        // Missing requestId — no-op.
+        handleMessage({ type: 'skill_trust_grant_ok', sessionId: 's1' }, ctx() as any)
+        // Unrecognised requestId — no-op.
+        handleMessage({ type: 'skill_trust_grant_ok', requestId: 'unknown', sessionId: 's1' }, ctx() as any)
+
+        const after = (store.getState() as any).sessionStates.s1.pendingTrustGrants
+        expect(after).toEqual(initial)
+      })
+    })
+
+    // #3588: error envelope with a matching requestId clears the
+    // in-flight pendingTrustGrants entry so the SkillsPanel row's
+    // disabled state lifts on INVALID_AUTHOR / TRUST_NOT_ENABLED /
+    // TRUST_FLUSH_FAILED responses.
+    describe('skill_trust_grant error path (#3588)', () => {
+      it('clears the matching pendingTrustGrants entry on error', () => {
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: {
+              ...empty,
+              pendingTrustGrants: [
+                { requestId: 'req-1', skillName: 'skill-a', author: 'alice' },
+              ],
+            },
+          },
+        }))
+        setStore(store)
+
+        handleMessage(
+          {
+            type: 'error',
+            requestId: 'req-1',
+            code: 'INVALID_AUTHOR',
+            message: 'Author mismatch',
+            actualAuthor: 'bob',
+          },
+          ctx() as any,
+        )
+
+        const after = (store.getState() as any).sessionStates.s1.pendingTrustGrants
+        expect(after).toEqual([])
+      })
+
+      it('clears the entry even when the error envelope lacks sessionId', () => {
+        // Defensive: the server's error path may not always include
+        // sessionId. The clear must still find the matching entry by
+        // requestId across all session states.
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: {
+              ...empty,
+              pendingTrustGrants: [
+                { requestId: 'req-7', skillName: 'skill-x', author: 'eve' },
+              ],
+            },
+          },
+        }))
+        setStore(store)
+
+        handleMessage(
+          { type: 'error', requestId: 'req-7', code: 'TRUST_FLUSH_FAILED', message: 'flush failed' },
+          ctx() as any,
+        )
+
+        const after = (store.getState() as any).sessionStates.s1.pendingTrustGrants
+        expect(after).toEqual([])
+      })
+
+      it('leaves pendingTrustGrants untouched when no requestId matches', () => {
+        const empty = createEmptySessionState()
+        const initial = [
+          { requestId: 'req-1', skillName: 'skill-a', author: 'alice' },
+        ]
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...empty, pendingTrustGrants: initial } },
+        }))
+        setStore(store)
+
+        handleMessage(
+          { type: 'error', requestId: 'something-else', code: 'OTHER', message: 'unrelated' },
+          ctx() as any,
+        )
+
+        const after = (store.getState() as any).sessionStates.s1.pendingTrustGrants
+        expect(after).toEqual(initial)
+      })
+
+      it('still records the toast (serverErrors) when clearing the in-flight entry', () => {
+        // The pending-clear is in addition to the existing toast, not a
+        // replacement — operators still get the error message.
+        const empty = createEmptySessionState()
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: {
+              ...empty,
+              pendingTrustGrants: [
+                { requestId: 'req-1', skillName: 'skill-a', author: 'alice' },
+              ],
+            },
+          },
+        }))
+        setStore(store)
+
+        handleMessage(
+          { type: 'error', requestId: 'req-1', code: 'TRUST_NOT_ENABLED', message: 'trust disabled' },
+          ctx() as any,
+        )
+
+        const after = store.getState() as any
+        expect(after.sessionStates.s1.pendingTrustGrants).toEqual([])
+        expect(after.serverErrors).toEqual(['trust disabled'])
       })
     })
   })

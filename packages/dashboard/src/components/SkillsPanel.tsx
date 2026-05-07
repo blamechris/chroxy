@@ -17,7 +17,7 @@
  * Compact native checkboxes — no extra deps. Accessibility comes from
  * the label association.
  */
-import type { PendingCommunitySkill, SessionSkillInfo } from '../store/types'
+import type { PendingCommunitySkill, PendingTrustGrant, SessionSkillInfo } from '../store/types'
 
 export interface SkillsPanelProps {
   skills: SessionSkillInfo[] | undefined
@@ -57,6 +57,14 @@ export interface SkillsPanelProps {
   // capability won't emit skill_trust_request events anyway, so the
   // section would be empty — but the gate makes the contract explicit.
   capabilities?: { skillTrustGrant?: boolean }
+  // #3588: in-flight skill_trust_grant requests for the active session.
+  // Drives the per-row in-flight state — when a row's (skillName, author)
+  // is in this list, the Trust button is disabled and shows a spinner so
+  // the operator gets feedback that the click was processed even when the
+  // server's response is an error (INVALID_AUTHOR / TRUST_NOT_ENABLED /
+  // TRUST_FLUSH_FAILED). Optional so older callers and tests that don't
+  // surface in-flight state still work.
+  pendingTrustGrants?: PendingTrustGrant[]
   onClose: () => void
 }
 
@@ -137,6 +145,7 @@ export function SkillsPanel({
   pendingCommunitySkills,
   onGrantTrust,
   capabilities,
+  pendingTrustGrants,
   onClose,
 }: SkillsPanelProps) {
   // Auto skills are always active and live above manual ones (visual
@@ -218,7 +227,17 @@ export function SkillsPanel({
         <section data-testid="skills-panel-pending-section">
           <h4>Pending review</h4>
           <ul className="skills-panel-list">
-            {(pendingCommunitySkills!).map(({ name, author, description, path }) => (
+            {(pendingCommunitySkills!).map(({ name, author, description, path }) => {
+              // #3588: per-row in-flight state. Disable the Trust button
+              // and show a spinner when a `skill_trust_grant` request for
+              // this exact (skillName, author) pair is pending an ack or
+              // error. The matcher is on (name, author) — not requestId —
+              // because the row is identified by the pending entry, not
+              // by the wire id. Cleared by the message-handler on
+              // skill_trust_grant_ok or matching `error`.
+              const inFlight = Array.isArray(pendingTrustGrants)
+                && pendingTrustGrants.some(g => g.skillName === name && g.author === author)
+              return (
               <li key={`${author}/${name}`} data-testid={`skill-pending-${author}/${name}`}>
                 <div className="skill-row">
                   <span className="skill-name">{name}</span>
@@ -228,9 +247,22 @@ export function SkillsPanel({
                     className="skill-accept-trust"
                     data-testid={`skill-grant-trust-${author}/${name}`}
                     onClick={() => onGrantTrust!(name, author)}
-                    title={`Grant first-activation trust to community author '${author}'`}
+                    disabled={inFlight}
+                    aria-busy={inFlight}
+                    title={inFlight
+                      ? `Granting trust to '${author}'…`
+                      : `Grant first-activation trust to community author '${author}'`}
                     aria-label={`Trust author ${author} for skill ${name}`}
-                  >Trust &apos;{author}&apos;</button>
+                  >
+                    {inFlight && (
+                      <span
+                        className="skill-trust-spinner"
+                        data-testid={`skill-grant-trust-spinner-${author}/${name}`}
+                        aria-hidden
+                      >⏳</span>
+                    )}
+                    {inFlight ? 'Granting…' : <>Trust &apos;{author}&apos;</>}
+                  </button>
                 </div>
                 {/* #3310: surface description and path so the operator can make
                     an informed trust decision. Both fields are optional — older
@@ -250,7 +282,8 @@ export function SkillsPanel({
                   >{path}</span>
                 )}
               </li>
-            ))}
+              )
+            })}
           </ul>
         </section>
       )}

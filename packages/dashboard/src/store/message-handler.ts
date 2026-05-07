@@ -876,12 +876,46 @@ function handleSkillTrustGranted(msg: Record<string, unknown>, get: MsgGet, _set
 }
 
 // #3298: ack sent to the requesting client after a successful
-// skill_trust_grant. No state change needed — the actual update flows
-// through skill_trust_granted (broadcast) and a subsequent skills_list
-// refresh. The handler exists so the message-handler.ts HANDLERS map
-// covers the type and the protocol handler-coverage contract test passes.
-function handleSkillTrustGrantOk(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // intentional no-op — state already updated via skill_trust_granted
+// skill_trust_grant. The actual list update flows through
+// skill_trust_granted (broadcast) and a subsequent skills_list refresh.
+// #3588: clear the matching `pendingTrustGrants` entry so the
+// SkillsPanel in-flight state (disabled Trust button + spinner) lifts.
+// Idempotent — if the broadcast clears the row before the ack arrives,
+// the entry is already gone and this is a no-op.
+function handleSkillTrustGrantOk(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+  if (!requestId) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+  updateSession(targetId, (state) => {
+    const existing = Array.isArray(state.pendingTrustGrants) ? state.pendingTrustGrants : [];
+    const next = existing.filter(g => g.requestId !== requestId);
+    if (next.length === existing.length) return {};
+    return { pendingTrustGrants: next };
+  });
+}
+
+// #3588: clear an in-flight `pendingTrustGrants` entry whose requestId
+// matches the supplied error envelope. Searches every session's
+// pendingTrustGrants list (the requestId is unique across sessions, but
+// the error envelope may not always carry sessionId — we don't want a
+// missing sessionId to leave the row stuck). Returns true when an entry
+// was cleared so the caller can branch on it; otherwise the requestId
+// belongs to some other handler's request and is ignored.
+function clearPendingTrustGrantByRequestId(requestId: string, get: MsgGet): boolean {
+  const sessionStates = get().sessionStates;
+  let cleared = false;
+  for (const sid of Object.keys(sessionStates)) {
+    const ss = sessionStates[sid];
+    if (!ss) continue;
+    const existing = Array.isArray(ss.pendingTrustGrants) ? ss.pendingTrustGrants : [];
+    const next = existing.filter(g => g.requestId !== requestId);
+    if (next.length !== existing.length) {
+      cleared = true;
+      updateSession(sid, () => ({ pendingTrustGrants: next }));
+    }
+  }
+  return cleared;
 }
 
 function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
@@ -2527,6 +2561,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Log it and surface it as a server error notification.
       const { code: errCode, message: errMsg } = sharedError(msg);
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+      // #3588: clear any in-flight skill_trust_grant whose requestId
+      // matches this error envelope so the SkillsPanel "Pending review"
+      // row's disabled state lifts. Without this, an INVALID_AUTHOR /
+      // TRUST_NOT_ENABLED / TRUST_FLUSH_FAILED response would leave the
+      // Trust button stuck "approving" forever and the operator would
+      // have no way to retry. The helper is a no-op when the requestId
+      // belongs to some other handler's request.
+      const errReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (errReqId) {
+        clearPendingTrustGrantByRequestId(errReqId, get);
+      }
       // #3570: skill_trust_grant INVALID_AUTHOR carries a structured
       // `actualAuthor` field (#3568, locked by
       // ServerSkillTrustGrantInvalidAuthorSchema) when the per-author
