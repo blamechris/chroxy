@@ -275,6 +275,39 @@ Object.assign(EVENT_MAP, {
     return { messages: [{ msg }] }
   },
 
+  // #3544: surface the cumulative stdin_dropped totals on the wire so
+  // dashboards and the mobile app can render a "X bytes lost over N drops"
+  // banner / badge for sessions that are silently truncating input at the
+  // SidecarProcess pre-dial cap. Transient — not replayed on reconnect,
+  // but the cumulative counters are session-lifetime so the next drop
+  // re-publishes the running total. The `escalated` flag mirrors the
+  // server-side log level (true = first drop / threshold-cross / every-Nth)
+  // so the UI can use a louder treatment for the loud-signal moments.
+  stdin_dropped_totals: (data, ctx) => {
+    const bytes = typeof data?.bytes === 'number' && Number.isFinite(data.bytes)
+      ? data.bytes
+      : 0
+    const count = typeof data?.count === 'number' && Number.isFinite(data.count)
+      ? data.count
+      : 0
+    const reason = typeof data?.reason === 'string' && data.reason.length > 0
+      ? data.reason
+      : 'unknown'
+    const escalated = !!data?.escalated
+    return {
+      messages: [{
+        msg: {
+          type: 'stdin_dropped_totals',
+          sessionId: ctx.sessionId || null,
+          bytes,
+          count,
+          reason,
+          escalated,
+        },
+      }],
+    }
+  },
+
 })
 
 /**

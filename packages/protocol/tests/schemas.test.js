@@ -631,4 +631,87 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(!result.success, 'Schema must lock type to literal "error"')
     })
   })
+
+  // #3544: pin the wire contract for the cumulative stdin_dropped totals so a
+  // server-side regression (e.g. dropping the `escalated` flag, widening
+  // `bytes` to a string, forgetting the nullable `sessionId`) is caught here
+  // before it reaches the dashboard schema-validation layer.
+  describe('ServerStdinDroppedTotalsSchema (#3544)', () => {
+    it('validates a multi-session payload', async () => {
+      const { ServerStdinDroppedTotalsSchema } = await import('../src/schemas/server.ts')
+      const result = ServerStdinDroppedTotalsSchema.safeParse({
+        type: 'stdin_dropped_totals',
+        sessionId: 'sess-1',
+        bytes: 1048576,
+        count: 4,
+        reason: 'pre-dial-cap',
+        escalated: true,
+      })
+      assert.ok(result.success, 'Should validate multi-session totals payload')
+    })
+
+    it('accepts null sessionId (legacy single-CLI mode)', async () => {
+      const { ServerStdinDroppedTotalsSchema } = await import('../src/schemas/server.ts')
+      const result = ServerStdinDroppedTotalsSchema.safeParse({
+        type: 'stdin_dropped_totals',
+        sessionId: null,
+        bytes: 0,
+        count: 0,
+        reason: 'unknown',
+        escalated: false,
+      })
+      assert.ok(result.success, 'Should validate null sessionId for legacy mode')
+    })
+
+    it('rejects negative bytes', async () => {
+      const { ServerStdinDroppedTotalsSchema } = await import('../src/schemas/server.ts')
+      const result = ServerStdinDroppedTotalsSchema.safeParse({
+        type: 'stdin_dropped_totals',
+        sessionId: 'sess-1',
+        bytes: -1,
+        count: 1,
+        reason: 'pre-dial-cap',
+        escalated: true,
+      })
+      assert.ok(!result.success, 'Should reject negative bytes — counters are nonnegative')
+    })
+
+    it('rejects non-integer count', async () => {
+      const { ServerStdinDroppedTotalsSchema } = await import('../src/schemas/server.ts')
+      const result = ServerStdinDroppedTotalsSchema.safeParse({
+        type: 'stdin_dropped_totals',
+        sessionId: 'sess-1',
+        bytes: 100,
+        count: 1.5,
+        reason: 'pre-dial-cap',
+        escalated: true,
+      })
+      assert.ok(!result.success, 'Should reject non-integer count')
+    })
+
+    it('rejects missing escalated flag', async () => {
+      const { ServerStdinDroppedTotalsSchema } = await import('../src/schemas/server.ts')
+      const result = ServerStdinDroppedTotalsSchema.safeParse({
+        type: 'stdin_dropped_totals',
+        sessionId: 'sess-1',
+        bytes: 100,
+        count: 1,
+        reason: 'pre-dial-cap',
+      })
+      assert.ok(!result.success, 'escalated is required for the loud-signal UX')
+    })
+
+    it('rejects wrong type literal', async () => {
+      const { ServerStdinDroppedTotalsSchema } = await import('../src/schemas/server.ts')
+      const result = ServerStdinDroppedTotalsSchema.safeParse({
+        type: 'wrong_type',
+        sessionId: 'sess-1',
+        bytes: 100,
+        count: 1,
+        reason: 'pre-dial-cap',
+        escalated: true,
+      })
+      assert.ok(!result.success, 'type must be "stdin_dropped_totals"')
+    })
+  })
 })

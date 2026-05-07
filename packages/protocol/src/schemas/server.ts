@@ -393,6 +393,26 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
   actualAuthor: z.string(),
 })
 
+// #3544: cumulative stdin_dropped totals broadcast to clients bound to the
+// session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
+// tailing the server log (mobile users, dashboard-only operators) see a live
+// "X bytes lost over N drops" indicator instead of a hung turn. Emitted on
+// every drop (not only the loud-signal escalations) so the counter stays
+// fresh; `escalated` mirrors the server-side log level so the UI can
+// differentiate routine warn-level updates from first-drop / threshold-cross
+// / every-Nth error-level moments. `sessionId` is null for legacy single-CLI
+// mode where there is no per-session scoping. Transient — not replayed on
+// reconnect, but the cumulative counters are session-lifetime so the next
+// drop re-publishes the running total.
+export const ServerStdinDroppedTotalsSchema = z.object({
+  type: z.literal('stdin_dropped_totals'),
+  sessionId: z.string().nullable(),
+  bytes: z.number().int().nonnegative(),
+  count: z.number().int().nonnegative(),
+  reason: z.string(),
+  escalated: z.boolean(),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),
