@@ -1141,14 +1141,29 @@ describe('resize store action', () => {
 // -- createSession() store action --
 
 describe('createSession store action', () => {
+  // The next describe block ('permission boundary splitting') calls
+  // `useConnectionStore.getState().disconnect()` in its beforeEach, which
+  // unconditionally invokes `socket.close()` on whatever socket is set.
+  // Without a `close` (and `onclose`) on this mock, that disconnect would
+  // throw `socket.close is not a function` when the suite runs in order.
+  // Provide no-op stubs to keep the test suite order-independent.
   function makeMockSocket(): { socket: WebSocket; sent: string[] } {
     const sent: string[] = [];
     const socket = {
       readyState: 1,
       send: (data: string) => sent.push(data),
+      close: () => {},
+      onclose: null,
     } as unknown as WebSocket;
     return { socket, sent };
   }
+
+  // Reset the socket to null after each test so a leaked mock can't bleed
+  // into a sibling describe block's `disconnect()` call. Belt-and-braces
+  // alongside the close stub above.
+  afterEach(() => {
+    useConnectionStore.setState({ socket: null });
+  });
 
   it('sends create_session with name only when other params omitted', () => {
     const { socket, sent } = makeMockSocket();
