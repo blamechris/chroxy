@@ -652,6 +652,39 @@ export const ServerEvaluateDraftResultSchema = z.union([
   ServerEvaluateDraftErrorSchema,
 ])
 
+// -- Auto-evaluator broadcast events (#3208) --
+//
+// Unlike `evaluate_draft_result` (request/response, manual flow), these two
+// events are broadcast to clients bound to `sessionId` WITHOUT a triggering
+// client request. They fire when the auto-evaluation hook (#3186) lands on
+// a `rewrite` or `clarify` verdict for a `user_input` message that was
+// gated through `session.config.promptEvaluator`.
+//
+// `evaluatorIterationId` is a server-generated monotonic-per-session id
+// used by the dashboard to dedup events received over a reconnect replay.
+// `evaluatorIteration` (clarify only) is the 1-based clarify-loop counter,
+// clamped to the server's `maxIterations` (currently 3) so the dashboard
+// can render `Iteration 2/3` style transparency.
+
+export const ServerEvaluatorRewriteSchema = z.object({
+  type: z.literal('evaluator_rewrite'),
+  sessionId: z.string(),
+  originalDraft: z.string(),
+  rewritten: z.string(),
+  reasoning: z.string(),
+  evaluatorIterationId: z.string(),
+})
+
+export const ServerEvaluatorClarifySchema = z.object({
+  type: z.literal('evaluator_clarify'),
+  sessionId: z.string(),
+  originalDraft: z.string(),
+  clarification: z.string(),
+  reasoning: z.string(),
+  evaluatorIterationId: z.string(),
+  evaluatorIteration: z.number().int().min(1),
+})
+
 // -- Inferred TypeScript types --
 
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>
@@ -662,5 +695,7 @@ export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>
+export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewriteSchema>
+export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>

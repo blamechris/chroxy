@@ -47,6 +47,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  'evaluator_rewrite',  // #3208 schemas only — dashboard handler tracked in #3188, server emit in #3186; move to PLATFORM_SPECIFIC: 'dashboard' once #3188 lands
+  'evaluator_clarify',  // #3208 schemas only — dashboard handler tracked in #3188, server emit in #3186; move to PLATFORM_SPECIFIC: 'dashboard' once #3188 lands
   // 'skills_list' removed — dashboard now handles it (#3209)
   // 'skill_changed' removed — dashboard now handles it (#3205)
   // 'skill_trust_request' removed — dashboard now handles it (#3298)
