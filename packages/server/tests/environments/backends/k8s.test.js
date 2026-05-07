@@ -321,6 +321,320 @@ describe('K8sBackend.createEnvironment()', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — workspace mount (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — workspace mount (#3316)', () => {
+  it('mounts opts.cwd as a hostPath volume named "workspace" at /workspace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'ws-test',
+      image: 'agent:latest',
+      cwd: '/home/user/myproject',
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const mounts = body.spec.containers[0].volumeMounts
+
+    assert.ok(Array.isArray(volumes), 'spec.volumes must be an array')
+    const wsVol = volumes.find(v => v.name === 'workspace')
+    assert.ok(wsVol, 'must have a volume named "workspace"')
+    assert.equal(wsVol.hostPath.path, '/home/user/myproject', 'hostPath.path must be opts.cwd')
+    assert.equal(wsVol.hostPath.type, 'DirectoryOrCreate')
+
+    assert.ok(Array.isArray(mounts), 'container.volumeMounts must be an array')
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount, 'volumeMounts must include the workspace volume')
+    assert.equal(wsMount.mountPath, '/workspace')
+  })
+
+  it('omits volumes and volumeMounts when opts.cwd is not provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-cwd', image: 'agent:latest' })
+
+    const { body } = api.calls.create[0]
+    assert.equal(body.spec.volumes, undefined, 'spec.volumes must be absent when no cwd')
+    assert.equal(
+      body.spec.containers[0].volumeMounts, undefined,
+      'volumeMounts must be absent when no cwd'
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — resource limits (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
+  it('sets resources.limits and resources.requests when memoryLimit is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'mem-only',
+      image: 'agent:latest',
+      memoryLimit: '2Gi',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(resources, 'container.resources must be present')
+    assert.equal(resources.limits.memory, '2Gi')
+    assert.equal(resources.requests.memory, '2Gi')
+    assert.equal(resources.limits.cpu, undefined, 'cpu must not be set when cpuLimit is absent')
+  })
+
+  it('sets resources.limits and resources.requests when cpuLimit is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'cpu-only',
+      image: 'agent:latest',
+      cpuLimit: '2',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(resources, 'container.resources must be present')
+    assert.equal(resources.limits.cpu, '2')
+    assert.equal(resources.requests.cpu, '2')
+    assert.equal(resources.limits.memory, undefined, 'memory must not be set when memoryLimit is absent')
+  })
+
+  it('sets both memory and cpu limits when both are provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'both-limits',
+      image: 'agent:latest',
+      memoryLimit: '512Mi',
+      cpuLimit: '0.5',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '512Mi')
+    assert.equal(resources.limits.cpu, '0.5')
+    assert.equal(resources.requests.memory, '512Mi')
+    assert.equal(resources.requests.cpu, '0.5')
+  })
+
+  it('normalises Docker-style memory suffix "g" to "Gi"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'mem-g',
+      image: 'agent:latest',
+      memoryLimit: '2g',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '2Gi', '"2g" must be normalised to "2Gi"')
+  })
+
+  it('normalises Docker-style memory suffix "m" to "Mi"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'mem-m',
+      image: 'agent:latest',
+      memoryLimit: '512m',
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '512Mi', '"512m" must be normalised to "512Mi"')
+  })
+
+  it('omits container.resources when neither memoryLimit nor cpuLimit is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-limits', image: 'agent:latest' })
+
+    const container = api.calls.create[0].body.spec.containers[0]
+    assert.equal(container.resources, undefined, 'resources must be absent when no limits are set')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — additional mounts (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — additional mounts (#3316)', () => {
+  it('translates opts.mounts into hostPath volumes and volumeMounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'extra-mounts',
+      image: 'agent:latest',
+      mounts: [
+        '/host/config:/etc/app-config',
+        '/host/data:/data',
+      ],
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const mounts = body.spec.containers[0].volumeMounts
+
+    assert.ok(Array.isArray(volumes))
+    const v0 = volumes.find(v => v.name === 'extra-vol-0')
+    assert.ok(v0, 'extra-vol-0 must exist')
+    assert.equal(v0.hostPath.path, '/host/config')
+
+    const v1 = volumes.find(v => v.name === 'extra-vol-1')
+    assert.ok(v1, 'extra-vol-1 must exist')
+    assert.equal(v1.hostPath.path, '/host/data')
+
+    const m0 = mounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m0)
+    assert.equal(m0.mountPath, '/etc/app-config')
+
+    const m1 = mounts.find(m => m.name === 'extra-vol-1')
+    assert.ok(m1)
+    assert.equal(m1.mountPath, '/data')
+  })
+
+  it('sets readOnly: true for ":ro" mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'ro-mount',
+      image: 'agent:latest',
+      mounts: ['/host/secrets:/run/secrets:ro'],
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const m = mounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m)
+    assert.equal(m.readOnly, true)
+  })
+
+  it('does not set readOnly for rw mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'rw-mount',
+      image: 'agent:latest',
+      mounts: ['/host/data:/data'],
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const m = mounts.find(m => m.name === 'extra-vol-0')
+    assert.ok(m)
+    assert.equal(m.readOnly, undefined)
+  })
+
+  it('combines workspace volume from cwd with extra mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'combined',
+      image: 'agent:latest',
+      cwd: '/home/user/project',
+      mounts: ['/host/certs:/certs:ro'],
+    })
+
+    const volumes = api.calls.create[0].body.spec.volumes
+    assert.ok(volumes.find(v => v.name === 'workspace'))
+    assert.ok(volumes.find(v => v.name === 'extra-vol-0'))
+    assert.equal(volumes.length, 2)
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    assert.ok(mounts.find(m => m.name === 'workspace'))
+    assert.ok(mounts.find(m => m.name === 'extra-vol-0'))
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — forwardPorts (#3316)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — forwardPorts (#3316)', () => {
+  it('adds extra containerPort entries from opts.forwardPorts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'ports-test',
+      image: 'agent:latest',
+      forwardPorts: [3000, 8080],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 3000))
+    assert.ok(ports.some(p => p.containerPort === 8080))
+  })
+
+  it('always includes the built-in AGENT_PORT (7681) even when forwardPorts is provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'agent-port-present',
+      image: 'agent:latest',
+      forwardPorts: [9000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 7681), 'AGENT_PORT 7681 must always be present')
+  })
+
+  it('deduplicates AGENT_PORT when forwardPorts includes it', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'dedup-port',
+      image: 'agent:latest',
+      forwardPorts: [7681, 4000],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    const agentPorts = ports.filter(p => p.containerPort === 7681)
+    assert.equal(agentPorts.length, 1, 'AGENT_PORT must not be duplicated')
+  })
+
+  it('accepts "hostPort:containerPort" string format', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'colon-port',
+      image: 'agent:latest',
+      forwardPorts: ['9000:8080'],
+    })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.ok(ports.some(p => p.containerPort === 8080), 'containerPort 8080 must be present')
+    assert.equal(ports.find(p => p.containerPort === 8080).hostPort, undefined,
+      'hostPort must not be set in the Pod spec (not supported at Pod level)')
+  })
+
+  it('pod spec has only AGENT_PORT when forwardPorts is absent', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-ports', image: 'agent:latest' })
+
+    const { ports } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(ports.length, 1, 'only AGENT_PORT when forwardPorts is absent')
+    assert.equal(ports[0].containerPort, 7681)
+    assert.equal(ports[0].name, 'agent')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.destroyEnvironment
 // ─────────────────────────────────────────────────────────────────────────────
 
