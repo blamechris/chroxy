@@ -48,6 +48,7 @@ K8sBackend                       chroxy-pod-agent
      │                                  │
      │── { type: 'spawn', stdin: 'ignore', ... } ──▶
      │◀─ { type: 'session_started', sessionId }
+     │◀─ { type: 'stderr', data: '[chroxy-pod-agent] spawn ...', seq: 1 }  ← sentinel
      │◀─ { type: 'event', payload: <object|string>, seq: N }
      │◀─ { type: 'stderr', data: '...', seq: N }
      │◀─ { type: 'exit', code: 0, seq: N }
@@ -68,6 +69,7 @@ K8sBackend                       chroxy-pod-agent
      │                                  │
      │── { type: 'spawn', stdin: 'pipe', ... } ──▶
      │◀─ { type: 'session_started', sessionId }
+     │◀─ { type: 'stderr', data: '[chroxy-pod-agent] spawn ...', seq: 1 }  ← sentinel
      │── { type: 'stdin', data: '{"prompt":"hello"}\n' } ──▶
      │── { type: 'stdin_end' } ──────────▶
      │◀─ { type: 'event', payload: <object|string>, seq: N }
