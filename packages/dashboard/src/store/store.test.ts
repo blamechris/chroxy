@@ -1890,39 +1890,57 @@ describe('server_error toast scope filtering', () => {
       const { useConnectionStore } = await import('./connection');
       const { socket, teardown } = await setupCapturedSocket();
 
-      // The auto-reconnect timer in socket.onclose only schedules when
-      // `wasConnected === true`. connect() sets phase to 'connecting' as it
-      // runs, so simulate the post-handshake state by promoting the phase
-      // back to 'connected' before firing onclose.
-      useConnectionStore.setState({ connectionPhase: 'connected' });
-
-      // Switch to fake timers AFTER setup (which uses real microtasks /
-      // setTimeout(0) to let the fetch chain run). Fake timers only need
-      // to cover the auto-reconnect setTimeout firing window.
-      vi.useFakeTimers();
       try {
-        // Spy on connect() to detect any stray reconnect attempt. Zustand
-        // returns the same state object reference across getState() calls,
-        // so spying here also intercepts the closure's later get().connect.
-        const connectSpy = vi.spyOn(useConnectionStore.getState(), 'connect');
+        // The auto-reconnect timer in socket.onclose only schedules when
+        // `wasConnected === true`. connect() sets phase to 'connecting' as
+        // it runs, so simulate the post-handshake state by promoting the
+        // phase back to 'connected' before firing onclose.
+        useConnectionStore.setState({ connectionPhase: 'connected' });
 
-        // Fire onclose to schedule the auto-reconnect setTimeout
-        // (AUTO_RECONNECT_DELAY = 1500ms).
-        socket.onclose!();
+        // Switch to fake timers AFTER setup (which uses real microtasks /
+        // setTimeout(0) to let the fetch chain run). Fake timers only need
+        // to cover the auto-reconnect setTimeout firing window.
+        vi.useFakeTimers();
+        try {
+          // Spy on connect() to detect any stray reconnect attempt. The
+          // captured onclose closure invokes the action via `get().connect`,
+          // and Zustand's action functions remain reference-stable across
+          // setState calls — spying on the current state's `connect` method
+          // therefore intercepts the closure's later call too.
+          // mockImplementation(() => {}) prevents a regression-induced real
+          // call from kicking off a fresh fetch/WebSocket cycle under fake
+          // timers, which would hang or pollute later tests.
+          const connectSpy = vi
+            .spyOn(useConnectionStore.getState(), 'connect')
+            .mockImplementation(() => {});
 
-        // Tear down before the timer's deadline. Must invalidate the
-        // captured `myAttemptId` so the queued callback no-ops.
-        teardown();
+          // Fire onclose to schedule the auto-reconnect setTimeout
+          // (AUTO_RECONNECT_DELAY = 1500ms).
+          socket.onclose!();
 
-        // Advance past both AUTO_RECONNECT_DELAY (1500ms) and
-        // ERROR_RECONNECT_DELAY (2000ms) — anything queued should now have
-        // fired. With teardown bumping connectionAttemptId, the gate fails
-        // and connect() is never called.
-        vi.advanceTimersByTime(5000);
+          // Tear down before the timer's deadline. Must invalidate the
+          // captured `myAttemptId` so the queued callback no-ops.
+          teardown();
 
-        expect(connectSpy).not.toHaveBeenCalled();
+          // Advance past both AUTO_RECONNECT_DELAY (1500ms) and
+          // ERROR_RECONNECT_DELAY (2000ms) — anything queued should now
+          // have fired. With teardown bumping connectionAttemptId, the
+          // gate fails and connect() is never called.
+          vi.advanceTimersByTime(5000);
+
+          expect(connectSpy).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
       } finally {
-        vi.useRealTimers();
+        // Outer guard: even if the inner block throws before reaching the
+        // explicit teardown() above (e.g., onclose was null, spy setup
+        // failed), guarantee globals + store get reset so we don't leak
+        // stubbed fetch/WebSocket into later tests. teardown() is
+        // idempotent: bumpConnectionAttemptId() is just an integer
+        // increment, vi.unstubAllGlobals() no-ops if nothing is stubbed,
+        // and the setState call is a fresh write.
+        teardown();
       }
     });
   });
