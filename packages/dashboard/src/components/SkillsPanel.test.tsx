@@ -486,6 +486,59 @@ describe('SkillsPanel (#3209)', () => {
       expect(screen.getByText(/from: alice/i)).toBeInTheDocument()
     })
 
+    // #3310: description and path fields in pending rows.
+    it('renders description beneath the author line when present', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          description: 'Does useful things',
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const desc = screen.getByTestId('skill-pending-description-alice/alice-skill')
+      expect(desc).toBeInTheDocument()
+      expect(desc).toHaveTextContent('Does useful things')
+    })
+
+    it('renders path when present', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{
+          name: 'alice-skill',
+          author: 'alice',
+          path: '/home/user/.chroxy/skills/community/alice/alice-skill.md',
+        }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      const pathEl = screen.getByTestId('skill-pending-path-alice/alice-skill')
+      expect(pathEl).toBeInTheDocument()
+      expect(pathEl).toHaveTextContent('/home/user/.chroxy/skills/community/alice/alice-skill.md')
+    })
+
+    it('does not render description element when description is absent', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skill-pending-description-alice/alice-skill')).toBeNull()
+    })
+
+    it('does not render path element when path is absent', () => {
+      renderPanel({
+        skills: [],
+        pendingCommunitySkills: [{ name: 'alice-skill', author: 'alice' }],
+        onGrantTrust: vi.fn(),
+        capabilities: { skillTrustGrant: true },
+      })
+      expect(screen.queryByTestId('skill-pending-path-alice/alice-skill')).toBeNull()
+    })
+
     it('renders empty state when no skills loaded AND no pending', () => {
       renderPanel({
         skills: [],

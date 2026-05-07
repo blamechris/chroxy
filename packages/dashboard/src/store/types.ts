@@ -267,9 +267,18 @@ export interface SessionSkillInfo {
 
 // #3298: one pending community skill awaiting first-activation trust
 // grant. Populated by skill_trust_request, cleared by skill_trust_granted.
+// #3310: extended with optional description and path so the SkillsPanel
+// can surface them in the "Pending review" row — the data is already on
+// the wire (ServerSkillTrustRequestSchema), the handler just wasn't
+// capturing it. Optional so existing serialised state (pre-#3310
+// reconnects) and tests that only set {name, author} remain valid.
 export interface PendingCommunitySkill {
   name: string;
   author: string;
+  /** Skill description text from the skill frontmatter (may be empty). */
+  description?: string;
+  /** Absolute path on disk where the skill file lives. */
+  path?: string;
 }
 
 export interface SessionState extends BaseSessionState {

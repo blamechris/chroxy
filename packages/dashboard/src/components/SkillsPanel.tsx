@@ -201,7 +201,7 @@ export function SkillsPanel({
         <section data-testid="skills-panel-pending-section">
           <h4>Pending review</h4>
           <ul className="skills-panel-list">
-            {(pendingCommunitySkills!).map(({ name, author }) => (
+            {(pendingCommunitySkills!).map(({ name, author, description, path }) => (
               <li key={`${author}/${name}`} data-testid={`skill-pending-${author}/${name}`}>
                 <div className="skill-row">
                   <span className="skill-name">{name}</span>
@@ -215,6 +215,23 @@ export function SkillsPanel({
                     aria-label={`Trust author ${author} for skill ${name}`}
                   >Trust &apos;{author}&apos;</button>
                 </div>
+                {/* #3310: surface description and path so the operator can make
+                    an informed trust decision. Both fields are optional — older
+                    servers (pre-#3310) or manually-constructed test fixtures may
+                    omit them; the row collapses gracefully. */}
+                {description && (
+                  <span
+                    className="skill-desc skill-pending-description"
+                    data-testid={`skill-pending-description-${author}/${name}`}
+                  >{description}</span>
+                )}
+                {path && (
+                  <span
+                    className="skill-meta skill-pending-path"
+                    data-testid={`skill-pending-path-${author}/${name}`}
+                    title={path}
+                  >{path}</span>
+                )}
               </li>
             ))}
           </ul>
