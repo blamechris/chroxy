@@ -112,11 +112,11 @@ Using lowercase `community/` everywhere is the portable convention that works on
 
 ### Trust file migration between platforms
 
-The trust ledger (`~/.chroxy/skills-trust.json`) stores path-based grant records. On macOS and Windows the stored paths are lowercased; on Linux they are stored verbatim as resolved by the filesystem.
+The trust ledger (`~/.chroxy/skills-trust.json`) stores path-based grant records under a `by-path` map. The JSON property names (the lookup keys) differ by host: on case-insensitive filesystems (typically macOS APFS/HFS+ and Windows NTFS by default) they are lowercased so the ledger can be queried case-insensitively, while on case-sensitive filesystems (typically Linux ext4/btrfs/xfs) they are written verbatim as resolved by the filesystem. Chroxy uses a platform-default heuristic — `darwin`/`win32` → case-insensitive, everything else → case-sensitive — and does not probe the actual mount, so non-default setups (e.g. case-sensitive APFS, or `ext4 -O casefold`) follow their platform default rather than their real FS behaviour. The path strings stored *inside* each record (and any other field values) are not rewritten — only the property name used for lookup is platform-normalised.
 
 If you copy your `skills-trust.json` from macOS to Linux (or vice versa), the `by-path` keys in the ledger may no longer match the real paths on the new machine. The result is that previously-trusted community skills appear as pending and require re-trust on the destination system. The `by-author` index is unaffected by this (author names are not path-cased), so author-level grants survive the migration — only path-level grants are at risk.
 
-**Workaround when migrating from macOS to Linux:** after copying the file, either re-trust affected skills through the UI, or manually edit `skills-trust.json` and update the `by-path` keys to match the verbatim paths on the Linux machine.
+**Workaround when migrating from macOS to Linux:** after copying the file, either re-trust affected skills through the UI, or manually edit `skills-trust.json` and update the **property names** in the `by-path` object to match the verbatim paths on the Linux machine. For example, change the key from `"/users/alice/.chroxy/skills/community/bob/style.md"` to `"/Users/alice/.chroxy/skills/community/bob/style.md"`; the `grantedAt` value inside the record does not need to be edited.
 
 ## Scope
 
