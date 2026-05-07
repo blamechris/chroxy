@@ -204,10 +204,11 @@ export function Toast({ items, onDismiss }: ToastProps) {
           onFocus={(e) => {
             // #3614: skip pause when focus came from a descendant (the
             // wrapper was already focused via bubbling). Without this we
-            // log a redundant pause when tab lands on an inner button
-            // having moved from another inner button. `pauseTimer` is
-            // idempotent on the reason set so this is mostly cosmetic,
-            // but mirrors the relatedTarget-aware blur for symmetry.
+            // record a redundant pause-reason mutation when tab lands on
+            // an inner button having moved from another inner button.
+            // `pauseTimer` is idempotent on the reason set so this is
+            // mostly cosmetic, but mirrors the relatedTarget-aware blur
+            // for symmetry.
             if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
             pauseTimer(item.id, 'focus')
           }}

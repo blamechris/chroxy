@@ -515,9 +515,11 @@ describe('Toast', () => {
       actionBtn.focus()
 
       // Tab from action → close: synthesize a blur on the wrapper with
-      // relatedTarget pointing inside the same toast, then a focus from
-      // close. The wrapper's onBlur should NOT call resumeTimer because
-      // focus is still within the toast.
+      // relatedTarget pointing at the close button (same toast). The
+      // wrapper's onBlur should NOT call resumeTimer because focus is
+      // still within the toast. We don't need to fire the matching
+      // focus event — the relatedTarget-aware blur handler is the only
+      // path under test here.
       fireEvent.blur(toast, { relatedTarget: closeBtn })
       // If the timer had been resumed, advancing 4s would dismiss.
       // It must remain paused.
