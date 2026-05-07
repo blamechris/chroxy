@@ -500,36 +500,27 @@ describe('K8sBackend imagePullPolicy validation (#3375)', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('K8sBackend imagePullPolicy default assignment (#3446)', () => {
-  it('undefined picks up the null default', () => {
+  it('omitted imagePullPolicy resolves to null (not undefined)', () => {
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api })
     // Field is internal but exercised here as a regression contract for the
-    // `imagePullPolicy ?? null` assignment in the constructor.
-    assert.equal(backend._imagePullPolicy, null)
+    // `imagePullPolicy ?? null` assignment in the constructor.  strictEqual
+    // is required because assert.equal(undefined, null) passes under loose
+    // equality and would not detect a constructor that forgets to default.
+    assert.strictEqual(backend._imagePullPolicy, null)
   })
 
   it('explicit null is preserved as null', () => {
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: null })
-    assert.equal(backend._imagePullPolicy, null)
-  })
-
-  it('explicit empty string is preserved (not replaced with default)', () => {
-    // Validation guards against empty strings at the constructor entry, so an
-    // empty string can never reach the assignment in normal use.  Validate the
-    // assignment expression directly to lock in the `??` choice over `||`:
-    // with `||`, `'' || null` collapses to `null`; with `??`, `'' ?? null`
-    // preserves `''`.  This regression catches a future revert to `||`.
-    const value = ''
-    assert.equal(value ?? null, '', 'nullish coalescing must preserve empty string')
-    assert.equal(value || null, null, 'logical OR would collapse empty string to null (rejected by ??)')
+    assert.strictEqual(backend._imagePullPolicy, null)
   })
 
   it('valid policy values are preserved verbatim', () => {
     const api = createMockApi()
     for (const policy of ['Always', 'IfNotPresent', 'Never']) {
       const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: policy })
-      assert.equal(backend._imagePullPolicy, policy)
+      assert.strictEqual(backend._imagePullPolicy, policy)
     }
   })
 })
