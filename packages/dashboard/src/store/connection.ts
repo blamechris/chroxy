@@ -76,6 +76,7 @@ import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, with
 import {
   setStore,
   wsSend,
+  sendClientVisible,
   handleMessage,
   setConnectionContext,
   setEncryptionState,
@@ -1960,9 +1961,18 @@ useConnectionStore.subscribe((state) => {
 // Reconnect or refresh on tab/window visibility change
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      const state = useConnectionStore.getState();
-      const { socket, connectionPhase, wsUrl, apiToken, activeSessionId, sessionStates } = state;
+    const state = useConnectionStore.getState();
+    const { socket, connectionPhase, wsUrl, apiToken, activeSessionId, sessionStates } = state;
+    const visible = document.visibilityState === 'visible';
+
+    // #3671: tell the server which side of the visible/hidden edge we're on
+    // so completion pushes don't get suppressed when the dashboard tab is in
+    // the background. Server defaults visible=true on every fresh connect, so
+    // sending only on edge transitions (memoised in sendClientVisible) is
+    // enough — no spam during quick alt-tab cycles.
+    sendClientVisible(socket, visible);
+
+    if (visible) {
       if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
         console.log('[ws] Tab became visible, socket stale — reconnecting');
         state.connect(wsUrl, apiToken);

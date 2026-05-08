@@ -13,6 +13,9 @@
  * interrupt/setModel/setPermissionMode plus a static `capabilities` getter.
  * See sdk-session.js or cli-session.js for a worked example.
  */
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { GeminiSession } from './gemini-session.js'
@@ -274,15 +277,31 @@ function getProviderAuthInfo(name, ProviderClass) {
     }
   }
 
-  // No env var matched — optional creds (host claude-sdk) get an OAuth fallback.
+  // No env var matched — optional creds (host claude-sdk) can fall back to
+  // an OAuth subscription cached on disk by `claude login`. Earlier code
+  // optimistically reported ready=true here, but #3674 caught that this
+  // misleads users who never ran `claude login`: their session creation
+  // would fail at runtime while the UI showed the chip enabled. We now
+  // best-effort probe the on-disk auth state and only claim ready when at
+  // least one known credential file is present.
   if (optional) {
+    if (_hasClaudeOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: `${describeBillingIdentity(name, null)} (OAuth from \`claude login\`)`,
+      }
+    }
     return {
-      ready: true,
-      source: 'oauth',
+      ready: false,
+      source: 'none',
       envVar: null,
       envVars,
-      hint,
-      detail: `${describeBillingIdentity(name, null)} (OAuth fallback — run \`claude login\` to verify)`,
+      hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
+      detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
     }
   }
 
@@ -297,6 +316,55 @@ function getProviderAuthInfo(name, ProviderClass) {
       ? `Not configured — ${hint}`
       : 'Not configured',
   }
+}
+
+/**
+ * Best-effort probe for `claude login` OAuth state on disk (#3674).
+ *
+ * Different versions of the Claude Agent SDK and Claude Code CLI cache
+ * subscription credentials in different files; we cover the three known
+ * locations and return true if any of them looks plausibly populated:
+ *
+ *   1. `~/.claude/auth.json`            — current SDK auth file
+ *   2. `~/.claude/.credentials.json`    — older Claude Code CLI keystore
+ *   3. `~/.claude.json`                 — global config; contains a
+ *                                          `claudeAiOauth` block when the
+ *                                          user has logged in via subscription
+ *
+ * The check is deliberately conservative: file presence (or the presence
+ * of the OAuth key inside `~/.claude.json`) is enough — we don't validate
+ * tokens or expiry. False positives are possible if the files are stale,
+ * but the alternative (false negatives) is what #3674 was filed to fix.
+ *
+ * Override path for tests/development via the `CHROXY_CLAUDE_HOME` env var.
+ *
+ * @returns {boolean}
+ */
+function _hasClaudeOAuthCreds() {
+  try {
+    const claudeHome = process.env.CHROXY_CLAUDE_HOME || join(homedir(), '.claude')
+    if (existsSync(join(claudeHome, 'auth.json'))) return true
+    if (existsSync(join(claudeHome, '.credentials.json'))) return true
+    // Global config file lives one level up; some installs only have this.
+    const globalConfig = process.env.CHROXY_CLAUDE_CONFIG
+      || (process.env.CHROXY_CLAUDE_HOME
+            ? join(process.env.CHROXY_CLAUDE_HOME, '..', '.claude.json')
+            : join(homedir(), '.claude.json'))
+    if (existsSync(globalConfig)) {
+      try {
+        const parsed = JSON.parse(readFileSync(globalConfig, 'utf-8'))
+        if (parsed && typeof parsed === 'object' && parsed.claudeAiOauth) {
+          return true
+        }
+      } catch {
+        // Malformed JSON — treat as absent.
+      }
+    }
+  } catch {
+    // Any unexpected fs error → behave as if no creds, so the UI surfaces
+    // the missing-creds state instead of silently misreporting ready.
+  }
+  return false
 }
 
 function describeBillingIdentity(name, envVar) {

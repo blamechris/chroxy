@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { registerProvider, getProvider, listProviders, registerDockerProvider } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
@@ -103,19 +106,31 @@ describe('Provider Registry', () => {
   // so the dashboard can grey-out unusable providers and show a billing-
   // identity confidence panel without making the user run `chroxy doctor`.
   describe('auth status (#3404 audit)', () => {
-    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG']
     const saved = {}
+    let _tmpClaudeHome = null
 
     function clearKeys() {
       for (const k of ENV_KEYS) {
         saved[k] = process.env[k]
         delete process.env[k]
       }
+      // #3674: point the OAuth probe at an empty tmpdir so neither the
+      // developer's actual ~/.claude state nor a previous test's leftover
+      // can satisfy `_hasClaudeOAuthCreds()` and silently keep optional-
+      // creds providers reporting ready=true.
+      _tmpClaudeHome = mkdtempSync(join(tmpdir(), 'chroxy-claude-home-'))
+      process.env.CHROXY_CLAUDE_HOME = _tmpClaudeHome
+      process.env.CHROXY_CLAUDE_CONFIG = join(_tmpClaudeHome, '.claude.json')
     }
     function restoreKeys() {
       for (const k of ENV_KEYS) {
         if (saved[k] === undefined) delete process.env[k]
         else process.env[k] = saved[k]
+      }
+      if (_tmpClaudeHome) {
+        try { rmSync(_tmpClaudeHome, { recursive: true, force: true }) } catch {}
+        _tmpClaudeHome = null
       }
     }
 
@@ -135,15 +150,72 @@ describe('Provider Registry', () => {
       }
     })
 
-    it('claude-sdk reports source=oauth (optional fallback) when no env var is set', () => {
+    it('claude-sdk reports ready=false when no env var AND no claude login state on disk (#3674)', () => {
       clearKeys()
       try {
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
-        // Optional credentials → ready stays true, source is oauth
+        // No env var, empty CHROXY_CLAUDE_HOME → no OAuth probe hit → ready=false
+        assert.equal(sdk.auth.ready, false)
+        assert.equal(sdk.auth.source, 'none')
+        assert.equal(sdk.auth.envVar, null)
+        assert.match(sdk.auth.hint, /claude login|ANTHROPIC_API_KEY/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-sdk reports ready=true source=oauth when ~/.claude/auth.json exists (#3674)', () => {
+      clearKeys()
+      writeFileSync(join(_tmpClaudeHome, 'auth.json'), '{}')
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, true)
         assert.equal(sdk.auth.source, 'oauth')
-        assert.equal(sdk.auth.envVar, null)
+        assert.match(sdk.auth.detail, /OAuth from `claude login`/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-sdk reports ready=true source=oauth when ~/.claude/.credentials.json exists (#3674)', () => {
+      clearKeys()
+      writeFileSync(join(_tmpClaudeHome, '.credentials.json'), '{}')
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        assert.equal(sdk.auth.ready, true)
+        assert.equal(sdk.auth.source, 'oauth')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-sdk reports ready=true source=oauth when ~/.claude.json has claudeAiOauth block (#3674)', () => {
+      clearKeys()
+      writeFileSync(
+        process.env.CHROXY_CLAUDE_CONFIG,
+        JSON.stringify({ claudeAiOauth: { refreshToken: 'fake' }, otherStuff: true }),
+      )
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        assert.equal(sdk.auth.ready, true)
+        assert.equal(sdk.auth.source, 'oauth')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-sdk stays ready=false when ~/.claude.json has no claudeAiOauth block (#3674)', () => {
+      clearKeys()
+      writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, JSON.stringify({ unrelated: 'config' }))
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        assert.equal(sdk.auth.ready, false)
+        assert.equal(sdk.auth.source, 'none')
       } finally {
         restoreKeys()
       }

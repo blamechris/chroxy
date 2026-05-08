@@ -280,6 +280,36 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
   }
 }
 
+// #3671: edge-trigger memo for the dashboard's client_visible send. Initialised
+// to true to match the server's per-connection default — a fresh socket sees
+// `visible: true` server-side until we say otherwise. Reset on every fresh
+// connect (auth_ok / key_exchange_ok) so the post-auth catch-up fires when
+// the dashboard reconnects with the tab already hidden.
+let _lastSentVisible: boolean = true;
+
+export function resetClientVisibleMemo(): void {
+  _lastSentVisible = true;
+}
+
+/**
+ * Send the dashboard tab's foreground/background state to the server. The
+ * server uses this to gate completion push notifications and other "is anyone
+ * actually watching this session" decisions — without it, a dashboard tab
+ * left open in the background would keep counting as an active viewer and
+ * suppress pushes on mobile, defeating #3404.
+ *
+ * Mirrors the mobile app's `sendClientVisible` (packages/app/src/store/
+ * message-handler.ts) including the encryption-pending guard so we don't
+ * fire plaintext during the key-exchange handshake window.
+ */
+export function sendClientVisible(socket: WebSocket | null, visible: boolean): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (_lastSentVisible === visible) return;
+  if (_pendingKeyPair !== null && _encryptionState === null) return;
+  _lastSentVisible = visible;
+  wsSend(socket, { type: 'client_visible', visible });
+}
+
 // Re-export encrypt for wsSend (import is used inside the function)
 import { encrypt } from './crypto';
 
@@ -1809,6 +1839,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
+        // #3671: server defaults visible=true on a fresh connect; sync if we
+        // reconnected while the tab was hidden so completion pushes fire.
+        resetClientVisibleMemo();
+        if (typeof document !== 'undefined') {
+          sendClientVisible(ctx.socket, document.visibilityState === 'visible');
+        }
       }
       // Save for quick reconnect
       saveConnection(ctx.url, ctx.token);
@@ -1839,6 +1875,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
+        // #3671: sync visibility once encryption is established (mirrors the
+        // unencrypted auth_ok path above).
+        resetClientVisibleMemo();
+        if (typeof document !== 'undefined') {
+          sendClientVisible(ctx.socket, document.visibilityState === 'visible');
+        }
       }
       break;
     }
