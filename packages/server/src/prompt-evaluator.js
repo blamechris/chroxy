@@ -33,6 +33,14 @@ const DEFAULT_MODEL = 'claude-opus-4-7'
 // on its 'reasoning' field.
 const MAX_OUTPUT_TOKENS = 1024
 
+// #3651 — deadline for the Anthropic round-trip. The auto-evaluator hook
+// (#3186) awaits `evaluateDraft` on the user_input hot path; without a cap
+// a hung promise (network partition, slow upstream, 503 with no body) would
+// block the user's input indefinitely. 30s is long enough for an Opus
+// extended-thinking call, short enough to keep the dashboard usable. Operators
+// can override via CHROXY_EVALUATOR_TIMEOUT_MS or per-call `timeoutMs`.
+const DEFAULT_TIMEOUT_MS = 30_000
+
 const SYSTEM_PROMPT = `You are a prompt evaluator. A user is about to send the draft below to a coding assistant. Your job is to decide ONE of three outcomes:
 
 1. "forward"  — The draft is clear and well-specified. The assistant has enough to act.
@@ -155,11 +163,16 @@ export function _resetSkipPatternCache() {
  * @param {object} args
  * @param {string} args.draft - The user's draft message (required, non-empty)
  * @param {string} [args.cwd] - Session cwd, included in the user prompt for context
- * @param {string} [args.model] - Anthropic model id (default: claude-opus-4-5
+ * @param {string} [args.model] - Anthropic model id (default: claude-opus-4-7
  *   or value of CHROXY_EVALUATOR_MODEL)
  * @param {string} [args.apiKey] - Anthropic API key (default: ANTHROPIC_API_KEY env)
  * @param {object} [args.client] - Test seam: pre-built Anthropic client (skips
  *   construction). Used by tests to inject a stub.
+ * @param {number} [args.timeoutMs] - Deadline for the Anthropic round-trip
+ *   (default: CHROXY_EVALUATOR_TIMEOUT_MS env or 30000). On expiry the call
+ *   aborts and `evaluateDraft` rejects with code 'EVALUATOR_TIMEOUT'. The
+ *   handler treats this the same as 'EVALUATOR_API_ERROR' (fail-open: forward
+ *   the original draft). See #3651.
  * @returns {Promise<{
  *   verdict: 'forward' | 'rewrite' | 'clarify',
  *   rewritten: string | null,
@@ -167,7 +180,7 @@ export function _resetSkipPatternCache() {
  *   reasoning: string,
  * }>}
  */
-export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) {
+export async function evaluateDraft({ draft, cwd, model, apiKey, client, timeoutMs } = {}) {
   if (typeof draft !== 'string' || !draft.trim()) {
     throw new Error('evaluateDraft: draft must be a non-empty string')
   }
@@ -188,15 +201,37 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
     ? `Session cwd: ${cwd}\n\nDraft message:\n${draft}`
     : `Draft message:\n${draft}`
 
+  const resolvedTimeoutMs = _resolveTimeoutMs(timeoutMs)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), resolvedTimeoutMs)
+
   let response
   try {
-    response = await anthropic.messages.create({
-      model: resolvedModel,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userMessage }],
-    })
+    response = await anthropic.messages.create(
+      {
+        model: resolvedModel,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userMessage }],
+      },
+      { signal: controller.signal },
+    )
   } catch (err) {
+    // #3651 — distinguish a timeout-driven abort from an upstream API error.
+    // `controller.signal.aborted` is true iff our setTimeout fired (we never
+    // abort for any other reason in this function), so it's the most
+    // reliable signal even if the SDK surfaces the rejection without an
+    // AbortError name. EVALUATOR_TIMEOUT bypasses the API-error sanitizer
+    // because there is no upstream status to surface. The auto-evaluator
+    // handler treats it the same as EVALUATOR_API_ERROR (fail-open: forward
+    // original draft) — see input-handlers.js fail-open catch.
+    if (controller.signal.aborted) {
+      const timeoutErr = new Error(`Evaluator request timed out after ${resolvedTimeoutMs}ms`)
+      timeoutErr.code = 'EVALUATOR_TIMEOUT'
+      timeoutErr.cause = err
+      log.warn(`Anthropic API call timed out after ${resolvedTimeoutMs}ms`)
+      throw timeoutErr
+    }
     // Log the sanitized bucket only — `log.warn` is fanned out to paired WS
     // clients as `log_entry` events (see addLogListener in ws-server.js), so
     // the raw upstream message is just as much of a leak channel as the
@@ -214,10 +249,39 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client } = {}) 
     }
     wrapped.cause = err
     throw wrapped
+  } finally {
+    // Clear the timer regardless of outcome so we never leak a pending
+    // setTimeout into the event loop. clearTimeout is a no-op if the timer
+    // already fired (the abort path above) or hasn't fired (fast-path).
+    clearTimeout(timer)
   }
 
   const text = _extractText(response)
   return _parseEvaluatorResponse(text)
+}
+
+/**
+ * Resolve the timeout in milliseconds for a single evaluator call.
+ *
+ * Precedence: explicit `timeoutMs` arg > `CHROXY_EVALUATOR_TIMEOUT_MS` env >
+ * `DEFAULT_TIMEOUT_MS`. Non-numeric, non-positive, or oversized values are
+ * rejected and fall through to the next source — we never want a 0/negative
+ * deadline to silently turn into "abort instantly", and Node `setTimeout`
+ * clamps delays above the i32 ceiling (`MAX_SAFE_TIMEOUT`, ~24.8 days) down
+ * to 1ms, which would turn a misconfigured "very large" timeout into a near-
+ * immediate abort. Reject oversized values rather than silently clamping —
+ * the operator gets the default (and a misconfigured env var doesn't
+ * silently break the feature).
+ */
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647
+function _resolveTimeoutMs(arg) {
+  if (typeof arg === 'number' && Number.isFinite(arg) && arg > 0 && arg <= MAX_SAFE_TIMEOUT_MS) return arg
+  const envSource = process.env.CHROXY_EVALUATOR_TIMEOUT_MS
+  if (typeof envSource === 'string' && envSource.length > 0) {
+    const parsed = Number.parseInt(envSource, 10)
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= MAX_SAFE_TIMEOUT_MS) return parsed
+  }
+  return DEFAULT_TIMEOUT_MS
 }
 
 /**
