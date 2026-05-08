@@ -210,6 +210,10 @@ export function createMockSession(overrides = {}) {
   // shape so handler tests can assert toggle behaviour without
   // standing up the full session.
   session.promptEvaluator = false
+  // #3639: per-session skip pattern, default null. Mock setter mirrors
+  // BaseSession.setPromptEvaluatorSkipPattern semantics: empty/null clears,
+  // valid regex source flips state, malformed source rejected.
+  session.promptEvaluatorSkipPattern = null
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
   session.setModel = createSpy()
@@ -217,6 +221,20 @@ export function createMockSession(overrides = {}) {
   session.setPromptEvaluator = createSpy((value) => {
     if (typeof value !== 'boolean' || value === session.promptEvaluator) return false
     session.promptEvaluator = value
+    return true
+  })
+  session.setPromptEvaluatorSkipPattern = createSpy((value) => {
+    let next
+    if (value === null || value === '') {
+      next = null
+    } else if (typeof value === 'string') {
+      try { new RegExp(value, 'i') } catch { return false }
+      next = value
+    } else {
+      return false
+    }
+    if (next === session.promptEvaluatorSkipPattern) return false
+    session.promptEvaluatorSkipPattern = next
     return true
   })
   session.respondToQuestion = createSpy()

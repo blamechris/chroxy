@@ -114,6 +114,18 @@ export const ServerPromptEvaluatorChangedSchema = z.object({
   value: z.boolean(),
 })
 
+// #3639: per-session promptEvaluatorSkipPattern changed. Broadcast to
+// every client bound to `sessionId` whenever the stored source string
+// actually changes (set, cleared, or rewritten). `value` is the
+// normalised stored value: a non-empty string source, or `null` when
+// the override is cleared. Empty string is normalised to null on the
+// server before broadcast.
+export const ServerPromptEvaluatorSkipPatternChangedSchema = z.object({
+  type: z.literal('prompt_evaluator_skip_pattern_changed'),
+  sessionId: z.string(),
+  value: z.union([z.string(), z.null()]),
+})
+
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *
@@ -253,6 +265,10 @@ export const ServerSessionListEntrySchema = z.object({
   repoCwd: z.string().nullable().optional(),
   isolation: z.string().optional(),
   promptEvaluator: z.boolean().optional(),
+  // #3639: per-session skip-pattern source (or null when unset). The
+  // dashboard can show / edit this; the server falls back to
+  // `config.promptEvaluatorSkipPattern` when null.
+  promptEvaluatorSkipPattern: z.union([z.string(), z.null()]).optional(),
   stdinForwardingDisabled: z.boolean().optional(),
   // #3573: cumulative stdin_dropped totals seeded into the handshake so a
   // late-joining client sees the running counter without waiting for the

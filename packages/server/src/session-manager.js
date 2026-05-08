@@ -338,6 +338,12 @@ export class SessionManager extends EventEmitter {
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
    * @param {boolean} [options.promptEvaluator] - Per-session toggle for the auto-evaluator
    *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
+   * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
+   *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
+   *   `config.promptEvaluatorSkipPattern` (#3639). Pairs with the per-session
+   *   promptEvaluator toggle so different sessions can use different skip
+   *   heuristics (e.g. PR-review session skips 'lgtm', triage session skips
+   *   'ack'). Default null — the global pattern from #3187 still applies.
    * @param {boolean} [options.stdinForwardingDisabled] - Internal: hydrate the SidecarProcess
    *   stdin_disabled latch (#3540) on a session being restored from disk. Only used by
    *   `restoreState()`. Truthy = the prior process latched the flag; the new SdkSession
@@ -348,7 +354,7 @@ export class SessionManager extends EventEmitter {
    *   empty history and destroy the very data we're restoring.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, stdinForwardingDisabled, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -497,6 +503,15 @@ export class SessionManager extends EventEmitter {
     // sessions persist this in session-state.json (see serializeState).
     if (typeof promptEvaluator === 'boolean') {
       providerOpts.promptEvaluator = promptEvaluator
+    }
+    // #3639: per-session promptEvaluatorSkipPattern. Same shape as
+    // promptEvaluator above — only string sources are forwarded; null,
+    // empty string, or non-string values use BaseSession's `null`
+    // default. Validation (regex compile) happens inside BaseSession
+    // so a hand-edited state file with a malformed source falls back
+    // to null without crashing session creation.
+    if (typeof promptEvaluatorSkipPattern === 'string' && promptEvaluatorSkipPattern.length > 0) {
+      providerOpts.promptEvaluatorSkipPattern = promptEvaluatorSkipPattern
     }
     // #3540: hydrate the persisted stdin_disabled flag onto the new
     // session so restoreState() round-trips correctly. Only forwarded
@@ -654,6 +669,14 @@ export class SessionManager extends EventEmitter {
         // separate round-trip. Defensive coerce in case a custom
         // provider class skips the BaseSession field initialiser.
         promptEvaluator: !!entry.session.promptEvaluator,
+        // #3639: surface the per-session skip-pattern source so the
+        // dashboard can show / edit the per-session override without
+        // having to introspect via a separate request. `null` when
+        // unset — the global config.promptEvaluatorSkipPattern still
+        // applies as a fallback (see input-handlers.js).
+        promptEvaluatorSkipPattern: typeof entry.session.promptEvaluatorSkipPattern === 'string'
+          ? entry.session.promptEvaluatorSkipPattern
+          : null,
         // #3540: surface the latched stdin_disabled flag so reconnecting
         // clients (and clients connecting after a server restart) see
         // the disabled state without waiting for a fresh `error` event.
@@ -876,6 +899,12 @@ export class SessionManager extends EventEmitter {
         // older state files (pre-#3185) round-trip as `false` rather
         // than `undefined` after restore.
         promptEvaluator: !!entry.session.promptEvaluator,
+        // #3639: persist the per-session skip-pattern source. Null when
+        // unset — old state files (pre-#3639) restore as null (the
+        // BaseSession default) so this is fully backward compatible.
+        promptEvaluatorSkipPattern: typeof entry.session.promptEvaluatorSkipPattern === 'string'
+          ? entry.session.promptEvaluatorSkipPattern
+          : null,
         // #3540: persist the SidecarProcess `stdin_disabled` latch so a
         // server restart preserves the disabled state. Without this, a
         // client connecting after restart would not see the banner — the
@@ -938,6 +967,12 @@ export class SessionManager extends EventEmitter {
           // pathway. createSession ignores non-boolean inputs (older
           // state files lack the field), so this round-trips cleanly.
           promptEvaluator: typeof saved.promptEvaluator === 'boolean' ? saved.promptEvaluator : undefined,
+          // #3639: same pattern — forward the persisted skip-pattern
+          // source. Non-string / empty values are dropped (createSession
+          // ignores them) so older state files restore as null.
+          promptEvaluatorSkipPattern: typeof saved.promptEvaluatorSkipPattern === 'string' && saved.promptEvaluatorSkipPattern.length > 0
+            ? saved.promptEvaluatorSkipPattern
+            : undefined,
           // #3540: forward the persisted stdin_disabled latch. Only
           // truthy values flip the flag; pre-#3540 state files (no
           // field) restore as `false`. The SdkSession constructor

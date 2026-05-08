@@ -106,6 +106,11 @@ export declare const SetPromptEvaluatorSchema: z.ZodObject<{
     value: z.ZodBoolean;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SetPromptEvaluatorSkipPatternSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_prompt_evaluator_skip_pattern">;
+    value: z.ZodUnion<readonly [z.ZodString, z.ZodNull]>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const SkillActivateSchema: z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;
     skillName: z.ZodString;
@@ -455,6 +460,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_prompt_evaluator_skip_pattern">;
+    value: z.ZodUnion<readonly [z.ZodString, z.ZodNull]>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;

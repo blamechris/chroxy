@@ -39,6 +39,26 @@ function _getEvaluatorAwaits(ctx) {
   return ctx._pendingEvaluatorAwaits
 }
 
+// #3639 — build the config object passed into shouldSkipEvaluator. The
+// per-session promptEvaluatorSkipPattern (string source) takes precedence;
+// the server-wide ctx.config.promptEvaluatorSkipPattern (#3187) is the
+// fallback so existing global-config deployments keep working unchanged.
+// Returns a plain object — never mutates ctx.config.
+function _resolveSkipConfig(entry, ctx) {
+  const sessionSource = entry?.session?.promptEvaluatorSkipPattern
+  const sessionPattern = typeof sessionSource === 'string' && sessionSource.length > 0
+    ? sessionSource
+    : null
+  const globalSource = ctx?.config?.promptEvaluatorSkipPattern
+  const globalPattern = typeof globalSource === 'string' && globalSource.length > 0
+    ? globalSource
+    : null
+  return {
+    ...(ctx?.config || {}),
+    promptEvaluatorSkipPattern: sessionPattern ?? globalPattern,
+  }
+}
+
 // Stable user-input message IDs (issue #2902). A client that sends its own
 // `clientMessageId` gets it adopted verbatim — that lets the sender dedup its
 // optimistic entry against the rehydrated history after a reconnect. Only
@@ -170,11 +190,17 @@ async function handleInput(ws, client, msg, ctx) {
   //               cycles — the next message force-forwards.
   // Fail-open: any evaluator error is logged and the original message is
   // forwarded so a key-missing or upstream outage never blocks the user.
+  //
+  // #3639: per-session promptEvaluatorSkipPattern overrides the server-wide
+  // `ctx.config.promptEvaluatorSkipPattern` when set, falling back to the
+  // global default (#3187) when null. Mirrors how `entry.session.promptEvaluator`
+  // (the toggle) is also per-session — the skip pattern shouldn't be the
+  // odd one out forced through global config.
   let textToSend = trimmed
   if (
     entry.session.promptEvaluator === true
     && trimmed.length > 0
-    && !shouldSkipEvaluator(trimmed, ctx.config || {})
+    && !shouldSkipEvaluator(trimmed, _resolveSkipConfig(entry, ctx))
   ) {
     const counters = _getEvaluatorIterations(ctx)
     const currentIteration = (counters.get(targetSessionId) || 0) + 1

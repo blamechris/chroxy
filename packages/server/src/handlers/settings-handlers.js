@@ -1081,6 +1081,87 @@ function handleSetPromptEvaluator(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #3639 — set the per-session promptEvaluatorSkipPattern. Mirrors the
+ * #3185 toggle handler: strict-typed payload validation, idempotent on
+ * unchanged input, broadcast on actual change, immediate persist (rather
+ * than the debounced schedulePersist) because pattern updates are operator
+ * actions and the synchronous flush prevents a crash inside the debounce
+ * window from silently losing the change.
+ *
+ * Empty string and `null` both clear the override — at that point
+ * `shouldSkipEvaluator` falls through to the server-wide
+ * `config.promptEvaluatorSkipPattern` (#3187) and the default skip rules.
+ *
+ * Validation: BaseSession.setPromptEvaluatorSkipPattern returns false for
+ * invalid regex sources. We surface that as a session_error with a clear
+ * message so the operator sees what was wrong instead of the change
+ * silently being dropped.
+ */
+function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
+  // Accept string or null. Anything else is a malformed payload.
+  if (msg.value !== null && typeof msg.value !== 'string') {
+    ctx.send(ws, {
+      type: 'session_error',
+      message: 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)',
+    })
+    return
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  if (typeof entry.session.setPromptEvaluatorSkipPattern !== 'function') {
+    // Defensive — mirrors the parallel path in handleSetPromptEvaluator.
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluatorSkipPattern' })
+    return
+  }
+
+  // Pre-validate non-empty strings here so we can distinguish a valid no-op
+  // (setter returns false because value matches current) from a rejected
+  // malformed regex (setter also returns false). Without this distinction
+  // the operator gets no feedback when their pattern is broken.
+  if (typeof msg.value === 'string' && msg.value.length > 0) {
+    try {
+      new RegExp(msg.value, 'i')
+    } catch (err) {
+      ctx.send(ws, {
+        type: 'session_error',
+        message: `Invalid pattern: ${err.message || 'malformed regex'}`,
+      })
+      return
+    }
+  }
+
+  const changed = entry.session.setPromptEvaluatorSkipPattern(msg.value)
+  if (!changed) {
+    // No-op (value already matches current) — no broadcast, no persist.
+    return
+  }
+
+  // The setter normalises empty string → null. Surface the stored value
+  // (not the raw payload) so subscribed clients see a stable shape.
+  const storedValue = entry.session.promptEvaluatorSkipPattern
+  ctx.broadcastToSession(sessionId, {
+    type: 'prompt_evaluator_skip_pattern_changed',
+    sessionId,
+    value: storedValue,
+  })
+
+  // Immediate persist — same justification as handleSetPromptEvaluator:
+  // pattern updates are rare operator actions and the sync flush avoids
+  // losing the change to a crash inside the debounce window.
+  try {
+    ctx.sessionManager?.serializeState?.()
+  } catch (err) {
+    log.warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
+  }
+}
+
 function handleSetPermissionRules(ws, client, msg, ctx) {
   const rules = msg.rules
 
@@ -1155,6 +1236,7 @@ export const settingsHandlers = {
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
   set_prompt_evaluator: handleSetPromptEvaluator,
+  set_prompt_evaluator_skip_pattern: handleSetPromptEvaluatorSkipPattern,
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,
