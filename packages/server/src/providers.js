@@ -208,13 +208,21 @@ function getProviderAuthInfo(name, ProviderClass) {
   const optional = !!credSpec?.optional
   const hint = credSpec?.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
 
-  // Claude CLI family always bills subscription regardless of env state.
-  const isClaudeCliFamily = name === 'claude-cli' || name === 'docker-cli'
+  // Bare claude-cli on the host always bills subscription: spawn-env.js's
+  // `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
+  // and the CLI auths via the host's ~/.claude OAuth state.
+  // Note: docker-cli is NOT in this set — see container-provider handling below.
+  const isHostClaudeCli = name === 'claude-cli'
 
-  // Look for any matching env var.
-  const matched = envVars.find(v => process.env[v])
+  // Container providers (docker-cli / docker-sdk) explicitly forward
+  // process.env.ANTHROPIC_API_KEY to the container at `docker run` time
+  // (see docker-session.js _startContainer + docker-sdk-session.js _startContainer).
+  // Inside the container there is no ~/.claude OAuth state, so the env var
+  // is the only auth path — no OAuth fallback even though the host-side
+  // preflight marks credentials as optional.
+  const isContainerProvider = name === 'docker-cli' || name === 'docker-sdk'
 
-  if (isClaudeCliFamily) {
+  if (isHostClaudeCli) {
     return {
       ready: true,
       source: 'oauth',
@@ -224,6 +232,9 @@ function getProviderAuthInfo(name, ProviderClass) {
       detail: 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
     }
   }
+
+  // Look for any matching env var.
+  const matched = envVars.find(v => process.env[v])
 
   if (matched) {
     return {
@@ -236,7 +247,19 @@ function getProviderAuthInfo(name, ProviderClass) {
     }
   }
 
-  // No env var matched — optional creds (Claude SDK family) get an OAuth fallback.
+  // Container providers can't reach host OAuth state — required-only.
+  if (isContainerProvider) {
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: hint || 'set ANTHROPIC_API_KEY (forwarded to the container at run time)',
+      detail: 'Not configured — container providers need ANTHROPIC_API_KEY on the host (no OAuth fallback inside the container)',
+    }
+  }
+
+  // No env var matched — optional creds (host claude-sdk) get an OAuth fallback.
   if (optional) {
     return {
       ready: true,
@@ -263,10 +286,16 @@ function getProviderAuthInfo(name, ProviderClass) {
 
 function describeBillingIdentity(name, envVar) {
   // Claude SDK family + ANTHROPIC_API_KEY → API; else OAuth fallback → subscription.
-  if (name === 'claude-sdk' || name === 'docker-sdk') {
+  if (name === 'claude-sdk') {
     if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API'
     if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token)'
     return 'Claude subscription'
+  }
+  // Container providers always bill API (no in-container OAuth fallback).
+  if (name === 'docker-cli' || name === 'docker-sdk') {
+    if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API (forwarded to container)'
+    if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token forwarded to container)'
+    return 'Anthropic API (forwarded to container)'
   }
   if (name === 'codex') return 'OpenAI API'
   if (name === 'gemini') return 'Google API'

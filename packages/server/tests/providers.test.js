@@ -192,6 +192,80 @@ describe('Provider Registry', () => {
         restoreKeys()
       }
     })
+
+    // Caught by agent review of #3673: docker-cli/docker-sdk forward
+    // ANTHROPIC_API_KEY to the container at `docker run` time, but the
+    // container has no ~/.claude OAuth state so they can't fall back when
+    // the env var is missing. Earlier code lumped docker-cli into the
+    // "always subscription" branch which was the exact misreport F1 was
+    // chartered to fix.
+    it('docker-cli reports ready=true source=env when ANTHROPIC_API_KEY is set', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      registerProvider('docker-cli', DockerSession)
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const dcli = list.find(p => p.name === 'docker-cli')
+        assert.ok(dcli?.auth)
+        assert.equal(dcli.auth.ready, true)
+        assert.equal(dcli.auth.source, 'env')
+        assert.equal(dcli.auth.envVar, 'ANTHROPIC_API_KEY')
+        assert.match(dcli.auth.detail, /Anthropic API.*forwarded to container/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-cli reports ready=false source=none when ANTHROPIC_API_KEY is missing', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      registerProvider('docker-cli', DockerSession)
+      clearKeys()
+      try {
+        const list = listProviders()
+        const dcli = list.find(p => p.name === 'docker-cli')
+        assert.ok(dcli?.auth)
+        assert.equal(dcli.auth.ready, false)
+        assert.equal(dcli.auth.source, 'none')
+        // Detail must NOT claim subscription billing — that was the bug.
+        assert.doesNotMatch(dcli.auth.detail, /subscription/i)
+        assert.match(dcli.auth.detail, /no OAuth fallback inside the container/i)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-sdk reports ready=true source=env when ANTHROPIC_API_KEY is set', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      registerProvider('docker-sdk', DockerSdkSession)
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const dsdk = list.find(p => p.name === 'docker-sdk')
+        assert.ok(dsdk?.auth)
+        assert.equal(dsdk.auth.ready, true)
+        assert.equal(dsdk.auth.source, 'env')
+        assert.match(dsdk.auth.detail, /Anthropic API/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-sdk reports ready=false when ANTHROPIC_API_KEY is missing (no OAuth fallback in container)', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      registerProvider('docker-sdk', DockerSdkSession)
+      clearKeys()
+      try {
+        const list = listProviders()
+        const dsdk = list.find(p => p.name === 'docker-sdk')
+        assert.ok(dsdk?.auth)
+        assert.equal(dsdk.auth.ready, false)
+        assert.equal(dsdk.auth.source, 'none')
+      } finally {
+        restoreKeys()
+      }
+    })
   })
 })
 
