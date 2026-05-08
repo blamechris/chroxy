@@ -110,9 +110,11 @@ import type {
   CustomAgent,
   DirectoryEntry,
   EnvironmentInfo,
+  EvaluatorRewriteMeta,
   FileEntry,
   McpServer,
   PendingCommunitySkill,
+  PendingEvaluatorClarify,
   QueuedMessage,
   SessionInfo,
   SessionNotification,
@@ -880,6 +882,101 @@ function handleSkillTrustAccepted(msg: Record<string, unknown>, get: MsgGet, _se
   });
 }
 
+// #3188: auto-evaluator rewrite broadcast (#3186 emit, #3208 schema).
+// Push a `system` message into the targeted session's history with
+// `evaluator` metadata so ChatView's renderMessage can render the
+// rewrite-explanation banner. Persisted via session_messages — replay
+// on reconnect re-renders the banner without re-firing the (transient)
+// wire event. Dedup'd by `evaluatorIterationId`.
+//
+// Also clears any matching `pendingEvaluatorClarify` for the session: a
+// rewrite verdict supersedes a stale clarify-pending entry the operator
+// hadn't answered when the new round-trip kicked in.
+function handleEvaluatorRewrite(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const evaluatorIterationId = typeof msg.evaluatorIterationId === 'string' ? msg.evaluatorIterationId : null;
+  const originalDraft = typeof msg.originalDraft === 'string' ? msg.originalDraft : null;
+  const rewritten = typeof msg.rewritten === 'string' ? msg.rewritten : null;
+  if (!evaluatorIterationId || originalDraft === null || rewritten === null) return;
+  const reasoning = typeof msg.reasoning === 'string' ? msg.reasoning : '';
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+
+  const evaluatorMeta: EvaluatorRewriteMeta = {
+    kind: 'rewrite',
+    evaluatorIterationId,
+    originalDraft,
+    rewritten,
+    reasoning,
+  };
+
+  updateSession(targetId, (state) => {
+    // Dedup on `evaluatorIterationId` so a session_messages replay (or
+    // duplicate broadcast) doesn't double-insert the banner.
+    const alreadyInserted = state.messages.some(
+      (m) => m.type === 'system' && m.evaluator?.evaluatorIterationId === evaluatorIterationId,
+    );
+    if (alreadyInserted) {
+      // Still clear any stale clarify-pending state — a new rewrite
+      // verdict means the prior clarify question no longer applies.
+      if (state.pendingEvaluatorClarify) return { pendingEvaluatorClarify: null };
+      return {};
+    }
+    const systemMessage: ChatMessage = {
+      id: `evaluator-rewrite-${evaluatorIterationId}`,
+      type: 'system',
+      content: 'Your message was rewritten to be clearer — see why',
+      timestamp: Date.now(),
+      evaluator: evaluatorMeta,
+    };
+    const patch: Partial<SessionState> = {
+      messages: [...state.messages, systemMessage],
+    };
+    if (state.pendingEvaluatorClarify) {
+      patch.pendingEvaluatorClarify = null;
+    }
+    return patch;
+  });
+}
+
+// #3188: auto-evaluator clarify broadcast (#3186 emit, #3208 schema).
+// Set `pendingEvaluatorClarify` on the targeted session so ChatView
+// renders an inline prompt block showing the clarifying question + the
+// `Iteration N/3` counter. Cleared on the next user_input echo for this
+// session or when a follow-up rewrite verdict supersedes it.
+//
+// Transient — NOT persisted across reconnects. The server re-fires the
+// event on the next user_input cycle, so a reconnect mid-clarify drops
+// the inline prompt; the operator re-types and the next round-trip
+// reproduces it. Dedup'd by `evaluatorIterationId` so a duplicate
+// broadcast doesn't reset state to an older question.
+function handleEvaluatorClarify(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const evaluatorIterationId = typeof msg.evaluatorIterationId === 'string' ? msg.evaluatorIterationId : null;
+  const evaluatorIteration = typeof msg.evaluatorIteration === 'number' && Number.isInteger(msg.evaluatorIteration) && msg.evaluatorIteration >= 1
+    ? msg.evaluatorIteration
+    : null;
+  const originalDraft = typeof msg.originalDraft === 'string' ? msg.originalDraft : null;
+  const clarification = typeof msg.clarification === 'string' ? msg.clarification : null;
+  if (!evaluatorIterationId || evaluatorIteration === null || originalDraft === null || clarification === null) return;
+  const reasoning = typeof msg.reasoning === 'string' ? msg.reasoning : '';
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId || !get().sessionStates[targetId]) return;
+
+  const pending: PendingEvaluatorClarify = {
+    evaluatorIterationId,
+    evaluatorIteration,
+    originalDraft,
+    clarification,
+    reasoning,
+  };
+
+  updateSession(targetId, (state) => {
+    // Dedup on `evaluatorIterationId` — a duplicate broadcast for the
+    // same iteration must NOT clobber state (no-op).
+    if (state.pendingEvaluatorClarify?.evaluatorIterationId === evaluatorIterationId) return {};
+    return { pendingEvaluatorClarify: pending };
+  });
+}
+
 // #3298: community skill is awaiting first-activation trust grant. Add
 // an entry to `pendingCommunitySkills` on the active (or target) session
 // so the SkillsPanel "Pending review" section renders a Trust button.
@@ -1539,6 +1636,9 @@ const HANDLERS: Record<string, Handler> = {
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
+  // #3188: auto-evaluator broadcast events (#3186 emit, #3208 schema)
+  evaluator_rewrite: handleEvaluatorRewrite,
+  evaluator_clarify: handleEvaluatorClarify,
   skills_list: handleSkillsList,
   skill_changed: handleSkillChanged,
   skill_activated: handleSkillActivated,
@@ -1975,9 +2075,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (userInput.content) {
         get().appendTerminalData(`\r\n\x1b[33m> ${userInput.content}\x1b[0m\r\n\r\n`);
       }
-      updateSession(userInput.sessionId, (ss) => ({
-        messages: [...ss.messages, userInput.chatMessage],
-      }));
+      // #3188: a remote client just answered (or otherwise sent a fresh
+      // user_input for this session). Any locally-rendered evaluator
+      // clarify prompt is now stale — clear it so two paired clients
+      // don't both keep showing the question after one has responded.
+      updateSession(userInput.sessionId, (ss) => {
+        const patch: Partial<SessionState> = {
+          messages: [...ss.messages, userInput.chatMessage],
+        };
+        if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+        return patch;
+      });
       break;
     }
 

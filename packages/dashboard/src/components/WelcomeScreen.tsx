@@ -31,6 +31,12 @@ function abbreviatePath(path: string): string {
 }
 
 /** Format a timestamp as relative time */
+// #3619: wall-clock relative-time renderer kept on `Date.now()`
+// intentionally. The input `ts` is itself wall-clock (persisted across
+// browser refreshes / reconnects); switching to `performance.now()`
+// would subtract a process-local monotonic clock from a wall-clock
+// input and produce nonsense. Same rationale applies to the analogous
+// renderers in `CheckpointTimeline.tsx` and `ServerPicker.tsx`.
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts
   if (diffMs < 0) return 'just now'
