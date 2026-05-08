@@ -100,12 +100,13 @@ export function EvaluatorClarifyPrompt({
   const submittedRef = useRef(false)
   // #3645 — hoist `onSubmit` into a ref so the handler identity is stable
   // across re-renders (parents commonly pass a fresh inline closure each
-  // render). The ref is updated in a layoutless effect so handleSubmit
-  // always invokes the *latest* prop and never a stale closure.
+  // render). The ref is assigned synchronously during render so handleSubmit
+  // always invokes the *latest* prop, with no commit-phase window where a
+  // user-input event could observe a stale closure (vs. useEffect, which
+  // runs after paint and leaves a brief gap on the first render with new
+  // props).
   const onSubmitRef = useRef(onSubmit)
-  useEffect(() => {
-    onSubmitRef.current = onSubmit
-  }, [onSubmit])
+  onSubmitRef.current = onSubmit
 
   // #3645 — when the server fires a new clarify iteration, the same
   // component instance may stay mounted (the parent re-renders with new
