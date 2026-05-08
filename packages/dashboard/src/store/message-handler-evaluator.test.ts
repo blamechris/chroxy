@@ -386,6 +386,126 @@ describe('dashboard message-handler — auto-evaluator (#3188)', () => {
     })
   })
 
+  // #3647 — The dedupe test above only exercises handler-level dedup within a
+  // single store lifecycle. In production, reconnect replay does NOT re-fire
+  // through `handleMessage` — `loadSavedConnection` reads the cached system
+  // message straight out of `localStorage` via `loadAllSessionMessages` and
+  // pushes it into `sessionStates[id].messages` directly. So the dedup that
+  // matters on reconnect is "the `evaluator` metadata round-trips cleanly
+  // through JSON.stringify/parse, and a follow-up live `evaluator_rewrite`
+  // for the same iteration id does NOT double-insert the banner".
+  //
+  // This test pins that contract using the REAL persistence helpers
+  // (`persistSessionMessages` + `loadSessionMessages`), not a JSON.stringify
+  // simulation. The persistence module is mocked at the top of this file for
+  // the rest of the suite, so we pull in the real implementation via
+  // `vi.importActual` here. The goal: catch a regression where someone adds a
+  // new field to the rewrite banner that doesn't survive JSON serialization
+  // (e.g. a Function, undefined, Date that gets coerced to string).
+  describe('localStorage round-trip: rewrite banner survives a real persist + rehydrate cycle (#3647)', () => {
+    it('round-trips through localStorage and dedupes a follow-up live event', async () => {
+      // Pull the real persistence helpers, bypassing the file-level vi.mock.
+      const realPersistence = await vi.importActual<typeof import('./persistence')>('./persistence')
+      const {
+        persistSessionMessages,
+        loadSessionMessages,
+        flushPendingWrites,
+        _resetForTesting,
+      } = realPersistence
+
+      // Reset module-level debounce + scope state from any prior test in this run.
+      _resetForTesting()
+
+      // 1. Fire the live event so the handler pushes the system banner.
+      handleMessage({
+        type: 'evaluator_rewrite',
+        sessionId: 's1',
+        originalDraft: 'fix it',
+        rewritten: 'Run lint on src/',
+        reasoning: 'too vague',
+        evaluatorIterationId: 'iter-roundtrip-1',
+      }, ctx() as any)
+
+      const liveSession = (store.getState() as any).sessionStates.s1 as SessionState
+      expect(liveSession.messages).toHaveLength(1)
+      const liveBanner = liveSession.messages[0]!
+      expect(liveBanner.type).toBe('system')
+      expect(liveBanner.evaluator?.kind).toBe('rewrite')
+
+      // 2. Persist via the REAL helper (debounced — flush to land it now).
+      persistSessionMessages('s1', liveSession.messages)
+      flushPendingWrites()
+
+      // Sanity: the raw localStorage entry is a JSON-encoded array. Key
+      // format mirrors `sessionMessagesKey` — `chroxy_persist_messages_<id>`
+      // when no server scope is set (the default in this suite).
+      const rawKey = `chroxy_persist_messages_s1`
+      const rawValue = localStorage.getItem(rawKey)
+      expect(rawValue).not.toBeNull()
+      expect(rawValue!.startsWith('[')).toBe(true)
+
+      // 3. Simulate reconnect: clear in-memory state, then recreate the store
+      //    as if the page just (re)loaded with no session state in memory.
+      mockSocket = createMockSocket()
+      store = createMockStore(baseStateWithSession('s1'))
+      setStore(store)
+      resetReplayFlags()
+      const reconnected = (store.getState() as any).sessionStates.s1 as SessionState
+      expect(reconnected.messages).toEqual([])
+
+      // 4. Rehydrate from localStorage via the REAL load helper. This is the
+      //    path `loadSavedConnection` takes — direct read, no handler.
+      const rehydrated = loadSessionMessages('s1')
+      expect(rehydrated).toHaveLength(1)
+      const rehydratedBanner = rehydrated[0]!
+
+      // 5. The system message + evaluator metadata round-trip cleanly.
+      //    These assertions are the contract that catches a regression where
+      //    a non-serializable field (Function, undefined, Date) gets added.
+      expect(rehydratedBanner.id).toBe(liveBanner.id)
+      expect(rehydratedBanner.type).toBe('system')
+      expect(rehydratedBanner.content).toBe(liveBanner.content)
+      expect(rehydratedBanner.timestamp).toBe(liveBanner.timestamp)
+      expect(rehydratedBanner.evaluator).toBeDefined()
+      expect(rehydratedBanner.evaluator?.kind).toBe('rewrite')
+      expect(rehydratedBanner.evaluator?.evaluatorIterationId).toBe('iter-roundtrip-1')
+      expect(rehydratedBanner.evaluator?.originalDraft).toBe('fix it')
+      expect(rehydratedBanner.evaluator?.rewritten).toBe('Run lint on src/')
+      expect(rehydratedBanner.evaluator?.reasoning).toBe('too vague')
+      // Deep-equal the evaluator block to pin the full shape (catches a new
+      // field that gets dropped or coerced by JSON.stringify).
+      expect(rehydratedBanner.evaluator).toEqual(liveBanner.evaluator)
+
+      // 6. Push the rehydrated message into the fresh store — this is what
+      //    `loadSavedConnection` does after `loadAllSessionMessages`.
+      store.setState((prev: any) => ({
+        sessionStates: {
+          ...prev.sessionStates,
+          s1: { ...prev.sessionStates.s1, messages: rehydrated },
+        },
+      }))
+
+      // 7. The live `evaluator_rewrite` arrives again post-reconnect (e.g. the
+      //    server replays it on resync). Dedup by `evaluatorIterationId` must
+      //    still work against the rehydrated banner — no double-insert.
+      handleMessage({
+        type: 'evaluator_rewrite',
+        sessionId: 's1',
+        originalDraft: 'fix it',
+        rewritten: 'Run lint on src/',
+        reasoning: 'too vague',
+        evaluatorIterationId: 'iter-roundtrip-1',
+      }, ctx() as any)
+
+      const final = (store.getState() as any).sessionStates.s1 as SessionState
+      expect(final.messages).toHaveLength(1)
+      expect(final.messages[0]!.evaluator?.evaluatorIterationId).toBe('iter-roundtrip-1')
+
+      // Cleanup module-level state so the next test starts fresh.
+      _resetForTesting()
+    })
+  })
+
   // #3188 — pendingEvaluatorClarify lifecycle hardening (Copilot review on PR #3643).
   // The clarify prompt must drop on:
   //   - cross-client user_input echo (a remote client answered)
