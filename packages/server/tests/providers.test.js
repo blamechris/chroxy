@@ -178,7 +178,7 @@ describe('Provider Registry', () => {
       }
     })
 
-    it('gemini reports ready when GEMINI_API_KEY or GOOGLE_API_KEY is set', () => {
+    it('gemini reports ready when GEMINI_API_KEY is set', () => {
       clearKeys()
       process.env.GEMINI_API_KEY = 'test-key'
       try {
@@ -190,6 +190,46 @@ describe('Provider Registry', () => {
         assert.equal(gemini.auth.envVar, 'GEMINI_API_KEY')
       } finally {
         restoreKeys()
+      }
+    })
+
+    it('gemini reports ready when GOOGLE_API_KEY is set (without GEMINI_API_KEY)', () => {
+      clearKeys()
+      process.env.GOOGLE_API_KEY = 'test-key'
+      try {
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'env')
+        assert.equal(gemini.auth.envVar, 'GOOGLE_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('providers without a preflight credentials block are reported ready (opt-out)', () => {
+      class NoPreflightProvider {
+        static get capabilities() { return {} }
+        // Intentionally no static get preflight() — opts out of credential checks
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+      }
+      registerProvider('test-no-preflight', NoPreflightProvider)
+      try {
+        const list = listProviders()
+        const entry = list.find(p => p.name === 'test-no-preflight')
+        assert.ok(entry?.auth, 'no-preflight provider should still expose auth')
+        assert.equal(entry.auth.ready, true, 'opt-out provider must not be marked unready')
+        assert.equal(entry.auth.source, 'none')
+        assert.deepEqual(entry.auth.envVars, [])
+      } finally {
+        // Cleanup: registerProvider mutates the module-level PROVIDERS map.
+        // No public unregister, but subsequent tests don't depend on absence.
       }
     })
 

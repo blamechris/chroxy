@@ -178,8 +178,11 @@ export class GeminiSession extends JsonlSubprocessSession {
         installHint: 'install Gemini CLI (see https://github.com/google-gemini/generative-ai-cli)',
       },
       credentials: {
-        envVars: ['GEMINI_API_KEY'],
-        hint: 'set GEMINI_API_KEY',
+        // GOOGLE_API_KEY is also accepted by the Gemini CLI subprocess (see
+        // utils/spawn-env.js gemini allowlist). Keep both here so the
+        // preflight + #3404 audit auth surface match what the spawn allows.
+        envVars: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+        hint: 'set GEMINI_API_KEY or GOOGLE_API_KEY',
         optional: false,
       },
     }

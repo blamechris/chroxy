@@ -208,6 +208,21 @@ function getProviderAuthInfo(name, ProviderClass) {
   const optional = !!credSpec?.optional
   const hint = credSpec?.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
 
+  // Providers that opt out of preflight credentials checking (custom/external
+  // providers, or any class that doesn't declare a `credentials` block) have
+  // no env-var requirement we can verify — treat as ready so the UI doesn't
+  // disable a working provider just because it skipped declaring preflight.
+  if (!credSpec) {
+    return {
+      ready: true,
+      source: 'none',
+      envVar: null,
+      envVars: [],
+      hint: '',
+      detail: 'No credential check declared by this provider',
+    }
+  }
+
   // Bare claude-cli on the host always bills subscription: spawn-env.js's
   // `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
   // and the CLI auths via the host's ~/.claude OAuth state.
