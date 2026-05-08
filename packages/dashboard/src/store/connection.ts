@@ -759,6 +759,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           patch.isPlanPending = false;
           patch.planAllowedPrompts = [];
         }
+        // #3188: pendingEvaluatorClarify is explicitly transient — the
+        // server re-fires `evaluator_clarify` on the next user_input
+        // cycle if the verdict is still clarify. Clearing here keeps the
+        // contract: a reconnect drops any in-flight clarify question
+        // rather than leaving it on screen with stale state.
+        if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
         return Object.keys(patch).length > 0 ? patch : {};
       });
 
@@ -1107,11 +1113,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (options?.isVoice) {
       payload.isVoice = true;
     }
+    let result: 'sent' | 'queued' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
-      return 'sent';
+      result = 'sent';
+    } else {
+      result = enqueueMessage('input', payload);
     }
-    return enqueueMessage('input', payload);
+
+    // #3188: clear the inline auto-evaluator clarify prompt once the
+    // answer has actually gone over the wire (or been queued for a
+    // pending reconnect). Clearing optimistically inside addUserMessage
+    // would lose the question if the queue is full and the message is
+    // dropped — the operator would be stuck without context to retry.
+    if ((result === 'sent' || result === 'queued') && activeSessionId) {
+      const ss = get().sessionStates[activeSessionId];
+      if (ss?.pendingEvaluatorClarify) {
+        updateActiveSession(() => ({ pendingEvaluatorClarify: null }));
+      }
+    }
+    return result;
   },
 
   sendInterrupt: () => {

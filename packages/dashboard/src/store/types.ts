@@ -14,6 +14,10 @@ export type {
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
+  // #3188: re-export auto-evaluator rewrite metadata so dashboard
+  // components can type-check banner props without reaching into
+  // store-core.
+  EvaluatorRewriteMeta,
   SavedConnection,
   ContextUsage,
   InputSettings,
@@ -195,6 +199,33 @@ export interface PermissionRule {
  */
 export type PermissionDecision = 'allow' | 'deny' | 'allowSession';
 
+// #3188: auto-evaluator clarify-pending state. Populated by the
+// `evaluator_clarify` handler when the auto-evaluator hook (#3186) lands
+// on the clarify verdict; cleared when the operator answers (sends a
+// regular `user_input`) or when a follow-up `evaluator_rewrite` arrives
+// for the same session. Transient — NOT persisted across reconnects.
+// The server re-fires the event on the next user_input cycle, so a
+// reconnect mid-clarify drops the inline prompt block; the operator
+// re-types and the next round-trip reproduces it.
+export interface PendingEvaluatorClarify {
+  /** Server-generated id used to dedup events on replay. */
+  evaluatorIterationId: string;
+  /** 1-based clarify-loop counter, capped at MAX_EVALUATOR_ITERATIONS (3). */
+  evaluatorIteration: number;
+  /** Operator's draft that triggered the clarify verdict. */
+  originalDraft: string;
+  /** The clarifying question the evaluator wants the operator to answer. */
+  clarification: string;
+  /** Why the evaluator decided to ask instead of forwarding/rewriting. */
+  reasoning: string;
+}
+
+/**
+ * #3188 — server-side cap on the auto-evaluator clarify loop (mirrors the
+ * default `maxIterations` in #3186). Used to render `Iteration N/MAX`.
+ */
+export const MAX_EVALUATOR_ITERATIONS = 3;
+
 // #3068: payload returned by the prompt evaluator. One of `verdict` or `error`
 // is populated per response — clients should check `error` first.
 export interface EvaluatorResultPayload {
@@ -339,6 +370,13 @@ export interface SessionState extends BaseSessionState {
   // error path. Not persisted across reconnects — the WS request would
   // be stale anyway, and the disconnect handler clears the field.
   pendingTrustGrants?: PendingTrustGrant[];
+  // #3188: pending clarify question from the auto-evaluator (#3186).
+  // Set when an `evaluator_clarify` event arrives for this session and
+  // cleared on the next user_input echo or follow-up `evaluator_rewrite`.
+  // Transient — NOT persisted across reconnects: the server re-emits
+  // the event on the next user_input cycle, so dropping the pending
+  // state on reconnect is acceptable for v1.
+  pendingEvaluatorClarify?: PendingEvaluatorClarify | null;
 }
 
 export interface ConnectionState {
