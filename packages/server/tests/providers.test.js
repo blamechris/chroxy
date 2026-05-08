@@ -98,6 +98,215 @@ describe('Provider Registry', () => {
         'gemini does not implement setPermissionRules so should report sessionRules: false')
     }
   })
+
+  // #3404 audit (F1+F5): listProviders must surface auth/credentials state
+  // so the dashboard can grey-out unusable providers and show a billing-
+  // identity confidence panel without making the user run `chroxy doctor`.
+  describe('auth status (#3404 audit)', () => {
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']
+    const saved = {}
+
+    function clearKeys() {
+      for (const k of ENV_KEYS) {
+        saved[k] = process.env[k]
+        delete process.env[k]
+      }
+    }
+    function restoreKeys() {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+
+    it('claude-sdk reports source=env and ready when ANTHROPIC_API_KEY is set', () => {
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        assert.ok(sdk?.auth, 'claude-sdk should expose auth')
+        assert.equal(sdk.auth.ready, true)
+        assert.equal(sdk.auth.source, 'env')
+        assert.equal(sdk.auth.envVar, 'ANTHROPIC_API_KEY')
+        assert.match(sdk.auth.detail, /ANTHROPIC_API_KEY/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-sdk reports source=oauth (optional fallback) when no env var is set', () => {
+      clearKeys()
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        // Optional credentials → ready stays true, source is oauth
+        assert.equal(sdk.auth.ready, true)
+        assert.equal(sdk.auth.source, 'oauth')
+        assert.equal(sdk.auth.envVar, null)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-cli reports source=oauth regardless of env (subscription always)', () => {
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const cli = list.find(p => p.name === 'claude-cli')
+        // CLI strips ANTHROPIC_API_KEY before spawn — billing is always subscription
+        assert.equal(cli.auth.source, 'oauth')
+        assert.equal(cli.auth.ready, true)
+        assert.match(cli.auth.detail, /subscription/i)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('codex reports ready=false and source=none when OPENAI_API_KEY is missing', () => {
+      clearKeys()
+      try {
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return // codex registration may be conditional in test env
+        assert.equal(codex.auth.ready, false)
+        assert.equal(codex.auth.source, 'none')
+        assert.match(codex.auth.detail, /OPENAI_API_KEY/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('gemini reports ready when GEMINI_API_KEY is set', () => {
+      clearKeys()
+      process.env.GEMINI_API_KEY = 'test-key'
+      try {
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'env')
+        assert.equal(gemini.auth.envVar, 'GEMINI_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('gemini reports ready when GOOGLE_API_KEY is set (without GEMINI_API_KEY)', () => {
+      clearKeys()
+      process.env.GOOGLE_API_KEY = 'test-key'
+      try {
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'env')
+        assert.equal(gemini.auth.envVar, 'GOOGLE_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('providers without a preflight credentials block are reported ready (opt-out)', () => {
+      class NoPreflightProvider {
+        static get capabilities() { return {} }
+        // Intentionally no static get preflight() — opts out of credential checks
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+      }
+      registerProvider('test-no-preflight', NoPreflightProvider)
+      try {
+        const list = listProviders()
+        const entry = list.find(p => p.name === 'test-no-preflight')
+        assert.ok(entry?.auth, 'no-preflight provider should still expose auth')
+        assert.equal(entry.auth.ready, true, 'opt-out provider must not be marked unready')
+        assert.equal(entry.auth.source, 'none')
+        assert.deepEqual(entry.auth.envVars, [])
+      } finally {
+        // Cleanup: registerProvider mutates the module-level PROVIDERS map.
+        // No public unregister, but subsequent tests don't depend on absence.
+      }
+    })
+
+    // Caught by agent review of #3673: docker-cli/docker-sdk forward
+    // ANTHROPIC_API_KEY to the container at `docker run` time, but the
+    // container has no ~/.claude OAuth state so they can't fall back when
+    // the env var is missing. Earlier code lumped docker-cli into the
+    // "always subscription" branch which was the exact misreport F1 was
+    // chartered to fix.
+    it('docker-cli reports ready=true source=env when ANTHROPIC_API_KEY is set', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      registerProvider('docker-cli', DockerSession)
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const dcli = list.find(p => p.name === 'docker-cli')
+        assert.ok(dcli?.auth)
+        assert.equal(dcli.auth.ready, true)
+        assert.equal(dcli.auth.source, 'env')
+        assert.equal(dcli.auth.envVar, 'ANTHROPIC_API_KEY')
+        assert.match(dcli.auth.detail, /Anthropic API.*forwarded to container/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-cli reports ready=false source=none when ANTHROPIC_API_KEY is missing', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      registerProvider('docker-cli', DockerSession)
+      clearKeys()
+      try {
+        const list = listProviders()
+        const dcli = list.find(p => p.name === 'docker-cli')
+        assert.ok(dcli?.auth)
+        assert.equal(dcli.auth.ready, false)
+        assert.equal(dcli.auth.source, 'none')
+        // Detail must NOT claim subscription billing — that was the bug.
+        assert.doesNotMatch(dcli.auth.detail, /subscription/i)
+        assert.match(dcli.auth.detail, /no OAuth fallback inside the container/i)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-sdk reports ready=true source=env when ANTHROPIC_API_KEY is set', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      registerProvider('docker-sdk', DockerSdkSession)
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const dsdk = list.find(p => p.name === 'docker-sdk')
+        assert.ok(dsdk?.auth)
+        assert.equal(dsdk.auth.ready, true)
+        assert.equal(dsdk.auth.source, 'env')
+        assert.match(dsdk.auth.detail, /Anthropic API/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-sdk reports ready=false when ANTHROPIC_API_KEY is missing (no OAuth fallback in container)', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      registerProvider('docker-sdk', DockerSdkSession)
+      clearKeys()
+      try {
+        const list = listProviders()
+        const dsdk = list.find(p => p.name === 'docker-sdk')
+        assert.ok(dsdk?.auth)
+        assert.equal(dsdk.auth.ready, false)
+        assert.equal(dsdk.auth.source, 'none')
+      } finally {
+        restoreKeys()
+      }
+    })
+  })
 })
 
 describe('Docker Provider Naming (#2475)', () => {

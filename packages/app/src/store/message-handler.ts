@@ -2170,7 +2170,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // objects without a string `name`.
       const providers: ProviderInfo[] = providerResult.providers
         .filter(
-          (p): p is { name: string; capabilities?: unknown } =>
+          (p): p is { name: string; capabilities?: unknown; auth?: unknown } =>
             !!p &&
             typeof p === 'object' &&
             typeof (p as { name?: unknown }).name === 'string',
@@ -2179,6 +2179,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           const entry: ProviderInfo = { name: p.name };
           if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
             entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
+          }
+          // #3404 audit (F1+F5): preserve the server's auth/billing summary so
+          // the create-session modal can disable unready chips and show the
+          // billing identity. Earlier code dropped the field, breaking the
+          // entire mobile UI surface for these features.
+          if (p.auth && typeof p.auth === 'object' && !Array.isArray(p.auth)) {
+            entry.auth = p.auth as ProviderInfo['auth'];
           }
           return entry;
         });

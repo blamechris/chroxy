@@ -467,22 +467,37 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             aria-label="Select provider"
           >
             {availableProviders.length > 0
-              ? availableProviders.map(p => (
-                  <option key={p.name} value={p.name}>
-                    {PROVIDER_LABELS[p.name] || p.name}
-                  </option>
-                ))
+              ? availableProviders.map(p => {
+                  const unready = p.auth?.ready === false
+                  return (
+                    <option key={p.name} value={p.name} disabled={unready}>
+                      {(PROVIDER_LABELS[p.name] || p.name) + (unready ? ' — credentials missing' : '')}
+                    </option>
+                  )
+                })
               : <>
                   <option value="claude-sdk">Claude Code (SDK)</option>
                   <option value="claude-cli">Claude Code (CLI)</option>
                 </>
             }
           </select>
-          {PROVIDER_BILLING[provider] && (
-            <span className="provider-billing-hint" data-testid="provider-billing-hint">
-              {PROVIDER_BILLING[provider]}
-            </span>
-          )}
+          {/* Live auth detail from the server (#3404 audit F5) wins over the
+              static PROVIDER_BILLING fallback so the user sees the actual
+              billing identity, not a generic "uses API credits" hint. */}
+          {(() => {
+            const live = availableProviders.find(p => p.name === provider)?.auth
+            const text = live?.detail || PROVIDER_BILLING[provider]
+            if (!text) return null
+            return (
+              <span
+                className="provider-billing-hint"
+                data-testid="provider-billing-hint"
+                data-source={live?.source ?? 'static'}
+              >
+                {text}
+              </span>
+            )
+          })()}
         </div>
         {availableProviders.length > 0 && (() => {
           const selected = availableProviders.find(p => p.name === provider)
