@@ -2254,4 +2254,82 @@ describe('dashboard message-handler dispatch', () => {
       warn.mockRestore()
     })
   })
+
+  // #3671: dashboard's sendClientVisible mirrors the mobile app pattern —
+  // edge-triggered, memo-gated, encryption-pending guarded.
+  describe('sendClientVisible (#3671)', () => {
+    it('skips when socket is null or not OPEN', async () => {
+      const { sendClientVisible, resetClientVisibleMemo } = await import('./message-handler')
+      resetClientVisibleMemo()
+      const closed = { send: vi.fn(), readyState: WebSocket.CLOSED } as unknown as WebSocket
+      sendClientVisible(null, false)
+      sendClientVisible(closed, false)
+      expect((closed.send as any)).not.toHaveBeenCalled()
+    })
+
+    it('sends visible:false on first transition away from default true', async () => {
+      const { sendClientVisible, resetClientVisibleMemo } = await import('./message-handler')
+      resetClientVisibleMemo()
+      const sock = createMockSocket()
+      sendClientVisible(sock, false)
+      const sent = JSON.parse((sock.send as any).mock.calls[0][0])
+      expect(sent).toMatchObject({ type: 'client_visible', visible: false })
+    })
+
+    it('does not re-send when state matches the last value sent', async () => {
+      const { sendClientVisible, resetClientVisibleMemo } = await import('./message-handler')
+      resetClientVisibleMemo()
+      const sock = createMockSocket()
+      sendClientVisible(sock, false)
+      sendClientVisible(sock, false)
+      sendClientVisible(sock, false)
+      expect((sock.send as any)).toHaveBeenCalledTimes(1)
+    })
+
+    it('emits both directions on a true→false→true cycle', async () => {
+      const { sendClientVisible, resetClientVisibleMemo } = await import('./message-handler')
+      resetClientVisibleMemo()
+      const sock = createMockSocket()
+      sendClientVisible(sock, false)
+      sendClientVisible(sock, true)
+      const calls = (sock.send as any).mock.calls.map((c: any[]) => JSON.parse(c[0]).visible)
+      expect(calls).toEqual([false, true])
+    })
+
+    it('resetClientVisibleMemo allows the same state to be sent again', async () => {
+      const { sendClientVisible, resetClientVisibleMemo } = await import('./message-handler')
+      resetClientVisibleMemo()
+      const sock = createMockSocket()
+      sendClientVisible(sock, false)
+      // After a fresh connect we expect the next call to fire even if the
+      // desired state matches what we previously sent on the OLD socket.
+      resetClientVisibleMemo()
+      sendClientVisible(sock, false)
+      expect((sock.send as any)).toHaveBeenCalledTimes(2)
+    })
+
+    // Copilot review of #3677: the encryption-handshake guard
+    // `_pendingKeyPair !== null && _encryptionState === null` keeps the
+    // dashboard from emitting plaintext client_visible mid key-exchange,
+    // which the server would 1008-disconnect.
+    it('skips when key-exchange handshake is in flight (#3677 review)', async () => {
+      const { sendClientVisible, resetClientVisibleMemo, _testSetEncryptionHandshake } = await import('./message-handler') as any
+      resetClientVisibleMemo()
+      const sock = createMockSocket()
+
+      // Open: pending keypair set, encryption not yet established.
+      _testSetEncryptionHandshake({ pending: true, established: false })
+      sendClientVisible(sock, false)
+      expect((sock.send as any)).not.toHaveBeenCalled()
+
+      // After key_exchange_ok: encryption established, pending cleared.
+      _testSetEncryptionHandshake({ pending: false, established: true })
+      sendClientVisible(sock, false)
+      expect((sock.send as any)).toHaveBeenCalledTimes(1)
+
+      // Reset the handshake state so subsequent tests in this file aren't
+      // poisoned (encryption flag would force `wsSend` down the encrypt path).
+      _testSetEncryptionHandshake({ pending: false, established: false })
+    })
+  })
 })

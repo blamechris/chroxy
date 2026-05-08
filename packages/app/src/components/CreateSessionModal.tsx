@@ -425,8 +425,12 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
   },
   providerChipDisabled: {
+    // #3676: Opacity is the disabled signal. RN's `borderStyle: 'dashed'`
+    // silently falls back to solid on Android whenever borderRadius != 0
+    // (chip uses borderRadius: 10), so we don't bother with it — opacity is
+    // the cross-platform indicator and the accessibility label already says
+    // "(credentials missing)" for screen readers.
     opacity: 0.5,
-    borderStyle: 'dashed',
   },
   providerChipTextDisabled: {
     color: COLORS.textDisabled,
