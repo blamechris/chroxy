@@ -570,6 +570,28 @@ describe('input-handlers', () => {
       assert.equal(session.sendMessage.lastCall[0], 'missing key should not block real users either')
     })
 
+    // #3651: pin EVALUATOR_TIMEOUT goes through the same fail-open path as
+    // API_ERROR / NO_API_KEY / BAD_RESPONSE. A hung evaluator (network
+    // partition, slow upstream) raises a timeout-coded error from
+    // evaluateDraft; the handler's catch block must keep the user moving
+    // by forwarding the original draft.
+    it('fail-open: EVALUATOR_TIMEOUT forwards original and does not throw', async () => {
+      const err = Object.assign(new Error('Evaluator request timed out after 30000ms'), {
+        code: 'EVALUATOR_TIMEOUT',
+      })
+      const evaluator = createSpy(async () => { throw err })
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'a hung evaluator must not block the user input path' }, ctx)
+
+      assert.equal(evaluator.callCount, 1)
+      assert.equal(session.sendMessage.callCount, 1, 'fail-open: original message must still reach the session on timeout')
+      assert.equal(session.sendMessage.lastCall[0], 'a hung evaluator must not block the user input path')
+      const evals = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
+      assert.equal(evals.length, 0, 'fail-open: no evaluator broadcast on timeout')
+    })
+
     // #3640: pin BAD_RESPONSE goes through the same fail-open path as
     // API_ERROR / NO_API_KEY. A future refactor that special-cases the
     // other two and lets BAD_RESPONSE escape would otherwise pass without

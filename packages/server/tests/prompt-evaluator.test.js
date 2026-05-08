@@ -27,6 +27,32 @@ function makeThrowingClient(err) {
   }
 }
 
+// #3651 — stub that never resolves on its own and rejects with an
+// AbortError when the caller's signal aborts. Mirrors what the real
+// Anthropic SDK does when passed a signal that fires.
+function makeHangingClient({ onSignal } = {}) {
+  return {
+    messages: {
+      create: (_args, opts) => new Promise((_resolve, reject) => {
+        const signal = opts?.signal
+        if (!signal) return // never resolves
+        if (signal.aborted) {
+          const err = new Error('aborted')
+          err.name = 'AbortError'
+          reject(err)
+          return
+        }
+        signal.addEventListener('abort', () => {
+          if (onSignal) onSignal(signal)
+          const err = new Error('aborted')
+          err.name = 'AbortError'
+          reject(err)
+        })
+      }),
+    },
+  }
+}
+
 describe('evaluateDraft', () => {
   describe('input validation', () => {
     it('throws when draft is missing', async () => {
@@ -382,6 +408,153 @@ describe('evaluateDraft', () => {
       } finally {
         delete process.env.CHROXY_EVALUATOR_MODEL
       }
+    })
+  })
+
+  // #3651: hard deadline on the Anthropic round-trip. Without it, a hung
+  // promise (network partition, slow upstream, 503 with no body) blocks
+  // the user_input hot path indefinitely.
+  describe('timeout (#3651)', () => {
+    it('throws EVALUATOR_TIMEOUT when messages.create never resolves before the deadline', async () => {
+      const client = makeHangingClient()
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: 25 }),
+        (err) => {
+          assert.equal(err.code, 'EVALUATOR_TIMEOUT')
+          assert.match(err.message, /timed out after 25ms/)
+          return true
+        },
+      )
+    })
+
+    it('passes an AbortSignal to messages.create that fires on timeout', async () => {
+      let receivedSignal = null
+      const client = {
+        messages: {
+          create: (_args, opts) => new Promise((_resolve, reject) => {
+            receivedSignal = opts?.signal ?? null
+            if (!receivedSignal) return
+            receivedSignal.addEventListener('abort', () => {
+              const err = new Error('aborted')
+              err.name = 'AbortError'
+              reject(err)
+            })
+          }),
+        },
+      }
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: 25 }),
+        (err) => err.code === 'EVALUATOR_TIMEOUT',
+      )
+      assert.ok(receivedSignal, 'evaluateDraft must pass a signal in the SDK options')
+      assert.equal(receivedSignal.aborted, true, 'signal must be aborted on timeout')
+    })
+
+    it('does not abort a fast-resolving call', async () => {
+      let receivedSignal = null
+      const client = {
+        messages: {
+          create: async (_args, opts) => {
+            receivedSignal = opts?.signal ?? null
+            return { content: [{ type: 'text', text: JSON.stringify({ verdict: 'forward', rewritten: null, clarification: null, reasoning: 'ok' }) }] }
+          },
+        },
+      }
+      const result = await evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: 5_000 })
+      assert.equal(result.verdict, 'forward')
+      assert.equal(receivedSignal?.aborted, false, 'signal must not abort on fast resolution')
+    })
+
+    it('clears the timeout when the call resolves so no orphaned timer fires later', async () => {
+      // Pin the cleanup contract: a successful evaluate must not leave a
+      // setTimeout queued that would call controller.abort() later (no-op
+      // on an already-completed call, but still a leaked event-loop entry).
+      let timeoutCalls = 0
+      const realSetTimeout = globalThis.setTimeout
+      const realClearTimeout = globalThis.clearTimeout
+      const liveTimers = new Set()
+      globalThis.setTimeout = (fn, ms, ...rest) => {
+        timeoutCalls++
+        const handle = realSetTimeout(fn, ms, ...rest)
+        liveTimers.add(handle)
+        return handle
+      }
+      globalThis.clearTimeout = (handle) => {
+        liveTimers.delete(handle)
+        return realClearTimeout(handle)
+      }
+      try {
+        const client = makeStubClient(
+          JSON.stringify({ verdict: 'forward', rewritten: null, clarification: null, reasoning: 'ok' }),
+        )
+        await evaluateDraft({ draft: 'a substantive draft for evaluation', client })
+        assert.equal(timeoutCalls, 1, 'evaluateDraft schedules exactly one timer per call')
+        assert.equal(liveTimers.size, 0, 'the timer must be cleared on success — none should be live')
+      } finally {
+        globalThis.setTimeout = realSetTimeout
+        globalThis.clearTimeout = realClearTimeout
+      }
+    })
+
+    it('honours CHROXY_EVALUATOR_TIMEOUT_MS env override when no explicit timeoutMs given', async () => {
+      const saved = process.env.CHROXY_EVALUATOR_TIMEOUT_MS
+      process.env.CHROXY_EVALUATOR_TIMEOUT_MS = '15'
+      try {
+        const client = makeHangingClient()
+        const start = Date.now()
+        await assert.rejects(
+          () => evaluateDraft({ draft: 'a substantive draft for evaluation', client }),
+          (err) => err.code === 'EVALUATOR_TIMEOUT',
+        )
+        const elapsed = Date.now() - start
+        assert.ok(elapsed < 200, `env-configured timeout should fire well before 200ms (took ${elapsed}ms)`)
+      } finally {
+        if (saved !== undefined) process.env.CHROXY_EVALUATOR_TIMEOUT_MS = saved
+        else delete process.env.CHROXY_EVALUATOR_TIMEOUT_MS
+      }
+    })
+
+    it('explicit timeoutMs arg beats env override', async () => {
+      process.env.CHROXY_EVALUATOR_TIMEOUT_MS = '60000'
+      try {
+        const client = makeHangingClient()
+        const start = Date.now()
+        await assert.rejects(
+          () => evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: 20 }),
+          (err) => err.code === 'EVALUATOR_TIMEOUT',
+        )
+        const elapsed = Date.now() - start
+        assert.ok(elapsed < 200, `explicit arg should fire well before the env-configured 60s (took ${elapsed}ms)`)
+      } finally {
+        delete process.env.CHROXY_EVALUATOR_TIMEOUT_MS
+      }
+    })
+
+    it('rejects non-positive timeoutMs and falls back to env / default', async () => {
+      // 0, -5, NaN, Infinity must not silently become "abort instantly". A
+      // 30s default fast-resolves the stub call, so we just verify no error.
+      const client = makeStubClient(
+        JSON.stringify({ verdict: 'forward', rewritten: null, clarification: null, reasoning: 'ok' }),
+      )
+      for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const result = await evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: bad })
+        assert.equal(result.verdict, 'forward', `non-positive timeoutMs ${bad} must fall back to default`)
+      }
+    })
+
+    it('EVALUATOR_TIMEOUT does not get rewrapped as EVALUATOR_API_ERROR', async () => {
+      // The timeout-detection branch must short-circuit BEFORE the API error
+      // sanitizer runs. Without this, a future refactor that reorders the
+      // catch block could double-wrap the timeout and lose the code.
+      const client = makeHangingClient()
+      await assert.rejects(
+        () => evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: 25 }),
+        (err) => {
+          assert.equal(err.code, 'EVALUATOR_TIMEOUT')
+          assert.notEqual(err.code, 'EVALUATOR_API_ERROR')
+          return true
+        },
+      )
     })
   })
 })
