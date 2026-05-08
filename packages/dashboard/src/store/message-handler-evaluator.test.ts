@@ -12,8 +12,9 @@
  *    so the inline clarify prompt block renders above InputBar.
  *
  * Replay safety: receiving the same `evaluatorIterationId` twice (live
- * broadcast then session_messages replay, or duplicate broadcast) must
- * NOT insert a duplicate banner or reset clarify state.
+ * broadcast then localStorage-cache replay via `sessionMessagesKey`,
+ * or duplicate broadcast) must NOT insert a duplicate banner or reset
+ * clarify state.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -171,7 +172,7 @@ describe('dashboard message-handler — auto-evaluator (#3188)', () => {
         evaluatorIterationId: 'iter-dup-1',
       }
       handleMessage(event, ctx() as any)
-      handleMessage(event, ctx() as any) // simulate session_messages replay
+      handleMessage(event, ctx() as any) // simulate localStorage-cache replay (sessionMessagesKey)
 
       const session = (store.getState() as any).sessionStates.s1 as SessionState
       expect(session.messages).toHaveLength(1)
@@ -369,8 +370,9 @@ describe('dashboard message-handler — auto-evaluator (#3188)', () => {
       expect(before).toHaveLength(1)
 
       // Simulate reconnect: handler called again with the same event id
-      // (e.g. the cached system message is replayed via session_messages
-      // and the live event arrives a second time too).
+      // (e.g. the cached system message is replayed from the per-session
+      // localStorage cache, and the live event arrives a second time
+      // too).
       handleMessage({
         type: 'evaluator_rewrite',
         sessionId: 's1',
