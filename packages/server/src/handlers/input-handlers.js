@@ -52,6 +52,23 @@ function _getEvaluatorAwaits(ctx) {
   return ctx._pendingEvaluatorAwaits
 }
 
+// #3665 — build the history text appended for a recorded user input.
+// When attachments are present we annotate the recorded text with a
+// `[N file(s) attached]` marker so audit/replay shows what came alongside
+// the message. The marker carries its own leading separator, so any
+// trailing whitespace on `text` is stripped first — the auto-evaluator
+// rewrite path commonly returns strings with a trailing newline, and
+// without normalization the recorded text reads `'foo \n[1 file(s) attached]'`
+// (double whitespace before the marker). Empty/whitespace-only text drops
+// to a marker-only entry.
+export function buildHistoryText(text, attCount) {
+  if (!attCount) return text
+  const stripped = typeof text === 'string' ? text.replace(/\s+$/, '') : ''
+  return stripped
+    ? `${stripped} [${attCount} file(s) attached]`
+    : `[${attCount} file(s) attached]`
+}
+
 // #3639 — build the minimal config object passed into shouldSkipEvaluator.
 // The per-session promptEvaluatorSkipPattern (string source) takes precedence;
 // the server-wide ctx.config.promptEvaluatorSkipPattern (#3187) is the
@@ -146,6 +163,25 @@ async function handleInput(ws, client, msg, ctx) {
     }
   }
 
+  // #3666 — hoist the per-session evaluator-await lock check above the
+  // routing logic so trivial-skip-path messages also reject during an
+  // in-flight evaluator round-trip. Without this, a fast trivial draft
+  // (short ack, configured skip pattern, or evaluator-disabled session)
+  // can sneak through to record+send while a slower non-trivial draft
+  // is still awaiting the evaluator on the same session — history
+  // insertion order then doesn't match arrival order. Same input_conflict
+  // category as the existing pre-await check; rejection (not queueing)
+  // matches the #3636 design.
+  const _pendingAwaits = _getEvaluatorAwaits(ctx)
+  if (_pendingAwaits.has(targetSessionId)) {
+    ctx.send(ws, {
+      type: 'session_error',
+      category: 'input_conflict',
+      message: 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
+    })
+    return
+  }
+
   if (entry.session.resumeSessionId) {
     ctx.checkpointManager.createCheckpoint({
       sessionId: targetSessionId,
@@ -182,14 +218,11 @@ async function handleInput(ws, client, msg, ctx) {
   // Rejection paths return without calling recordHistoryEntry().
   // touchActivity moves with it so a rejected message doesn't bump the
   // session's activity timestamp.
-  const buildHistoryText = (text) => attCount
-    ? `${text}${text ? ' ' : ''}[${attCount} file(s) attached]`
-    : text
   let _historyRecorded = false
   function recordHistoryEntry(text) {
     if (_historyRecorded) return
     _historyRecorded = true
-    ctx.sessionManager.recordUserInput(targetSessionId, buildHistoryText(text), messageId)
+    ctx.sessionManager.recordUserInput(targetSessionId, buildHistoryText(text, attCount), messageId)
     ctx.sessionManager.touchActivity(targetSessionId)
   }
 
@@ -226,17 +259,10 @@ async function handleInput(ws, client, msg, ctx) {
     } else {
       // #3636 — per-session serialization. Reject (don't queue) a second
       // concurrent draft for the same session while an evaluator round-trip
-      // is in flight. Reuses the existing input_conflict category so the
-      // user gets the same retry UX they already know.
-      const pending = _getEvaluatorAwaits(ctx)
-      if (pending.has(targetSessionId)) {
-        ctx.send(ws, {
-          type: 'session_error',
-          category: 'input_conflict',
-          message: 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
-        })
-        return
-      }
+      // is in flight. The hoisted check at function entry (#3666) already
+      // rejects messages arriving during an in-flight await, so by the time
+      // we reach here the lock is guaranteed empty — we just take it.
+      const pending = _pendingAwaits
 
       const evaluator = typeof ctx.evaluateDraft === 'function' ? ctx.evaluateDraft : defaultEvaluateDraft
       let result

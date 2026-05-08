@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { inputHandlers } from '../../src/handlers/input-handlers.js'
+import { inputHandlers, buildHistoryText } from '../../src/handlers/input-handlers.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
@@ -822,6 +822,133 @@ describe('input-handlers', () => {
 
       assert.equal(evaluator.callCount, 1, 'evaluator must run when no skip rule matches')
       assert.equal(session.sendMessage.callCount, 1)
+    })
+  })
+
+  // #3665: when an attachment annotation is appended, normalize trailing
+  // whitespace on the supplied text. The auto-evaluator rewrite path
+  // commonly returns rewritten strings with trailing newlines; without
+  // this, recorded history reads `'foo \n[1 file(s) attached]'`.
+  describe('buildHistoryText (#3665)', () => {
+    it('appends marker with single space when text has no trailing whitespace', () => {
+      assert.equal(buildHistoryText('foo', 1), 'foo [1 file(s) attached]')
+    })
+    it('strips a single trailing space before appending marker', () => {
+      assert.equal(buildHistoryText('foo ', 1), 'foo [1 file(s) attached]')
+    })
+    it('strips a trailing newline before appending marker', () => {
+      assert.equal(buildHistoryText('foo\n', 1), 'foo [1 file(s) attached]')
+    })
+    it('strips mixed trailing whitespace (spaces, tabs, newlines)', () => {
+      assert.equal(buildHistoryText('foo  \t\n', 2), 'foo [2 file(s) attached]')
+    })
+    it('returns marker alone when text is empty', () => {
+      assert.equal(buildHistoryText('', 1), '[1 file(s) attached]')
+    })
+    it('returns marker alone when text is whitespace-only', () => {
+      assert.equal(buildHistoryText('   \n', 1), '[1 file(s) attached]')
+    })
+    it('returns text unchanged when no attachments', () => {
+      assert.equal(buildHistoryText('hello', 0), 'hello')
+    })
+    it('preserves the rewritten text on the rewrite path with trailing whitespace', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'rewrite',
+        rewritten: 'Cleaned-up draft text\n',
+        clarification: null,
+        reasoning: '',
+      }))
+      const { ctx } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+      const attachments = [
+        { type: 'image', mediaType: 'image/png', data: 'AAAA', name: 'a.png' },
+      ]
+
+      await inputHandlers.input(makeWs(), client, { data: 'redo this attached screenshot please', attachments }, ctx)
+
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      assert.equal(
+        ctx.sessionManager.recordUserInput.lastCall[1],
+        'Cleaned-up draft text [1 file(s) attached]',
+        'rewrite-path trailing newline must be normalized before the attachment marker',
+      )
+    })
+  })
+
+  // #3666: when an evaluator round-trip is in flight on a session, NEW
+  // input arriving for the same session must reject regardless of whether
+  // the new input would itself take the evaluator path. Without this, a
+  // fast trivial-skip-path message can sneak through to record+send while
+  // the slower non-trivial draft is still awaiting, producing history
+  // insertion order that doesn't match arrival order.
+  describe('input (bursty trivial-skip during in-flight evaluator #3666)', () => {
+    it('rejects a trivial-skip message during an in-flight evaluator round-trip on the same session', async () => {
+      let resolveFirst
+      const firstPromise = new Promise((r) => { resolveFirst = r })
+      const evaluator = createSpy(async () => {
+        await firstPromise
+        return { verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }
+      })
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const clientA = makeClient({ id: 'client-A', activeSessionId: 's1' })
+      const clientB = makeClient({ id: 'client-B', activeSessionId: 's1' })
+
+      const firstInFlight = inputHandlers.input(makeWs(), clientA, { data: 'a substantive draft awaiting the evaluator' }, ctx)
+      await new Promise((r) => setImmediate(r))
+
+      // 'yes' matches the default skip heuristic — without #3666 it would
+      // bypass the evaluator block entirely and race ahead to record+send.
+      await inputHandlers.input(makeWs(), clientB, { data: 'yes' }, ctx)
+
+      assert.equal(evaluator.callCount, 1, 'second trivial-skip message must not invoke the evaluator')
+      const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
+      assert.equal(conflicts.length, 1, 'trivial-skip message must reject with input_conflict during an in-flight evaluator')
+      assert.equal(session.sendMessage.callCount, 0, 'rejected trivial draft must NOT be forwarded')
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 0, 'rejected trivial draft must NOT be recorded in history')
+
+      resolveFirst()
+      await firstInFlight
+      assert.equal(session.sendMessage.callCount, 1, 'first draft must still forward after evaluator resolves')
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1, 'first draft recorded exactly once')
+    })
+
+    it('does not reject trivial-skip messages on a DIFFERENT session (lock remains per-session)', async () => {
+      let resolveFirst
+      const firstPromise = new Promise((r) => { resolveFirst = r })
+      const evaluator = createSpy(async () => {
+        await firstPromise
+        return { verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }
+      })
+
+      const sessions = new Map()
+      const sessionA = createMockSession()
+      sessionA.promptEvaluator = true
+      const sessionB = createMockSession()
+      sessionB.promptEvaluator = true
+      sessions.set('sA', { session: sessionA, name: 'A', cwd: '/work-a' })
+      sessions.set('sB', { session: sessionB, name: 'B', cwd: '/work-b' })
+      const ctx = makeCtx(sessions, {
+        broadcastToSession: createSpy(),
+        evaluateDraft: evaluator,
+      })
+
+      const clientA = makeClient({ id: 'client-A', activeSessionId: 'sA' })
+      const clientB = makeClient({ id: 'client-B', activeSessionId: 'sB' })
+
+      const firstInFlight = inputHandlers.input(makeWs(), clientA, { data: 'substantive draft for session A under evaluation' }, ctx)
+      await new Promise((r) => setImmediate(r))
+
+      // Trivial-skip message for a different session — must pass through.
+      await inputHandlers.input(makeWs(), clientB, { data: 'yes' }, ctx)
+
+      const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
+      assert.equal(conflicts.length, 0, 'trivial-skip on a DIFFERENT session must not be blocked')
+      assert.equal(sessionB.sendMessage.callCount, 1, 'trivial-skip for session B must forward')
+      assert.equal(sessionB.sendMessage.lastCall[0], 'yes')
+
+      resolveFirst()
+      await firstInFlight
+      assert.equal(sessionA.sendMessage.callCount, 1, 'session A still forwards after its own evaluator completes')
     })
   })
 })
