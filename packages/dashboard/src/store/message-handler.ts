@@ -885,8 +885,10 @@ function handleSkillTrustAccepted(msg: Record<string, unknown>, get: MsgGet, _se
 // #3188: auto-evaluator rewrite broadcast (#3186 emit, #3208 schema).
 // Push a `system` message into the targeted session's history with
 // `evaluator` metadata so ChatView's renderMessage can render the
-// rewrite-explanation banner. Persisted via session_messages — replay
-// on reconnect re-renders the banner without re-firing the (transient)
+// rewrite-explanation banner. The system message is persisted in the
+// per-session localStorage cache (`sessionMessagesKey` in
+// packages/dashboard/src/store/persistence.ts), so reconnect/replay
+// re-renders the banner from cache without re-firing the transient
 // wire event. Dedup'd by `evaluatorIterationId`.
 //
 // Also clears any matching `pendingEvaluatorClarify` for the session: a
@@ -910,8 +912,8 @@ function handleEvaluatorRewrite(msg: Record<string, unknown>, get: MsgGet, _set:
   };
 
   updateSession(targetId, (state) => {
-    // Dedup on `evaluatorIterationId` so a session_messages replay (or
-    // duplicate broadcast) doesn't double-insert the banner.
+    // Dedup on `evaluatorIterationId` so a localStorage-cache replay
+    // (or duplicate broadcast) doesn't double-insert the banner.
     const alreadyInserted = state.messages.some(
       (m) => m.type === 'system' && m.evaluator?.evaluatorIterationId === evaluatorIterationId,
     );

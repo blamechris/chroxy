@@ -376,7 +376,11 @@ export interface SessionState extends BaseSessionState {
   // Transient — NOT persisted across reconnects: the server re-emits
   // the event on the next user_input cycle, so dropping the pending
   // state on reconnect is acceptable for v1.
-  pendingEvaluatorClarify?: PendingEvaluatorClarify | null;
+  // #3646: always-present, defaulted to `null` by `createEmptySessionState`.
+  // The handler clears with `null`, never `undefined`. Tests / call
+  // sites should use `toBeNull()` consistently instead of branching on
+  // `toBeUndefined()` for the initial state.
+  pendingEvaluatorClarify: PendingEvaluatorClarify | null;
 }
 
 export interface ConnectionState {

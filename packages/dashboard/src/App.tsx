@@ -1048,8 +1048,10 @@ export function App() {
 
     // #3188: auto-evaluator rewrite banner. The system message is pushed
     // by the dashboard's `evaluator_rewrite` handler and persisted in
-    // session_messages, so reconnect/replay re-renders the banner from
-    // the cached metadata (no need to re-fire the transient wire event).
+    // the per-session localStorage cache (`sessionMessagesKey` in
+    // packages/dashboard/src/store/persistence.ts). Reconnect/replay
+    // re-renders the banner from that cached metadata — no need to
+    // re-fire the transient wire event.
     if (storeMsg.type === 'system' && storeMsg.evaluator?.kind === 'rewrite') {
       return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
     }

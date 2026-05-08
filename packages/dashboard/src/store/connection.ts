@@ -467,6 +467,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       devPreviews: EMPTY_DEV_PREVIEWS,
       selectedFilePath: null,
       thinkingLevel: 'default',
+      // #3646: always-present, defaulted to `null` (parity with
+      // createEmptySessionState).
+      pendingEvaluatorClarify: null,
     };
   },
 

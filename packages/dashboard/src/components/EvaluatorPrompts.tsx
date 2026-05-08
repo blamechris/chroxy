@@ -20,7 +20,7 @@
  * Visual style follows PermissionPrompt / QuestionPrompt — inline blocks
  * inside the chat scroll container, no overlay modals.
  */
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import type { EvaluatorRewriteMeta } from '../store/types'
 import { MAX_EVALUATOR_ITERATIONS } from '../store/types'
 
@@ -98,6 +98,25 @@ export function EvaluatorClarifyPrompt({
 }: EvaluatorClarifyPromptProps) {
   const [text, setText] = useState('')
   const submittedRef = useRef(false)
+  // #3645 — hoist `onSubmit` into a ref so the handler identity is stable
+  // across re-renders (parents commonly pass a fresh inline closure each
+  // render). The ref is assigned synchronously during render so handleSubmit
+  // always invokes the *latest* prop, with no commit-phase window where a
+  // user-input event could observe a stale closure (vs. useEffect, which
+  // runs after paint and leaves a brief gap on the first render with new
+  // props).
+  const onSubmitRef = useRef(onSubmit)
+  onSubmitRef.current = onSubmit
+
+  // #3645 — when the server fires a new clarify iteration, the same
+  // component instance may stay mounted (the parent re-renders with new
+  // props rather than unmounting). Reset the double-submit guard and the
+  // textarea so the operator can answer the next question.
+  useEffect(() => {
+    submittedRef.current = false
+    setText('')
+  }, [evaluatorIteration])
+
   // Defensive clamp: server should already cap at MAX_EVALUATOR_ITERATIONS,
   // but if a future server raises the cap and forgets to update the
   // dashboard, render the higher value rather than `1/3` — the operator
@@ -109,7 +128,7 @@ export function EvaluatorClarifyPrompt({
     const trimmed = text.trim()
     if (!trimmed) return
     submittedRef.current = true
-    onSubmit(trimmed)
+    onSubmitRef.current(trimmed)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -121,7 +140,10 @@ export function EvaluatorClarifyPrompt({
   }
 
   return (
-    <div className="evaluator-clarify-prompt" data-testid="evaluator-clarify-prompt">
+    <div
+      className="evaluator-clarify-prompt"
+      data-testid="evaluator-clarify-prompt"
+    >
       <div className="evaluator-clarify-header">
         <span className="evaluator-clarify-title">Need a bit more detail</span>
         <span
@@ -136,7 +158,23 @@ export function EvaluatorClarifyPrompt({
         <div className="evaluator-clarify-label">Your draft</div>
         <div className="evaluator-clarify-original">{originalDraft}</div>
       </div>
-      <div className="evaluator-clarify-section">
+      {/*
+        #3644 — announce the clarify question to screen readers when it
+        appears. `role="status"` + `aria-live="polite"` reads the prompt
+        without interrupting the operator's current focus. `aria-atomic="true"`
+        announces label + question text as a unit. Scoped to the question
+        section only (Copilot review) — applying this to the outer prompt
+        container would force the entire `originalDraft`, the controlled
+        `<textarea>`, and the Send button into the live announcement, which
+        is verbose and disruptive when `originalDraft` is long.
+      */}
+      <div
+        className="evaluator-clarify-section"
+        data-testid="evaluator-clarify-question-region"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         <div className="evaluator-clarify-label">Question</div>
         <div className="evaluator-clarify-question">{clarification}</div>
       </div>
