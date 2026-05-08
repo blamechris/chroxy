@@ -401,6 +401,15 @@ export const UnsubscribeSessionsSchema = z.object({
   sessionIds: z.array(z.string().max(256)).min(1).max(20),
 })
 
+// #3404: client signals foreground/background state. Mobile app sends
+// {visible:false} on AppState background/inactive so the server stops
+// treating its still-alive WS connection as an active viewer and lets
+// completion push notifications fire.
+export const ClientVisibleSchema = z.object({
+  type: z.literal('client_visible'),
+  visible: z.boolean(),
+})
+
 // -- Repo management schemas --
 
 export const ListProvidersSchema = z.object({
@@ -538,6 +547,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RequestCostSummarySchema,
   SubscribeSessionsSchema,
   UnsubscribeSessionsSchema,
+  ClientVisibleSchema,
   ListProvidersSchema,
   ListSkillsSchema,
   ListReposSchema,

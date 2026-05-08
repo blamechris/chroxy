@@ -467,4 +467,28 @@ describe('session-handlers', () => {
       assert.ok(!client.subscribedSessionIds.has('s2'))
     })
   })
+
+  describe('client_visible (#3404)', () => {
+    it('sets visible=false on the client', () => {
+      const ctx = makeCtx()
+      const client = makeClient({ visible: true })
+      sessionHandlers.client_visible(makeWs(), client, { visible: false }, ctx)
+      assert.equal(client.visible, false)
+    })
+
+    it('sets visible=true when re-foregrounded', () => {
+      const ctx = makeCtx()
+      const client = makeClient({ visible: false })
+      sessionHandlers.client_visible(makeWs(), client, { visible: true }, ctx)
+      assert.equal(client.visible, true)
+    })
+
+    it('does not send a response (fire-and-forget)', () => {
+      const ctx = makeCtx()
+      const client = makeClient({ visible: true })
+      sessionHandlers.client_visible(makeWs(), client, { visible: false }, ctx)
+      assert.equal(ctx.send.callCount, 0)
+      assert.equal(ctx.broadcast.callCount, 0)
+    })
+  })
 })

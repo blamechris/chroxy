@@ -276,6 +276,15 @@ function handleUnsubscribeSessions(ws, client, msg, ctx) {
   })
 }
 
+// #3404: mobile app sends this when foreground/background state changes so
+// the server can suppress idle/completion pushes only for foreground viewers.
+// Backgrounded clients with still-alive sockets must NOT be treated as active
+// viewers — otherwise the OS keepalive grace period causes false-negative
+// notifications and breaks the phone-first workflow.
+function handleClientVisible(ws, client, msg) {
+  client.visible = msg.visible !== false
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -284,4 +293,5 @@ export const sessionHandlers = {
   rename_session: handleRenameSession,
   subscribe_sessions: handleSubscribeSessions,
   unsubscribe_sessions: handleUnsubscribeSessions,
+  client_visible: handleClientVisible,
 }

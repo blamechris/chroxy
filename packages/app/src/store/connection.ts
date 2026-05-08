@@ -83,6 +83,7 @@ import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, with
 import {
   setStore,
   wsSend,
+  sendClientVisible,
   handleMessage,
   setConnectionContext,
   setEncryptionState,
@@ -1507,14 +1508,23 @@ if (global.__chroxy_appStateSub) {
 const RESUME_RECONNECT_COOLDOWN_MS = 5000;
 let _lastResumeReconnectAt = 0;
 
+function isVisibleAppState(state: string): boolean {
+  return state === 'active';
+}
+
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
+  // #3404: keep the server in sync with foreground/background state so it
+  // can route completion push notifications to backgrounded phones whose
+  // sockets are still alive in the OS keepalive grace period.
+  const { socket } = useConnectionStore.getState();
+  sendClientVisible(socket, isVisibleAppState(nextState));
+
   if (nextState === 'active') {
     const now = Date.now();
     if (now - _lastResumeReconnectAt < RESUME_RECONNECT_COOLDOWN_MS) {
       return;
     }
 
-    const { socket } = useConnectionStore.getState();
     const { connectionPhase, wsUrl, apiToken, userDisconnected, savedConnection } = useConnectionLifecycleStore.getState();
 
     // Case 1: socket thinks it was connected but is actually stale
