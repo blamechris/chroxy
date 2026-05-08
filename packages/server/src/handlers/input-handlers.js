@@ -3,10 +3,28 @@
  *
  * Handles: input, interrupt, resume_budget, register_push_token, user_question_response
  */
+import { randomUUID } from 'node:crypto'
 import { validateAttachments, resolveFileRefAttachments, resolveSession } from '../handler-utils.js'
+import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
+
+// #3186 — auto-evaluation hook config.
+//
+// MAX_EVALUATOR_ITERATIONS caps the clarify loop. After 3 consecutive clarify
+// verdicts on a single session, the next user message force-forwards
+// regardless of the verdict. Without the cap an evaluator that never settles
+// would silently swallow every message.
+const MAX_EVALUATOR_ITERATIONS = 3
+
+// Per-session iteration counter, hung off the handler context. Reset to 0
+// once the cap fires so a subsequent send starts fresh — see test
+// "force-forwards original draft after 3 consecutive clarify verdicts".
+function _getEvaluatorIterations(ctx) {
+  if (!ctx._evaluatorIterations) ctx._evaluatorIterations = new Map()
+  return ctx._evaluatorIterations
+}
 
 // Stable user-input message IDs (issue #2902). A client that sends its own
 // `clientMessageId` gets it adopted verbatim — that lets the sender dedup its
@@ -33,7 +51,7 @@ function resolveUserInputId(candidate) {
   return candidate
 }
 
-function handleInput(ws, client, msg, ctx) {
+async function handleInput(ws, client, msg, ctx) {
   const text = msg.data
   let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
   const targetSessionId = msg.sessionId || client.activeSessionId
@@ -99,7 +117,94 @@ function handleInput(ws, client, msg, ctx) {
   const messageId = resolveUserInputId(msg.clientMessageId)
   ctx.sessionManager.recordUserInput(targetSessionId, historyText, messageId)
   ctx.sessionManager.touchActivity(targetSessionId)
-  entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
+
+  // #3186 — auto-evaluation hook. Gates message forwarding on a per-session
+  // promptEvaluator toggle. Skips evaluation for trivial drafts (acks, short
+  // replies) that wouldn't benefit from a round-trip. Verdict routing:
+  //   - forward → original message goes through unchanged
+  //   - rewrite → broadcast evaluator_rewrite, forward the rewritten text
+  //   - clarify → broadcast evaluator_clarify, do NOT forward (wait for
+  //               follow-up). Capped at MAX_EVALUATOR_ITERATIONS clarify
+  //               cycles — the next message force-forwards.
+  // Fail-open: any evaluator error is logged and the original message is
+  // forwarded so a key-missing or upstream outage never blocks the user.
+  let textToSend = trimmed
+  if (
+    entry.session.promptEvaluator === true
+    && trimmed.length > 0
+    && !shouldSkipEvaluator(trimmed, ctx.config || {})
+  ) {
+    const counters = _getEvaluatorIterations(ctx)
+    const currentIteration = (counters.get(targetSessionId) || 0) + 1
+
+    if (currentIteration > MAX_EVALUATOR_ITERATIONS) {
+      // Cap fired — force-forward and reset for the next cycle so the
+      // session isn't permanently locked out of evaluator gating.
+      log.warn(`Evaluator iteration cap hit for session ${targetSessionId}; force-forwarding draft`)
+      counters.delete(targetSessionId)
+    } else {
+      const evaluator = typeof ctx.evaluateDraft === 'function' ? ctx.evaluateDraft : defaultEvaluateDraft
+      let result
+      try {
+        result = await evaluator({ draft: trimmed, cwd: entry.cwd })
+      } catch (err) {
+        // Fail-open: logged-then-forwarded keeps the user moving when
+        // ANTHROPIC_API_KEY is missing or the upstream is down.
+        log.warn(`Auto-evaluator failed (${err?.code || 'UNKNOWN'}): ${err?.message || err}; forwarding original draft`)
+        result = null
+      }
+
+      if (result?.verdict === 'rewrite' && typeof result.rewritten === 'string' && result.rewritten.trim()) {
+        counters.delete(targetSessionId)
+        const evaluatorIterationId = randomUUID()
+        ctx.broadcastToSession(targetSessionId, {
+          type: 'evaluator_rewrite',
+          sessionId: targetSessionId,
+          originalDraft: trimmed,
+          rewritten: result.rewritten,
+          reasoning: result.reasoning || '',
+          evaluatorIterationId,
+        })
+        textToSend = result.rewritten
+      } else if (result?.verdict === 'clarify' && typeof result.clarification === 'string' && result.clarification.trim()) {
+        // Clarify path: hold the message, surface the question, increment
+        // the counter. The user's NEXT input will be evaluated against the
+        // same counter — once it reaches MAX_EVALUATOR_ITERATIONS+1 we cap.
+        counters.set(targetSessionId, currentIteration)
+        const evaluatorIterationId = randomUUID()
+        ctx.broadcastToSession(targetSessionId, {
+          type: 'evaluator_clarify',
+          sessionId: targetSessionId,
+          originalDraft: trimmed,
+          clarification: result.clarification,
+          reasoning: result.reasoning || '',
+          evaluatorIterationId,
+          evaluatorIteration: currentIteration,
+        })
+        // DO NOT forward to the session — return early. We've already
+        // recorded the user input in history and touched activity above
+        // so the dashboard sees the draft + the clarification.
+        //
+        // Update primary even though the message wasn't forwarded — the
+        // user's intent was to drive the session, and the input-conflict
+        // and primary-changed bookkeeping that downstream clients depend
+        // on should reflect that. Without this, two paired clients can
+        // both have stale "you're primary" views during a clarify cycle.
+        ctx.updatePrimary(targetSessionId, client.id)
+        ctx.broadcast(
+          { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
+          (c) => c.id !== client.id,
+        )
+        return
+      } else {
+        // forward verdict (or unrecognised result) — drop the iteration
+        // counter so a clarify-then-forward sequence resets cleanly.
+        counters.delete(targetSessionId)
+      }
+    }
+  }
+
+  entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice })
 
   ctx.updatePrimary(targetSessionId, client.id)
 

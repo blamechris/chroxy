@@ -823,4 +823,174 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(result.data.sessions[1].stdinDroppedCount, 0)
     })
   })
+
+  // #3208: auto-evaluator broadcast events. Two transient events arriving without
+  // a triggering client request, so the dashboard knows to render the
+  // rewrite-explanation banner or the clarify-question modal.
+  describe('ServerEvaluatorRewriteSchema (#3208)', () => {
+    it('validates a well-formed evaluator_rewrite payload', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'evaluator_rewrite',
+        sessionId: 'sess-1',
+        originalDraft: 'fix it',
+        rewritten: 'Please fix the failing test in foo.js',
+        reasoning: 'Original was too vague.',
+        evaluatorIterationId: 'iter-abc-1',
+      })
+      assert.ok(result.success, 'Should validate well-formed evaluator_rewrite')
+      assert.equal(result.data.sessionId, 'sess-1')
+      assert.equal(result.data.evaluatorIterationId, 'iter-abc-1')
+    })
+
+    it('rejects evaluator_rewrite with wrong type literal', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'rewrite',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        rewritten: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+      })
+      assert.ok(!result.success, 'Should reject when type is not "evaluator_rewrite"')
+    })
+
+    it('rejects evaluator_rewrite missing rewritten field', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'evaluator_rewrite',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+      })
+      assert.ok(!result.success, 'rewritten is required for the rewrite verdict')
+    })
+
+    it('rejects evaluator_rewrite missing evaluatorIterationId', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'evaluator_rewrite',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        rewritten: 'y',
+        reasoning: 'z',
+      })
+      assert.ok(!result.success, 'evaluatorIterationId is required for dashboard dedup')
+    })
+
+    it('rejects evaluator_rewrite with non-string sessionId', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'evaluator_rewrite',
+        sessionId: 42,
+        originalDraft: 'x',
+        rewritten: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+      })
+      assert.ok(!result.success, 'sessionId must be a string')
+    })
+  })
+
+  describe('ServerEvaluatorClarifySchema (#3208)', () => {
+    it('validates a well-formed evaluator_clarify payload', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'fix it',
+        clarification: 'Which file are you referring to?',
+        reasoning: 'The draft does not specify a file.',
+        evaluatorIterationId: 'iter-abc-2',
+        evaluatorIteration: 1,
+      })
+      assert.ok(result.success, 'Should validate well-formed evaluator_clarify')
+      assert.equal(result.data.evaluatorIteration, 1)
+    })
+
+    it('validates evaluator_clarify at max iteration (3)', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 3,
+      })
+      assert.ok(result.success, 'Should accept iteration 3 (max)')
+    })
+
+    it('rejects evaluator_clarify with iteration above sanity ceiling (11)', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 11,
+      })
+      assert.ok(!result.success, 'iteration must be capped at the wire-schema sanity ceiling (10)')
+    })
+
+    it('rejects evaluator_clarify with iteration 0', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 0,
+      })
+      assert.ok(!result.success, 'iteration counter is 1-based')
+    })
+
+    it('rejects evaluator_clarify with non-integer iteration', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 1.5,
+      })
+      assert.ok(!result.success, 'iteration must be an integer')
+    })
+
+    it('rejects evaluator_clarify missing clarification', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 1,
+      })
+      assert.ok(!result.success, 'clarification is required for the clarify verdict')
+    })
+
+    it('rejects evaluator_clarify with wrong type literal', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 1,
+      })
+      assert.ok(!result.success, 'Should reject when type is not "evaluator_clarify"')
+    })
+  })
 })
