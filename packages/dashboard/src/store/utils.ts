@@ -24,5 +24,10 @@ export function createEmptySessionState(): SessionState {
     terminalRawBuffer: '',
     selectedFilePath: null,
     thinkingLevel: 'default',
+    // #3646: default to `null` (not `undefined`) so the field is always
+    // present in the same shape the handler uses to clear it. Prevents
+    // tests from having to handle `toBeUndefined()` (initial) vs
+    // `toBeNull()` (cleared) for the same field.
+    pendingEvaluatorClarify: null,
   };
 }
