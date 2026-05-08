@@ -534,10 +534,23 @@ describe('input-handlers', () => {
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'exactly one input_conflict session_error must be sent for the rejected second draft')
 
+      // #3636 phantom-history guard — the rejected second draft must NOT
+      // be persisted into history, and must NOT broadcast a user_input
+      // echo. Otherwise reconnect replay would surface a draft that
+      // never reached the session and was never delivered to peers.
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 0,
+        'rejected second draft must NOT be recorded in session history')
+      const userInputEchos = ctx._broadcasts.filter((b) => b?.type === 'user_input')
+      assert.equal(userInputEchos.length, 0,
+        'rejected second draft must NOT be broadcast as a user_input echo')
+
       // Let the first finish and confirm it forwards normally.
       resolveFirst()
       await firstInFlight
       assert.equal(session.sendMessage.callCount, 1, 'first draft must still forward to the session after evaluator resolves')
+      // The first draft IS recorded — it forwarded successfully.
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1,
+        'first (forwarded) draft must be recorded exactly once')
     })
 
     it('does not reject concurrent evaluator-awaits for DIFFERENT sessions (lock is per-session)', async () => {
@@ -617,6 +630,13 @@ describe('input-handlers', () => {
       assert.equal(session.sendMessage.callCount, 0, 'must NOT forward when conflict re-emerges after the await')
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'must emit a single input_conflict session_error after the await re-check')
+      // #3636 phantom-history guard — post-await rejection path must not
+      // persist into history nor broadcast a user_input echo either.
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 0,
+        'post-await rejected draft must NOT be recorded in session history')
+      const userInputEchos = ctx._broadcasts.filter((b) => b?.type === 'user_input')
+      assert.equal(userInputEchos.length, 0,
+        'post-await rejected draft must NOT be broadcast as a user_input echo')
     })
   })
 })

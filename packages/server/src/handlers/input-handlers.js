@@ -128,8 +128,20 @@ async function handleInput(ws, client, msg, ctx) {
   // broadcast so any reconnecting client can match rehydrated entries
   // against their optimistic/echo copies (issue #2902).
   const messageId = resolveUserInputId(msg.clientMessageId)
-  ctx.sessionManager.recordUserInput(targetSessionId, historyText, messageId)
-  ctx.sessionManager.touchActivity(targetSessionId)
+  // #3636 — defer history recording until AFTER all rejection paths
+  // (pending-evaluator guard and post-await input_conflict re-check) pass.
+  // Recording before those checks would produce phantom history entries
+  // for drafts that were rejected with input_conflict — the message would
+  // appear in replay/reconnect history but was neither forwarded nor
+  // broadcast. Forwarding, clarify, and rewrite paths all call
+  // recordHistoryEntry() below; rejection paths return without recording.
+  let _historyRecorded = false
+  function recordHistoryEntry() {
+    if (_historyRecorded) return
+    _historyRecorded = true
+    ctx.sessionManager.recordUserInput(targetSessionId, historyText, messageId)
+    ctx.sessionManager.touchActivity(targetSessionId)
+  }
 
   // #3186 — auto-evaluation hook. Gates message forwarding on a per-session
   // promptEvaluator toggle. Skips evaluation for trivial drafts (acks, short
@@ -228,6 +240,10 @@ async function handleInput(ws, client, msg, ctx) {
         // same counter — once it reaches MAX_EVALUATOR_ITERATIONS+1 we cap.
         counters.set(targetSessionId, currentIteration)
         const evaluatorIterationId = randomUUID()
+        // #3636 — record the draft in history NOW (clarify path is a
+        // legitimate persisted entry, not a rejection) so the dashboard
+        // sees the draft + the clarification on replay.
+        recordHistoryEntry()
         ctx.broadcastToSession(targetSessionId, {
           type: 'evaluator_clarify',
           sessionId: targetSessionId,
@@ -237,9 +253,7 @@ async function handleInput(ws, client, msg, ctx) {
           evaluatorIterationId,
           evaluatorIteration: currentIteration,
         })
-        // DO NOT forward to the session — return early. We've already
-        // recorded the user input in history and touched activity above
-        // so the dashboard sees the draft + the clarification.
+        // DO NOT forward to the session — return early.
         //
         // Update primary even though the message wasn't forwarded — the
         // user's intent was to drive the session, and the input-conflict
@@ -259,6 +273,12 @@ async function handleInput(ws, client, msg, ctx) {
       }
     }
   }
+
+  // #3636 — record history at the forward boundary. All earlier
+  // rejection paths (input_conflict pre-await, pending-evaluator guard,
+  // post-await re-check) returned without recording. The clarify path
+  // already recorded above before its own return.
+  recordHistoryEntry()
 
   entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice })
 
