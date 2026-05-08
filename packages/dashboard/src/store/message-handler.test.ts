@@ -2307,5 +2307,29 @@ describe('dashboard message-handler dispatch', () => {
       sendClientVisible(sock, false)
       expect((sock.send as any)).toHaveBeenCalledTimes(2)
     })
+
+    // Copilot review of #3677: the encryption-handshake guard
+    // `_pendingKeyPair !== null && _encryptionState === null` keeps the
+    // dashboard from emitting plaintext client_visible mid key-exchange,
+    // which the server would 1008-disconnect.
+    it('skips when key-exchange handshake is in flight (#3677 review)', async () => {
+      const { sendClientVisible, resetClientVisibleMemo, _testSetEncryptionHandshake } = await import('./message-handler') as any
+      resetClientVisibleMemo()
+      const sock = createMockSocket()
+
+      // Open: pending keypair set, encryption not yet established.
+      _testSetEncryptionHandshake({ pending: true, established: false })
+      sendClientVisible(sock, false)
+      expect((sock.send as any)).not.toHaveBeenCalled()
+
+      // After key_exchange_ok: encryption established, pending cleared.
+      _testSetEncryptionHandshake({ pending: false, established: true })
+      sendClientVisible(sock, false)
+      expect((sock.send as any)).toHaveBeenCalledTimes(1)
+
+      // Reset the handshake state so subsequent tests in this file aren't
+      // poisoned (encryption flag would force `wsSend` down the encrypt path).
+      _testSetEncryptionHandshake({ pending: false, established: false })
+    })
   })
 })

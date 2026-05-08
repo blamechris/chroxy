@@ -336,7 +336,13 @@ function getProviderAuthInfo(name, ProviderClass) {
  * tokens or expiry. False positives are possible if the files are stale,
  * but the alternative (false negatives) is what #3674 was filed to fix.
  *
- * Override path for tests/development via the `CHROXY_CLAUDE_HOME` env var.
+ * Override paths for tests / atypical installs:
+ *   - `CHROXY_CLAUDE_HOME`   — overrides the directory for the first two
+ *                              file checks AND the default location of
+ *                              `.claude.json` (one level up from this dir).
+ *   - `CHROXY_CLAUDE_CONFIG` — overrides the global `.claude.json` path
+ *                              directly. Wins over the `CHROXY_CLAUDE_HOME`-
+ *                              derived default when both are set.
  *
  * @returns {boolean}
  */

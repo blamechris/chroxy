@@ -221,6 +221,23 @@ describe('Provider Registry', () => {
       }
     })
 
+    // Copilot review of #3677: _hasClaudeOAuthCreds catches JSON parse errors
+    // and treats them as "no creds". Lock that in so a future refactor can't
+    // accidentally make a malformed config crash the server-wide listProviders
+    // call.
+    it('claude-sdk stays ready=false when ~/.claude.json is malformed JSON (#3677 review)', () => {
+      clearKeys()
+      writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, 'this is not { valid json')
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        assert.equal(sdk.auth.ready, false)
+        assert.equal(sdk.auth.source, 'none')
+      } finally {
+        restoreKeys()
+      }
+    })
+
     it('claude-cli reports source=oauth regardless of env (subscription always)', () => {
       clearKeys()
       process.env.ANTHROPIC_API_KEY = 'sk-test'

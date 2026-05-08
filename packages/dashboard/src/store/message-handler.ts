@@ -291,6 +291,17 @@ export function resetClientVisibleMemo(): void {
   _lastSentVisible = true;
 }
 
+// #3677 (Copilot review): flip the module-level handshake flags from a
+// test so we can assert the encryption-pending guard inside
+// `sendClientVisible`. Resetting both to false leaves no observable trace
+// for downstream tests in the same file.
+export function _testSetEncryptionHandshake(opts: { pending: boolean; established: boolean }): void {
+  _pendingKeyPair = opts.pending ? { publicKey: 'mock-pub', secretKey: 'mock-sec' } as KeyPair : null;
+  _encryptionState = opts.established
+    ? { sharedKey: new Uint8Array(32), sendNonce: 0, recvNonce: 0 }
+    : null;
+}
+
 /**
  * Send the dashboard tab's foreground/background state to the server. The
  * server uses this to gate completion push notifications and other "is anyone
