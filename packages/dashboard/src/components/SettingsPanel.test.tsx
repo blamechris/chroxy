@@ -40,22 +40,31 @@ vi.mock('../theme/theme-engine', () => ({
 const mockSetTheme = vi.fn()
 const mockUpdateInputSettings = vi.fn()
 
+// #3404 audit F1: settable so individual tests can override availableProviders
+// without redefining the whole mock.
+let mockState: Record<string, unknown> = {}
+
+function setMockState(extra: Record<string, unknown> = {}): void {
+  mockState = {
+    activeTheme: 'default',
+    setTheme: mockSetTheme,
+    defaultProvider: 'claude-sdk',
+    setDefaultProvider: vi.fn(),
+    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+    updateInputSettings: mockUpdateInputSettings,
+    availableProviders: [],
+    ...extra,
+  }
+}
+setMockState()
+
 vi.mock('../store/connection', () => ({
-  useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
-    const state = {
-      activeTheme: 'default',
-      setTheme: mockSetTheme,
-      defaultProvider: 'claude-sdk',
-      setDefaultProvider: vi.fn(),
-      inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
-      updateInputSettings: mockUpdateInputSettings,
-    }
-    return selector(state)
-  },
+  useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => selector(mockState),
 }))
 
 beforeEach(() => {
   mockSetTheme.mockClear()
+  setMockState()
 })
 
 afterEach(cleanup)
@@ -191,5 +200,58 @@ describe('SettingsPanel', () => {
   it('does not render console toggle when onToggleConsoleTab is not provided', () => {
     render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
     expect(screen.queryByLabelText('Show Console tab')).toBeNull()
+  })
+
+  // #3404 audit F1
+  describe('Provider auth status section', () => {
+    it('hides the section when the server has not surfaced any auth field', () => {
+      setMockState({ availableProviders: [{ name: 'claude-sdk', capabilities: {} }] })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('auth-status-section')).toBeNull()
+    })
+
+    it('renders one row per provider with the server-provided detail', () => {
+      setMockState({
+        availableProviders: [
+          {
+            name: 'claude-sdk',
+            capabilities: {},
+            auth: { ready: true, source: 'env', envVar: 'ANTHROPIC_API_KEY', envVars: ['ANTHROPIC_API_KEY'], hint: '', detail: 'Anthropic API (ANTHROPIC_API_KEY set)' },
+          },
+          {
+            name: 'codex',
+            capabilities: {},
+            auth: { ready: false, source: 'none', envVar: null, envVars: ['OPENAI_API_KEY'], hint: 'set OPENAI_API_KEY', detail: 'Not configured — set OPENAI_API_KEY' },
+          },
+        ],
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+      expect(screen.getByTestId('auth-status-section')).toBeInTheDocument()
+
+      const sdkRow = screen.getByTestId('auth-status-claude-sdk')
+      expect(sdkRow).toHaveAttribute('data-tone', 'env')
+      expect(sdkRow).toHaveTextContent('Anthropic API (ANTHROPIC_API_KEY set)')
+
+      const codexRow = screen.getByTestId('auth-status-codex')
+      expect(codexRow).toHaveAttribute('data-tone', 'missing')
+      expect(codexRow).toHaveTextContent('Not configured — set OPENAI_API_KEY')
+      expect(codexRow).toHaveTextContent('set OPENAI_API_KEY') // hint surfaced
+    })
+
+    it('marks oauth-source rows with the oauth tone', () => {
+      setMockState({
+        availableProviders: [
+          {
+            name: 'claude-cli',
+            capabilities: {},
+            auth: { ready: true, source: 'oauth', envVar: null, envVars: [], hint: '', detail: 'Claude subscription' },
+          },
+        ],
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const row = screen.getByTestId('auth-status-claude-cli')
+      expect(row).toHaveAttribute('data-tone', 'oauth')
+    })
   })
 })

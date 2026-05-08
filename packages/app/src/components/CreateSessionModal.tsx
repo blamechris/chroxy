@@ -97,12 +97,21 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   }, [availableProviders.length]);
 
   const providerChips = [
-    DEFAULT_PROVIDER_CHIP,
+    { ...DEFAULT_PROVIDER_CHIP, ready: true, detail: '' },
     ...availableProviders.map((p) => ({
       id: p.name,
       label: getProviderLabel(p.name),
+      // #3404 audit F5: ready=false providers stay visible but get disabled
+      // styling. Default to true so older servers without an `auth` field
+      // continue to work as before.
+      ready: p.auth?.ready !== false,
+      // #3404 audit F6: surface the server's billing-identity detail so
+      // mobile users see what wallet the chip will charge.
+      detail: p.auth?.detail ?? '',
     })),
   ];
+
+  const selectedProviderDetail = providerChips.find((p) => p.id === provider)?.detail ?? '';
 
   const handleCreate = () => {
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
@@ -216,13 +225,22 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               {providerChips.map((p) => (
                 <TouchableOpacity
                   key={p.id || '__default__'}
-                  style={[styles.providerChip, provider === p.id && styles.providerChipActive]}
-                  onPress={() => setProvider(p.id)}
+                  style={[
+                    styles.providerChip,
+                    provider === p.id && styles.providerChipActive,
+                    !p.ready && styles.providerChipDisabled,
+                  ]}
+                  onPress={() => p.ready && setProvider(p.id)}
+                  disabled={!p.ready}
                   accessibilityRole="button"
-                  accessibilityLabel={`Provider: ${p.label}`}
-                  accessibilityState={{ selected: provider === p.id }}
+                  accessibilityLabel={`Provider: ${p.label}${p.ready ? '' : ' (credentials missing)'}`}
+                  accessibilityState={{ selected: provider === p.id, disabled: !p.ready }}
                 >
-                  <Text style={[styles.providerChipText, provider === p.id && styles.providerChipTextActive]}>
+                  <Text style={[
+                    styles.providerChipText,
+                    provider === p.id && styles.providerChipTextActive,
+                    !p.ready && styles.providerChipTextDisabled,
+                  ]}>
                     {p.label}
                   </Text>
                 </TouchableOpacity>
@@ -243,6 +261,16 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                 </View>
               )}
             </View>
+            {/* #3404 audit F6: billing-identity detail under the chip row so
+                mobile users see what wallet they're picking. */}
+            {selectedProviderDetail ? (
+              <Text
+                style={styles.providerBillingHint}
+                accessibilityLabel={`Billing: ${selectedProviderDetail}`}
+              >
+                {selectedProviderDetail}
+              </Text>
+            ) : null}
 
             <View style={styles.buttons}>
               <TouchableOpacity style={styles.cancelButton} onPress={handleCancel}>
@@ -396,10 +424,24 @@ const styles = StyleSheet.create({
   providerChipTextActive: {
     color: COLORS.textPrimary,
   },
+  providerChipDisabled: {
+    opacity: 0.5,
+    borderStyle: 'dashed',
+  },
+  providerChipTextDisabled: {
+    color: COLORS.textDisabled,
+  },
   providerHint: {
     color: COLORS.textDisabled,
     fontSize: 12,
     paddingVertical: 8,
+  },
+  providerBillingHint: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginTop: -8,
+    marginBottom: 16,
+    fontStyle: 'italic',
   },
   providersEmptyRow: {
     flexDirection: 'row',

@@ -117,9 +117,20 @@ export interface ProviderCapabilities {
   sessionRules?: boolean;
 }
 
+// #3404 audit (F1+F5): per-provider auth state for grey-out + billing panel.
+export interface ProviderAuth {
+  ready: boolean;
+  source: 'env' | 'oauth' | 'none';
+  envVar: string | null;
+  envVars: string[];
+  hint: string;
+  detail: string;
+}
+
 export interface ProviderInfo {
   name: string;
   capabilities: ProviderCapabilities;
+  auth?: ProviderAuth;
 }
 
 export interface DirectoryEntry {

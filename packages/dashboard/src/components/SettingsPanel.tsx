@@ -265,6 +265,41 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
             </div>
           </section>
 
+          {/* #3404 audit F1: per-provider auth/billing status. Surfaces
+              `chroxy doctor` info inside the UI so users don't have to
+              shell out to verify which account is on the hook. */}
+          {availableProviders.some(p => !!p.auth) && (
+            <section className="settings-section" data-testid="auth-status-section">
+              <h3>Provider auth status</h3>
+              <p className="settings-hint">
+                Which billing identity each provider would use for new sessions.
+                The server reports this from the same checks <code>chroxy doctor</code> runs.
+              </p>
+              <ul className="auth-status-list">
+                {availableProviders.map(p => {
+                  if (!p.auth) return null
+                  const label = PROVIDER_LABELS[p.name] || p.name
+                  const tone = p.auth.ready ? p.auth.source : 'missing'
+                  return (
+                    <li
+                      key={p.name}
+                      className="auth-status-row"
+                      data-provider={p.name}
+                      data-tone={tone}
+                      data-testid={`auth-status-${p.name}`}
+                    >
+                      <span className="auth-status-name">{label}</span>
+                      <span className="auth-status-detail">{p.auth.detail}</span>
+                      {!p.auth.ready && p.auth.hint && (
+                        <span className="auth-status-hint">{p.auth.hint}</span>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          )}
+
           {onToggleConsoleTab && (
             <section className="settings-section">
               <h3>Dashboard</h3>

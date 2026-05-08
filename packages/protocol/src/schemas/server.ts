@@ -306,11 +306,24 @@ export const ServerSessionRestoreFailedSchema = z.object({
   historyLength: z.number().optional(),
 })
 
+// #3404 audit (F1+F5): per-provider auth/billing summary so clients can
+// grey-out unusable providers and surface billing-identity confidence.
+// Optional on the wire so older servers stay parseable.
+const ProviderAuthSchema = z.object({
+  ready: z.boolean(),
+  source: z.enum(['env', 'oauth', 'none']),
+  envVar: z.string().nullable(),
+  envVars: z.array(z.string()),
+  hint: z.string(),
+  detail: z.string(),
+})
+
 export const ServerProviderListSchema = z.object({
   type: z.literal('provider_list'),
   providers: z.array(z.object({
     name: z.string(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
+    auth: ProviderAuthSchema.optional(),
   })),
 })
 

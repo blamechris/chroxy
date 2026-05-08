@@ -275,6 +275,18 @@ export declare const ServerProviderListSchema: z.ZodObject<{
     providers: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        auth: z.ZodOptional<z.ZodObject<{
+            ready: z.ZodBoolean;
+            source: z.ZodEnum<{
+                none: "none";
+                env: "env";
+                oauth: "oauth";
+            }>;
+            envVar: z.ZodNullable<z.ZodString>;
+            envVars: z.ZodArray<z.ZodString>;
+            hint: z.ZodString;
+            detail: z.ZodString;
+        }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerSkillsListSchema: z.ZodObject<{

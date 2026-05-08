@@ -158,7 +158,12 @@ export function getProviderDataDirs() {
  * supports session-scoped rules iff its prototype has `setPermissionRules`.
  * Clients use this to gate the "Allow for Session" UI affordance (#3072).
  *
- * @returns {Array<{ name: string, capabilities: object }>}
+ * `auth` (#3404 audit F1+F5) summarises whether the provider can actually run
+ * sessions right now and which billing identity is on the hook. Lets the
+ * dashboard grey-out unusable providers and surface a billing-confidence
+ * panel without making the user shell out and run `chroxy doctor`.
+ *
+ * @returns {Array<{ name: string, capabilities: object, auth: object }>}
  */
 export function listProviders() {
   const list = []
@@ -170,9 +175,102 @@ export function listProviders() {
         ...(ProviderClass.capabilities || {}),
         sessionRules: typeof ProviderClass.prototype.setPermissionRules === 'function',
       },
+      auth: getProviderAuthInfo(name, ProviderClass),
     })
   }
   return list
+}
+
+/**
+ * Resolve the auth/billing state for a single provider.
+ *
+ * The Claude CLI provider (and its docker-cli variant) explicitly strips
+ * `ANTHROPIC_API_KEY` before spawning the binary — see spawn-env.js's
+ * `claude` denylist — so it always bills the claude.ai subscription
+ * regardless of whether the env var is present. Other providers route to
+ * whichever credential they find first.
+ *
+ * Returns:
+ *   ready    : boolean — false only when required creds are missing
+ *   source   : 'env' | 'oauth' | 'none'
+ *   envVar   : matched env var name (null when source !== 'env')
+ *   envVars  : env var candidates checked
+ *   hint     : human-readable fix hint
+ *   detail   : human-readable summary including billing identity
+ *
+ * @param {string} name
+ * @param {Function} ProviderClass
+ */
+function getProviderAuthInfo(name, ProviderClass) {
+  const spec = ProviderClass.preflight
+  const credSpec = spec?.credentials
+  const envVars = (credSpec && Array.isArray(credSpec.envVars)) ? credSpec.envVars : []
+  const optional = !!credSpec?.optional
+  const hint = credSpec?.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
+
+  // Claude CLI family always bills subscription regardless of env state.
+  const isClaudeCliFamily = name === 'claude-cli' || name === 'docker-cli'
+
+  // Look for any matching env var.
+  const matched = envVars.find(v => process.env[v])
+
+  if (isClaudeCliFamily) {
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint: 'run `claude login` if not yet authed',
+      detail: 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
+    }
+  }
+
+  if (matched) {
+    return {
+      ready: true,
+      source: 'env',
+      envVar: matched,
+      envVars,
+      hint: '',
+      detail: `${describeBillingIdentity(name, matched)} (${matched} set)`,
+    }
+  }
+
+  // No env var matched — optional creds (Claude SDK family) get an OAuth fallback.
+  if (optional) {
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `${describeBillingIdentity(name, null)} (OAuth fallback — run \`claude login\` to verify)`,
+    }
+  }
+
+  // Required creds missing — provider can't run.
+  return {
+    ready: false,
+    source: 'none',
+    envVar: null,
+    envVars,
+    hint,
+    detail: envVars.length
+      ? `Not configured — ${hint}`
+      : 'Not configured',
+  }
+}
+
+function describeBillingIdentity(name, envVar) {
+  // Claude SDK family + ANTHROPIC_API_KEY → API; else OAuth fallback → subscription.
+  if (name === 'claude-sdk' || name === 'docker-sdk') {
+    if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API'
+    if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token)'
+    return 'Claude subscription'
+  }
+  if (name === 'codex') return 'OpenAI API'
+  if (name === 'gemini') return 'Google API'
+  return 'External provider'
 }
 
 /**

@@ -98,6 +98,101 @@ describe('Provider Registry', () => {
         'gemini does not implement setPermissionRules so should report sessionRules: false')
     }
   })
+
+  // #3404 audit (F1+F5): listProviders must surface auth/credentials state
+  // so the dashboard can grey-out unusable providers and show a billing-
+  // identity confidence panel without making the user run `chroxy doctor`.
+  describe('auth status (#3404 audit)', () => {
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']
+    const saved = {}
+
+    function clearKeys() {
+      for (const k of ENV_KEYS) {
+        saved[k] = process.env[k]
+        delete process.env[k]
+      }
+    }
+    function restoreKeys() {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+
+    it('claude-sdk reports source=env and ready when ANTHROPIC_API_KEY is set', () => {
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        assert.ok(sdk?.auth, 'claude-sdk should expose auth')
+        assert.equal(sdk.auth.ready, true)
+        assert.equal(sdk.auth.source, 'env')
+        assert.equal(sdk.auth.envVar, 'ANTHROPIC_API_KEY')
+        assert.match(sdk.auth.detail, /ANTHROPIC_API_KEY/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-sdk reports source=oauth (optional fallback) when no env var is set', () => {
+      clearKeys()
+      try {
+        const list = listProviders()
+        const sdk = list.find(p => p.name === 'claude-sdk')
+        // Optional credentials → ready stays true, source is oauth
+        assert.equal(sdk.auth.ready, true)
+        assert.equal(sdk.auth.source, 'oauth')
+        assert.equal(sdk.auth.envVar, null)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('claude-cli reports source=oauth regardless of env (subscription always)', () => {
+      clearKeys()
+      process.env.ANTHROPIC_API_KEY = 'sk-test'
+      try {
+        const list = listProviders()
+        const cli = list.find(p => p.name === 'claude-cli')
+        // CLI strips ANTHROPIC_API_KEY before spawn — billing is always subscription
+        assert.equal(cli.auth.source, 'oauth')
+        assert.equal(cli.auth.ready, true)
+        assert.match(cli.auth.detail, /subscription/i)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('codex reports ready=false and source=none when OPENAI_API_KEY is missing', () => {
+      clearKeys()
+      try {
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return // codex registration may be conditional in test env
+        assert.equal(codex.auth.ready, false)
+        assert.equal(codex.auth.source, 'none')
+        assert.match(codex.auth.detail, /OPENAI_API_KEY/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('gemini reports ready when GEMINI_API_KEY or GOOGLE_API_KEY is set', () => {
+      clearKeys()
+      process.env.GEMINI_API_KEY = 'test-key'
+      try {
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'env')
+        assert.equal(gemini.auth.envVar, 'GEMINI_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+  })
 })
 
 describe('Docker Provider Naming (#2475)', () => {
