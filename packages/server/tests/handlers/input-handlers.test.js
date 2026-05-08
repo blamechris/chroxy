@@ -383,6 +383,86 @@ describe('input-handlers', () => {
       assert.equal(ev.msg.reasoning, 'Original was vague.')
       assert.ok(typeof ev.msg.evaluatorIterationId === 'string' && ev.msg.evaluatorIterationId.length > 0,
         'evaluatorIterationId must be a non-empty string for dashboard dedup')
+
+      // Issue #3635: history must record the rewritten text so what was
+      // forwarded to the session matches what an operator sees on replay.
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      assert.equal(
+        ctx.sessionManager.recordUserInput.lastCall[1],
+        'Profile auth_handler() and propose 2 specific optimisations.',
+        'history must record the rewritten text on rewrite verdict (parity with sendMessage)',
+      )
+    })
+
+    // Issue #3635: regression pin — what's forwarded to the session and what
+    // gets recorded into history must agree on the rewrite path. Without
+    // this, post-reconnect replay shows the user's original draft beside an
+    // assistant response that answers the rewritten prompt.
+    it('records rewritten text in history when verdict is rewrite (parity with what was forwarded)', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'rewrite',
+        rewritten: 'Profile auth_handler() and propose 2 concrete optimisations.',
+        clarification: null,
+        reasoning: 'Vague — needs measurable goal.',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(
+        makeWs(),
+        client,
+        { data: 'make the auth handler faster please', clientMessageId: 'user-3635-rewrite' },
+        ctx,
+      )
+
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      const [sid, recordedText, recordedId] = ctx.sessionManager.recordUserInput.lastCall
+      assert.equal(sid, 's1')
+      assert.equal(
+        recordedText,
+        session.sendMessage.lastCall[0],
+        'recorded history text must match the text forwarded to the session',
+      )
+      assert.equal(
+        recordedText,
+        'Profile auth_handler() and propose 2 concrete optimisations.',
+        'recorded history text must be the rewritten string, not the original draft',
+      )
+      assert.equal(
+        recordedId,
+        'user-3635-rewrite',
+        'messageId must remain stable across record + echo broadcast on the rewrite path',
+      )
+
+      // Echo broadcast — kept on the original-id contract from #2902.
+      const echoes = ctx._broadcasts.filter((m) => m.type === 'user_input')
+      assert.equal(echoes.length, 1)
+      assert.equal(echoes[0].messageId, 'user-3635-rewrite',
+        'echo broadcast must reuse the same messageId as the history record')
+    })
+
+    // Issue #3635: clarify path holds the message — the session never sees
+    // it, so history should retain the user's original draft (the
+    // dashboard renders the clarify UI alongside that draft).
+    it('records ORIGINAL draft in history on clarify verdict (no rewrite parity required)', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'clarify',
+        rewritten: null,
+        clarification: 'Which file?',
+        reasoning: 'Ambiguous "it".',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'remove it from the function' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 0, 'clarify never forwards to session')
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      assert.equal(
+        ctx.sessionManager.recordUserInput.lastCall[1],
+        'remove it from the function',
+        'clarify path must keep the original draft in history (the dashboard pairs it with the clarify card)',
+      )
     })
 
     it('broadcasts evaluator_clarify and DOES NOT forward on clarify verdict', async () => {
