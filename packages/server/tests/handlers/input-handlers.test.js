@@ -42,6 +42,24 @@ function makeClient(overrides = {}) {
 
 function makeWs() { return {} }
 
+// #3186: helper to build a session entry with a configurable promptEvaluator
+// flag and capture broadcastToSession calls. Auto-evaluation tests need both.
+function makeAutoEvalCtx({ promptEvaluator = false, evaluator } = {}) {
+  const sessions = new Map()
+  const session = createMockSession()
+  session.promptEvaluator = promptEvaluator
+  sessions.set('s1', { session, name: 'S', cwd: '/work' })
+  const broadcastToSessionCalls = []
+  const ctx = makeCtx(sessions, {
+    broadcastToSession: createSpy((sid, msg, filter) => {
+      broadcastToSessionCalls.push({ sid, msg, filter })
+    }),
+    evaluateDraft: evaluator,
+  })
+  ctx._broadcastToSessionCalls = broadcastToSessionCalls
+  return { ctx, session }
+}
+
 describe('input-handlers', () => {
   describe('input', () => {
     it('sends session_error when no active session', () => {
@@ -282,6 +300,194 @@ describe('input-handlers', () => {
 
       assert.equal(session.respondToQuestion.callCount, 1)
       assert.equal(session.respondToQuestion.lastCall[0], 'yes')
+    })
+  })
+
+  // #3186: auto-evaluation hook on user_input. When session.promptEvaluator
+  // is true, the handler runs evaluateDraft before forwarding the message.
+  describe('input (auto-evaluation hook #3186)', () => {
+    it('does not call evaluator when promptEvaluator is false (forwards directly)', async () => {
+      const evaluator = createSpy(async () => ({ verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: false, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'a substantial message that would otherwise evaluate' }, ctx)
+
+      assert.equal(evaluator.callCount, 0, 'evaluator must not be called when promptEvaluator is off')
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(session.sendMessage.lastCall[0], 'a substantial message that would otherwise evaluate')
+      assert.equal(ctx._broadcastToSessionCalls.length, 0)
+    })
+
+    it('does not call evaluator when message matches skip heuristic ("yes")', async () => {
+      const evaluator = createSpy(async () => ({ verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'yes' }, ctx)
+
+      assert.equal(evaluator.callCount, 0, 'short ack messages must skip the evaluator round-trip')
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(session.sendMessage.lastCall[0], 'yes')
+    })
+
+    it('forwards original message when verdict is "forward"', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'forward',
+        rewritten: null,
+        clarification: null,
+        reasoning: 'Clear enough.',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'please refactor the auth handler thoroughly' }, ctx)
+
+      assert.equal(evaluator.callCount, 1, 'evaluator must be called once')
+      assert.equal(evaluator.lastCall[0].draft, 'please refactor the auth handler thoroughly')
+      assert.equal(evaluator.lastCall[0].cwd, '/work', 'cwd must be threaded into evaluator')
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(session.sendMessage.lastCall[0], 'please refactor the auth handler thoroughly')
+      // No broadcast events on forward (matches manual evaluator UX — silent pass-through)
+      const broadcasts = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
+      assert.equal(broadcasts.length, 0, 'forward verdict must not emit evaluator_* broadcasts')
+    })
+
+    it('broadcasts evaluator_rewrite and forwards rewritten text on rewrite verdict', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'rewrite',
+        rewritten: 'Profile auth_handler() and propose 2 specific optimisations.',
+        clarification: null,
+        reasoning: 'Original was vague.',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'make it faster please' }, ctx)
+
+      assert.equal(evaluator.callCount, 1)
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(
+        session.sendMessage.lastCall[0],
+        'Profile auth_handler() and propose 2 specific optimisations.',
+        'session must receive the rewritten text, not the original draft',
+      )
+
+      const rewrites = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite')
+      assert.equal(rewrites.length, 1, 'a single evaluator_rewrite broadcast must fire')
+      const ev = rewrites[0]
+      assert.equal(ev.sid, 's1')
+      assert.equal(ev.msg.sessionId, 's1')
+      assert.equal(ev.msg.originalDraft, 'make it faster please')
+      assert.equal(ev.msg.rewritten, 'Profile auth_handler() and propose 2 specific optimisations.')
+      assert.equal(ev.msg.reasoning, 'Original was vague.')
+      assert.ok(typeof ev.msg.evaluatorIterationId === 'string' && ev.msg.evaluatorIterationId.length > 0,
+        'evaluatorIterationId must be a non-empty string for dashboard dedup')
+    })
+
+    it('broadcasts evaluator_clarify and DOES NOT forward on clarify verdict', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'clarify',
+        rewritten: null,
+        clarification: 'Which file are you referring to?',
+        reasoning: 'Ambiguous "it".',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'remove it from the function' }, ctx)
+
+      assert.equal(evaluator.callCount, 1)
+      assert.equal(session.sendMessage.callCount, 0, 'clarify must NOT forward to session — wait for follow-up')
+
+      const clarifies = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_clarify')
+      assert.equal(clarifies.length, 1)
+      const ev = clarifies[0]
+      assert.equal(ev.msg.sessionId, 's1')
+      assert.equal(ev.msg.originalDraft, 'remove it from the function')
+      assert.equal(ev.msg.clarification, 'Which file are you referring to?')
+      assert.equal(ev.msg.reasoning, 'Ambiguous "it".')
+      assert.equal(ev.msg.evaluatorIteration, 1, 'first clarify is iteration 1')
+      assert.ok(typeof ev.msg.evaluatorIterationId === 'string' && ev.msg.evaluatorIterationId.length > 0)
+      // Primary must be updated even on the clarify path so input-conflict
+      // and primary-changed bookkeeping reflects the user's intent — see
+      // Copilot review on PR #3634.
+      assert.equal(ctx.updatePrimary.callCount, 1, 'updatePrimary must be called even on clarify path')
+      assert.deepEqual(ctx.updatePrimary.lastCall, ['s1', client.id])
+    })
+
+    it('force-forwards original draft after 3 consecutive clarify verdicts (max iteration cap)', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'clarify',
+        rewritten: null,
+        clarification: 'Still ambiguous?',
+        reasoning: 'Need more.',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      // Iterations 1-3 all clarify — none should forward
+      await inputHandlers.input(ws, client, { data: 'first attempt at clarification draft' }, ctx)
+      await inputHandlers.input(ws, client, { data: 'second attempt — still vague honestly' }, ctx)
+      await inputHandlers.input(ws, client, { data: 'third try and the evaluator keeps clarifying' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 0, 'iterations 1-3 must not forward when verdict is clarify')
+
+      const clarifies1 = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_clarify')
+      assert.equal(clarifies1.length, 3, 'three clarify broadcasts so far')
+      assert.equal(clarifies1[0].msg.evaluatorIteration, 1)
+      assert.equal(clarifies1[1].msg.evaluatorIteration, 2)
+      assert.equal(clarifies1[2].msg.evaluatorIteration, 3)
+
+      // Iteration 4: cap kicks in — force-forward despite clarify verdict
+      await inputHandlers.input(ws, client, { data: 'fourth message bypasses the evaluator gate' }, ctx)
+      assert.equal(session.sendMessage.callCount, 1, 'iteration 4 must force-forward the original draft')
+      assert.equal(session.sendMessage.lastCall[0], 'fourth message bypasses the evaluator gate')
+
+      // After the cap fires the counter resets — a subsequent message should
+      // start a fresh evaluator cycle (otherwise users get stuck after one
+      // long clarify loop).
+      session.sendMessage.reset()
+      await inputHandlers.input(ws, client, { data: 'fifth message after the loop has reset cleanly' }, ctx)
+      const clarifies2 = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_clarify')
+      // The fifth call ran the evaluator again (still clarify). Iteration
+      // counter must have reset to 1 — not continued from 4.
+      assert.equal(clarifies2[clarifies2.length - 1].msg.evaluatorIteration, 1,
+        'iteration counter must reset after the cap fires')
+    })
+
+    it('fail-open: EVALUATOR_API_ERROR forwards original message and does not throw', async () => {
+      const err = Object.assign(new Error('Evaluator service unavailable'), {
+        code: 'EVALUATOR_API_ERROR',
+        status: 503,
+      })
+      const evaluator = createSpy(async () => { throw err })
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'an upstream evaluator outage must not block us' }, ctx)
+
+      assert.equal(evaluator.callCount, 1)
+      assert.equal(session.sendMessage.callCount, 1, 'fail-open: original message must still reach the session')
+      assert.equal(session.sendMessage.lastCall[0], 'an upstream evaluator outage must not block us')
+      // No evaluator_rewrite / evaluator_clarify on fail-open path
+      const evals = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
+      assert.equal(evals.length, 0)
+    })
+
+    it('fail-open: EVALUATOR_NO_API_KEY forwards original and does not throw', async () => {
+      const err = Object.assign(new Error('ANTHROPIC_API_KEY is not set'), {
+        code: 'EVALUATOR_NO_API_KEY',
+      })
+      const evaluator = createSpy(async () => { throw err })
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'missing key should not block real users either' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(session.sendMessage.lastCall[0], 'missing key should not block real users either')
     })
   })
 })
