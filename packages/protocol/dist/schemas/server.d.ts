@@ -96,6 +96,11 @@ export declare const ServerPromptEvaluatorChangedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     value: z.ZodBoolean;
 }, z.core.$strip>;
+export declare const ServerPromptEvaluatorSkipPatternChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"prompt_evaluator_skip_pattern_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodUnion<readonly [z.ZodString, z.ZodNull]>;
+}, z.core.$strip>;
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *
@@ -214,6 +219,7 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     repoCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     isolation: z.ZodOptional<z.ZodString>;
     promptEvaluator: z.ZodOptional<z.ZodBoolean>;
+    promptEvaluatorSkipPattern: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNull]>>;
     stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
     stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
     stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
@@ -236,6 +242,7 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         repoCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         isolation: z.ZodOptional<z.ZodString>;
         promptEvaluator: z.ZodOptional<z.ZodBoolean>;
+        promptEvaluatorSkipPattern: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNull]>>;
         stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
         stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
         stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
@@ -534,6 +541,23 @@ export declare const ServerEvaluateDraftResultSchema: z.ZodUnion<readonly [z.Zod
     clarification: z.ZodOptional<z.ZodNever>;
     reasoning: z.ZodOptional<z.ZodNever>;
 }, z.core.$strip>]>;
+export declare const ServerEvaluatorRewriteSchema: z.ZodObject<{
+    type: z.ZodLiteral<"evaluator_rewrite">;
+    sessionId: z.ZodString;
+    originalDraft: z.ZodString;
+    rewritten: z.ZodString;
+    reasoning: z.ZodString;
+    evaluatorIterationId: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerEvaluatorClarifySchema: z.ZodObject<{
+    type: z.ZodLiteral<"evaluator_clarify">;
+    sessionId: z.ZodString;
+    originalDraft: z.ZodString;
+    clarification: z.ZodString;
+    reasoning: z.ZodString;
+    evaluatorIterationId: z.ZodString;
+    evaluatorIteration: z.ZodNumber;
+}, z.core.$strip>;
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>;
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>;
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>;
@@ -542,5 +566,7 @@ export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;
+export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewriteSchema>;
+export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>;
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>;
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>;

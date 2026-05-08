@@ -99,6 +99,17 @@ export const ServerPromptEvaluatorChangedSchema = z.object({
     sessionId: z.string(),
     value: z.boolean(),
 });
+// #3639: per-session promptEvaluatorSkipPattern changed. Broadcast to
+// every client bound to `sessionId` whenever the stored source string
+// actually changes (set, cleared, or rewritten). `value` is the
+// normalised stored value: a non-empty string source, or `null` when
+// the override is cleared. Empty string is normalised to null on the
+// server before broadcast.
+export const ServerPromptEvaluatorSkipPatternChangedSchema = z.object({
+    type: z.literal('prompt_evaluator_skip_pattern_changed'),
+    sessionId: z.string(),
+    value: z.union([z.string(), z.null()]),
+});
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *
@@ -225,6 +236,10 @@ export const ServerSessionListEntrySchema = z.object({
     repoCwd: z.string().nullable().optional(),
     isolation: z.string().optional(),
     promptEvaluator: z.boolean().optional(),
+    // #3639: per-session skip-pattern source (or null when unset). The
+    // dashboard can show / edit this; the server falls back to
+    // `config.promptEvaluatorSkipPattern` when null.
+    promptEvaluatorSkipPattern: z.union([z.string(), z.null()]).optional(),
     stdinForwardingDisabled: z.boolean().optional(),
     // #3573: cumulative stdin_dropped totals seeded into the handshake so a
     // late-joining client sees the running counter without waiting for the
@@ -590,3 +605,36 @@ export const ServerEvaluateDraftResultSchema = z.union([
     ServerEvaluateDraftSuccessSchema,
     ServerEvaluateDraftErrorSchema,
 ]);
+// -- Auto-evaluator broadcast events (#3208) --
+//
+// Unlike `evaluate_draft_result` (request/response, manual flow), these two
+// events are broadcast to clients bound to `sessionId` WITHOUT a triggering
+// client request. They fire when the auto-evaluation hook (#3186) lands on
+// a `rewrite` or `clarify` verdict for a `user_input` message that was
+// gated through `session.config.promptEvaluator`.
+//
+// `evaluatorIterationId` is a server-generated monotonic-per-session id
+// used by the dashboard to dedup events received over a reconnect replay.
+// `evaluatorIteration` (clarify only) is the 1-based clarify-loop counter.
+// The server clamps it to its configured `maxIterations` (currently 3, see
+// #3186) before emit; the wire schema enforces a 10-iteration sanity ceiling
+// so a misconfiguration or counter overflow can't surface as e.g.
+// "Iteration 999/3" in the dashboard. Tighten the ceiling in lock-step if
+// future server-side caps land below 10.
+export const ServerEvaluatorRewriteSchema = z.object({
+    type: z.literal('evaluator_rewrite'),
+    sessionId: z.string(),
+    originalDraft: z.string(),
+    rewritten: z.string(),
+    reasoning: z.string(),
+    evaluatorIterationId: z.string(),
+});
+export const ServerEvaluatorClarifySchema = z.object({
+    type: z.literal('evaluator_clarify'),
+    sessionId: z.string(),
+    originalDraft: z.string(),
+    clarification: z.string(),
+    reasoning: z.string(),
+    evaluatorIterationId: z.string(),
+    evaluatorIteration: z.number().int().min(1).max(10),
+});

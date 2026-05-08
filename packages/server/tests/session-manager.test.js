@@ -266,6 +266,36 @@ describe('SessionManager.serializeState', () => {
     assert.equal(typeof onEntry.promptEvaluator, 'boolean')
   })
 
+  // #3639: per-session promptEvaluatorSkipPattern survives the
+  // round-trip so a restart preserves the operator's per-session
+  // skip-list override.
+  it('serializes promptEvaluatorSkipPattern on each session entry (#3639)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionWithPattern = new EventEmitter()
+    sessionWithPattern.model = 'sonnet'
+    sessionWithPattern.permissionMode = 'approve'
+    sessionWithPattern.promptEvaluatorSkipPattern = '^lgtm ship it$'
+    Object.defineProperty(sessionWithPattern, 'resumeSessionId', { get: () => null })
+    sessionWithPattern.destroy = () => {}
+    mgr._sessions.set('s-with', { session: sessionWithPattern, name: 'WithPattern', cwd: '/tmp' })
+
+    const sessionNoPattern = new EventEmitter()
+    sessionNoPattern.model = 'sonnet'
+    sessionNoPattern.permissionMode = 'approve'
+    sessionNoPattern.promptEvaluatorSkipPattern = null
+    Object.defineProperty(sessionNoPattern, 'resumeSessionId', { get: () => null })
+    sessionNoPattern.destroy = () => {}
+    mgr._sessions.set('s-no', { session: sessionNoPattern, name: 'NoPattern', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    const withEntry = state.sessions.find(s => s.name === 'WithPattern')
+    const noEntry = state.sessions.find(s => s.name === 'NoPattern')
+    assert.equal(withEntry.promptEvaluatorSkipPattern, '^lgtm ship it$')
+    assert.equal(noEntry.promptEvaluatorSkipPattern, null,
+      'unset pattern serializes as null (not undefined) so the wire shape is stable')
+  })
+
   // #3540: persisted stdin_disabled latch survives the round-trip so a
   // server restart preserves the disabled state. Reconnecting clients
   // observe the flag through session_list / listSessions metadata
@@ -447,6 +477,37 @@ describe('SessionManager.restoreState', () => {
     // `undefined` on the wire.
     assert.equal(withoutEval.promptEvaluator, false)
     assert.equal(typeof withoutEval.promptEvaluator, 'boolean')
+
+    mgr.destroyAll()
+  })
+
+  // #3639: per-session promptEvaluatorSkipPattern round-trips. A state
+  // file written with the field must restore the session with the same
+  // pattern; pre-#3639 state files (no field) restore as null. Malformed
+  // patterns in the saved file fall back to null so a hand-edited state
+  // file can't crash session restoration.
+  it('restores promptEvaluatorSkipPattern across the state cycle (#3639)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'WithPattern', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, promptEvaluatorSkipPattern: '^lgtm$' },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        { name: 'BadPattern', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, promptEvaluatorSkipPattern: '[unclosed' },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    const withPat = sessions.find(s => s.name === 'WithPattern')
+    const noField = sessions.find(s => s.name === 'NoField')
+    const badPat = sessions.find(s => s.name === 'BadPattern')
+    assert.equal(withPat.promptEvaluatorSkipPattern, '^lgtm$')
+    assert.equal(noField.promptEvaluatorSkipPattern, null,
+      'pre-#3639 state files restore with the per-session field as null (global config still applies)')
+    assert.equal(badPat.promptEvaluatorSkipPattern, null,
+      'malformed regex source falls back to null on restore (BaseSession defends against schema drift)')
 
     mgr.destroyAll()
   })

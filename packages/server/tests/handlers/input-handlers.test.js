@@ -579,8 +579,6 @@ describe('input-handlers', () => {
   // re-check after the await before forwarding.
   describe('input (evaluator concurrency #3636)', () => {
     it('rejects a second concurrent evaluator-await on the same session with input_conflict', async () => {
-      // Manual deferred so we can hold the first evaluator promise open
-      // while the second message arrives.
       let resolveFirst
       const firstPromise = new Promise((r) => { resolveFirst = r })
       let callCount = 0
@@ -590,8 +588,6 @@ describe('input-handlers', () => {
           await firstPromise
           return { verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }
         }
-        // Second call should never run — it should be rejected before
-        // reaching the evaluator.
         return { verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }
       })
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
@@ -600,35 +596,24 @@ describe('input-handlers', () => {
       const wsA = makeWs()
       const wsB = makeWs()
 
-      // Kick off the first input — evaluator hangs.
       const firstInFlight = inputHandlers.input(wsA, clientA, { data: 'first draft awaiting an evaluator round-trip' }, ctx)
-
-      // Yield so the first call enters the await.
       await new Promise((r) => setImmediate(r))
 
-      // Second input on the SAME session arrives while evaluator is in
-      // flight. Should be rejected immediately with input_conflict.
       await inputHandlers.input(wsB, clientB, { data: 'second draft arriving mid-evaluation on same session' }, ctx)
 
       assert.equal(evaluator.callCount, 1, 'second call must be rejected before invoking the evaluator')
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'exactly one input_conflict session_error must be sent for the rejected second draft')
 
-      // #3636 phantom-history guard — the rejected second draft must NOT
-      // be persisted into history, and must NOT broadcast a user_input
-      // echo. Otherwise reconnect replay would surface a draft that
-      // never reached the session and was never delivered to peers.
       assert.equal(ctx.sessionManager.recordUserInput.callCount, 0,
         'rejected second draft must NOT be recorded in session history')
       const userInputEchos = ctx._broadcasts.filter((b) => b?.type === 'user_input')
       assert.equal(userInputEchos.length, 0,
         'rejected second draft must NOT be broadcast as a user_input echo')
 
-      // Let the first finish and confirm it forwards normally.
       resolveFirst()
       await firstInFlight
       assert.equal(session.sendMessage.callCount, 1, 'first draft must still forward to the session after evaluator resolves')
-      // The first draft IS recorded — it forwarded successfully.
       assert.equal(ctx.sessionManager.recordUserInput.callCount, 1,
         'first (forwarded) draft must be recorded exactly once')
     })
@@ -645,7 +630,6 @@ describe('input-handlers', () => {
         return { verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }
       })
 
-      // Build a ctx that knows two sessions.
       const sessions = new Map()
       const sessionA = createMockSession()
       sessionA.promptEvaluator = true
@@ -665,10 +649,8 @@ describe('input-handlers', () => {
       const firstInFlight = inputHandlers.input(makeWs(), clientA, { data: 'draft for session A under evaluation' }, ctx)
       await new Promise((r) => setImmediate(r))
 
-      // Second draft on a DIFFERENT session — must NOT be rejected.
       const secondInFlight = inputHandlers.input(makeWs(), clientB, { data: 'draft for session B under evaluation' }, ctx)
 
-      // Resolve so both can complete.
       resolveFirst()
       await Promise.all([firstInFlight, secondInFlight])
 
@@ -680,9 +662,6 @@ describe('input-handlers', () => {
     })
 
     it('re-checks input_conflict AFTER the evaluator await — drops if isRunning flipped during the round-trip', async () => {
-      // The evaluator returns forward, but mid-await another path flips
-      // isRunning=true with a different primary client. The handler must
-      // re-check and emit input_conflict instead of forwarding.
       let resolveEval
       const evalPromise = new Promise((r) => { resolveEval = r })
       const evaluator = createSpy(async () => {
@@ -692,17 +671,14 @@ describe('input-handlers', () => {
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
       const client = makeClient({ id: 'client-A', activeSessionId: 's1' })
 
-      // isRunning false at handler entry (passes initial guard).
       session.isRunning = false
 
       const inFlight = inputHandlers.input(makeWs(), client, { data: 'draft that will be pre-empted by another client' }, ctx)
       await new Promise((r) => setImmediate(r))
 
-      // Mid-await, simulate another client driving the session to busy.
       session.isRunning = true
       ctx.primaryClients.set('s1', 'other-client')
 
-      // Resolve evaluator — handler proceeds past the await and must re-check.
       resolveEval()
       await inFlight
 
@@ -710,13 +686,69 @@ describe('input-handlers', () => {
       assert.equal(session.sendMessage.callCount, 0, 'must NOT forward when conflict re-emerges after the await')
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'must emit a single input_conflict session_error after the await re-check')
-      // #3636 phantom-history guard — post-await rejection path must not
-      // persist into history nor broadcast a user_input echo either.
       assert.equal(ctx.sessionManager.recordUserInput.callCount, 0,
         'post-await rejected draft must NOT be recorded in session history')
       const userInputEchos = ctx._broadcasts.filter((b) => b?.type === 'user_input')
       assert.equal(userInputEchos.length, 0,
         'post-await rejected draft must NOT be broadcast as a user_input echo')
+    })
+  })
+
+  // #3639: per-session promptEvaluatorSkipPattern. When the session has a
+  // pattern set, it takes precedence over the server-wide ctx.config one.
+  // When the session has no pattern, the server-wide config still applies
+  // (backward compat with #3187). When neither is set, default rules only.
+  describe('input (per-session promptEvaluatorSkipPattern #3639)', () => {
+    it('per-session pattern matches → skips evaluator (no broadcast, no rewrite)', async () => {
+      const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'X', clarification: null, reasoning: '' }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      session.promptEvaluatorSkipPattern = '^lgtm ship it now$'
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'lgtm ship it now' }, ctx)
+
+      assert.equal(evaluator.callCount, 0, 'per-session pattern must short-circuit the evaluator')
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(session.sendMessage.lastCall[0], 'lgtm ship it now', 'original draft forwarded as-is')
+      const evals = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
+      assert.equal(evals.length, 0, 'no evaluator_* broadcast on skip')
+    })
+
+    it('per-session pattern absent → falls back to ctx.config.promptEvaluatorSkipPattern', async () => {
+      const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'X', clarification: null, reasoning: '' }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      ctx.config = { promptEvaluatorSkipPattern: '^server wide ack pattern$' }
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'server wide ack pattern' }, ctx)
+
+      assert.equal(evaluator.callCount, 0, 'fallback to ctx.config pattern preserves #3187 behaviour')
+      assert.equal(session.sendMessage.callCount, 1)
+    })
+
+    it('per-session pattern overrides a different ctx.config pattern (precedence)', async () => {
+      const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'rw', clarification: null, reasoning: '' }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      session.promptEvaluatorSkipPattern = '^per session ack phrase$'
+      ctx.config = { promptEvaluatorSkipPattern: '^something completely else$' }
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'per session ack phrase' }, ctx)
+
+      assert.equal(evaluator.callCount, 0, 'session pattern takes precedence over global pattern')
+      assert.equal(session.sendMessage.callCount, 1)
+    })
+
+    it('neither pattern set → only default skip rules apply (no fallthrough crash)', async () => {
+      const evaluator = createSpy(async () => ({ verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      ctx.config = undefined
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'a substantial message worth evaluating' }, ctx)
+
+      assert.equal(evaluator.callCount, 1, 'evaluator must run when no skip rule matches')
+      assert.equal(session.sendMessage.callCount, 1)
     })
   })
 })

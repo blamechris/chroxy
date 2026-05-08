@@ -153,6 +153,91 @@ describe('BaseSession', () => {
     })
   })
 
+  // #3639: per-session promptEvaluatorSkipPattern. Mirrors the #3185
+  // toggle's strict-validation pattern — the setter accepts a string
+  // (compiled & verified as a real regex) or null/empty (clear), and
+  // returns true when state changed so the WS handler knows whether
+  // to broadcast.
+  describe('promptEvaluatorSkipPattern (#3639)', () => {
+    it('defaults to null when omitted from constructor opts', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.promptEvaluatorSkipPattern, null)
+    })
+
+    it('accepts a valid regex source from the constructor', () => {
+      const s = new BaseSession({
+        promptEvaluatorSkipPattern: '^lgtm$',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.promptEvaluatorSkipPattern, '^lgtm$')
+    })
+
+    it('rejects a malformed regex source from the constructor (falls back to null)', () => {
+      // Constructor must not throw on bad input — sessions might be
+      // restored from a state file that contains an invalid pattern
+      // (operator hand-edit, schema drift). Defaulting to null preserves
+      // session creation; the runtime setter is where invalid input
+      // surfaces an error to the operator.
+      const s = new BaseSession({
+        promptEvaluatorSkipPattern: '[unclosed',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.promptEvaluatorSkipPattern, null)
+    })
+
+    describe('setPromptEvaluatorSkipPattern', () => {
+      it('accepts a valid regex source and updates state', () => {
+        assert.equal(session.promptEvaluatorSkipPattern, null)
+        const result = session.setPromptEvaluatorSkipPattern('^ack$')
+        assert.equal(result, true)
+        assert.equal(session.promptEvaluatorSkipPattern, '^ack$')
+      })
+
+      it('clears when value is empty string', () => {
+        session.promptEvaluatorSkipPattern = '^old$'
+        const result = session.setPromptEvaluatorSkipPattern('')
+        assert.equal(result, true)
+        assert.equal(session.promptEvaluatorSkipPattern, null)
+      })
+
+      it('clears when value is null', () => {
+        session.promptEvaluatorSkipPattern = '^old$'
+        const result = session.setPromptEvaluatorSkipPattern(null)
+        assert.equal(result, true)
+        assert.equal(session.promptEvaluatorSkipPattern, null)
+      })
+
+      it('returns false when value is unchanged (idempotent no-op)', () => {
+        assert.equal(session.setPromptEvaluatorSkipPattern(null), false)
+        session.promptEvaluatorSkipPattern = '^same$'
+        assert.equal(session.setPromptEvaluatorSkipPattern('^same$'), false)
+      })
+
+      it('rejects non-string non-null inputs without mutating state', () => {
+        for (const bad of [42, true, false, {}, []]) {
+          assert.equal(session.setPromptEvaluatorSkipPattern(bad), false,
+            `expected setPromptEvaluatorSkipPattern(${JSON.stringify(bad)}) to return false`)
+          assert.equal(session.promptEvaluatorSkipPattern, null)
+        }
+      })
+
+      it('rejects malformed regex source without mutating state', () => {
+        // Returning false (not throwing) lets the WS handler decide how
+        // to surface the error — same pattern setPromptEvaluator uses
+        // for non-boolean rejection.
+        const result = session.setPromptEvaluatorSkipPattern('[unclosed')
+        assert.equal(result, false)
+        assert.equal(session.promptEvaluatorSkipPattern, null)
+      })
+    })
+  })
+
   // #3209: runtime activate/deactivate of manual skills. The WS layer
   // (skill_activate / skill_deactivate handlers) calls these and uses
   // the boolean return to decide whether to broadcast.
