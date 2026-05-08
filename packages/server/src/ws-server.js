@@ -411,6 +411,13 @@ export class WsServer {
     this.wss = null
     this._pingInterval = null
     this._pendingPermissions = new Map() // requestId -> { resolve, timer }
+    // #3637: per-session auto-evaluator iteration counter for the clarify
+    // loop cap (#3186). Lives on the WsServer (not per-message-ctx)
+    // because handler ctx is spread fresh on every dispatch — without a
+    // stable home the counter would reset on every message and the cap
+    // would never fire in production. Cleaned up by `_sessionDestroyedHandler`
+    // so a long-running server doesn't leak entries for destroyed sessions.
+    this._evaluatorIterations = new Map() // sessionId -> iteration count
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
     this._hookSecrets = new Set() // per-session hook secrets registered by active CliSessions
     this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
@@ -476,6 +483,9 @@ export class WsServer {
       get clients() { return self.clients },
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,
+      // #3637: stable per-session auto-evaluator iteration counter (#3186).
+      // See WsServer constructor for the lifecycle rationale.
+      _evaluatorIterations: this._evaluatorIterations,
       pendingPermissions: this._pendingPermissions,
       fileOps: this._fileOps,
       permissions: this._permissions,
@@ -607,6 +617,12 @@ export class WsServer {
         for (const [key, sid] of this._questionSessionMap) {
           if (sid === sessionId) this._questionSessionMap.delete(key)
         }
+        // #3637: drop the auto-evaluator iteration counter entry for the
+        // destroyed session. The Map would otherwise grow unboundedly
+        // over the server's lifetime — small leak (one int per session)
+        // but a long-running server with many session destroys would
+        // accumulate dead entries.
+        this._evaluatorIterations.delete(sessionId)
       }
       // #3057: audit auto-deny resolution paths (timeout / aborted / cleared).
       // The WS inline response path in settings-handlers.js audits user

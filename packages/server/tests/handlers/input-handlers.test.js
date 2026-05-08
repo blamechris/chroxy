@@ -489,5 +489,78 @@ describe('input-handlers', () => {
       assert.equal(session.sendMessage.callCount, 1)
       assert.equal(session.sendMessage.lastCall[0], 'missing key should not block real users either')
     })
+
+    // #3640: pin BAD_RESPONSE goes through the same fail-open path as
+    // API_ERROR / NO_API_KEY. A future refactor that special-cases the
+    // other two and lets BAD_RESPONSE escape would otherwise pass without
+    // anyone noticing.
+    it('fail-open: EVALUATOR_BAD_RESPONSE forwards original and does not throw', async () => {
+      const err = Object.assign(new Error('Evaluator returned an unknown verdict'), {
+        code: 'EVALUATOR_BAD_RESPONSE',
+      })
+      const evaluator = createSpy(async () => { throw err })
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'malformed evaluator response should not block users' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1, 'fail-open: original message must still reach the session')
+      assert.equal(session.sendMessage.lastCall[0], 'malformed evaluator response should not block users')
+      const evals = ctx._broadcastToSessionCalls.filter(c => c.msg?.type === 'evaluator_rewrite' || c.msg?.type === 'evaluator_clarify')
+      assert.equal(evals.length, 0, 'fail-open: no evaluator broadcast on BAD_RESPONSE')
+    })
+
+    // #3641: attachments must survive the rewrite path verbatim. The
+    // existing rewrite test checks lastCall[0] (text) but not lastCall[1]
+    // (attachments). A future refactor that builds a new opts object for
+    // the rewrite branch could silently drop attachments.
+    it('attachments survive the auto-evaluator rewrite path', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'rewrite',
+        rewritten: 'Rewritten substantive draft text',
+        clarification: null,
+        reasoning: 'Clearer.',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+      const attachments = [
+        { type: 'image', mediaType: 'image/png', data: 'AAAA', name: 'screenshot.png' },
+      ]
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'fix this attached screenshot please',
+        attachments,
+      }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(session.sendMessage.lastCall[0], 'Rewritten substantive draft text')
+      const sentAtts = session.sendMessage.lastCall[1]
+      assert.ok(Array.isArray(sentAtts), 'attachments arg must remain an array on the rewrite path')
+      assert.equal(sentAtts.length, 1)
+      assert.equal(sentAtts[0].name, 'screenshot.png')
+      assert.equal(sentAtts[0].mediaType, 'image/png')
+    })
+
+    // #3637: WsServer's session_destroyed handler must clean up the
+    // auto-evaluator iteration counter for the destroyed session.
+    // Verify the contract at the input-handler level — calling
+    // `delete(sessionId)` on the Map evicts the counter.
+    it('iteration counter is removed when the session_destroyed cleanup hook runs (#3637)', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'clarify',
+        rewritten: null,
+        clarification: 'which file?',
+        reasoning: 'Ambiguous.',
+      }))
+      const { ctx } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'first ambiguous draft for clarification' }, ctx)
+      assert.equal(ctx._evaluatorIterations?.get('s1'), 1, 'counter advanced to 1 after first clarify')
+
+      // Simulate WsServer._sessionDestroyedHandler for s1.
+      ctx._evaluatorIterations.delete('s1')
+      assert.equal(ctx._evaluatorIterations.has('s1'), false, 'counter entry removed for destroyed session')
+    })
   })
 })

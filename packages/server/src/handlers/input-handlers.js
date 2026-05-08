@@ -13,14 +13,27 @@ const log = createLogger('ws')
 // #3186 — auto-evaluation hook config.
 //
 // MAX_EVALUATOR_ITERATIONS caps the clarify loop. After 3 consecutive clarify
-// verdicts on a single session, the next user message force-forwards
-// regardless of the verdict. Without the cap an evaluator that never settles
-// would silently swallow every message.
+// verdicts on a session, the NEXT user message bypasses the evaluator call
+// entirely — the cap fires BEFORE the await, so there is no verdict on that
+// message; the original draft is force-forwarded sight-unseen and the
+// counter resets so a subsequent send can re-enter the evaluator gate.
+// Without the cap an evaluator that never settles would silently swallow
+// every message. (#3642 tightened this comment — the cap doesn't
+// "force-forward regardless of verdict", it bypasses the evaluator entirely
+// so there's no verdict to override.)
 const MAX_EVALUATOR_ITERATIONS = 3
 
-// Per-session iteration counter, hung off the handler context. Reset to 0
-// once the cap fires so a subsequent send starts fresh — see test
-// "force-forwards original draft after 3 consecutive clarify verdicts".
+// Per-session iteration counter. Owned by WsServer at runtime
+// (`this._evaluatorIterations`, exposed on `ctx._evaluatorIterations`)
+// because handler ctx is spread fresh on every dispatch — without a
+// stable home the counter would reset on every message and the cap
+// would never fire in production. Cleaned up by `_sessionDestroyedHandler`
+// so destroyed sessions don't leak counter entries (#3637). The lazy
+// creation below remains so tests that don't pass the Map through ctx
+// still work.
+//
+// Reset to 0 once the cap fires so a subsequent send starts fresh — see
+// test "force-forwards original draft after 3 consecutive clarify verdicts".
 function _getEvaluatorIterations(ctx) {
   if (!ctx._evaluatorIterations) ctx._evaluatorIterations = new Map()
   return ctx._evaluatorIterations
