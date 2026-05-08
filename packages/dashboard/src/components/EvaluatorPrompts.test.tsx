@@ -115,7 +115,13 @@ describe('EvaluatorClarifyPrompt (#3188)', () => {
   // #3644 — screen-reader announcement when the clarify question arrives.
   // role="status" + aria-live="polite" lets assistive tech read the prompt
   // without interrupting the operator's current focus.
-  it('exposes the prompt as a polite live region for screen readers', () => {
+  //
+  // Scoped to the question section only (Copilot review on PR #3661):
+  // applying this to the outer prompt container would force the entire
+  // originalDraft + textarea + Send button into the live announcement,
+  // which is verbose and disruptive for screen-reader users when the
+  // originalDraft is long.
+  it('exposes the question section as a polite live region for screen readers', () => {
     render(
       <EvaluatorClarifyPrompt
         evaluatorIteration={1}
@@ -125,10 +131,16 @@ describe('EvaluatorClarifyPrompt (#3188)', () => {
         onSubmit={vi.fn()}
       />,
     )
+    const region = screen.getByTestId('evaluator-clarify-question-region')
+    expect(region).toHaveAttribute('role', 'status')
+    expect(region).toHaveAttribute('aria-live', 'polite')
+    expect(region).toHaveAttribute('aria-atomic', 'true')
+
+    // The outer prompt must NOT carry the live-region attributes —
+    // otherwise the originalDraft and textarea get re-announced too.
     const prompt = screen.getByTestId('evaluator-clarify-prompt')
-    expect(prompt).toHaveAttribute('role', 'status')
-    expect(prompt).toHaveAttribute('aria-live', 'polite')
-    expect(prompt).toHaveAttribute('aria-atomic', 'true')
+    expect(prompt).not.toHaveAttribute('role', 'status')
+    expect(prompt).not.toHaveAttribute('aria-live')
   })
 
   it('renders the original draft, question, and reasoning sections', () => {

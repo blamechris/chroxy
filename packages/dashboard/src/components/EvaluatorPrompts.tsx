@@ -121,17 +121,9 @@ export function EvaluatorClarifyPrompt({
   }
 
   return (
-    // #3644 — announce the clarify question to screen readers when it appears.
-    // `role="status"` + `aria-live="polite"` lets assistive tech read the
-    // prompt without interrupting the operator's current focus.
-    // `aria-atomic="true"` ensures the whole block is announced as a unit
-    // (question + iteration counter together) rather than piecemeal.
     <div
       className="evaluator-clarify-prompt"
       data-testid="evaluator-clarify-prompt"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
     >
       <div className="evaluator-clarify-header">
         <span className="evaluator-clarify-title">Need a bit more detail</span>
@@ -147,7 +139,23 @@ export function EvaluatorClarifyPrompt({
         <div className="evaluator-clarify-label">Your draft</div>
         <div className="evaluator-clarify-original">{originalDraft}</div>
       </div>
-      <div className="evaluator-clarify-section">
+      {/*
+        #3644 — announce the clarify question to screen readers when it
+        appears. `role="status"` + `aria-live="polite"` reads the prompt
+        without interrupting the operator's current focus. `aria-atomic="true"`
+        announces label + question text as a unit. Scoped to the question
+        section only (Copilot review) — applying this to the outer prompt
+        container would force the entire `originalDraft`, the controlled
+        `<textarea>`, and the Send button into the live announcement, which
+        is verbose and disruptive when `originalDraft` is long.
+      */}
+      <div
+        className="evaluator-clarify-section"
+        data-testid="evaluator-clarify-question-region"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         <div className="evaluator-clarify-label">Question</div>
         <div className="evaluator-clarify-question">{clarification}</div>
       </div>
