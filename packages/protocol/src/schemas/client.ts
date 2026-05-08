@@ -96,6 +96,19 @@ export const SetPromptEvaluatorSchema = z.object({
   sessionId: z.string().max(256).optional(),
 })
 
+// #3639: per-session promptEvaluatorSkipPattern (regex source string).
+// Companion to SetPromptEvaluatorSchema — when the per-session toggle is
+// on, this pattern is consulted BEFORE the server-wide
+// `config.promptEvaluatorSkipPattern` (#3187) so different sessions can
+// pick their own skip heuristics. `null` or empty string clears the
+// override; the global default still applies. Wire-level cap at 1024
+// chars so a malicious payload can't bloat session-state.json.
+export const SetPromptEvaluatorSkipPatternSchema = z.object({
+  type: z.literal('set_prompt_evaluator_skip_pattern'),
+  value: z.union([z.string().max(1024), z.null()]),
+  sessionId: z.string().max(256).optional(),
+})
+
 // #3209: runtime activate/deactivate of a manual skill. The skill name
 // is the loader-resolved name (the file's basename without extension);
 // the server validates it matches a real skill before mutating state.
@@ -482,6 +495,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetThinkingLevelSchema,
   SetPermissionRulesSchema,
   SetPromptEvaluatorSchema,
+  SetPromptEvaluatorSkipPatternSchema,
   SkillActivateSchema,
   SkillDeactivateSchema,
   SkillTrustAcceptSchema,

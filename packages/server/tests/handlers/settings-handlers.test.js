@@ -680,6 +680,125 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #3639: per-session promptEvaluatorSkipPattern setter. Mirrors the
+  // #3185 pattern — strict-string payload validation, idempotent on
+  // unchanged value, broadcast `prompt_evaluator_skip_pattern_changed`
+  // and persist immediately on actual change. Pattern source is also
+  // validated as a real regex (parity with shouldSkipEvaluator's compile
+  // path) so the dashboard surfaces invalid input as a session_error
+  // instead of silently keeping a broken pattern.
+  describe('set_prompt_evaluator_skip_pattern (#3639)', () => {
+    it('rejects non-string values with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: 42 }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /string/)
+    })
+
+    it('rejects malformed regex source with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: '[unclosed' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /pattern|regex/i)
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejected pattern')
+    })
+
+    it('rejects when no active session', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: '^ack$' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('sets a valid pattern, broadcasts prompt_evaluator_skip_pattern_changed, persists', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, {
+        sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy },
+      })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: '^lgtm$' }, ctx)
+
+      assert.equal(session.setPromptEvaluatorSkipPattern.callCount, 1)
+      assert.equal(session.setPromptEvaluatorSkipPattern.lastCall[0], '^lgtm$')
+      assert.equal(session.promptEvaluatorSkipPattern, '^lgtm$')
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'prompt_evaluator_skip_pattern_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, '^lgtm$')
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('clears the pattern when value is empty string', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.promptEvaluatorSkipPattern = '^old pattern$'
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, {
+        sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy },
+      })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: '' }, ctx)
+
+      assert.equal(session.promptEvaluatorSkipPattern, null, 'empty string clears the per-session pattern')
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, null)
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('idempotent on no-op (already null)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      // Mock default is null — clearing-from-null must not broadcast or persist.
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, {
+        sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy },
+      })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: '' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('rejects when the session does not implement setPromptEvaluatorSkipPattern', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      delete session.setPromptEvaluatorSkipPattern
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_prompt_evaluator_skip_pattern(makeWs(), client, { value: '^ack$' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /does not support promptEvaluatorSkipPattern/)
+    })
+  })
+
   // #3209: runtime activate/deactivate of manual skills. The handler
   // validates the skillName payload, forwards to session.activateSkill /
   // deactivateSkill, and broadcasts on actual change. No-op toggles

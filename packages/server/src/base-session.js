@@ -37,6 +37,22 @@ const DEFAULT_INJECTION_BY_PROVIDER = {
 }
 const FALLBACK_INJECTION_MODE = 'append'
 
+// #3639: validate a constructor-supplied promptEvaluatorSkipPattern. Only
+// real regex sources survive — anything else (non-string, malformed
+// regex, empty string) falls back to null. Pulled out of the constructor
+// body because the same shape is consulted by `setPromptEvaluatorSkipPattern`
+// at runtime, but the runtime path needs to distinguish "rejected" from
+// "no-op clear" — the constructor only needs the final stored value.
+function _coerceSkipPatternOpt(source) {
+  if (typeof source !== 'string' || source.length === 0) return null
+  try {
+    new RegExp(source, 'i')
+    return source
+  } catch {
+    return null
+  }
+}
+
 export class BaseSession extends EventEmitter {
   /**
    * Custom event names emitted by this provider class that should be proxied
@@ -66,6 +82,7 @@ export class BaseSession extends EventEmitter {
     trustStore,
     trustMismatchMode,
     promptEvaluator,
+    promptEvaluatorSkipPattern,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -77,6 +94,18 @@ export class BaseSession extends EventEmitter {
     // here so JSON.stringify produces `true`/`false` (not `1`/`null`) on
     // the auth_ok / session_list wires.
     this.promptEvaluator = !!promptEvaluator
+    // #3639: per-session regex source string used by `shouldSkipEvaluator`
+    // to extend the default continuation/ack skip list. Mirrors the
+    // server-wide `config.promptEvaluatorSkipPattern` from #3187 but is
+    // evaluated FIRST in input-handlers.js so a per-session override
+    // beats the global default. Stored as the source string (not a
+    // RegExp) — the prompt-evaluator module owns compilation + caching.
+    // Validated here as a real regex source on construction; malformed
+    // values fall back to null so a hand-edited state file can't crash
+    // session creation. The runtime setter (setPromptEvaluatorSkipPattern)
+    // does the same validation but reports the rejection so the operator
+    // sees a session_error in the dashboard instead of a silent default.
+    this.promptEvaluatorSkipPattern = _coerceSkipPatternOpt(promptEvaluatorSkipPattern)
 
     this._isBusy = false
     this._processReady = false
@@ -406,6 +435,47 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.promptEvaluator = value
+    return true
+  }
+
+  /**
+   * Set the per-session promptEvaluatorSkipPattern (#3639). Accepts a
+   * regex source string (validated by attempting to compile it), null,
+   * or empty string (both clear the override). Returns `true` when the
+   * stored value changes and `false` for either invalid input or a
+   * redundant set — same idempotent contract as `setPromptEvaluator`.
+   *
+   * The compiled regex itself isn't stored: `shouldSkipEvaluator` owns
+   * the compile cache (LRU keyed by source string) so a stale per-session
+   * pattern won't pin a closure here. The validation done here is
+   * defence-in-depth — `shouldSkipEvaluator` also try/catches its own
+   * compile, so a session that somehow ends up with a bad source still
+   * fails-open to default-only skip rules.
+   *
+   * Safe to call mid-turn: the pattern is read at the start of the next
+   * `user_input` handler invocation only.
+   *
+   * @param {string|null} value
+   * @returns {boolean}
+   */
+  setPromptEvaluatorSkipPattern(value) {
+    let next
+    if (value === null || value === '') {
+      next = null
+    } else if (typeof value === 'string') {
+      try {
+        new RegExp(value, 'i')
+      } catch {
+        return false
+      }
+      next = value
+    } else {
+      return false
+    }
+    if (next === this.promptEvaluatorSkipPattern) {
+      return false
+    }
+    this.promptEvaluatorSkipPattern = next
     return true
   }
 

@@ -47,6 +47,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
   // 'evaluator_rewrite' removed — dashboard now handles it (#3188)
   // 'evaluator_clarify' removed — dashboard now handles it (#3188)
   // 'skills_list' removed — dashboard now handles it (#3209)
