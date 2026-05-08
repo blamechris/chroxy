@@ -93,6 +93,56 @@ describe('EvaluatorClarifyPrompt (#3188)', () => {
     expect(screen.getByTestId('evaluator-clarify-iteration')).toHaveTextContent('Iteration 3/3')
   })
 
+  // #3649 — pin behavior when the server bumps the cap above MAX_EVALUATOR_ITERATIONS.
+  // The component defensively widens the denominator via Math.max(MAX, server),
+  // so iteration=5 must render as 5/5 (not 5/3 — that would be misleading,
+  // and not clamped to 3/3 — that would lose information from the server).
+  it('renders N/N when server sends iteration > MAX_EVALUATOR_ITERATIONS', () => {
+    render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={5}
+        originalDraft="x"
+        clarification="y"
+        reasoning="z"
+        onSubmit={vi.fn()}
+      />,
+    )
+    const counter = screen.getByTestId('evaluator-clarify-iteration')
+    expect(counter).toHaveTextContent('Iteration 5/5')
+    expect(counter).toHaveAttribute('aria-label', 'Clarify iteration 5 of 5')
+  })
+
+  // #3644 — screen-reader announcement when the clarify question arrives.
+  // role="status" + aria-live="polite" lets assistive tech read the prompt
+  // without interrupting the operator's current focus.
+  //
+  // Scoped to the question section only (Copilot review on PR #3661):
+  // applying this to the outer prompt container would force the entire
+  // originalDraft + textarea + Send button into the live announcement,
+  // which is verbose and disruptive for screen-reader users when the
+  // originalDraft is long.
+  it('exposes the question section as a polite live region for screen readers', () => {
+    render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={1}
+        originalDraft="x"
+        clarification="Which file should I look at?"
+        reasoning="no file specified"
+        onSubmit={vi.fn()}
+      />,
+    )
+    const region = screen.getByTestId('evaluator-clarify-question-region')
+    expect(region).toHaveAttribute('role', 'status')
+    expect(region).toHaveAttribute('aria-live', 'polite')
+    expect(region).toHaveAttribute('aria-atomic', 'true')
+
+    // The outer prompt must NOT carry the live-region attributes —
+    // otherwise the originalDraft and textarea get re-announced too.
+    const prompt = screen.getByTestId('evaluator-clarify-prompt')
+    expect(prompt).not.toHaveAttribute('role', 'status')
+    expect(prompt).not.toHaveAttribute('aria-live')
+  })
+
   it('renders the original draft, question, and reasoning sections', () => {
     render(
       <EvaluatorClarifyPrompt
