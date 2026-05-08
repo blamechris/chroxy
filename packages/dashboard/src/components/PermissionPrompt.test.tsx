@@ -181,6 +181,39 @@ describe('PermissionPrompt', () => {
     expect(screen.getByTestId('perm-countdown')).toHaveTextContent('Timed out')
   })
 
+  // #3619: countdown math uses `performance.now()` so a wall-clock jump
+  // (NTP sync, manual clock change) does not visibly skew the rendered
+  // remaining time. Render with a normal clock, advance one tick, then
+  // jump `Date.now` forward by an hour while leaving `performance.now`
+  // (driven by fake timers) to advance normally. The countdown should
+  // continue ticking second-by-second, not snap to "Timed out".
+  it('countdown is unaffected by Date.now wall-clock jump (#3619)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="Run command"
+        remainingMs={10000}
+        onRespond={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('perm-countdown')).toHaveTextContent('0:10')
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(screen.getByTestId('perm-countdown')).toHaveTextContent('0:09')
+
+    const realDateNow = Date.now
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realDateNow() + 60 * 60 * 1000)
+    try {
+      act(() => { vi.advanceTimersByTime(1000) })
+      // Wall-clock jumped by an hour; monotonic clock advanced by 1s.
+      // Countdown must follow the monotonic clock (0:08), not snap to
+      // expired (0:00 / "Timed out").
+      expect(screen.getByTestId('perm-countdown')).toHaveTextContent('0:08')
+    } finally {
+      dateNowSpy.mockRestore()
+    }
+  })
+
   it('calls onRespond with allow when Allow clicked', () => {
     const onRespond = vi.fn()
     render(

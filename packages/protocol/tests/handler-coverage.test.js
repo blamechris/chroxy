@@ -47,6 +47,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  // 'evaluator_rewrite' removed — dashboard now handles it (#3188)
+  // 'evaluator_clarify' removed — dashboard now handles it (#3188)
   // 'skills_list' removed — dashboard now handles it (#3209)
   // 'skill_changed' removed — dashboard now handles it (#3205)
   // 'skill_trust_request' removed — dashboard now handles it (#3298)
@@ -79,6 +81,8 @@ const PLATFORM_SPECIFIC = {
   'environment_error': 'dashboard',   // environment panel is dashboard-only
   'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
   'prompt_evaluator_changed': 'dashboard', // per-session promptEvaluator toggle (#3185) is dashboard-only — same epic as evaluate_draft_result, mobile app exposure tracked in #3068
+  'evaluator_rewrite': 'dashboard',   // auto-evaluator rewrite broadcast (#3208 schema, #3186 emit, #3188 handler) — dashboard renders rewrite-explanation banner; mobile app exposure tracked under parent epic #3068
+  'evaluator_clarify': 'dashboard',   // auto-evaluator clarify broadcast (#3208 schema, #3186 emit, #3188 handler) — dashboard renders inline clarify question with iteration counter; mobile app exposure tracked under parent epic #3068
   'skills_list': 'dashboard',       // skills list response (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
   'skill_changed': 'dashboard',     // skill content-hash mismatch event (#3234/#3205) is dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_activated': 'dashboard',   // manual-skill runtime toggle (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958

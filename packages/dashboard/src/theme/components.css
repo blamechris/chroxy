@@ -5599,3 +5599,190 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ---- Auto-evaluator UI (#3188) ---- */
+
+.evaluator-rewrite-banner {
+  display: block;
+  width: 100%;
+  background: var(--accent-blue-subtle, rgba(96, 165, 250, 0.08));
+  border: 1px solid var(--accent-blue-subtle, rgba(96, 165, 250, 0.25));
+  border-radius: 8px;
+  padding: 0;
+  margin: 4px 0;
+  overflow: hidden;
+}
+
+.evaluator-rewrite-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.evaluator-rewrite-toggle:hover {
+  background: var(--accent-blue-subtle, rgba(96, 165, 250, 0.15));
+}
+
+.evaluator-rewrite-icon {
+  display: inline-flex;
+  color: var(--accent-blue, #60a5fa);
+  flex-shrink: 0;
+}
+
+.evaluator-rewrite-summary {
+  flex: 1;
+  font-weight: 500;
+}
+
+.evaluator-rewrite-chevron {
+  color: var(--text-dim);
+  font-size: 0.9em;
+  flex-shrink: 0;
+}
+
+.evaluator-rewrite-details {
+  padding: 8px 12px 12px 12px;
+  border-top: 1px solid var(--border-primary, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.evaluator-rewrite-section { display: flex; flex-direction: column; gap: 4px; }
+
+.evaluator-rewrite-label {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.evaluator-rewrite-original,
+.evaluator-rewrite-rewritten,
+.evaluator-rewrite-reasoning {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evaluator-rewrite-original { color: var(--text-secondary); font-style: italic; }
+.evaluator-rewrite-reasoning { color: var(--text-secondary); }
+
+.evaluator-clarify-prompt {
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-purple, #a78bfa);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.evaluator-clarify-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.evaluator-clarify-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: var(--text-base);
+}
+
+.evaluator-clarify-iteration {
+  font-size: var(--text-xs, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.evaluator-clarify-section { display: flex; flex-direction: column; gap: 4px; }
+
+.evaluator-clarify-label {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.evaluator-clarify-original {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evaluator-clarify-question {
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evaluator-clarify-reasoning-section .evaluator-clarify-reasoning {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evaluator-clarify-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.evaluator-clarify-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  font-family: inherit;
+  outline: none;
+}
+
+.evaluator-clarify-input:focus {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 2px var(--accent-purple);
+}
+
+.evaluator-clarify-input::placeholder { color: var(--text-disabled); }
+
+.evaluator-clarify-send {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-purple);
+  background: var(--accent-purple);
+  color: #fff;
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.evaluator-clarify-send:hover { opacity: 0.85; }
+.evaluator-clarify-send:disabled { opacity: 0.5; cursor: not-allowed; }

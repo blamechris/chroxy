@@ -21,6 +21,26 @@ export interface ToolResultImage {
   data: string;
 }
 
+/**
+ * #3188 — auto-evaluator rewrite metadata. Attached to a `system` ChatMessage
+ * pushed by the dashboard's `evaluator_rewrite` handler so the rewrite-
+ * explanation banner can render the original draft + reasoning when the
+ * operator clicks the "see why" affordance. Persisted via session_messages
+ * so reconnect/replay re-renders the banner without re-firing the
+ * (transient) `evaluator_rewrite` event.
+ *
+ * `evaluatorIterationId` is the server-generated id used to dedup the
+ * system message — receiving the same id twice (e.g. local handler +
+ * history replay) must NOT insert a duplicate banner.
+ */
+export interface EvaluatorRewriteMeta {
+  kind: 'rewrite';
+  evaluatorIterationId: string;
+  originalDraft: string;
+  rewritten: string;
+  reasoning: string;
+}
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
@@ -43,6 +63,14 @@ export interface ChatMessage {
   attachments?: MessageAttachment[];
   /** MCP server name (for tool_use messages from MCP tools) */
   serverName?: string;
+  /**
+   * #3188 — auto-evaluator metadata for `system` messages produced by the
+   * `evaluator_rewrite` handler. Optional; only present on system entries
+   * that should render the rewrite-explanation banner. The `system`
+   * message persists via session_messages so reconnect/replay re-renders
+   * the banner from the cached metadata.
+   */
+  evaluator?: EvaluatorRewriteMeta;
 }
 
 export interface SavedConnection {

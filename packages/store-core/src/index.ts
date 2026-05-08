@@ -15,6 +15,8 @@ export type {
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
+  // #3188: auto-evaluator rewrite metadata attached to system ChatMessages
+  EvaluatorRewriteMeta,
   SavedConnection,
   ContextUsage,
   InputSettings,
