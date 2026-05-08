@@ -26,6 +26,19 @@ function _getEvaluatorIterations(ctx) {
   return ctx._evaluatorIterations
 }
 
+// #3636 — per-session evaluator-await lock. Without this, two messages
+// arriving close together for the same session can both pass the pre-await
+// input_conflict / primary checks, both invoke the evaluator concurrently,
+// and produce non-deterministic interleaving (two evaluator round-trips,
+// two `session.sendMessage` calls in unspecified order, broadcasts mixed).
+// We reject the second concurrent draft with the same input_conflict
+// category the user already understands — not queue it — so callers retry
+// rather than silently waiting on an unbounded queue.
+function _getEvaluatorAwaits(ctx) {
+  if (!ctx._pendingEvaluatorAwaits) ctx._pendingEvaluatorAwaits = new Map()
+  return ctx._pendingEvaluatorAwaits
+}
+
 // Stable user-input message IDs (issue #2902). A client that sends its own
 // `clientMessageId` gets it adopted verbatim — that lets the sender dedup its
 // optimistic entry against the rehydrated history after a reconnect. Only
@@ -143,15 +156,58 @@ async function handleInput(ws, client, msg, ctx) {
       log.warn(`Evaluator iteration cap hit for session ${targetSessionId}; force-forwarding draft`)
       counters.delete(targetSessionId)
     } else {
+      // #3636 — per-session serialization. Reject (don't queue) a second
+      // concurrent draft for the same session while an evaluator round-trip
+      // is in flight. Reuses the existing input_conflict category so the
+      // user gets the same retry UX they already know.
+      const pending = _getEvaluatorAwaits(ctx)
+      if (pending.has(targetSessionId)) {
+        ctx.send(ws, {
+          type: 'session_error',
+          category: 'input_conflict',
+          message: 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
+        })
+        return
+      }
+
       const evaluator = typeof ctx.evaluateDraft === 'function' ? ctx.evaluateDraft : defaultEvaluateDraft
       let result
+      const evalPromise = (async () => {
+        try {
+          return await evaluator({ draft: trimmed, cwd: entry.cwd })
+        } catch (err) {
+          // Fail-open: logged-then-forwarded keeps the user moving when
+          // ANTHROPIC_API_KEY is missing or the upstream is down.
+          log.warn(`Auto-evaluator failed (${err?.code || 'UNKNOWN'}): ${err?.message || err}; forwarding original draft`)
+          return null
+        }
+      })()
+      pending.set(targetSessionId, evalPromise)
       try {
-        result = await evaluator({ draft: trimmed, cwd: entry.cwd })
-      } catch (err) {
-        // Fail-open: logged-then-forwarded keeps the user moving when
-        // ANTHROPIC_API_KEY is missing or the upstream is down.
-        log.warn(`Auto-evaluator failed (${err?.code || 'UNKNOWN'}): ${err?.message || err}; forwarding original draft`)
-        result = null
+        result = await evalPromise
+      } finally {
+        // Always release the lock — even on rewrite/clarify/forward paths
+        // and on fail-open. Without this, a single failed evaluator call
+        // would permanently block all future input on the session.
+        if (pending.get(targetSessionId) === evalPromise) {
+          pending.delete(targetSessionId)
+        }
+      }
+
+      // #3636 — re-check input_conflict after the await. State may have
+      // flipped during the round-trip (e.g. another path started the
+      // session). Without this, the rewritten/forward draft would race
+      // ahead of the now-busy session and produce out-of-order sends.
+      if (entry.session.isRunning) {
+        const primaryClientId = ctx.primaryClients.get(targetSessionId)
+        if (primaryClientId && primaryClientId !== client.id) {
+          ctx.send(ws, {
+            type: 'session_error',
+            category: 'input_conflict',
+            message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+          })
+          return
+        }
       }
 
       if (result?.verdict === 'rewrite' && typeof result.rewritten === 'string' && result.rewritten.trim()) {
