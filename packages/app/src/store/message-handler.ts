@@ -9,7 +9,7 @@
  * Depends on the Zustand store via a late-bound reference (setStore) to
  * avoid circular imports.
  */
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import {
   createKeyPair,
   deriveSharedKey,
@@ -284,6 +284,29 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
   } else {
     socket.send(JSON.stringify(payload));
   }
+}
+
+// #3404: edge-trigger memoisation for client_visible — only send on actual
+// transitions and only on the side that differs from the server's default.
+// Reset to null by resetClientVisibleMemo() on every fresh connect.
+let _lastSentVisible: boolean | null = null;
+
+export function resetClientVisibleMemo(): void {
+  _lastSentVisible = null;
+}
+
+/**
+ * Send the current app foreground/background state to the server. The server
+ * uses this to gate completion push notifications: a backgrounded client whose
+ * WS socket is still alive must not be treated as an active viewer
+ * (otherwise the OS keepalive grace period suppresses the push). Idempotent —
+ * skips if the desired state matches what we last sent.
+ */
+export function sendClientVisible(socket: WebSocket | null, visible: boolean): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (_lastSentVisible === visible) return;
+  _lastSentVisible = visible;
+  wsSend(socket, { type: 'client_visible', visible });
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +982,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: false });
+        // #3404: server defaults visible=true on fresh connect; sync if we
+        // reconnected while backgrounded so completion pushes still fire.
+        resetClientVisibleMemo();
+        sendClientVisible(ctx.socket, AppState.currentState === 'active');
       }
       // Save for quick reconnect (use effectiveToken for pairing flow)
       saveConnection(ctx.url, effectiveToken);
@@ -992,6 +1019,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
+        // #3404: sync visibility once encryption is established (mirrors the
+        // unencrypted auth_ok path above).
+        resetClientVisibleMemo();
+        sendClientVisible(ctx.socket, AppState.currentState === 'active');
       }
       break;
     }

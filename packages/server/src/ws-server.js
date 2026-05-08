@@ -919,6 +919,10 @@ export class WsServer {
         ip,
         socketIp,
         rateLimitKey,
+        // #3404: visible defaults to true; mobile flips to false on backgrounding
+        // so completion push notifications fire instead of being suppressed by
+        // a still-alive but invisible WS connection.
+        visible: true,
         _seq: 0,                  // monotonic sequence number for outbound messages
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange

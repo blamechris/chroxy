@@ -94,7 +94,12 @@ export class WsClientManager extends EventEmitter {
    */
   hasActiveViewers(sessionId) {
     for (const [ws, client] of this.clients) {
-      if (client.authenticated && client.activeSessionId === sessionId && ws.readyState === 1) return true
+      if (
+        client.authenticated &&
+        client.activeSessionId === sessionId &&
+        ws.readyState === 1 &&
+        client.visible !== false
+      ) return true
     }
     return false
   }

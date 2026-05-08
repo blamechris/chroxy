@@ -212,6 +212,33 @@ describe('WsClientManager', () => {
       }))
       assert.strictEqual(manager.hasActiveViewers('session-1'), false)
     })
+
+    // #3404: backgrounded mobile app should not count as an active viewer,
+    // otherwise completion push notifications get suppressed during the
+    // OS grace period before TCP keepalive culls the socket.
+    it('returns false when client visible flag is false', () => {
+      const ws = createMockWs()
+      manager.addClient(ws, createClientInfo({
+        id: 'c1',
+        authenticated: true,
+        activeSessionId: 'session-1',
+        visible: false,
+      }))
+      assert.strictEqual(manager.hasActiveViewers('session-1'), false)
+    })
+
+    it('returns true when visible flag is undefined (back-compat default)', () => {
+      const ws = createMockWs()
+      // Older clients that never set the field still count as visible
+      const info = createClientInfo({
+        id: 'c1',
+        authenticated: true,
+        activeSessionId: 'session-1',
+      })
+      delete info.visible
+      manager.addClient(ws, info)
+      assert.strictEqual(manager.hasActiveViewers('session-1'), true)
+    })
   })
 
   describe('authenticatedCount', () => {
