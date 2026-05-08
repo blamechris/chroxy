@@ -515,6 +515,7 @@ describe('evaluateDraft', () => {
     })
 
     it('explicit timeoutMs arg beats env override', async () => {
+      const saved = process.env.CHROXY_EVALUATOR_TIMEOUT_MS
       process.env.CHROXY_EVALUATOR_TIMEOUT_MS = '60000'
       try {
         const client = makeHangingClient()
@@ -526,7 +527,8 @@ describe('evaluateDraft', () => {
         const elapsed = Date.now() - start
         assert.ok(elapsed < 200, `explicit arg should fire well before the env-configured 60s (took ${elapsed}ms)`)
       } finally {
-        delete process.env.CHROXY_EVALUATOR_TIMEOUT_MS
+        if (saved !== undefined) process.env.CHROXY_EVALUATOR_TIMEOUT_MS = saved
+        else delete process.env.CHROXY_EVALUATOR_TIMEOUT_MS
       }
     })
 
@@ -540,6 +542,24 @@ describe('evaluateDraft', () => {
         const result = await evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: bad })
         assert.equal(result.verdict, 'forward', `non-positive timeoutMs ${bad} must fall back to default`)
       }
+    })
+
+    it('rejects oversized timeoutMs (> i32 ceiling) and falls back to env / default', async () => {
+      // Node setTimeout clamps delays > 2_147_483_647 down to 1ms — that
+      // would turn a misconfigured "very large" timeout into a near-instant
+      // abort. _resolveTimeoutMs must treat it as invalid so the operator
+      // gets the default 30s instead.
+      const client = makeStubClient(
+        JSON.stringify({ verdict: 'forward', rewritten: null, clarification: null, reasoning: 'ok' }),
+      )
+      // 2_147_483_648 = i32 ceiling + 1 (the smallest invalid value)
+      const result = await evaluateDraft({
+        draft: 'a substantive draft for evaluation',
+        client,
+        timeoutMs: 2_147_483_648,
+      })
+      assert.equal(result.verdict, 'forward',
+        'oversized timeoutMs must fall back to default — silent clamp would near-instantly abort')
     })
 
     it('EVALUATOR_TIMEOUT does not get rewrapped as EVALUATOR_API_ERROR', async () => {

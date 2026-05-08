@@ -163,7 +163,7 @@ export function _resetSkipPatternCache() {
  * @param {object} args
  * @param {string} args.draft - The user's draft message (required, non-empty)
  * @param {string} [args.cwd] - Session cwd, included in the user prompt for context
- * @param {string} [args.model] - Anthropic model id (default: claude-opus-4-5
+ * @param {string} [args.model] - Anthropic model id (default: claude-opus-4-7
  *   or value of CHROXY_EVALUATOR_MODEL)
  * @param {string} [args.apiKey] - Anthropic API key (default: ANTHROPIC_API_KEY env)
  * @param {object} [args.client] - Test seam: pre-built Anthropic client (skips
@@ -264,16 +264,22 @@ export async function evaluateDraft({ draft, cwd, model, apiKey, client, timeout
  * Resolve the timeout in milliseconds for a single evaluator call.
  *
  * Precedence: explicit `timeoutMs` arg > `CHROXY_EVALUATOR_TIMEOUT_MS` env >
- * `DEFAULT_TIMEOUT_MS`. Non-numeric or non-positive values are rejected and
- * fall through to the next source — we never want a 0/negative deadline to
- * silently turn into "abort instantly" or "no abort scheduled."
+ * `DEFAULT_TIMEOUT_MS`. Non-numeric, non-positive, or oversized values are
+ * rejected and fall through to the next source — we never want a 0/negative
+ * deadline to silently turn into "abort instantly", and Node `setTimeout`
+ * clamps delays above the i32 ceiling (`MAX_SAFE_TIMEOUT`, ~24.8 days) down
+ * to 1ms, which would turn a misconfigured "very large" timeout into a near-
+ * immediate abort. Reject oversized values rather than silently clamping —
+ * the operator gets the default (and a misconfigured env var doesn't
+ * silently break the feature).
  */
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647
 function _resolveTimeoutMs(arg) {
-  if (typeof arg === 'number' && Number.isFinite(arg) && arg > 0) return arg
+  if (typeof arg === 'number' && Number.isFinite(arg) && arg > 0 && arg <= MAX_SAFE_TIMEOUT_MS) return arg
   const envSource = process.env.CHROXY_EVALUATOR_TIMEOUT_MS
   if (typeof envSource === 'string' && envSource.length > 0) {
     const parsed = Number.parseInt(envSource, 10)
-    if (Number.isFinite(parsed) && parsed > 0) return parsed
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= MAX_SAFE_TIMEOUT_MS) return parsed
   }
   return DEFAULT_TIMEOUT_MS
 }
