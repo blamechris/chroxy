@@ -39,11 +39,14 @@ function _getEvaluatorAwaits(ctx) {
   return ctx._pendingEvaluatorAwaits
 }
 
-// #3639 — build the config object passed into shouldSkipEvaluator. The
-// per-session promptEvaluatorSkipPattern (string source) takes precedence;
+// #3639 — build the minimal config object passed into shouldSkipEvaluator.
+// The per-session promptEvaluatorSkipPattern (string source) takes precedence;
 // the server-wide ctx.config.promptEvaluatorSkipPattern (#3187) is the
 // fallback so existing global-config deployments keep working unchanged.
-// Returns a plain object — never mutates ctx.config.
+// shouldSkipEvaluator only reads `config.promptEvaluatorSkipPattern` (verified
+// in prompt-evaluator.js), so we return a single-key object rather than
+// spreading the whole ctx.config — this runs on the user_input hot path and
+// the spread was unnecessary allocation/copy work.
 function _resolveSkipConfig(entry, ctx) {
   const sessionSource = entry?.session?.promptEvaluatorSkipPattern
   const sessionPattern = typeof sessionSource === 'string' && sessionSource.length > 0
@@ -53,10 +56,7 @@ function _resolveSkipConfig(entry, ctx) {
   const globalPattern = typeof globalSource === 'string' && globalSource.length > 0
     ? globalSource
     : null
-  return {
-    ...(ctx?.config || {}),
-    promptEvaluatorSkipPattern: sessionPattern ?? globalPattern,
-  }
+  return { promptEvaluatorSkipPattern: sessionPattern ?? globalPattern }
 }
 
 // Stable user-input message IDs (issue #2902). A client that sends its own

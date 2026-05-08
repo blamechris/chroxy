@@ -340,10 +340,12 @@ export class SessionManager extends EventEmitter {
    *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
    * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
    *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
-   *   `config.promptEvaluatorSkipPattern` (#3639). Pairs with the per-session
-   *   promptEvaluator toggle so different sessions can use different skip
-   *   heuristics (e.g. PR-review session skips 'lgtm', triage session skips
-   *   'ack'). Default null — the global pattern from #3187 still applies.
+   *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
+   *   this per-session override lands here in #3639). Pairs with the
+   *   per-session promptEvaluator toggle so different sessions can use
+   *   different skip heuristics (e.g. PR-review session skips 'lgtm',
+   *   triage session skips 'ack'). Default null — the global pattern from
+   *   #3187 still applies as the fallback.
    * @param {boolean} [options.stdinForwardingDisabled] - Internal: hydrate the SidecarProcess
    *   stdin_disabled latch (#3540) on a session being restored from disk. Only used by
    *   `restoreState()`. Truthy = the prior process latched the flag; the new SdkSession
@@ -673,10 +675,15 @@ export class SessionManager extends EventEmitter {
         // dashboard can show / edit the per-session override without
         // having to introspect via a separate request. `null` when
         // unset — the global config.promptEvaluatorSkipPattern still
-        // applies as a fallback (see input-handlers.js).
-        promptEvaluatorSkipPattern: typeof entry.session.promptEvaluatorSkipPattern === 'string'
-          ? entry.session.promptEvaluatorSkipPattern
-          : null,
+        // applies as a fallback (see input-handlers.js). Treat empty
+        // string as unset so the wire shape stays stable across the
+        // setter/constructor (which normalise '' to null) and a
+        // serialise -> restore round-trip.
+        promptEvaluatorSkipPattern:
+          typeof entry.session.promptEvaluatorSkipPattern === 'string' &&
+          entry.session.promptEvaluatorSkipPattern.length > 0
+            ? entry.session.promptEvaluatorSkipPattern
+            : null,
         // #3540: surface the latched stdin_disabled flag so reconnecting
         // clients (and clients connecting after a server restart) see
         // the disabled state without waiting for a fresh `error` event.
@@ -902,9 +909,15 @@ export class SessionManager extends EventEmitter {
         // #3639: persist the per-session skip-pattern source. Null when
         // unset — old state files (pre-#3639) restore as null (the
         // BaseSession default) so this is fully backward compatible.
-        promptEvaluatorSkipPattern: typeof entry.session.promptEvaluatorSkipPattern === 'string'
-          ? entry.session.promptEvaluatorSkipPattern
-          : null,
+        // Treat empty string as null too: the setter and restoreState
+        // both normalise '' to null, so persisting '' would not
+        // round-trip and would violate the non-empty-string-or-null
+        // invariant.
+        promptEvaluatorSkipPattern:
+          typeof entry.session.promptEvaluatorSkipPattern === 'string' &&
+          entry.session.promptEvaluatorSkipPattern.length > 0
+            ? entry.session.promptEvaluatorSkipPattern
+            : null,
         // #3540: persist the SidecarProcess `stdin_disabled` latch so a
         // server restart preserves the disabled state. Without this, a
         // client connecting after restart would not see the banner — the
