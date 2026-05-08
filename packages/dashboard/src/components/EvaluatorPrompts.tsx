@@ -121,7 +121,18 @@ export function EvaluatorClarifyPrompt({
   }
 
   return (
-    <div className="evaluator-clarify-prompt" data-testid="evaluator-clarify-prompt">
+    // #3644 — announce the clarify question to screen readers when it appears.
+    // `role="status"` + `aria-live="polite"` lets assistive tech read the
+    // prompt without interrupting the operator's current focus.
+    // `aria-atomic="true"` ensures the whole block is announced as a unit
+    // (question + iteration counter together) rather than piecemeal.
+    <div
+      className="evaluator-clarify-prompt"
+      data-testid="evaluator-clarify-prompt"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
       <div className="evaluator-clarify-header">
         <span className="evaluator-clarify-title">Need a bit more detail</span>
         <span

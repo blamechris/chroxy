@@ -93,6 +93,44 @@ describe('EvaluatorClarifyPrompt (#3188)', () => {
     expect(screen.getByTestId('evaluator-clarify-iteration')).toHaveTextContent('Iteration 3/3')
   })
 
+  // #3649 — pin behavior when the server bumps the cap above MAX_EVALUATOR_ITERATIONS.
+  // The component defensively widens the denominator via Math.max(MAX, server),
+  // so iteration=5 must render as 5/5 (not 5/3 — that would be misleading,
+  // and not clamped to 3/3 — that would lose information from the server).
+  it('renders N/N when server sends iteration > MAX_EVALUATOR_ITERATIONS', () => {
+    render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={5}
+        originalDraft="x"
+        clarification="y"
+        reasoning="z"
+        onSubmit={vi.fn()}
+      />,
+    )
+    const counter = screen.getByTestId('evaluator-clarify-iteration')
+    expect(counter).toHaveTextContent('Iteration 5/5')
+    expect(counter).toHaveAttribute('aria-label', 'Clarify iteration 5 of 5')
+  })
+
+  // #3644 — screen-reader announcement when the clarify question arrives.
+  // role="status" + aria-live="polite" lets assistive tech read the prompt
+  // without interrupting the operator's current focus.
+  it('exposes the prompt as a polite live region for screen readers', () => {
+    render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={1}
+        originalDraft="x"
+        clarification="Which file should I look at?"
+        reasoning="no file specified"
+        onSubmit={vi.fn()}
+      />,
+    )
+    const prompt = screen.getByTestId('evaluator-clarify-prompt')
+    expect(prompt).toHaveAttribute('role', 'status')
+    expect(prompt).toHaveAttribute('aria-live', 'polite')
+    expect(prompt).toHaveAttribute('aria-atomic', 'true')
+  })
+
   it('renders the original draft, question, and reasoning sections', () => {
     render(
       <EvaluatorClarifyPrompt
