@@ -892,6 +892,38 @@ describe('@chroxy/protocol schemas', () => {
       })
       assert.ok(!result.success, 'sessionId must be a string')
     })
+
+    // #3627: pin the empty-string and extra-field policies so a future
+    // tightening (z.string().min(1) or .strict()) is a deliberate decision
+    // with a failing test, not a silent regression that breaks older
+    // servers when newer fields land.
+    it('accepts empty originalDraft / rewritten / reasoning (empty-string policy)', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'evaluator_rewrite',
+        sessionId: 'sess-1',
+        originalDraft: '',
+        rewritten: '',
+        reasoning: '',
+        evaluatorIterationId: 'iter-1',
+      })
+      assert.ok(result.success, 'empty strings must validate — auto-evaluator may produce empty reasoning under timeout fallback')
+    })
+
+    it('strips unknown fields for forward compat (Zod default behavior)', async () => {
+      const { ServerEvaluatorRewriteSchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorRewriteSchema.safeParse({
+        type: 'evaluator_rewrite',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        rewritten: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        someFutureField: { nested: 'value' },
+      })
+      assert.ok(result.success, 'unknown fields must NOT reject — newer servers may emit fields older clients don\'t recognize')
+      assert.equal(result.data.someFutureField, undefined, 'Zod default strips unknown fields from the parsed output')
+    })
   })
 
   describe('ServerEvaluatorClarifySchema (#3208)', () => {
@@ -991,6 +1023,38 @@ describe('@chroxy/protocol schemas', () => {
         evaluatorIteration: 1,
       })
       assert.ok(!result.success, 'Should reject when type is not "evaluator_clarify"')
+    })
+
+    // #3627: same empty-string + extra-field policies as the rewrite schema —
+    // pin them so a future tightening is a deliberate decision.
+    it('accepts empty originalDraft / clarification / reasoning (empty-string policy)', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: '',
+        clarification: '',
+        reasoning: '',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 1,
+      })
+      assert.ok(result.success, 'empty strings must validate — auto-evaluator may produce empty reasoning under timeout fallback')
+    })
+
+    it('strips unknown fields for forward compat (Zod default behavior)', async () => {
+      const { ServerEvaluatorClarifySchema } = await import('../src/schemas/server.ts')
+      const result = ServerEvaluatorClarifySchema.safeParse({
+        type: 'evaluator_clarify',
+        sessionId: 'sess-1',
+        originalDraft: 'x',
+        clarification: 'y',
+        reasoning: 'z',
+        evaluatorIterationId: 'iter-1',
+        evaluatorIteration: 1,
+        someFutureField: { nested: 'value' },
+      })
+      assert.ok(result.success, 'unknown fields must NOT reject — newer servers may emit fields older clients don\'t recognize')
+      assert.equal(result.data.someFutureField, undefined, 'Zod default strips unknown fields from the parsed output')
     })
   })
 })

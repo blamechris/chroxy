@@ -26,6 +26,19 @@ function _getEvaluatorIterations(ctx) {
   return ctx._evaluatorIterations
 }
 
+// #3636 — per-session evaluator-await lock. Without this, two messages
+// arriving close together for the same session can both pass the pre-await
+// input_conflict / primary checks, both invoke the evaluator concurrently,
+// and produce non-deterministic interleaving (two evaluator round-trips,
+// two `session.sendMessage` calls in unspecified order, broadcasts mixed).
+// We reject the second concurrent draft with the same input_conflict
+// category the user already understands — not queue it — so callers retry
+// rather than silently waiting on an unbounded queue.
+function _getEvaluatorAwaits(ctx) {
+  if (!ctx._pendingEvaluatorAwaits) ctx._pendingEvaluatorAwaits = new Map()
+  return ctx._pendingEvaluatorAwaits
+}
+
 // Stable user-input message IDs (issue #2902). A client that sends its own
 // `clientMessageId` gets it adopted verbatim — that lets the sender dedup its
 // optimistic entry against the rehydrated history after a reconnect. Only
@@ -109,14 +122,43 @@ async function handleInput(ws, client, msg, ctx) {
       messageCount: ctx.sessionManager.getHistoryCount(targetSessionId),
     }).catch((err) => log.warn(`Auto-checkpoint failed: ${err.message}`))
   }
-  const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
   // Adopt the sender's clientMessageId if present and well-formed; otherwise
   // generate one. Same ID is stored in history and emitted in the live-echo
   // broadcast so any reconnecting client can match rehydrated entries
   // against their optimistic/echo copies (issue #2902).
   const messageId = resolveUserInputId(msg.clientMessageId)
-  ctx.sessionManager.recordUserInput(targetSessionId, historyText, messageId)
-  ctx.sessionManager.touchActivity(targetSessionId)
+
+  // #3635 + #3636 merged: record-after-evaluator AND rejection-safe.
+  //
+  // #3635 — the auto-evaluator (#3186) can rewrite a draft before
+  // forwarding. Historically we recorded the ORIGINAL draft to history
+  // before awaiting the evaluator, so replayed history showed the
+  // user's original text against an assistant response that answered
+  // the rewrite (confusing divergence). Decision: record what was
+  // actually forwarded on rewrite, original on forward/clarify/skip/
+  // fail-open.
+  //
+  // #3636 — the auto-evaluator hook also added rejection paths
+  // (pending-evaluator guard, post-await input_conflict re-check) that
+  // return without forwarding. Recording before those checks would
+  // produce phantom history entries — appears in replay/reconnect
+  // history but was neither forwarded nor broadcast.
+  //
+  // Resolution: defer recording until a success boundary (clarify path
+  // OR forward boundary), recording the text that was actually used.
+  // Rejection paths return without calling recordHistoryEntry().
+  // touchActivity moves with it so a rejected message doesn't bump the
+  // session's activity timestamp.
+  const buildHistoryText = (text) => attCount
+    ? `${text}${text ? ' ' : ''}[${attCount} file(s) attached]`
+    : text
+  let _historyRecorded = false
+  function recordHistoryEntry(text) {
+    if (_historyRecorded) return
+    _historyRecorded = true
+    ctx.sessionManager.recordUserInput(targetSessionId, buildHistoryText(text), messageId)
+    ctx.sessionManager.touchActivity(targetSessionId)
+  }
 
   // #3186 — auto-evaluation hook. Gates message forwarding on a per-session
   // promptEvaluator toggle. Skips evaluation for trivial drafts (acks, short
@@ -143,15 +185,58 @@ async function handleInput(ws, client, msg, ctx) {
       log.warn(`Evaluator iteration cap hit for session ${targetSessionId}; force-forwarding draft`)
       counters.delete(targetSessionId)
     } else {
+      // #3636 — per-session serialization. Reject (don't queue) a second
+      // concurrent draft for the same session while an evaluator round-trip
+      // is in flight. Reuses the existing input_conflict category so the
+      // user gets the same retry UX they already know.
+      const pending = _getEvaluatorAwaits(ctx)
+      if (pending.has(targetSessionId)) {
+        ctx.send(ws, {
+          type: 'session_error',
+          category: 'input_conflict',
+          message: 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
+        })
+        return
+      }
+
       const evaluator = typeof ctx.evaluateDraft === 'function' ? ctx.evaluateDraft : defaultEvaluateDraft
       let result
+      const evalPromise = (async () => {
+        try {
+          return await evaluator({ draft: trimmed, cwd: entry.cwd })
+        } catch (err) {
+          // Fail-open: logged-then-forwarded keeps the user moving when
+          // ANTHROPIC_API_KEY is missing or the upstream is down.
+          log.warn(`Auto-evaluator failed (${err?.code || 'UNKNOWN'}): ${err?.message || err}; forwarding original draft`)
+          return null
+        }
+      })()
+      pending.set(targetSessionId, evalPromise)
       try {
-        result = await evaluator({ draft: trimmed, cwd: entry.cwd })
-      } catch (err) {
-        // Fail-open: logged-then-forwarded keeps the user moving when
-        // ANTHROPIC_API_KEY is missing or the upstream is down.
-        log.warn(`Auto-evaluator failed (${err?.code || 'UNKNOWN'}): ${err?.message || err}; forwarding original draft`)
-        result = null
+        result = await evalPromise
+      } finally {
+        // Always release the lock — even on rewrite/clarify/forward paths
+        // and on fail-open. Without this, a single failed evaluator call
+        // would permanently block all future input on the session.
+        if (pending.get(targetSessionId) === evalPromise) {
+          pending.delete(targetSessionId)
+        }
+      }
+
+      // #3636 — re-check input_conflict after the await. State may have
+      // flipped during the round-trip (e.g. another path started the
+      // session). Without this, the rewritten/forward draft would race
+      // ahead of the now-busy session and produce out-of-order sends.
+      if (entry.session.isRunning) {
+        const primaryClientId = ctx.primaryClients.get(targetSessionId)
+        if (primaryClientId && primaryClientId !== client.id) {
+          ctx.send(ws, {
+            type: 'session_error',
+            category: 'input_conflict',
+            message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+          })
+          return
+        }
       }
 
       if (result?.verdict === 'rewrite' && typeof result.rewritten === 'string' && result.rewritten.trim()) {
@@ -172,6 +257,13 @@ async function handleInput(ws, client, msg, ctx) {
         // same counter — once it reaches MAX_EVALUATOR_ITERATIONS+1 we cap.
         counters.set(targetSessionId, currentIteration)
         const evaluatorIterationId = randomUUID()
+        // #3636: record the draft in history NOW (clarify path is a
+        // legitimate persisted entry, not a rejection) so the dashboard
+        // sees the draft + the clarification on replay.
+        // #3635: record the ORIGINAL draft (not a rewrite) — the
+        // dashboard renders the clarify card alongside what the user
+        // typed, so the user's intent IS reflected by `trimmed`.
+        recordHistoryEntry(trimmed)
         ctx.broadcastToSession(targetSessionId, {
           type: 'evaluator_clarify',
           sessionId: targetSessionId,
@@ -181,9 +273,7 @@ async function handleInput(ws, client, msg, ctx) {
           evaluatorIterationId,
           evaluatorIteration: currentIteration,
         })
-        // DO NOT forward to the session — return early. We've already
-        // recorded the user input in history and touched activity above
-        // so the dashboard sees the draft + the clarification.
+        // DO NOT forward to the session — return early.
         //
         // Update primary even though the message wasn't forwarded — the
         // user's intent was to drive the session, and the input-conflict
@@ -204,11 +294,24 @@ async function handleInput(ws, client, msg, ctx) {
     }
   }
 
+  // #3636: record history at the forward boundary. All earlier
+  // rejection paths (input_conflict pre-await, pending-evaluator guard,
+  // post-await re-check) returned without recording. The clarify path
+  // already recorded above before its own return.
+  // #3635: record what was actually forwarded — `textToSend` is the
+  // rewritten string on the rewrite verdict, the original `trimmed`
+  // draft on every other path (forward, skip-heuristic, fail-open,
+  // cap-bypass).
+  recordHistoryEntry(textToSend)
+
   entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice })
 
   ctx.updatePrimary(targetSessionId, client.id)
 
-  // Echo user_input to other clients so they see what was sent (#1119)
+  // Echo user_input to other clients so they see what was sent (#1119).
+  // The echo carries `trimmed` (the user's original text) so paired
+  // clients can dedup their optimistic copy of what the user typed —
+  // the rewritten text is signalled separately via evaluator_rewrite.
   ctx.broadcast(
     { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
     (c) => c.id !== client.id
