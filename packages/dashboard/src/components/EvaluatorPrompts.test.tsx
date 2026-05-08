@@ -188,4 +188,87 @@ describe('EvaluatorClarifyPrompt (#3188)', () => {
     fireEvent.click(send)
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
+
+  // #3645 — submittedRef must reset whenever a new clarify iteration arrives.
+  // Without the reset, the same component instance stays "submitted" forever
+  // and the operator can't answer the next question. Today the parent unmounts
+  // the prompt between iterations (because addUserMessage clears
+  // pendingEvaluatorClarify synchronously), but this hardens the component
+  // against future code paths that keep it mounted across rounds.
+  it('resets the double-submit guard when evaluatorIteration changes', () => {
+    const onSubmit = vi.fn()
+    const { rerender } = render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={1}
+        originalDraft="x"
+        clarification="Which file?"
+        reasoning="vague"
+        onSubmit={onSubmit}
+      />,
+    )
+    const firstInput = screen.getByTestId('evaluator-clarify-input') as HTMLTextAreaElement
+    fireEvent.change(firstInput, { target: { value: 'foo' } })
+    fireEvent.click(screen.getByTestId('evaluator-clarify-send'))
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenLastCalledWith('foo')
+
+    // Server fires a new evaluator_clarify with iteration 2; parent re-renders
+    // the same component with a fresh question.
+    rerender(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={2}
+        originalDraft="foo"
+        clarification="Which file inside the foo package?"
+        reasoning="still vague"
+        onSubmit={onSubmit}
+      />,
+    )
+
+    // The textarea should be cleared so the operator starts fresh, and the
+    // Send button must accept a new submission.
+    const secondInput = screen.getByTestId('evaluator-clarify-input') as HTMLTextAreaElement
+    expect(secondInput.value).toBe('')
+
+    fireEvent.change(secondInput, { target: { value: 'bar' } })
+    fireEvent.click(screen.getByTestId('evaluator-clarify-send'))
+    expect(onSubmit).toHaveBeenCalledTimes(2)
+    expect(onSubmit).toHaveBeenLastCalledWith('bar')
+  })
+
+  // #3645 — onSubmit is hoisted into a ref-stable handler so re-renders that
+  // pass a fresh closure don't invalidate the textarea/Enter key bindings, but
+  // the *latest* onSubmit is still the one invoked (no stale-closure capture).
+  it('invokes the latest onSubmit prop after re-render', () => {
+    const firstOnSubmit = vi.fn()
+    const secondOnSubmit = vi.fn()
+    const { rerender } = render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={1}
+        originalDraft="x"
+        clarification="y"
+        reasoning="z"
+        onSubmit={firstOnSubmit}
+      />,
+    )
+
+    // Type into the textarea, then re-render with a new onSubmit prop before
+    // submitting. The fresh callback must be the one that fires.
+    const input = screen.getByTestId('evaluator-clarify-input')
+    fireEvent.change(input, { target: { value: 'answer' } })
+
+    rerender(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={1}
+        originalDraft="x"
+        clarification="y"
+        reasoning="z"
+        onSubmit={secondOnSubmit}
+      />,
+    )
+
+    fireEvent.click(screen.getByTestId('evaluator-clarify-send'))
+    expect(firstOnSubmit).not.toHaveBeenCalled()
+    expect(secondOnSubmit).toHaveBeenCalledTimes(1)
+    expect(secondOnSubmit).toHaveBeenCalledWith('answer')
+  })
 })
