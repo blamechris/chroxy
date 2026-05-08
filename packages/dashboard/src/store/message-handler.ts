@@ -294,11 +294,15 @@ export function resetClientVisibleMemo(): void {
 // #3677 (Copilot review): flip the module-level handshake flags from a
 // test so we can assert the encryption-pending guard inside
 // `sendClientVisible`. Resetting both to false leaves no observable trace
-// for downstream tests in the same file.
+// for downstream tests in the same file. Cast via `unknown` because we only
+// touch the truthy/null aspects of these flags here, not their actual
+// crypto contents.
 export function _testSetEncryptionHandshake(opts: { pending: boolean; established: boolean }): void {
-  _pendingKeyPair = opts.pending ? { publicKey: 'mock-pub', secretKey: 'mock-sec' } as KeyPair : null;
+  _pendingKeyPair = opts.pending
+    ? ({ publicKey: 'mock-pub', secretKey: 'mock-sec' } as unknown as KeyPair)
+    : null;
   _encryptionState = opts.established
-    ? { sharedKey: new Uint8Array(32), sendNonce: 0, recvNonce: 0 }
+    ? ({ sharedKey: new Uint8Array(32), sendNonce: 0, recvNonce: 0 } as unknown as EncryptionState)
     : null;
 }
 
