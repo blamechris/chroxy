@@ -335,7 +335,7 @@ describe('dashboard message-handler — auto-evaluator (#3188)', () => {
       }, ctx() as any)
 
       const session = (store.getState() as any).sessionStates.s1 as SessionState
-      expect(session.pendingEvaluatorClarify).toBeUndefined()
+      expect(session.pendingEvaluatorClarify).toBeNull()
     })
 
     it('drops the event when targeted session does not exist', () => {
@@ -350,7 +350,7 @@ describe('dashboard message-handler — auto-evaluator (#3188)', () => {
       }, ctx() as any)
 
       const session = (store.getState() as any).sessionStates.s1 as SessionState
-      expect(session.pendingEvaluatorClarify).toBeUndefined()
+      expect(session.pendingEvaluatorClarify).toBeNull()
     })
   })
 
