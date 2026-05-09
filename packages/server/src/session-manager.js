@@ -908,7 +908,9 @@ export class SessionManager extends EventEmitter {
   /**
    * Serialize session state to disk for graceful restart.
    * Called during drain before the process exits.
-   * @returns {object} The serialized state
+   * @returns {object|null} The serialized state, or `null` if `destroyAll()`
+   *   has already run — late callers (duplicate shutdown handler, stray
+   *   session event) cannot overwrite the on-disk state (#3697).
    */
   serializeState() {
     // After destroyAll() has cleared the in-memory Map, any further write

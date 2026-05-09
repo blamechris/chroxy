@@ -751,7 +751,15 @@ export async function startCliServer(config) {
   process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)) })
 
   process.on('uncaughtException', (err) => {
-    if (shuttingDown) return
+    if (shuttingDown) {
+      // Late crash arriving during an already-running shutdown — still log
+      // it and schedule exit, otherwise installing this handler would
+      // suppress Node's default crash-exit and a stuck shutdown
+      // (e.g. hung tunnel.stop()) could leave the process alive forever.
+      log.error(`Uncaught exception during shutdown: ${err?.stack || err}`)
+      setTimeout(() => process.exit(1), 100)
+      return
+    }
     shuttingDown = true
     log.error(`Uncaught exception: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
@@ -764,7 +772,11 @@ export async function startCliServer(config) {
   })
 
   process.on('unhandledRejection', (err) => {
-    if (shuttingDown) return
+    if (shuttingDown) {
+      log.error(`Unhandled rejection during shutdown: ${err?.stack || err}`)
+      setTimeout(() => process.exit(1), 100)
+      return
+    }
     shuttingDown = true
     log.error(`Unhandled rejection: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
