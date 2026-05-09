@@ -68,8 +68,35 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/^\d+\. (.+)$/gm, '<li class="md-ol">$1</li>')
   html = html.replace(/(<li class="md-ol">.*<\/li>\n?)+/g, (m) => `<ol>${m}</ol>`)
 
+  // Tables (GFM) — header row + separator row of `|---|:--:|...|` + zero or
+  // more body rows. Inline formatting in cells (bold, italic, code, links)
+  // has already been applied above, so cells render rich content. Emitted
+  // without internal newlines so the later `\n` → `<br>` pass can't
+  // corrupt the table structure. Outer pipes required (matches what
+  // LLMs typically emit and avoids false-positives on prose with `|`).
+  const tableRe = /^\|(.+)\|[ \t]*\n\|([-:|\s]+)\|[ \t]*\n((?:\|.*\|[ \t]*\n?)*)/gm
+  html = html.replace(tableRe, (_m, headerLine: string, sepLine: string, bodyBlock: string) => {
+    const headerCells = headerLine.split('|').map(c => c.trim())
+    const aligns = sepLine.split('|').map(s => s.trim()).filter(s => /^:?-+:?$/.test(s)).map(s => {
+      if (s.startsWith(':') && s.endsWith(':')) return 'center'
+      if (s.endsWith(':')) return 'right'
+      if (s.startsWith(':')) return 'left'
+      return ''
+    })
+    const align = (i: number) => aligns[i] ? ` style="text-align:${aligns[i]}"` : ''
+    const headerHtml = headerCells.map((c, i) => `<th${align(i)}>${c}</th>`).join('')
+    const bodyRows = bodyBlock.trim().split('\n').map(row => {
+      const cells = row.replace(/^\s*\||\|\s*$/g, '').split('|').map(c => c.trim())
+      return `<tr>${cells.map((c, i) => `<td${align(i)}>${c}</td>`).join('')}</tr>`
+    }).filter(r => r !== '<tr></tr>').join('')
+    // Append `\n\n` so the table is its own paragraph segment after the
+    // split below — without it, the regex's trailing-newline consumption
+    // collapses the `\n\n` boundary between the table and following text.
+    return `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyRows}</tbody></table>\n\n`
+  })
+
   // Paragraphs — split on double newlines, wrap non-block segments in <p> (#1169)
-  const blockRe = /^(<(h[1-6]|pre|ul|ol|blockquote)|\x00FB\d+\x00$)/
+  const blockRe = /^(<(h[1-6]|pre|ul|ol|blockquote|table)|\x00FB\d+\x00$)/
   html = html.split('\n\n').map(seg => {
     const trimmed = seg.trim()
     if (!trimmed) return ''
