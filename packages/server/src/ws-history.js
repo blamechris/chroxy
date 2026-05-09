@@ -210,7 +210,14 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     send(ws, {
       type: 'model_changed',
-      model: cliSession.model ? toShortModelId(cliSession.model) : null,
+      // #3687: prefer the user's explicit override (`model`) so a later
+      // `setModel()` isn't masked by a stale `bootedModel` (SdkSession's
+      // setModel doesn't restart, so bootedModel only refreshes on the
+      // next init). Fall back to bootedModel when no override was set so
+      // the dashboard sees the real running model, not `null`.
+      model: (cliSession.model || cliSession.bootedModel)
+        ? toShortModelId(cliSession.model || cliSession.bootedModel)
+        : null,
     })
     send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
     send(ws, {
@@ -237,7 +244,14 @@ export function sendSessionInfo(ctx, ws, sessionId) {
   }
   send(ws, {
     type: 'model_changed',
-    model: session.model ? toShortModelId(session.model) : null,
+    // #3687: prefer the user's explicit override (`model`) so a later
+    // `setModel()` isn't masked by a stale `bootedModel` (SdkSession's
+    // setModel doesn't restart, so bootedModel only refreshes on the
+    // next init). Fall back to bootedModel when no override was set so
+    // tab switches / reconnects see the real running model, not `null`.
+    model: (session.model || session.bootedModel)
+      ? toShortModelId(session.model || session.bootedModel)
+      : null,
     sessionId,
   })
   send(ws, {

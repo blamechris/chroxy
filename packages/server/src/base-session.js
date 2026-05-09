@@ -87,6 +87,14 @@ export class BaseSession extends EventEmitter {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
+    // Actual model the underlying CLI/SDK reports at init time. May differ
+    // from `this.model` (the user's requested override) when no override
+    // was set — e.g. user sent create_session with no `model`, the CLI
+    // booted with whatever `~/.claude/settings.json` had configured. Used
+    // for display only; spawn/respawn still uses `this.model` so a null
+    // override keeps following the upstream default after CLI updates.
+    // Set by subclasses in their init handlers (#3687).
+    this.bootedModel = null
     this.permissionMode = permissionMode || 'approve'
     // #3185: per-session toggle for the auto-evaluator chain (parent epic
     // #3068). Default `false` — the existing manual `evaluate_draft` flow

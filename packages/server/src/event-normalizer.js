@@ -23,10 +23,20 @@ Object.assign(EVENT_MAP, {
     const messages = [{ msg: { type: 'claude_ready' } }]
     const entry = ctx.getSessionEntry?.()
     if (entry) {
+      // #3687: prefer the actual model the underlying CLI/SDK reports at
+      // init (`data.model`) — that's the truth for the running session.
+      // Then fall back to the user's explicit override (`entry.session.model`)
+      // so a later `setModel()` call isn't masked by a stale `bootedModel`
+      // (SdkSession's setModel doesn't restart the process, so its
+      // bootedModel only refreshes on the next init). Finally fall back
+      // to bootedModel for the case the original bug fixed: user didn't
+      // specify a model AND we're past init AND data.model is missing
+      // (e.g. legacy callers, replay paths).
+      const reportedModel = data?.model || entry.session.model || entry.session.bootedModel
       messages.push({
         msg: {
           type: 'model_changed',
-          model: entry.session.model ? toShortModelId(entry.session.model) : null,
+          model: reportedModel ? toShortModelId(reportedModel) : null,
         },
       })
       messages.push({

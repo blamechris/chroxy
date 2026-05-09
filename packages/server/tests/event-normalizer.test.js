@@ -70,6 +70,77 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages.length, 1)
       assert.equal(result.messages[0].msg.type, 'claude_ready')
     })
+
+    // #3687: when the user didn't specify a model, session.model is null
+    // but the underlying CLI booted with SOMETHING. The init event carries
+    // that real model in data.model — normalizer must surface it instead
+    // of reporting `null` to the dashboard.
+    it('reports data.model when session.model is null (no user override)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: null, bootedModel: null, permissionMode: 'approve' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', { model: 'claude-opus-4-7' }, ctx)
+      assert.equal(result.messages[1].msg.type, 'model_changed')
+      assert.equal(result.messages[1].msg.model, 'opus')
+    })
+
+    it('prefers data.model over session.model when both are set', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: 'claude-sonnet-4-6', bootedModel: null, permissionMode: 'approve' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', { model: 'claude-opus-4-7' }, ctx)
+      assert.equal(result.messages[1].msg.model, 'opus')
+    })
+
+    it('falls back to bootedModel when data.model is missing (early ready emit)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: null, bootedModel: 'claude-opus-4-7', permissionMode: 'approve' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[1].msg.model, 'opus')
+    })
+
+    it('falls back to session.model when neither data.model nor bootedModel is set', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: 'claude-sonnet-4-6', bootedModel: null, permissionMode: 'approve' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[1].msg.model, 'sonnet')
+    })
+
+    // #3687 / Copilot review: when the user has set an explicit override
+    // AND a previous boot has populated bootedModel, the override must
+    // win — bootedModel can be stale (SdkSession doesn't restart on
+    // setModel) so reporting bootedModel here would mask the user's
+    // intent. data.model is missing in this scenario (replay path /
+    // sendSessionInfo equivalent / non-init re-emit).
+    it('prefers session.model over bootedModel when both are set and data.model is missing', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: 'claude-opus-4-7', bootedModel: 'claude-sonnet-4-6', permissionMode: 'approve' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[1].msg.model, 'opus')
+    })
   })
 
   // ---- EVENT_MAP: conversation_id ----

@@ -655,7 +655,15 @@ export class SessionManager extends EventEmitter {
         sessionId,
         name: entry.name,
         cwd: entry.cwd,
-        model: entry.session.model || null,
+        // #3687: prefer the user's explicit override (`model`) so a later
+        // `setModel()` isn't masked by a stale `bootedModel` (SdkSession's
+        // setModel doesn't restart, so bootedModel only refreshes on the
+        // next init). Fall back to bootedModel so the session list shows
+        // what's actually running when no override was set. State
+        // persistence (snapshotState below) keeps using `entry.session.model`
+        // only — we want to remember the user's intent (null = "follow
+        // CLI default") across restarts.
+        model: entry.session.model || entry.session.bootedModel || null,
         permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,

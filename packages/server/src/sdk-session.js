@@ -553,6 +553,13 @@ export class SdkSession extends BaseSession {
             if (msg.subtype === 'init') {
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
+              // #3687: persist the actual model the SDK booted with so
+              // sendSessionInfo (replay on reconnect / tab switch) reports
+              // the truth instead of `null` when the user didn't specify a
+              // model.
+              if (typeof msg.model === 'string' && msg.model) {
+                this.bootedModel = msg.model
+              }
               log.info(`Session initialized: ${msg.session_id} (model: ${msg.model})`)
               this.emit('ready', {
                 sessionId: msg.session_id,
