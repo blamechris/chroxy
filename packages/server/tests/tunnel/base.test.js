@@ -82,19 +82,22 @@ describe('BaseTunnelAdapter', () => {
       assert.equal(adapter._startCallCount, adapter.maxStartAttempts)
     })
 
-    it('aborts mid-retry when intentionalShutdown becomes true', async () => {
+    it('aborts mid-retry when stop() is called during the cold-start sleep', async () => {
       const adapter = new TestAdapter({
         port: 3000,
         startBehavior: () => { throw new Error('boom') },
       })
-      adapter.recoveryBackoffs = [50, 50, 50]
+      // Long backoff so the test would hang for ~30s without abort.
+      adapter.recoveryBackoffs = [30_000, 30_000, 30_000]
 
+      const startedAt = Date.now()
       const startPromise = adapter.start()
-      // Flip the flag during the first backoff sleep
-      setTimeout(() => { adapter.intentionalShutdown = true }, 10)
+      // Trigger stop() during the first cold-start backoff sleep.
+      setTimeout(() => { adapter.stop().catch(() => {}) }, 50)
 
-      await assert.rejects(startPromise, /boom|aborted/)
-      assert.ok(adapter._startCallCount < adapter.maxStartAttempts, 'should bail before exhausting attempts')
+      await assert.rejects(startPromise, /boom/)
+      assert.ok(Date.now() - startedAt < 5_000, 'stop() during cold-start sleep should abort within seconds, not the full backoff')
+      assert.equal(adapter._startCallCount, 1, 'should not retry after abort')
     })
   })
 

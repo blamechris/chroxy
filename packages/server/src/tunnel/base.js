@@ -91,7 +91,7 @@ export class BaseTunnelAdapter extends EventEmitter {
     // unhandled rejection.
     let lastErr = null
     for (let attempt = 1; attempt <= this.maxStartAttempts; attempt++) {
-      if (this.intentionalShutdown) throw new Error('Tunnel start aborted')
+      if (this.intentionalShutdown) throw lastErr ?? new Error('Tunnel start aborted')
       try {
         return await this._startTunnel()
       } catch (err) {
@@ -101,7 +101,25 @@ export class BaseTunnelAdapter extends EventEmitter {
           log.warn(
             `Tunnel start attempt ${attempt}/${this.maxStartAttempts} failed: ${err.message}. Retrying in ${backoffMs}ms...`
           )
-          await new Promise((resolve) => setTimeout(resolve, backoffMs))
+          // Cancellable sleep — stop() aborts this so a startup retry
+          // doesn't block shutdown for up to 12s. Mirrors the recovery
+          // loop pattern in _handleUnexpectedExit().
+          this._startAbort = new AbortController()
+          try {
+            await new Promise((resolve, reject) => {
+              const timer = setTimeout(resolve, backoffMs)
+              this._startAbort.signal.addEventListener('abort', () => {
+                clearTimeout(timer)
+                reject(new Error('start aborted'))
+              }, { once: true })
+            })
+          } catch {
+            // Aborted by stop() — bail with the last real error so the
+            // caller still sees the underlying provider failure.
+            throw lastErr
+          } finally {
+            this._startAbort = null
+          }
         }
       }
     }
@@ -126,6 +144,12 @@ export class BaseTunnelAdapter extends EventEmitter {
     if (this._recoveryAbort) {
       this._recoveryAbort.abort()
       this._recoveryAbort = null
+    }
+    // Same for cold-start retry sleep so a stop() during startup
+    // doesn't block on the 3s/6s cold-start backoff.
+    if (this._startAbort) {
+      this._startAbort.abort()
+      this._startAbort = null
     }
     if (this.process) {
       this.process.kill()

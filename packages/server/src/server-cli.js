@@ -576,12 +576,15 @@ export async function startCliServer(config) {
     } catch (startErr) {
       const message = `Tunnel start failed: ${startErr.message}`
       log.error(message)
-      try { wsServer.broadcastError(message) } catch {}
+      try { wsServer.broadcastError('tunnel', message, false) } catch {}
       console.error(`\n  ✗ ${message}\n`)
       try { await tunnel.stop() } catch {}
       try { wsServer.close() } catch {}
       try { mdnsService?.stop?.() } catch {}
       try { bonjourInstance?.destroy?.() } catch {}
+      try { tokenManager?.destroy() } catch {}
+      try { pairingManager?.destroy() } catch {}
+      try { sessionManager.destroyAll() } catch {}
       process.exitCode = 1
       return
     }
@@ -639,12 +642,17 @@ export async function startCliServer(config) {
       })
     } catch (tunnelErr) {
       log.error(tunnelErr.message)
-      wsServer.broadcastError(tunnelErr.message)
+      try { wsServer.broadcastError('tunnel', tunnelErr.message, false) } catch {}
       console.error(`\n  ✗ ${tunnelErr.message}\n`)
-      // Clean up the tunnel and server before exiting so we don't
-      // leave orphan processes holding the port.
+      // Clean up everything that's been started so we don't leave
+      // orphan processes or armed timers holding the event loop alive.
       try { await tunnel.stop() } catch {}
       try { wsServer.close() } catch {}
+      try { mdnsService?.stop?.() } catch {}
+      try { bonjourInstance?.destroy?.() } catch {}
+      try { tokenManager?.destroy() } catch {}
+      try { pairingManager?.destroy() } catch {}
+      try { sessionManager.destroyAll() } catch {}
       process.exitCode = 1
       return
     }
