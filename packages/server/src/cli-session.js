@@ -562,6 +562,12 @@ export class CliSession extends BaseSession {
         if (data.subtype === 'init') {
           this._sessionId = data.session_id
           this._respawnCount = 0
+          // #3687: persist the actual model the CLI booted with so
+          // sendSessionInfo (replay on reconnect / tab switch) reports the
+          // truth instead of `null` when the user didn't specify a model.
+          if (typeof data.model === 'string' && data.model) {
+            this.bootedModel = data.model
+          }
           log.info(`Session initialized: ${data.session_id}`)
           this.emit('ready', {
             sessionId: data.session_id,

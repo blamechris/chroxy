@@ -655,7 +655,12 @@ export class SessionManager extends EventEmitter {
         sessionId,
         name: entry.name,
         cwd: entry.cwd,
-        model: entry.session.model || null,
+        // #3687: prefer the actual booted model so the session list shows
+        // what's running. Falls back to the user's configured override,
+        // and finally null. State persistence (snapshotState below) keeps
+        // using `entry.session.model` only — we want to remember the
+        // user's intent (null = "follow CLI default") across restarts.
+        model: entry.session.bootedModel || entry.session.model || null,
         permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,

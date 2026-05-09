@@ -23,10 +23,19 @@ Object.assign(EVENT_MAP, {
     const messages = [{ msg: { type: 'claude_ready' } }]
     const entry = ctx.getSessionEntry?.()
     if (entry) {
+      // #3687: prefer the actual model the underlying CLI/SDK reports at
+      // init (`data.model`) over the configured override
+      // (`entry.session.model`). When the user didn't specify a model,
+      // session.model is `null` but the CLI still booted with SOMETHING
+      // — reporting that something keeps the dashboard dropdown honest.
+      // Falls back to bootedModel (set by subclasses in their init
+      // handlers) and finally to the configured override for the
+      // pre-init "ready" emit that fires before the system.init message.
+      const reportedModel = data?.model || entry.session.bootedModel || entry.session.model
       messages.push({
         msg: {
           type: 'model_changed',
-          model: entry.session.model ? toShortModelId(entry.session.model) : null,
+          model: reportedModel ? toShortModelId(reportedModel) : null,
         },
       })
       messages.push({

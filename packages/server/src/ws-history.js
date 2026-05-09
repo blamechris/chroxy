@@ -210,7 +210,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     send(ws, {
       type: 'model_changed',
-      model: cliSession.model ? toShortModelId(cliSession.model) : null,
+      // #3687: prefer the actual booted model so reconnects show the truth
+      // instead of `null` when the user didn't specify an override.
+      model: (cliSession.bootedModel || cliSession.model)
+        ? toShortModelId(cliSession.bootedModel || cliSession.model)
+        : null,
     })
     send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
     send(ws, {
@@ -237,7 +241,12 @@ export function sendSessionInfo(ctx, ws, sessionId) {
   }
   send(ws, {
     type: 'model_changed',
-    model: session.model ? toShortModelId(session.model) : null,
+    // #3687: prefer the actual booted model so tab switches / reconnects
+    // show what the session is running, not `null` when the user didn't
+    // specify an override.
+    model: (session.bootedModel || session.model)
+      ? toShortModelId(session.bootedModel || session.model)
+      : null,
     sessionId,
   })
   send(ws, {
