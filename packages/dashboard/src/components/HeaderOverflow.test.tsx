@@ -28,19 +28,29 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(match).toBeTruthy()
   })
 
-  it('.header-left is non-shrinking so version + status-dot stay readable', () => {
+  it('.header-left is a flex container (its children layout) — sizing pinned by the grid `auto` track', () => {
     const block = css.match(/\.header-left\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/flex-shrink:\s*0/)
+    expect(block![0]).toMatch(/display:\s*flex/)
+    // No flex-shrink — header-left is a grid item, not a flex item. The
+    // grid `auto` column track is what keeps it content-sized;
+    // flex-shrink would be a no-op here. Anchor the negation on the
+    // `flex-shrink:` declaration form so explanatory comment text
+    // mentioning the property doesn't trigger a false positive.
+    expect(block![0]).not.toMatch(/flex-shrink:/)
   })
 
-  it('.header-right is non-shrinking so the status bar (cost + tokens) never truncates', () => {
+  it('.header-right is a flex container — sizing pinned by the grid `auto` track', () => {
     const block = css.match(/\.header-right\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/flex-shrink:\s*0/)
+    expect(block![0]).toMatch(/display:\s*flex/)
+    expect(block![0]).not.toMatch(/flex-shrink:/)
   })
 
-  it('.header-right .status-bar inherits flex-shrink: 0 + nowrap', () => {
+  it('.header-right .status-bar (a flex item inside header-right) gets flex-shrink: 0 + nowrap', () => {
+    // status-bar IS a flex item here (header-right is display: flex), so
+    // flex-shrink: 0 is the right primitive — without it, the cost +
+    // token text could truncate to "718 toke...".
     const block = css.match(/\.header-right \.status-bar\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/flex-shrink:\s*0/)

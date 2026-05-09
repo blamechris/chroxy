@@ -97,7 +97,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
+  /* As a grid item, this column is sized by `grid-template-columns: auto`
+     on #header — it pins to content width automatically. No flex-shrink
+     needed (would be a no-op anyway since this isn't a flex item). */
 }
 
 .header-center {
@@ -293,7 +295,11 @@
   gap: 8px;
   align-items: center;
   min-width: 0;
-  flex-shrink: 0;
+  /* As a grid item, this column is sized by `grid-template-columns: ... auto`
+     on #header — it pins to content width automatically. No flex-shrink
+     needed (would be a no-op anyway since this isn't a flex item). The
+     `min-width: 0` here lets the inner flex distribute children correctly
+     without forcing a horizontal scroll. */
 }
 
 /* Status bar lives inside header-right (cost + tokens). It must NOT shrink
