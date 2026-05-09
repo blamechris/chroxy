@@ -713,8 +713,18 @@ export async function startCliServer(config) {
 
   console.log('\nPress Ctrl+C to stop.\n')
 
-  // Graceful shutdown
+  // Graceful shutdown.
+  // Idempotent: a second SIGINT/SIGTERM (or a crash arriving mid-shutdown)
+  // returns immediately. Without this, the second call ran serializeState()
+  // against an already-empty `_sessions` Map and wrote 0 sessions to disk,
+  // erasing the user's restored state across upgrade/quit cycles (#3697).
+  let shuttingDown = false
   const shutdown = async (signal) => {
+    if (shuttingDown) {
+      log.info(`[${signal}] Shutdown already in progress, ignoring duplicate signal`)
+      return
+    }
+    shuttingDown = true
     log.info(`[${signal}] Shutting down...`)
     // Notify connected clients (ETA 0 = not coming back unless supervised)
     wsServer.broadcastShutdown('shutdown', 0)
@@ -741,6 +751,8 @@ export async function startCliServer(config) {
   process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)) })
 
   process.on('uncaughtException', (err) => {
+    if (shuttingDown) return
+    shuttingDown = true
     log.error(`Uncaught exception: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
@@ -752,6 +764,8 @@ export async function startCliServer(config) {
   })
 
   process.on('unhandledRejection', (err) => {
+    if (shuttingDown) return
+    shuttingDown = true
     log.error(`Unhandled rejection: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
