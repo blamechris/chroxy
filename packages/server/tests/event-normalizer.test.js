@@ -123,6 +123,24 @@ describe('EventNormalizer', () => {
       const result = normalizer.normalize('ready', {}, ctx)
       assert.equal(result.messages[1].msg.model, 'sonnet')
     })
+
+    // #3687 / Copilot review: when the user has set an explicit override
+    // AND a previous boot has populated bootedModel, the override must
+    // win — bootedModel can be stale (SdkSession doesn't restart on
+    // setModel) so reporting bootedModel here would mask the user's
+    // intent. data.model is missing in this scenario (replay path /
+    // sendSessionInfo equivalent / non-init re-emit).
+    it('prefers session.model over bootedModel when both are set and data.model is missing', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: 'claude-opus-4-7', bootedModel: 'claude-sonnet-4-6', permissionMode: 'approve' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[1].msg.model, 'opus')
+    })
   })
 
   // ---- EVENT_MAP: conversation_id ----

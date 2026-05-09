@@ -24,14 +24,15 @@ Object.assign(EVENT_MAP, {
     const entry = ctx.getSessionEntry?.()
     if (entry) {
       // #3687: prefer the actual model the underlying CLI/SDK reports at
-      // init (`data.model`) over the configured override
-      // (`entry.session.model`). When the user didn't specify a model,
-      // session.model is `null` but the CLI still booted with SOMETHING
-      // — reporting that something keeps the dashboard dropdown honest.
-      // Falls back to bootedModel (set by subclasses in their init
-      // handlers) and finally to the configured override for the
-      // pre-init "ready" emit that fires before the system.init message.
-      const reportedModel = data?.model || entry.session.bootedModel || entry.session.model
+      // init (`data.model`) — that's the truth for the running session.
+      // Then fall back to the user's explicit override (`entry.session.model`)
+      // so a later `setModel()` call isn't masked by a stale `bootedModel`
+      // (SdkSession's setModel doesn't restart the process, so its
+      // bootedModel only refreshes on the next init). Finally fall back
+      // to bootedModel for the case the original bug fixed: user didn't
+      // specify a model AND we're past init AND data.model is missing
+      // (e.g. legacy callers, replay paths).
+      const reportedModel = data?.model || entry.session.model || entry.session.bootedModel
       messages.push({
         msg: {
           type: 'model_changed',
