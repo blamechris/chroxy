@@ -758,10 +758,17 @@ export class CliSession extends BaseSession {
             // Diagnostic for #3700 — log skipped assistant events that contain
             // text. If a NEW assistant turn (post-tool) emits text but we skip
             // it because turn-1 set didStreamText, that's the smoking gun.
-            const hasText = content.some(b => b?.type === 'text' && b?.text)
-            if (hasText) {
-              const tlen = content.reduce((n, b) => n + ((b?.type === 'text' && b?.text) ? b.text.length : 0), 0)
-              log.info(`[stream-debug] SKIPPED assistant event (didStreamText=true) messageId=${messageId} hasText=true textLen=${tlen}`)
+            // Gated on `loggedSkippedAssistant` so the partial-message stream
+            // (which fires this same handler many times per turn) doesn't
+            // flood the log file — we only need the first occurrence per
+            // exchange to diagnose the bug.
+            if (!ctx.loggedSkippedAssistant) {
+              const hasText = content.some(b => b?.type === 'text' && b?.text)
+              if (hasText) {
+                ctx.loggedSkippedAssistant = true
+                const tlen = content.reduce((n, b) => n + ((b?.type === 'text' && b?.text) ? b.text.length : 0), 0)
+                log.info(`[stream-debug] SKIPPED assistant event (didStreamText=true) messageId=${messageId} hasText=true textLen=${tlen}`)
+              }
             }
             break
           }
