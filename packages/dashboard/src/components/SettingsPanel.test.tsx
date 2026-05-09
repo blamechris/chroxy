@@ -239,6 +239,24 @@ describe('SettingsPanel', () => {
       expect(codexRow).toHaveTextContent('set OPENAI_API_KEY') // hint surfaced
     })
 
+    it('renders the color legend so the green/blue/red tones are self-explanatory', () => {
+      setMockState({
+        availableProviders: [
+          {
+            name: 'claude-cli',
+            capabilities: {},
+            auth: { ready: true, source: 'oauth', envVar: null, envVars: [], hint: '', detail: 'Claude subscription' },
+          },
+        ],
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const legend = screen.getByLabelText('Color legend')
+      expect(legend).toBeInTheDocument()
+      expect(legend).toHaveTextContent('Subscription / login')
+      expect(legend).toHaveTextContent('API key')
+      expect(legend).toHaveTextContent('Not configured')
+    })
+
     it('marks oauth-source rows with the oauth tone', () => {
       setMockState({
         availableProviders: [
