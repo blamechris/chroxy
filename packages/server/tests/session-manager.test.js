@@ -2050,6 +2050,37 @@ describe('SessionManager.maxMessages option (#2735)', () => {
   })
 })
 
+describe('#3700b — bootedModel round-trips through serialize/restore', () => {
+  it('serializeState includes bootedModel for sessions that booted with no explicit model', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.model = null
+    session.bootedModel = 'claude-opus-4-7'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'My Session', cwd: '/tmp', createdAt: Date.now() })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].model, null, 'explicit model stays null')
+    assert.equal(state.sessions[0].bootedModel, 'claude-opus-4-7', 'bootedModel is persisted')
+  })
+
+  it('serializeState writes null bootedModel when session has not booted yet', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.model = null
+    session.bootedModel = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Pending', cwd: '/tmp', createdAt: Date.now() })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].bootedModel, null)
+  })
+})
+
 describe('#3697 — shutdown race must not overwrite good state with empty state', () => {
   it('serializeState() after destroyAll() is a no-op (does not write 0 sessions)', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'chroxy-3697-'))

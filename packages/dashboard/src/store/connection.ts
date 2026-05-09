@@ -1300,18 +1300,58 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
     }
+    // Mirror the optimistic-update pattern from setPermissionMode (#3693)
+    // so the controlled <select> doesn't briefly snap back to the prior
+    // value while waiting for the server's `model_changed` broadcast.
+    if (activeSessionId && get().sessionStates[activeSessionId]) {
+      updateActiveSession(() => ({ activeModel: model }));
+    } else {
+      set({ activeModel: model });
+    }
   },
 
   setPermissionMode: (mode: string) => {
     const { socket, activeSessionId, permissionMode } = get();
+    // `auto` (bypass-permissions) is destructive — confirm before sending.
+    // window.confirm is synchronous and avoids the missing-modal gap that
+    // previously left the dropdown stuck on the prior selection (#3693).
+    // Confirmed BEFORE updating any state so a cancel leaves both the mode
+    // and previousPermissionMode untouched — the latter is the Shift+Tab
+    // toggle target, and overwriting it on cancel would silently break the
+    // toggle.
+    if (mode === 'auto') {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm('Switch to Auto mode? Tools will run without asking for permission.')
+        : true;
+      if (!ok) return;
+    }
     // Save current mode before switching (for Shift+Tab toggle)
     if (permissionMode && permissionMode !== mode) {
       set({ previousPermissionMode: permissionMode });
     }
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
-      if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
+    if (mode === 'auto') {
+      // Send with confirmed:true so the server skips its own confirmation
+      // round-trip and broadcasts `permission_mode_changed` directly.
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true };
+        if (activeSessionId) payload.sessionId = activeSessionId;
+        wsSend(socket, payload);
+      }
+    } else {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
+        if (activeSessionId) payload.sessionId = activeSessionId;
+        wsSend(socket, payload);
+      }
+    }
+    // Optimistically update local state so the controlled `<select>`
+    // doesn't snap back to the prior value before the server's
+    // `permission_mode_changed` broadcast lands (#3693). Idempotent — the
+    // broadcast will re-set the same value when it arrives.
+    if (activeSessionId && get().sessionStates[activeSessionId]) {
+      updateActiveSession(() => ({ permissionMode: mode }));
+    } else {
+      set({ permissionMode: mode });
     }
   },
 

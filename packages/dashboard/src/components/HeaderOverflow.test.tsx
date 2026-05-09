@@ -34,10 +34,13 @@ describe('Header overflow prevention (#2297)', () => {
     expect(block![0]).toMatch(/flex:\s*1\s+1\s+auto/)
   })
 
-  it('.header-center select has max-width and text truncation', () => {
+  it('.header-center select has min-width / max-width and text truncation', () => {
     const block = css.match(/\.header-center select\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/max-width:\s*180px/)
+    // min-width pins the floor so the chat-tab Copy-Transcript button can't
+    // squeeze the model dropdown below its natural label width.
+    expect(block![0]).toMatch(/min-width:\s*180px/)
+    expect(block![0]).toMatch(/max-width:\s*220px/)
     expect(block![0]).toMatch(/overflow:\s*hidden/)
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
     expect(block![0]).toMatch(/text-overflow:\s*ellipsis/)
