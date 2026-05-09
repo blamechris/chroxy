@@ -73,10 +73,17 @@
 }
 
 /* ---- Header ---- */
+/* Header is a 3-column grid (auto | 1fr | auto). Switching from flex
+   space-between fixed a class of overlap bugs: with flex, header-center
+   could spill into header-right's space (overflow: visible was needed for
+   native select dropdowns), causing Skills to underlap the gear button and
+   long model names to underlap the status dot. Grid gives each zone its
+   own cell with explicit gap; only the center column flexes. */
 #header {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
+  gap: 16px;
   padding: 10px 16px;
   background: var(--bg-header);
   border-bottom: 1px solid var(--border-primary);
@@ -90,6 +97,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  /* As a grid item, this column is sized by `grid-template-columns: auto`
+     on #header — it pins to content width automatically. No flex-shrink
+     needed (would be a no-op anyway since this isn't a flex item). */
 }
 
 .header-center {
@@ -97,8 +107,13 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1 1 auto;
-  justify-content: center;
+  /* No flex on the wrapper itself — grid sizes the column. The flex
+     children inside still distribute by their content. */
+  justify-content: flex-start;
+  /* Hide overflow on the wrapper but allow native <select> dropdowns to
+     escape via the children's own positioning — selects render outside
+     the document flow on macOS, so wrapper clipping doesn't affect them. */
+  overflow: hidden;
 }
 
 .header-center select {
@@ -109,16 +124,15 @@
   padding: 4px 8px;
   font-size: var(--text-base);
   cursor: pointer;
-  /* min-width pins the dropdown's floor so the chat-tab Copy-Transcript
-     button (which adds ~36px to header-right) cannot squeeze the model
-     select below its natural label width. Without this, the select
-     truncated to "Default (Sonnet 4..." on the chat tab while showing
-     the full "Default (Sonnet 4.6)" on every other tab. */
+  /* min-width gives a comfortable floor for the default labels; max-width
+     lets long model names ("Opus 4.7 (1M)") show fully. The grid layout
+     prevents this from pushing into other zones. */
   min-width: 180px;
-  max-width: 220px;
+  max-width: 240px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  flex-shrink: 1;
 }
 
 .header-center select:focus {
@@ -137,6 +151,11 @@
   color: var(--text-primary);
   cursor: pointer;
   user-select: none;
+  /* Keep the label on a single line — without nowrap it breaks to "Auto-"
+     / "evaluate" stacked, increasing the wrapper's vertical height and
+     pushing surrounding controls. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .prompt-evaluator-toggle input[type='checkbox'] {
@@ -276,6 +295,21 @@
   gap: 8px;
   align-items: center;
   min-width: 0;
+  /* As a grid item, this column is sized by `grid-template-columns: ... auto`
+     on #header — it pins to content width automatically. No flex-shrink
+     needed (would be a no-op anyway since this isn't a flex item). The
+     `min-width: 0` here lets the inner flex distribute children correctly
+     without forcing a horizontal scroll. */
+}
+
+/* Status bar lives inside header-right (cost + tokens). It must NOT shrink
+   below its content — token count truncating to "718 toke..." was the
+   visible symptom. The 3-column grid above already protects the right
+   zone from the center, so the status bar is free to take whatever width
+   its content needs. */
+.header-right .status-bar {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .logo {
@@ -3313,9 +3347,16 @@
 
 /* ---- Responsive ---- */
 @media (max-width: 600px) {
-  #header { padding: 8px 12px; }
+  #header { padding: 8px 12px; gap: 8px; }
   .logo { font-size: 16px; }
-  .header-center select { font-size: var(--text-sm); padding: 3px 6px; max-width: 120px; }
+  .header-center select {
+    font-size: var(--text-sm);
+    padding: 3px 6px;
+    /* Relax min-width on narrow viewports too (#3705) so the dropdown
+       can shrink when the grid's center column is squeezed. */
+    min-width: 100px;
+    max-width: 140px;
+  }
   .header-center { gap: 4px; }
   .header-right { gap: 4px; }
   .status-bar { gap: 6px; padding: 4px 6px; }
@@ -3914,6 +3955,14 @@
 .header-text-btn:focus-visible {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
+}
+
+.header-text-btn,
+.header-icon-btn {
+  /* Header buttons should never shrink — they're icons / single-word
+     labels. Without this, the flex inside header-center could squeeze them
+     and cause text/icon overlap. */
+  flex-shrink: 0;
 }
 
 /* --- Settings panel --- */
