@@ -2049,3 +2049,61 @@ describe('SessionManager.maxMessages option (#2735)', () => {
     assert.equal(mgr.maxMessages, 300)
   })
 })
+
+describe('#3697 — shutdown race must not overwrite good state with empty state', () => {
+  it('serializeState() after destroyAll() is a no-op (does not write 0 sessions)', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'chroxy-3697-'))
+    const stateFile = join(tempDir, 'session-state.json')
+    try {
+      const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+      const session = new EventEmitter()
+      session.model = 'claude-opus-4-7'
+      session.permissionMode = 'approve'
+      Object.defineProperty(session, 'resumeSessionId', { get: () => 'sdk-abc' })
+      session.destroy = () => {}
+      mgr._sessions.set('s1', { session, type: 'cli', name: 'My Work', cwd: '/tmp', createdAt: Date.now() })
+      mgr._lastActivity.set('s1', Date.now())
+
+      // First shutdown pass: writes the good state, then clears _sessions.
+      mgr.destroyAll()
+      const afterDestroy = JSON.parse(readFileSync(stateFile, 'utf-8'))
+      assert.equal(afterDestroy.sessions.length, 1, 'destroyAll itself wrote the good state')
+
+      // Second shutdown pass (e.g. SIGINT-after-SIGTERM, or duplicate handler):
+      // would previously have written 0 sessions and rotated the good state to .bak.
+      const result = mgr.serializeState()
+      assert.equal(result, null, 'serializeState returns null after destroyAll')
+      const afterSecond = JSON.parse(readFileSync(stateFile, 'utf-8'))
+      assert.equal(afterSecond.sessions.length, 1, 'state on disk still has the session')
+      assert.equal(afterSecond.sessions[0].name, 'My Work')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('_schedulePersist() after destroyAll() does not queue a debounced empty-state write', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'chroxy-3697b-'))
+    const stateFile = join(tempDir, 'session-state.json')
+    try {
+      const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+      const session = new EventEmitter()
+      session.model = 'claude-opus-4-7'
+      session.permissionMode = 'approve'
+      Object.defineProperty(session, 'resumeSessionId', { get: () => 'sdk-xyz' })
+      session.destroy = () => {}
+      mgr._sessions.set('s1', { session, type: 'cli', name: 'Important', cwd: '/tmp', createdAt: Date.now() })
+
+      mgr.destroyAll()
+
+      // Spy on persistence.schedulePersist — must NOT be called after destroyAll
+      let scheduled = 0
+      mgr._persistence.schedulePersist = () => { scheduled++ }
+      mgr._schedulePersist()
+      assert.equal(scheduled, 0, '_schedulePersist must not queue a write once _destroying is set')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+})

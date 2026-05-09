@@ -270,6 +270,11 @@ export class SessionManager extends EventEmitter {
     // because the provider happened to be misconfigured at boot.
     this._failedRestores = new Map() // sessionId -> { saved, error }
 
+    // Set to true by destroyAll() so any subsequent persist call is a no-op
+    // — prevents a duplicate shutdown pass writing 0 sessions over the good
+    // state already on disk (#3697).
+    this._destroying = false
+
     // Session idle timeout (delegated to SessionTimeoutManager)
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
     if (sessionTimeout != null && parsedTimeout == null) {
@@ -838,6 +843,13 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Destroy all sessions (shutdown cleanup).
+   *
+   * Sets `_destroying` so any persist call after this point — whether from a
+   * duplicate shutdown handler invocation or from a stray late-arriving event
+   * — is a no-op. Without that guard, a second shutdown pass ran
+   * `serializeState()` against the already-cleared `_sessions` Map and wrote
+   * 0 sessions to disk, erasing the user's restored state across upgrade/quit
+   * cycles (#3697).
    */
   destroyAll() {
     this.stopSessionTimeouts()
@@ -847,6 +859,10 @@ export class SessionManager extends EventEmitter {
     } catch (err) {
       log.error(`Failed to serialize state during destroyAll: ${err?.stack || err}`)
     }
+    // Set the destroying flag AFTER the final write — every persist call from
+    // here on (duplicate shutdown handler, late-arriving session event) will
+    // be a no-op so the good state on disk survives (#3697).
+    this._destroying = true
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
       entry.session.on('error', () => {})
@@ -892,9 +908,16 @@ export class SessionManager extends EventEmitter {
   /**
    * Serialize session state to disk for graceful restart.
    * Called during drain before the process exits.
-   * @returns {object} The serialized state
+   * @returns {object|null} The serialized state, or `null` if `destroyAll()`
+   *   has already run — late callers (duplicate shutdown handler, stray
+   *   session event) cannot overwrite the on-disk state (#3697).
    */
   serializeState() {
+    // After destroyAll() has cleared the in-memory Map, any further write
+    // would persist 0 sessions and overwrite the good state already on disk.
+    // Skip silently — the destroyAll() call did the final write itself
+    // (#3697).
+    if (this._destroying) return null
     const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
       const history = this._history.getHistory(id).map(e => this._history.truncateEntry(e))
@@ -1235,8 +1258,10 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Schedule a debounced persist. Multiple rapid calls reset the timer.
+   * No-op once `destroyAll()` has run — see `serializeState()` (#3697).
    */
   _schedulePersist() {
+    if (this._destroying) return
     this._persistence.schedulePersist(() => this.serializeState())
   }
 
