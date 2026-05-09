@@ -52,6 +52,50 @@ describe('BaseTunnelAdapter', () => {
 
       await adapter.stop()
     })
+
+    it('retries _startTunnel after a transient failure', async () => {
+      const adapter = new TestAdapter({
+        port: 3000,
+        startBehavior: (attempt) => {
+          if (attempt === 1) throw new Error('cloudflared exited with code 1 before establishing tunnel')
+          return { httpUrl: 'https://recovered.example.com', wsUrl: 'wss://recovered.example.com' }
+        },
+      })
+      adapter.recoveryBackoffs = [10, 20, 30]
+
+      const result = await adapter.start()
+
+      assert.equal(adapter._startCallCount, 2)
+      assert.equal(result.httpUrl, 'https://recovered.example.com')
+
+      await adapter.stop()
+    })
+
+    it('throws after maxStartAttempts when every attempt fails', async () => {
+      const adapter = new TestAdapter({
+        port: 3000,
+        startBehavior: () => { throw new Error('persistent failure') },
+      })
+      adapter.recoveryBackoffs = [10, 20, 30]
+
+      await assert.rejects(adapter.start(), /persistent failure/)
+      assert.equal(adapter._startCallCount, adapter.maxStartAttempts)
+    })
+
+    it('aborts mid-retry when intentionalShutdown becomes true', async () => {
+      const adapter = new TestAdapter({
+        port: 3000,
+        startBehavior: () => { throw new Error('boom') },
+      })
+      adapter.recoveryBackoffs = [50, 50, 50]
+
+      const startPromise = adapter.start()
+      // Flip the flag during the first backoff sleep
+      setTimeout(() => { adapter.intentionalShutdown = true }, 10)
+
+      await assert.rejects(startPromise, /boom|aborted/)
+      assert.ok(adapter._startCallCount < adapter.maxStartAttempts, 'should bail before exhausting attempts')
+    })
   })
 
   describe('stop()', () => {

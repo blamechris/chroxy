@@ -570,7 +570,21 @@ export async function startCliServer(config) {
       tunnelName: config.tunnelName || null,
       tunnelHostname: config.tunnelHostname || null,
     })
-    const { wsUrl, httpUrl } = await tunnel.start()
+    let wsUrl, httpUrl
+    try {
+      ({ wsUrl, httpUrl } = await tunnel.start())
+    } catch (startErr) {
+      const message = `Tunnel start failed: ${startErr.message}`
+      log.error(message)
+      try { wsServer.broadcastError(message) } catch {}
+      console.error(`\n  ✗ ${message}\n`)
+      try { await tunnel.stop() } catch {}
+      try { wsServer.close() } catch {}
+      try { mdnsService?.stop?.() } catch {}
+      try { bonjourInstance?.destroy?.() } catch {}
+      process.exitCode = 1
+      return
+    }
     currentWsUrl = wsUrl
 
     // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)

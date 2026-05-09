@@ -32,6 +32,10 @@ export class BaseTunnelAdapter extends EventEmitter {
     // supervisor restarts the child, not the tunnel.
     this.maxRecoveryAttempts = 3
     this.recoveryBackoffs = [3000, 6000, 12000]
+    // Cold-start retry budget. Distinct from recoveryBackoffs which
+    // governs mid-session recovery. Reuses recoveryBackoffs for the
+    // delay between attempts so a single knob tunes both phases.
+    this.maxStartAttempts = 3
     // Unbounded long-tail retry: after the initial round, keep trying
     // with exponential backoff capped at 60s. A tunnel outage is often
     // transient (Cloudflare rollover, flaky wifi on the user's dev
@@ -78,7 +82,30 @@ export class BaseTunnelAdapter extends EventEmitter {
   async start() {
     this.intentionalShutdown = false
     this.recoveryAttempt = 0
-    return this._startTunnel()
+
+    // Bounded retry on initial start to absorb transient provider hiccups
+    // (e.g. Cloudflare quick-tunnel API briefly returning 5xx). The
+    // post-success recovery loop in _handleUnexpectedExit() handles
+    // outages mid-session; this loop handles cold-start failures so a
+    // momentary upstream blip doesn't crash the server with an
+    // unhandled rejection.
+    let lastErr = null
+    for (let attempt = 1; attempt <= this.maxStartAttempts; attempt++) {
+      if (this.intentionalShutdown) throw new Error('Tunnel start aborted')
+      try {
+        return await this._startTunnel()
+      } catch (err) {
+        lastErr = err
+        if (attempt < this.maxStartAttempts) {
+          const backoffMs = this.recoveryBackoffs[attempt - 1] ?? this.recoveryBackoffs[this.recoveryBackoffs.length - 1]
+          log.warn(
+            `Tunnel start attempt ${attempt}/${this.maxStartAttempts} failed: ${err.message}. Retrying in ${backoffMs}ms...`
+          )
+          await new Promise((resolve) => setTimeout(resolve, backoffMs))
+        }
+      }
+    }
+    throw lastErr
   }
 
   /**
