@@ -1397,6 +1397,34 @@
   color: var(--text-blockquote);
 }
 
+/* GFM tables (#3689). Borders use the same tokens as the rest of the
+   chat surface so themes apply automatically. Header row gets a slightly
+   elevated background to separate it from the body. */
+.msg table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  border: 1px solid var(--border-primary);
+}
+
+.msg table th,
+.msg table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border-primary);
+  text-align: left;
+  vertical-align: top;
+}
+
+.msg table th {
+  background: var(--bg-elevated, var(--bg-input));
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.msg table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg-input)) 50%, transparent);
+}
+
 /* ---- Tool Bubble ---- */
 .tool-bubble {
   background: var(--bg-tool-bubble);

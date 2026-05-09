@@ -148,6 +148,64 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<p>after</p>')
   })
 
+  // GFM tables (#3689)
+  describe('tables', () => {
+    it('renders a basic GFM table', () => {
+      const md = '| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |'
+      const html = renderMarkdown(md)
+      expect(html).toContain('<table>')
+      expect(html).toContain('<thead><tr><th>Name</th><th>Age</th></tr></thead>')
+      expect(html).toContain('<tbody><tr><td>Alice</td><td>30</td></tr><tr><td>Bob</td><td>25</td></tr></tbody>')
+    })
+
+    it('renders a table that is the only content in the message', () => {
+      const md = '| col |\n|-----|\n| val |'
+      const html = renderMarkdown(md)
+      expect(html).toContain('<table>')
+      expect(html).toContain('<th>col</th>')
+      expect(html).toContain('<td>val</td>')
+    })
+
+    it('renders inline formatting inside cells', () => {
+      const md = '| Header | Value |\n|--------|-------|\n| **bold** | `code` |'
+      const html = renderMarkdown(md)
+      expect(html).toContain('<strong>bold</strong>')
+      expect(html).toContain('<code>code</code>')
+    })
+
+    it('parses alignment markers from the separator row', () => {
+      const md = '| L | C | R |\n|:---|:---:|---:|\n| a | b | c |'
+      const html = renderMarkdown(md)
+      expect(html).toContain('text-align:left')
+      expect(html).toContain('text-align:center')
+      expect(html).toContain('text-align:right')
+    })
+
+    it('does not wrap a table in <p> tags', () => {
+      const md = 'before\n\n| x |\n|---|\n| y |\n\nafter'
+      const html = renderMarkdown(md)
+      expect(html).not.toMatch(/<p>\s*<table>/)
+      expect(html).toContain('<p>before</p>')
+      expect(html).toContain('<p>after</p>')
+    })
+
+    it('does not insert <br> inside the table', () => {
+      const md = '| a | b |\n|---|---|\n| 1 | 2 |'
+      const html = renderMarkdown(md)
+      expect(html).toContain('<table>')
+      // The transitions between thead/tbody/tr are emitted without literal
+      // newlines, so the later `\n` → `<br>` pass leaves them alone.
+      expect(html).not.toMatch(/<table>[^<]*<br>/)
+      expect(html).not.toMatch(/<\/tr>\s*<br>/)
+    })
+
+    it('does not match prose lines that happen to contain pipes', () => {
+      const md = 'shell command: foo | bar | baz\n\nnext paragraph'
+      const html = renderMarkdown(md)
+      expect(html).not.toContain('<table>')
+    })
+  })
+
   it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
     // Verify no raw <script> or event handler attributes survive in output.
     // Input is escaped by escapeHtml first; DOMPurify catches anything that
