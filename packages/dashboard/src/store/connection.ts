@@ -1312,18 +1312,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   setPermissionMode: (mode: string) => {
     const { socket, activeSessionId, permissionMode } = get();
-    // Save current mode before switching (for Shift+Tab toggle)
-    if (permissionMode && permissionMode !== mode) {
-      set({ previousPermissionMode: permissionMode });
-    }
     // `auto` (bypass-permissions) is destructive — confirm before sending.
     // window.confirm is synchronous and avoids the missing-modal gap that
     // previously left the dropdown stuck on the prior selection (#3693).
+    // Confirmed BEFORE updating any state so a cancel leaves both the mode
+    // and previousPermissionMode untouched — the latter is the Shift+Tab
+    // toggle target, and overwriting it on cancel would silently break the
+    // toggle.
     if (mode === 'auto') {
       const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
         ? window.confirm('Switch to Auto mode? Tools will run without asking for permission.')
         : true;
       if (!ok) return;
+    }
+    // Save current mode before switching (for Shift+Tab toggle)
+    if (permissionMode && permissionMode !== mode) {
+      set({ previousPermissionMode: permissionMode });
+    }
+    if (mode === 'auto') {
       // Send with confirmed:true so the server skips its own confirmation
       // round-trip and broadcasts `permission_mode_changed` directly.
       if (socket && socket.readyState === WebSocket.OPEN) {

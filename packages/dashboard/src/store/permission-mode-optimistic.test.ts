@@ -71,6 +71,33 @@ describe('#3693 — optimistic permission/model update', () => {
     confirmSpy.mockRestore()
   })
 
+  it('cancelling auto-confirm does not mutate previousPermissionMode (Shift+Tab toggle target)', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sessionId = 'sess-toggle'
+    const ss = createEmptySessionState()
+    ss.permissionMode = 'plan'
+    useConnectionStore.setState({
+      activeSessionId: sessionId,
+      sessionStates: { [sessionId]: ss },
+      // Top-level fields used by the toggle are tracked on the root store.
+      permissionMode: 'plan',
+      previousPermissionMode: 'approve',
+      socket: null,
+    })
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    useConnectionStore.getState().setPermissionMode('auto')
+    expect(confirmSpy).toHaveBeenCalledOnce()
+
+    // Mode unchanged (cancel was respected) AND previousPermissionMode untouched
+    // so Shift+Tab still flips back to the real prior mode (`approve`), not to
+    // `plan` itself which would no-op the toggle.
+    expect(useConnectionStore.getState().sessionStates[sessionId]!.permissionMode).toBe('plan')
+    expect(useConnectionStore.getState().previousPermissionMode).toBe('approve')
+
+    confirmSpy.mockRestore()
+  })
+
   it('setModel updates active sessionState immediately', async () => {
     const { useConnectionStore } = await import('./connection')
     const sessionId = 'sess-3'
