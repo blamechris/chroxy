@@ -3993,6 +3993,35 @@
 .auth-status-row[data-tone="oauth"] { border-left-color: var(--accent-green, #4ade80); }
 .auth-status-row[data-tone="missing"] { border-left-color: var(--accent-red, #ef4444); }
 
+.auth-status-legend {
+  list-style: none;
+  margin: 0 0 8px 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.auth-status-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auth-status-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--border-primary);
+}
+
+.auth-status-swatch[data-tone="env"] { background: var(--accent-blue); }
+.auth-status-swatch[data-tone="oauth"] { background: var(--accent-green, #4ade80); }
+.auth-status-swatch[data-tone="missing"] { background: var(--accent-red, #ef4444); }
+
 .auth-status-name {
   font-weight: 600;
   color: var(--text-primary);

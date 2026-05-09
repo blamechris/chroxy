@@ -275,6 +275,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 Which billing identity each provider would use for new sessions.
                 The server reports this from the same checks <code>chroxy doctor</code> runs.
               </p>
+              <ul className="auth-status-legend" aria-label="Color legend">
+                <li><span className="auth-status-swatch" data-tone="oauth" /> Subscription / login</li>
+                <li><span className="auth-status-swatch" data-tone="env" /> API key</li>
+                <li><span className="auth-status-swatch" data-tone="missing" /> Not configured</li>
+              </ul>
               <ul className="auth-status-list">
                 {availableProviders.map(p => {
                   if (!p.auth) return null
