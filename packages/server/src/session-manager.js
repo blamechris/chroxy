@@ -361,7 +361,7 @@ export class SessionManager extends EventEmitter {
    *   empty history and destroy the very data we're restoring.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, bootedModel, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -537,6 +537,14 @@ export class SessionManager extends EventEmitter {
     if (containerUser) providerOpts.containerUser = containerUser
     if (containerCliPath) providerOpts.containerCliPath = containerCliPath
     const session = new ProviderClass(providerOpts)
+    // Pre-seed `bootedModel` from a restored snapshot so the dashboard can
+    // surface the session's actual model immediately on reconnect, without
+    // waiting for the next CLI init event to repopulate it (#3700b). Only
+    // accept non-empty strings so older state files (no field) round-trip
+    // as `null`.
+    if (typeof bootedModel === 'string' && bootedModel.length > 0) {
+      session.bootedModel = bootedModel
+    }
 
     // Derive isolation mode from actual session state, ignoring client-provided value
     // when it conflicts with reality (e.g. isolation:'container' with a non-container provider)
@@ -927,6 +935,13 @@ export class SessionManager extends EventEmitter {
         conversationId: entry.session.resumeSessionId || null,
         cwd: entry.cwd,
         model: entry.session.model,
+        // Persist the model the underlying CLI actually booted with (#3700b).
+        // `model` reflects an explicit user override; `bootedModel` is what
+        // the provider chose when no override was set. Surfacing this on
+        // restore lets the dashboard show the real model in the dropdown
+        // immediately, instead of falling back to the registry default
+        // until the next init event lands.
+        bootedModel: entry.session.bootedModel || null,
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
         name: entry.name,
@@ -1025,6 +1040,13 @@ export class SessionManager extends EventEmitter {
           // ensures no warn/error is re-emitted on restore — clients
           // observe the disabled state via session_list metadata.
           stdinForwardingDisabled: saved.stdinForwardingDisabled === true ? true : undefined,
+          // Restore the previously-booted model (#3700b) so the dashboard
+          // dropdown shows the real model on reconnect, not the registry
+          // fallback. createSession() ignores non-string / empty values so
+          // older state files (pre-#3700b) restore cleanly as null.
+          bootedModel: typeof saved.bootedModel === 'string' && saved.bootedModel.length > 0
+            ? saved.bootedModel
+            : undefined,
           skipPersist: true,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)

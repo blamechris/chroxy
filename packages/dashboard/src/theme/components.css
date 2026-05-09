@@ -109,7 +109,13 @@
   padding: 4px 8px;
   font-size: var(--text-base);
   cursor: pointer;
-  max-width: 180px;
+  /* min-width pins the dropdown's floor so the chat-tab Copy-Transcript
+     button (which adds ~36px to header-right) cannot squeeze the model
+     select below its natural label width. Without this, the select
+     truncated to "Default (Sonnet 4..." on the chat tab while showing
+     the full "Default (Sonnet 4.6)" on every other tab. */
+  min-width: 180px;
+  max-width: 220px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -3880,6 +3886,32 @@
 }
 
 .header-icon-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+/* Text-labeled header button (e.g. Skills). The icon-button class above
+   sets font-size: 18px which is right for glyph icons (⎘ ⚙) but oversized
+   for word labels and gives no border affordance, so the label reads as
+   plain text rather than a clickable target. */
+.header-text-btn {
+  background: var(--bg-secondary);
+  border: 1px solid var(--scrollbar-thumb);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: var(--text-base);
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.header-text-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--accent-blue);
+}
+
+.header-text-btn:focus-visible {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
 }

@@ -1216,7 +1216,7 @@ export function App() {
               another client's toggles after reconnect). */}
           <button
             type="button"
-            className="header-icon-btn"
+            className="header-text-btn"
             data-testid="btn-toggle-skills-panel"
             onClick={() => {
               setSkillsPanelOpen(prev => {
