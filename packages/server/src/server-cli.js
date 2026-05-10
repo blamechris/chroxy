@@ -763,6 +763,12 @@ export async function startCliServer(config) {
     shuttingDown = true
     log.error(`Uncaught exception: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
+    // Persist sessions before destroying — losing the user's restored state
+    // on crash is worse UX than the small risk of writing partial state. The
+    // try/catch isolates serialization failures so destroyAll() still runs.
+    try { sessionManager.serializeState() } catch (serializeErr) {
+      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
+    }
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
     try { wsServer.close() } catch {}
@@ -780,6 +786,12 @@ export async function startCliServer(config) {
     shuttingDown = true
     log.error(`Unhandled rejection: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
+    // Persist sessions before destroying — losing the user's restored state
+    // on crash is worse UX than the small risk of writing partial state. The
+    // try/catch isolates serialization failures so destroyAll() still runs.
+    try { sessionManager.serializeState() } catch (serializeErr) {
+      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
+    }
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
     try { wsServer.close() } catch {}
