@@ -4062,6 +4062,31 @@
   border-color: var(--accent-blue);
 }
 
+/* Checkbox-shaped settings-field — the label wraps both the checkbox and
+   the option text on a single line; the hint sits below at full width.
+   The base .settings-field label rule turns labels into block-level
+   elements with bottom margin which breaks inline checkbox+text layout. */
+.settings-field-checkbox label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.settings-field-checkbox input[type='checkbox'] {
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+  margin: 0;
+}
+
+.settings-field-checkbox .settings-hint {
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
 /* #3404 audit F1: per-provider auth/billing status panel */
 .settings-hint {
   margin: 0 0 12px;

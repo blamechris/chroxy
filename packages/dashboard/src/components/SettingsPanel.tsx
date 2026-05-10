@@ -62,6 +62,16 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
+  // Per-session promptEvaluator toggle. Lives in settings (not the header)
+  // so the "Auto-evaluate prompts before send" label has room for a hint
+  // line and doesn't crowd the model/permission selects. Only shown when
+  // the active session reports a boolean `promptEvaluator` field —
+  // older servers (pre-#3185) omit it, in which case we'd be rendering
+  // a non-functional control.
+  const activeSessionId = useConnectionStore(s => s.activeSessionId)
+  const sessions = useConnectionStore(s => s.sessions)
+  const setPromptEvaluator = useConnectionStore(s => s.setPromptEvaluator)
+  const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
   const themes = getAvailableThemes()
   const inTauri = isTauri()
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
@@ -264,6 +274,34 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               </select>
             </div>
           </section>
+
+          {/* Active session — per-session toggles. Only renders when the
+              active session reports a capability (e.g. boolean
+              promptEvaluator). Older servers (pre-#3185) omit the field
+              entirely, in which case showing a non-functional toggle
+              would mislead. */}
+          {typeof activeSessionPromptEvaluator === 'boolean' && (
+            <section className="settings-section" data-testid="active-session-section">
+              <h3>Active session</h3>
+              <div className="settings-field settings-field-checkbox">
+                <label htmlFor="prompt-evaluator-toggle">
+                  <input
+                    id="prompt-evaluator-toggle"
+                    type="checkbox"
+                    checked={activeSessionPromptEvaluator}
+                    onChange={(e) => setPromptEvaluator(e.target.checked)}
+                    data-testid="prompt-evaluator-toggle"
+                  />
+                  Auto-evaluate prompts before send
+                </label>
+                <p className="settings-hint">
+                  Run a quality check on each prompt before it's sent. Catches
+                  ambiguous wording and surfaces clarifications inline. Applies
+                  to this session only.
+                </p>
+              </div>
+            </section>
+          )}
 
           {/* #3404 audit F1: per-provider auth/billing status. Surfaces
               `chroxy doctor` info inside the UI so users don't have to

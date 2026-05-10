@@ -309,7 +309,9 @@ export function App() {
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
-  const setPromptEvaluator = useConnectionStore(s => s.setPromptEvaluator)
+  // setPromptEvaluator now consumed directly by SettingsPanel — moved out
+  // of the header in fix/auto-evaluate-to-settings (avoids the wrapping
+  // "Auto-" / "evaluate" header label and gives the toggle a hint line).
   // #3209: skills runtime API
   const requestListSkills = useConnectionStore(s => s.requestListSkills)
   const activateSkill = useConnectionStore(s => s.activateSkill)
@@ -1208,8 +1210,6 @@ export function App() {
             })()}
             thinkingLevel={thinkingLevel}
             onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
-            promptEvaluator={sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator}
-            onPromptEvaluatorChange={setPromptEvaluator}
           />
           {/* #3209: Skills toggle. Refreshes the list on open so the
               panel reflects any out-of-band changes (file edits,
