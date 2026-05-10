@@ -126,9 +126,10 @@ export class BaseSession extends EventEmitter {
     // dashboard's cached `msg-1` from the previous boot's session — the
     // dashboard's resolveStreamId silently REUSED the old response and
     // appended new deltas to it, leaving the bottom of the chat empty.
-    // A 6-byte random prefix per boot guarantees IDs from different
-    // server processes can never share a string namespace, even if the
-    // counter happens to land on the same value.
+    // A 3-byte (6 hex char) random prefix per boot guarantees IDs from
+    // different server processes can never share a string namespace, even
+    // if the counter happens to land on the same value. 16⁶ ≈ 16.7M
+    // values — collision across realistic restart counts is astronomical.
     this._messageIdPrefix = randomBytes(3).toString('hex')
     this._currentMessageId = null
     this._destroying = false

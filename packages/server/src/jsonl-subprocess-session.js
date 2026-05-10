@@ -223,7 +223,12 @@ export class JsonlSubprocessSession extends BaseSession {
 
     const Klass = this.constructor
     this._isBusy = true
-    this._currentMessageId = `${Klass.messageIdPrefix}-msg-${++this._messageCounter}`
+    // `{providerLabel}-msg-{bootPrefix}-{counter}` — the bootPrefix from
+    // BaseSession ensures messageIds from different server boots can never
+    // collide with the dashboard's localStorage cache (#3700). Without
+    // it, Codex/Gemini sessions would still hit the same collision class
+    // that CliSession/SdkSession were fixed for.
+    this._currentMessageId = `${Klass.messageIdPrefix}-msg-${this._messageIdPrefix}-${++this._messageCounter}`
 
     // Skills MVP (#2957) — prepend skills text to the first user message when
     // the provider has no system-prompt flag (Codex, Gemini). Only done once
