@@ -2081,6 +2081,121 @@ describe('#3700b — bootedModel round-trips through serialize/restore', () => {
   })
 })
 
+describe('#3700 — messageId counter survives server restart (no dashboard collision)', () => {
+  it('serializeState persists the per-session _messageCounter', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.model = null
+    session.bootedModel = null
+    session.permissionMode = 'approve'
+    session._messageCounter = 27
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'My Session', cwd: '/tmp', createdAt: Date.now() })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].messageCounter, 27, 'counter is persisted as-is')
+  })
+
+  it('serializeState writes 0 when the session never sent a message', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.model = null
+    session.permissionMode = 'approve'
+    session._messageCounter = 0
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Fresh', cwd: '/tmp', createdAt: Date.now() })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].messageCounter, 0)
+  })
+
+  it('createSession({ messageCounter }) pre-seeds session._messageCounter on the constructed session', async () => {
+    // Use an actual provider so the session object has _messageCounter
+    // initialized by BaseSession's constructor. Ignore that the spawn
+    // would fail without the binary — we're checking the pre-seed
+    // ordering happens BEFORE start() and we destroy immediately.
+    const { CliSession } = await import('../src/cli-session.js')
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    // Stub the ProviderClass return so we can intercept construction.
+    // CliSession's constructor just initialises fields — no async / I/O —
+    // so calling it directly is safe even without a real binary.
+    const orig = CliSession.prototype.start
+    CliSession.prototype.start = function () { /* no-op */ }
+    try {
+      const sessionId = mgr.createSession({
+        name: 'Restored',
+        cwd: '/tmp',
+        provider: 'claude-cli',
+        messageCounter: 42,
+      })
+      const entry = mgr._sessions.get(sessionId)
+      assert.ok(entry, 'session was created')
+      assert.equal(entry.session._messageCounter, 42, '_messageCounter pre-seeded from opt')
+      // Cleanup so destroyAll doesn't try to spawn anything
+      entry.session.destroy = () => {}
+      mgr.destroyAll()
+    } finally {
+      CliSession.prototype.start = orig
+    }
+  })
+
+  it('createSession ignores non-numeric / negative / non-finite messageCounter', async () => {
+    const { CliSession } = await import('../src/cli-session.js')
+    const orig = CliSession.prototype.start
+    CliSession.prototype.start = function () { /* no-op */ }
+    try {
+      // Each garbage value should be ignored — session falls back to the
+      // BaseSession constructor default of 0. Run them through individual
+      // SessionManager instances so destroyAll between cases doesn't leak
+      // shared persistence state.
+      const garbageValues = [
+        ['negative number', -1],
+        ['NaN', NaN],
+        ['Infinity', Infinity],
+        ['-Infinity', -Infinity],
+        ['string', '5'],
+        ['null', null],
+      ]
+      for (const [label, val] of garbageValues) {
+        const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+        const sid = mgr.createSession({
+          name: `Bad ${label}`, cwd: '/tmp', provider: 'claude-cli', messageCounter: val,
+        })
+        assert.equal(
+          mgr._sessions.get(sid).session._messageCounter, 0,
+          `${label} should fall back to 0`
+        )
+        mgr._sessions.get(sid).session.destroy = () => {}
+        mgr.destroyAll()
+      }
+    } finally {
+      CliSession.prototype.start = orig
+    }
+  })
+
+  it('createSession accepts 0 as a valid messageCounter value', async () => {
+    // Edge case: an explicit 0 should be honoured (it's a valid counter
+    // for a fresh session that was persisted before any message was sent).
+    // The Number.isFinite + >=0 guard correctly admits 0.
+    const { CliSession } = await import('../src/cli-session.js')
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const orig = CliSession.prototype.start
+    CliSession.prototype.start = function () { /* no-op */ }
+    try {
+      const sid = mgr.createSession({
+        name: 'Zero', cwd: '/tmp', provider: 'claude-cli', messageCounter: 0,
+      })
+      assert.equal(mgr._sessions.get(sid).session._messageCounter, 0)
+      mgr._sessions.get(sid).session.destroy = () => {}
+      mgr.destroyAll()
+    } finally {
+      CliSession.prototype.start = orig
+    }
+  })
+})
+
 describe('#3697 — shutdown race must not overwrite good state with empty state', () => {
   it('serializeState() after destroyAll() is a no-op (does not write 0 sessions)', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'chroxy-3697-'))
