@@ -767,7 +767,7 @@ export async function startCliServer(config) {
     // on crash is worse UX than the small risk of writing partial state. The
     // try/catch isolates serialization failures so destroyAll() still runs.
     try { sessionManager.serializeState() } catch (serializeErr) {
-      log.warn(`Failed to serialize state during crash: ${serializeErr?.message || serializeErr}`)
+      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
     }
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
@@ -790,7 +790,7 @@ export async function startCliServer(config) {
     // on crash is worse UX than the small risk of writing partial state. The
     // try/catch isolates serialization failures so destroyAll() still runs.
     try { sessionManager.serializeState() } catch (serializeErr) {
-      log.warn(`Failed to serialize state during crash: ${serializeErr?.message || serializeErr}`)
+      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
     }
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
