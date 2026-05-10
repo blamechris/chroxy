@@ -1211,12 +1211,14 @@ export function App() {
             thinkingLevel={thinkingLevel}
             onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
           />
-          {/* #3209: Skills toggle. Refreshes the list on open so the
-              panel reflects any out-of-band changes (file edits,
-              another client's toggles after reconnect). */}
+        </div>
+        <div className="header-right">
+          {/* #3209: Skills toggle, moved to header-right as an icon
+              button. Was previously a text button in header-center
+              where it competed for space with the model dropdown. */}
           <button
             type="button"
-            className="header-text-btn"
+            className="header-icon-btn"
             data-testid="btn-toggle-skills-panel"
             onClick={() => {
               setSkillsPanelOpen(prev => {
@@ -1225,12 +1227,11 @@ export function App() {
                 return next
               })
             }}
+            aria-label="Skills"
             title="Skills"
           >
-            Skills
+            &#128190;
           </button>
-        </div>
-        <div className="header-right">
           {viewMode === 'chat' && storeMessages.length > 0 && (
             <button
               className="header-icon-btn"
