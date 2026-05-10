@@ -361,7 +361,7 @@ export class SessionManager extends EventEmitter {
    *   empty history and destroy the very data we're restoring.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, bootedModel, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, bootedModel, messageCounter, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -544,6 +544,13 @@ export class SessionManager extends EventEmitter {
     // as `null`.
     if (typeof bootedModel === 'string' && bootedModel.length > 0) {
       session.bootedModel = bootedModel
+    }
+    // Pre-seed `_messageCounter` so the next sendMessage on a restored
+    // session generates `msg-{N+1}` instead of restarting from `msg-1`
+    // and colliding with messages the dashboard cached from the
+    // previous process (#3700). Only accept finite non-negative numbers.
+    if (typeof messageCounter === 'number' && Number.isFinite(messageCounter) && messageCounter >= 0) {
+      session._messageCounter = messageCounter
     }
 
     // Derive isolation mode from actual session state, ignoring client-provided value
@@ -942,6 +949,15 @@ export class SessionManager extends EventEmitter {
         // immediately, instead of falling back to the registry default
         // until the next init event lands.
         bootedModel: entry.session.bootedModel || null,
+        // Persist the per-session messageId counter so a server restart
+        // doesn't restart from `msg-1` and collide with messages the
+        // dashboard already has cached in localStorage from the previous
+        // process — the dashboard's stream-id collision logic would
+        // silently REUSE the old `msg-1` response message and append
+        // the new turn's text to it, leaving the bottom of the chat
+        // empty (#3700). Falsy/missing on older state files round-trips
+        // as 0 which is the original constructor default.
+        messageCounter: entry.session._messageCounter || 0,
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
         name: entry.name,
@@ -1046,6 +1062,11 @@ export class SessionManager extends EventEmitter {
           // older state files (pre-#3700b) restore cleanly as null.
           bootedModel: typeof saved.bootedModel === 'string' && saved.bootedModel.length > 0
             ? saved.bootedModel
+            : undefined,
+          // Restore the messageId counter so new turns don't reuse old IDs
+          // and collide with dashboard-cached messages (#3700).
+          messageCounter: typeof saved.messageCounter === 'number' && Number.isFinite(saved.messageCounter) && saved.messageCounter >= 0
+            ? saved.messageCounter
             : undefined,
           skipPersist: true,
         })
