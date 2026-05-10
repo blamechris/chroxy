@@ -50,6 +50,22 @@ describe('BaseSession', () => {
       assert.equal(session._activeAgents.size, 0)
       assert.equal(session._resultTimeout, null)
     })
+
+    it('generates a 6-hex-char _messageIdPrefix per session (#3700)', () => {
+      assert.match(session._messageIdPrefix, /^[0-9a-f]{6}$/, 'matches 6-hex format')
+    })
+
+    it('each new BaseSession gets a unique _messageIdPrefix (#3700)', () => {
+      // The dashboard caches messageIds in localStorage. If two sessions
+      // (or the same session across server restarts) shared a prefix,
+      // their counters would collide and the dashboard would silently
+      // append new deltas to old response bubbles.
+      const prefixes = new Set()
+      for (let i = 0; i < 20; i++) {
+        prefixes.add(new BaseSession({ cwd: '/tmp', model: 't', permissionMode: 'approve' })._messageIdPrefix)
+      }
+      assert.equal(prefixes.size, 20, 'all 20 prefixes are distinct')
+    })
   })
 
   describe('isRunning', () => {

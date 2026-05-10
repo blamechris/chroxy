@@ -154,6 +154,35 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
+  it('scrolls to the bottom on initial mount (tab-switch UX)', async () => {
+    // Force the container to have overflow content so scrollTop is meaningful.
+    Object.defineProperty(HTMLDivElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() { return 1000 },
+    })
+    Object.defineProperty(HTMLDivElement.prototype, 'clientHeight', {
+      configurable: true,
+      get() { return 200 },
+    })
+    try {
+      const messages: ChatViewMessage[] = Array.from({ length: 20 }, (_, i) => ({
+        id: `m-${i}`, type: 'response', content: `msg ${i}`, timestamp: Date.now() + i,
+      }))
+      render(<ChatView messages={messages} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+      // Wait one RAF tick — the mount effect uses requestAnimationFrame.
+      await new Promise(resolve => requestAnimationFrame(() => resolve(null)))
+      // After mount, the container should have been scrolled to scrollHeight
+      // (jsdom doesn't actually paint, but our effect sets scrollTop = scrollHeight).
+      expect(container.scrollTop).toBe(1000)
+    } finally {
+      // @ts-expect-error — restore by deleting the override
+      delete HTMLDivElement.prototype.scrollHeight
+      // @ts-expect-error — restore by deleting the override
+      delete HTMLDivElement.prototype.clientHeight
+    }
+  })
+
   it('deduplicates messages by id', () => {
     const messages: ChatViewMessage[] = [
       { id: 'dup', type: 'response', content: 'First', timestamp: Date.now() },

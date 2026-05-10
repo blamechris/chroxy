@@ -102,7 +102,10 @@ describe('CliSession.sendMessage', () => {
     session.sendMessage('test prompt')
 
     assert.equal(session._isBusy, true)
-    assert.equal(session._currentMessageId, 'msg-1')
+    // messageId format is `msg-{6-hex-bootPrefix}-{counter}` (#3700) —
+    // the prefix is random per BaseSession instance so assert the
+    // shape rather than the literal value.
+    assert.match(session._currentMessageId, /^msg-[0-9a-f]{6}-1$/)
     assert.equal(written.length, 1)
     const parsed = JSON.parse(written[0].trim())
     assert.equal(parsed.type, 'user')

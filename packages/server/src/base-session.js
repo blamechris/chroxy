@@ -7,6 +7,7 @@
  * SdkSession, and GeminiSession don't duplicate them.
  */
 import { EventEmitter } from 'events'
+import { randomBytes } from 'crypto'
 import { resolveModelId } from './models.js'
 import {
   loadActiveSkillsLayered,
@@ -118,6 +119,17 @@ export class BaseSession extends EventEmitter {
     this._isBusy = false
     this._processReady = false
     this._messageCounter = 0
+    // Boot-unique prefix mixed into every emitted messageId (#3700).
+    // The dashboard caches up to 100 messages per session in localStorage
+    // keyed by server-assigned messageId. Pre-fix, every server boot
+    // restarted the counter from 0, so a fresh `msg-1` collided with the
+    // dashboard's cached `msg-1` from the previous boot's session — the
+    // dashboard's resolveStreamId silently REUSED the old response and
+    // appended new deltas to it, leaving the bottom of the chat empty.
+    // A 6-byte random prefix per boot guarantees IDs from different
+    // server processes can never share a string namespace, even if the
+    // counter happens to land on the same value.
+    this._messageIdPrefix = randomBytes(3).toString('hex')
     this._currentMessageId = null
     this._destroying = false
     this._activeAgents = new Map()

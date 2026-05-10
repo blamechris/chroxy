@@ -150,6 +150,19 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
     requestAnimationFrame(() => { programmaticScrollRef.current = false })
   }, [])
 
+  // Scroll to the bottom on initial mount so switching back to the chat
+  // tab always lands on the most-recent message above the input bar.
+  // Empty dep array — fires once per mount; React unmounts/remounts the
+  // ChatView when the parent toggles viewMode away and back, so this
+  // effect re-runs naturally on every tab return.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    programmaticScrollRef.current = true
+    el.scrollTop = el.scrollHeight
+    requestAnimationFrame(() => { programmaticScrollRef.current = false })
+  }, [])
+
   // Reset userScrolledUp when streaming ends — show the final response
   useEffect(() => {
     if (prevStreamingRef.current && !isStreaming) {
