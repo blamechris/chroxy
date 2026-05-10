@@ -122,6 +122,119 @@ describe('createPermissionHookManager', () => {
     manager.destroy()
   })
 
+  it('register() strips orphan chroxy entries that lost the _chroxy flag (#3714)', async () => {
+    // Simulate the bad state we found in the wild: multiple chroxy
+    // permission-hook.sh entries without the _chroxy:true marker, plus
+    // potentially a properly-marked one. The legacy filter
+    // (`!entry._chroxy`) only catches the marked one, so the orphans
+    // accumulate forever and cause every Bash call to trigger 3+
+    // simultaneous /permission requests → timeouts → "Hook ... asked
+    // for confirmation" surfaced to the user instead of the prompt UI.
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          // Two orphans (no _chroxy flag) pointing at the chroxy install path
+          { matcher: '', hooks: [{ type: 'command', command: '/Applications/Chroxy.app/Contents/Resources/server/hooks/permission-hook.sh', timeout: 300 }] },
+          { matcher: '', hooks: [{ type: 'command', command: '/Applications/Chroxy.app/Contents/Resources/server/hooks/permission-hook.sh', timeout: 300 }] },
+          // A properly-marked one
+          { _chroxy: true, matcher: '', hooks: [{ type: 'command', command: '/Applications/Chroxy.app/Contents/Resources/server/hooks/permission-hook.sh', timeout: 300 }] },
+          // An unrelated user hook that must NOT be touched
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo hi' }] },
+        ],
+      },
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.register()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    // After register: exactly one chroxy entry (the freshly added one),
+    // plus the user's unrelated hook. The 3 prior chroxy entries (orphans
+    // + marked) are all stripped before re-adding.
+    const chroxyEntries = settings.hooks.PreToolUse.filter(e => e._chroxy)
+    assert.equal(chroxyEntries.length, 1, 'exactly one chroxy entry after orphan cleanup')
+    assert.equal(settings.hooks.PreToolUse.length, 2, 'unrelated user hook preserved')
+    const userHook = settings.hooks.PreToolUse.find(e => !e._chroxy)
+    assert.equal(userHook.matcher, 'Bash', 'user hook untouched')
+    assert.equal(userHook.hooks[0].command, 'echo hi')
+
+    manager.destroy()
+  })
+
+  it('register() strips orphan chroxy entries with Windows-style backslash paths (#3715 review)', async () => {
+    // The path-match regex accepts both `/` and `\\` separators so the
+    // orphan cleanup works regardless of which separator the previous
+    // chroxy install used to write the entry. (Earlier draft of the
+    // predicate had a forward-slash-only `includes()` pre-filter that
+    // would have skipped this entry — Copilot caught it.)
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: 'C:\\Program Files\\chroxy\\packages\\server\\hooks\\permission-hook.sh' }] },
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo hi' }] },
+        ],
+      },
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.register()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    const chroxyEntries = settings.hooks.PreToolUse.filter(e => e._chroxy)
+    assert.equal(chroxyEntries.length, 1, 'orphan with backslash path was stripped, then a single marked entry was added')
+    const userHook = settings.hooks.PreToolUse.find(e => !e._chroxy)
+    assert.equal(userHook.hooks[0].command, 'echo hi', 'unrelated user hook preserved')
+
+    manager.destroy()
+  })
+
+  it('register() does not strip user hooks that share the basename but live elsewhere (#3714)', async () => {
+    // Defensive: the path-match arm must require the chroxy install layout,
+    // not just the basename. A user with their own permission-hook.sh in
+    // an unrelated path should keep it untouched.
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: '/home/user/dotfiles/hooks/permission-hook.sh' }] },
+        ],
+      },
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.register()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks.PreToolUse.length, 2, 'user hook preserved + chroxy hook added')
+    assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, '/home/user/dotfiles/hooks/permission-hook.sh')
+    assert.equal(settings.hooks.PreToolUse[1]._chroxy, true)
+
+    manager.destroy()
+  })
+
+  it('unregister() also strips orphan chroxy entries (#3714)', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: '/Applications/Chroxy.app/Contents/Resources/server/hooks/permission-hook.sh' }] },
+          { matcher: '', hooks: [{ type: 'command', command: '/Applications/Chroxy.app/Contents/Resources/server/hooks/permission-hook.sh' }] },
+        ],
+      },
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.unregister()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    // Both orphans removed; hooks key cleaned up since empty.
+    assert.equal(settings.hooks, undefined)
+
+    manager.destroy()
+  })
+
   it('register() preserves existing non-chroxy hooks', async () => {
     const settingsPath = join(tempDir, 'settings.json')
     writeFileSync(settingsPath, JSON.stringify({
