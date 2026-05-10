@@ -50,6 +50,28 @@ describe('BaseSession', () => {
       assert.equal(session._activeAgents.size, 0)
       assert.equal(session._resultTimeout, null)
     })
+
+    it('generates a 6-hex-char _messageIdPrefix per session (#3700)', () => {
+      assert.match(session._messageIdPrefix, /^[0-9a-f]{6}$/, 'matches 6-hex format')
+    })
+
+    it('each new BaseSession draws an independent _messageIdPrefix (#3700)', () => {
+      // Each instance MUST call randomBytes(3) at construction so prefixes
+      // are independent across server boots. Asserting strict uniqueness
+      // would be probabilistic (16⁶ collision space — a 20-instance set
+      // has ~1.2e-5 collision odds, low but non-zero — flaky in CI). Test
+      // the deterministic invariant instead: every instance has the right
+      // format and 20 instances produce >= 18 distinct values (the lower
+      // bound passes for any reasonable RNG without ever flaking on a
+      // legitimate collision).
+      const prefixes = new Set()
+      for (let i = 0; i < 20; i++) {
+        const p = new BaseSession({ cwd: '/tmp', model: 't', permissionMode: 'approve' })._messageIdPrefix
+        assert.match(p, /^[0-9a-f]{6}$/, `instance ${i} has well-formed prefix`)
+        prefixes.add(p)
+      }
+      assert.ok(prefixes.size >= 18, `>= 18 distinct of 20 (got ${prefixes.size})`)
+    })
   })
 
   describe('isRunning', () => {

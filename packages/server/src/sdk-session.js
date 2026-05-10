@@ -421,7 +421,10 @@ export class SdkSession extends BaseSession {
 
     this._isBusy = true
     this._messageCounter++
-    const messageId = `msg-${this._messageCounter}`
+    // `msg-{bootPrefix}-{counter}` — see BaseSession constructor for why
+    // the boot-unique prefix is needed (#3700). Format change does not
+    // affect the wire schema; clients treat messageId as opaque string.
+    const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
     // Shared ref so _handleResultTimeout can observe the latest value
     // when it fires (the timer was armed when hasStreamStarted was still

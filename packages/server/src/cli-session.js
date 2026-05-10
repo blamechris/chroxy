@@ -441,7 +441,10 @@ export class CliSession extends BaseSession {
 
     this._isBusy = true
     this._messageCounter++
-    this._currentMessageId = `msg-${this._messageCounter}`
+    // `msg-{bootPrefix}-{counter}` — see BaseSession constructor for why
+    // the boot-unique prefix is needed (#3700). Format change does not
+    // affect the wire schema; clients treat messageId as opaque string.
+    this._currentMessageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
     this._currentCtx = { hasStreamStarted: false, didStreamText: false, assistantTextSeen: 0, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false }
 
     const content = buildContentBlocks(transformedPrompt, attachments)
