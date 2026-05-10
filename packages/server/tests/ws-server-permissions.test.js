@@ -474,6 +474,44 @@ describe('auto permission mode confirmation handshake', () => {
     ws.close()
   })
 
+  it('audit log records the real previous mode (Copilot review on PR #3730)', async () => {
+    // Pre-fix the handler captured `prevMode` from `entry.session._permissionMode`
+    // — a typo'd field that BaseSession never sets, so the audit log silently
+    // recorded `'approve'` regardless of the real previous mode. The fix uses
+    // the public `permissionMode` (already computed as `previousMode` above).
+    const mockSession = createMockSession()
+    mockSession.permissionMode = 'acceptEdits'
+    mockSession.setPermissionMode = (mode) => { mockSession.permissionMode = mode }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'set_permission_mode', mode: 'approve' })
+    await waitForMessageMatch(
+      messages,
+      m => m.type === 'permission_mode_changed' && m.mode === 'approve',
+      2000,
+      'permission_mode_changed mode=approve',
+    )
+
+    const modeChanges = server._permissionAudit.query({ type: 'mode_change' })
+    assert.equal(modeChanges.length, 1, 'one mode_change entry recorded')
+    assert.equal(modeChanges[0].previousMode, 'acceptEdits',
+      'audit must surface the actual previous mode, not the always-undefined _permissionMode default')
+    assert.equal(modeChanges[0].newMode, 'approve')
+
+    ws.close()
+  })
+
   it('auto mode requires confirmation (multi-session)', async () => {
     const manager = new EventEmitter()
     const mockSession = createMockSession()

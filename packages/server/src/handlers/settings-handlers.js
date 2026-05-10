@@ -206,7 +206,11 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         } else {
           log.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
         }
-        const prevMode = entry.session._permissionMode || 'approve'
+        // BaseSession exposes the mode on the public `permissionMode` field.
+        // The earlier `_permissionMode` read was a typo that always resolved
+        // to `undefined`, so the audit log silently fell back to 'approve'
+        // regardless of the real previous mode (Copilot review on PR #3730).
+        // Reuse `previousMode` from above (line 203) — same source of truth.
         entry.session.setPermissionMode(msg.mode)
         // #3729: setPermissionMode silently rejects mid-turn changes (and
         // same-mode no-ops). Use the post-call value as ground truth — if
@@ -226,7 +230,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
           ctx.permissionAudit.logModeChange({
             clientId: client.id,
             sessionId: permModeSessionId,
-            previousMode: prevMode,
+            previousMode,
             newMode: msg.mode,
           })
         }
