@@ -43,6 +43,32 @@ export function withSettingsLock(fn) {
 }
 
 /**
+ * Identifies any settings.json hook entry as one of ours so we can prune
+ * it on register/unregister. Catches both the canonical `_chroxy: true`
+ * marker AND orphans where the marker was lost (e.g. a user manually
+ * edited the file, or an older chroxy version wrote without the flag).
+ * Without the path-match arm, orphans accumulated across restarts —
+ * Claude then fired the same script multiple times per tool call,
+ * creating duplicate /permission requests and timeouts (#3714).
+ *
+ * @param {object} entry - One element of settings.hooks.PreToolUse
+ * @returns {boolean}
+ */
+function _isChroxyHookEntry(entry) {
+  if (entry?._chroxy === true) return true
+  const inner = Array.isArray(entry?.hooks) ? entry.hooks : []
+  return inner.some(h =>
+    typeof h?.command === 'string' &&
+    h.command.includes('hooks/permission-hook.sh') &&
+    // Tighten the match to chroxy-installed paths only — the basename
+    // alone could match an unrelated script that happens to share the
+    // name. Match on the parent directory layout we always install
+    // under: `<chroxy>/hooks/permission-hook.sh`.
+    /(?:Chroxy\.app|chroxy[/\\]packages[/\\]server|@chroxy[/\\]server).*hooks[/\\]permission-hook\.sh$/.test(h.command)
+  )
+}
+
+/**
  * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
  * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
@@ -67,10 +93,18 @@ function registerPermissionHookSync(settingsPath) {
   if (!settings.hooks) settings.hooks = {}
   if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = []
 
-  // Remove any existing Chroxy hook entry
+  // Remove any existing Chroxy hook entry — catches the canonical
+  // `_chroxy:true` marker AND orphan entries that lost the flag (#3714).
+  const before = settings.hooks.PreToolUse.length
   settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
-    (entry) => !entry._chroxy
+    (entry) => !_isChroxyHookEntry(entry)
   )
+  const removed = before - settings.hooks.PreToolUse.length
+  if (removed > 1) {
+    // Logging the orphan count makes future regressions visible in the
+    // boot log instead of silently piling up.
+    log.warn(`Removed ${removed} chroxy permission-hook entries from ${settingsPath} (>1 indicates leaked orphans from a prior install — see #3714)`)
+  }
 
   // Add our hook — script reads CHROXY_PORT and CHROXY_TOKEN from env vars
   settings.hooks.PreToolUse.push({
@@ -107,8 +141,9 @@ function unregisterPermissionHookSync(settingsPath) {
   }
 
   if (settings.hooks?.PreToolUse) {
+    // Same predicate as register — also strips orphans without the flag (#3714).
     settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
-      (entry) => !entry._chroxy
+      (entry) => !_isChroxyHookEntry(entry)
     )
     if (settings.hooks.PreToolUse.length === 0) {
       delete settings.hooks.PreToolUse
