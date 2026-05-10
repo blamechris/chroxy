@@ -64,14 +64,33 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/overflow:\s*hidden/)
   })
 
-  it('.header-center select has min-width / max-width and text truncation', () => {
+  it('.header-center select has text truncation (shared across kinds)', () => {
     const block = css.match(/\.header-center select\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/min-width:\s*180px/)
-    expect(block![0]).toMatch(/max-width:\s*240px/)
     expect(block![0]).toMatch(/overflow:\s*hidden/)
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
     expect(block![0]).toMatch(/text-overflow:\s*ellipsis/)
+  })
+
+  it('.header-center select widths are per-kind so the model dropdown does not impose its width on the smaller permission/thinking selects', () => {
+    // Pre-#3720 a single rule applied 180–240px to all three header
+    // selects. That floor was right for the model select but visually
+    // crowded the right zone for the permission ("Approve"/"Accept Edits")
+    // and thinking ("Auto"/"High"/"Max") selects whose longest labels
+    // are far shorter. Per-kind data attributes let each select get a
+    // width that matches its content.
+    const model = css.match(/\.header-center select\[data-kind="model"\]\s*\{[^}]*\}/s)
+    const permission = css.match(/\.header-center select\[data-kind="permission"\]\s*\{[^}]*\}/s)
+    const thinking = css.match(/\.header-center select\[data-kind="thinking"\]\s*\{[^}]*\}/s)
+    expect(model).toBeTruthy()
+    expect(permission).toBeTruthy()
+    expect(thinking).toBeTruthy()
+    expect(model![0]).toMatch(/min-width:\s*180px/)
+    expect(model![0]).toMatch(/max-width:\s*240px/)
+    expect(permission![0]).toMatch(/min-width:\s*110px/)
+    expect(permission![0]).toMatch(/max-width:\s*160px/)
+    expect(thinking![0]).toMatch(/min-width:\s*80px/)
+    expect(thinking![0]).toMatch(/max-width:\s*110px/)
   })
 
   // Note: the prompt-evaluator-toggle moved out of the header into
@@ -98,10 +117,14 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
   })
 
-  it('responsive breakpoint relaxes the dropdown min-width (#3705)', () => {
+  it('responsive breakpoint relaxes the dropdown min-width per-kind (#3705 + #3720)', () => {
+    // Narrow viewports get smaller floors for each kind. Anchored to
+    // the per-kind selectors introduced in #3720 — the previous shared
+    // 100/140 floor was only valid when all three selects shared one rule.
     const block = css.match(/@media \(max-width: 600px\)\s*\{[\s\S]*?\n\}/)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/min-width:\s*100px/)
-    expect(block![0]).toMatch(/max-width:\s*140px/)
+    expect(block![0]).toMatch(/select\[data-kind="model"\]\s*\{\s*min-width:\s*120px;\s*max-width:\s*160px/)
+    expect(block![0]).toMatch(/select\[data-kind="permission"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*110px/)
+    expect(block![0]).toMatch(/select\[data-kind="thinking"\]\s*\{\s*min-width:\s*60px;\s*max-width:\s*80px/)
   })
 })
