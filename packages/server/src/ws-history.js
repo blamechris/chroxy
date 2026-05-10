@@ -280,6 +280,15 @@ export function sendSessionInfo(ctx, ws, sessionId) {
 /**
  * Replay message history for a session to a single client.
  * Sends the full ring buffer in batches to yield the event loop.
+ *
+ * Marks the replay as `fullHistory: true` so clients clear their per-session
+ * messages array before applying the replayed events. Without this, every
+ * reconnect (the client re-enters `replayHistory` each time it reconnects to
+ * an existing session) appends a fresh copy of the ring buffer on top of
+ * whatever the client already had. `isReplayDuplicate` cannot save us when
+ * ring-buffer entries and live-broadcast entries have different messageIds —
+ * the user-visible failure is duplicated assistant turns and scrambled order
+ * (#3741 dogfood smoke-test).
  */
 export function replayHistory(ctx, ws, sessionId) {
   const { sessionManager, send } = ctx
@@ -288,7 +297,7 @@ export function replayHistory(ctx, ws, sessionId) {
   if (history.length === 0) return
 
   const truncated = sessionManager.isHistoryTruncated(sessionId)
-  send(ws, { type: 'history_replay_start', sessionId, truncated })
+  send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory: true })
 
   const CHUNK_SIZE = 20
   const sendChunk = (offset) => {

@@ -694,6 +694,29 @@ describe('replayHistory', () => {
     assert.equal(startMsg.truncated, true)
   })
 
+  it('marks the auto-replay as fullHistory: true so clients clear before replay (#3741)', async () => {
+    // Without this flag, every reconnect to an already-loaded session
+    // appends a fresh copy of the ring buffer on top of whatever the client
+    // already had, producing duplicated turns and scrambled order. The
+    // explicit `request_full_history` path already sends fullHistory: true
+    // for the same reason; auto-replay on reconnect is equally authoritative.
+    const history = [{ type: 'response', content: 'Hi' }]
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const startMsg = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(startMsg.fullHistory, true)
+  })
+
   it('stops mid-replay if ws closes (readyState !== 1)', async () => {
     // Build > 20 messages so a second chunk would be needed
     const history = Array.from({ length: 25 }, (_, i) => ({ type: 'response', content: `msg-${i}` }))
