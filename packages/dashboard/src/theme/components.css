@@ -3889,8 +3889,12 @@
   color: var(--text-primary);
 }
 
-/* --- Header icon buttons --- */
-
+/* --- Header icon buttons ---
+   Glyph-only buttons (Skills 💾, copy ⎘, gear ⚙). flex-shrink: 0 keeps
+   them from being squeezed when the right zone gets crowded. The
+   previous .header-text-btn class (used by the in-header Skills text
+   button) was removed when Skills moved to an icon — there's no other
+   text-labeled header button. */
 .header-icon-btn {
   background: none;
   border: none;
@@ -3900,6 +3904,7 @@
   padding: 4px 8px;
   border-radius: 6px;
   transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
 }
 
 .header-icon-btn:hover {
@@ -3910,40 +3915,6 @@
 .header-icon-btn:focus-visible {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
-}
-
-/* Text-labeled header button (e.g. Skills). The icon-button class above
-   sets font-size: 18px which is right for glyph icons (⎘ ⚙) but oversized
-   for word labels and gives no border affordance, so the label reads as
-   plain text rather than a clickable target. */
-.header-text-btn {
-  background: var(--bg-secondary);
-  border: 1px solid var(--scrollbar-thumb);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: var(--text-base);
-  font-weight: 500;
-  padding: 4px 10px;
-  border-radius: 6px;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-}
-
-.header-text-btn:hover {
-  background: var(--bg-tertiary);
-  border-color: var(--accent-blue);
-}
-
-.header-text-btn:focus-visible {
-  outline: 2px solid var(--accent-blue);
-  outline-offset: 2px;
-}
-
-.header-text-btn,
-.header-icon-btn {
-  /* Header buttons should never shrink — they're icons / single-word
-     labels. Without this, the flex inside header-center could squeeze them
-     and cause text/icon overlap. */
-  flex-shrink: 0;
 }
 
 /* --- Settings panel --- */
