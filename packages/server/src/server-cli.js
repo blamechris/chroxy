@@ -8,7 +8,7 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import QRCode from 'qrcode'
-import { createLogger, setJsonMode } from './logger.js'
+import { createLogger, setJsonMode, initFileLogging } from './logger.js'
 
 const log = createLogger('cli')
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
@@ -202,11 +202,52 @@ function isWithinHome(dir) {
 /**
  * Start the Chroxy server in CLI headless mode.
  */
+/**
+ * Persist server logs to disk so timeouts and crashes leave a forensic trail (#3731).
+ *
+ * Pre-fix the server only wrote to stdout/stderr — the Tauri parent buffered
+ * ~100 lines in memory and the rest was dropped. Default destination is
+ * `~/.chroxy/logs/chroxy.log` with 5MB rotation × 3 files; the caller can
+ * override via `config.logLevel` / `config.logDir` or the `CHROXY_LOG_LEVEL` /
+ * `CHROXY_LOG_DIR` env vars, and opt out entirely with
+ * `CHROXY_NO_FILE_LOGGING=1` (used when a parent process owns log capture).
+ *
+ * Failures are swallowed: the boot path must not abort over a logging-only
+ * problem (e.g. a read-only home directory). The error is reported to stderr
+ * and the server continues with stdout-only logging.
+ *
+ * Exported for testing.
+ *
+ * @param {{ logLevel?: string, logDir?: string }} config
+ * @returns {{ enabled: boolean, level: string, logDir: string|null, error?: string }}
+ */
+export function initFileLoggingFromConfig(config = {}) {
+  if (process.env.CHROXY_NO_FILE_LOGGING === '1') {
+    return { enabled: false, level: 'info', logDir: null }
+  }
+  const level = config.logLevel || process.env.CHROXY_LOG_LEVEL || 'info'
+  const logDir = config.logDir || process.env.CHROXY_LOG_DIR || null
+  try {
+    initFileLogging({ level, ...(logDir ? { logDir } : {}) })
+    return { enabled: true, level, logDir }
+  } catch (err) {
+    const message = err?.message || String(err)
+    // Use console.error rather than the chroxy logger because the logger
+    // itself may have just failed to initialize — a recursive log call
+    // here would either silently swallow the message or crash on the
+    // unset log path.
+    console.error(`[logger] file logging init failed: ${message}`)
+    return { enabled: false, level, logDir, error: message }
+  }
+}
+
 export async function startCliServer(config) {
   // Enable JSON log format if configured
   if (config.logFormat === 'json') {
     setJsonMode(true)
   }
+
+  initFileLoggingFromConfig(config)
 
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
   const NO_AUTH = !!config.noAuth

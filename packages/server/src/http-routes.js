@@ -5,6 +5,7 @@ import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
+import { buildDiagnosticsSnapshot } from './diagnostics.js'
 
 const log = createLogger('ws')
 
@@ -17,6 +18,45 @@ const ALLOWED_ORIGINS = [
   'tauri://localhost',
   'https://tauri.localhost',
 ]
+
+/**
+ * Render a diagnostics snapshot as a copy-pasteable plaintext block.
+ * Used when the caller asks `Accept: text/plain` — convenient for SSH
+ * sessions and bug reports.
+ */
+function formatDiagnosticsText(snap) {
+  const lines = []
+  const s = snap.server || {}
+  lines.push(`chroxy server v${s.version} (${s.mode || 'unknown'}) — pid ${s.pid}, node ${s.nodeVersion}`)
+  lines.push(`uptime: ${s.uptime}s — clients: ${snap.clients?.connected ?? 0} connected, ${snap.clients?.authenticated ?? 0} authed`)
+  lines.push(`memory: rss=${formatBytes(s.memory?.rss)} heap=${formatBytes(s.memory?.heapUsed)}/${formatBytes(s.memory?.heapTotal)}`)
+  lines.push('')
+  lines.push(`sessions (${snap.sessions?.length ?? 0}):`)
+  for (const sess of snap.sessions || []) {
+    lines.push(`  - ${sess.id} [${sess.provider}] busy=${sess.isBusy} mode=${sess.permissionMode}`)
+    lines.push(`    pause=${sess.resultTimeoutPaused} count=${sess.permissionPauseCount} cwd=${sess.cwd}`)
+    if (sess.pendingPermissions?.length) {
+      for (const p of sess.pendingPermissions) {
+        const age = p.ageMs != null ? `${Math.round(p.ageMs / 1000)}s` : '?'
+        lines.push(`    pending: ${p.tool} (${age} old) — ${p.description || ''}`)
+      }
+    }
+  }
+  lines.push('')
+  const lg = snap.logs || {}
+  lines.push(`log tail (${lg.source}${lg.path ? `: ${lg.path}` : ''}):`)
+  for (const line of lg.lines || []) lines.push(`  ${line}`)
+  if (lg.note) lines.push(`  (${lg.note})`)
+  if (lg.error) lines.push(`  (error: ${lg.error})`)
+  return lines.join('\n') + '\n'
+}
+
+function formatBytes(n) {
+  if (typeof n !== 'number') return '?'
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+  return `${(n / 1024 / 1024).toFixed(1)}MB`
+}
 
 /**
  * Check if an Origin header matches the allowed list.
@@ -124,6 +164,24 @@ export function createHttpHandler(server) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(payload))
+      return
+    }
+
+    // Diagnostics endpoint — runtime snapshot for triaging stuck sessions (#3732).
+    // Returns server state, per-session busy/pending/timeout-pause flags, and
+    // a tail of the on-disk log (#3731). Bearer-auth gated; sensitive content
+    // (tool inputs) is omitted, only `tool` + `description` surface.
+    if (req.method === 'GET' && req.url?.startsWith('/diagnostics')) {
+      if (!server._validateBearerAuth(req, res)) return
+      const snapshot = buildDiagnosticsSnapshot({ server, serverVersion: SERVER_VERSION })
+      const accept = req.headers['accept'] || ''
+      if (accept.includes('text/plain')) {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end(formatDiagnosticsText(snapshot))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(snapshot, null, 2))
       return
     }
 

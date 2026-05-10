@@ -142,6 +142,16 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
 }
 
 /**
+ * Return the current on-disk log path, or `null` if file logging is disabled.
+ * Used by /diagnostics (#3732) to point operators at the log file.
+ *
+ * @returns {string|null}
+ */
+export function getLogPath() {
+  return _logToFile ? _logPath : null
+}
+
+/**
  * Close file logging. Used in tests for cleanup.
  */
 export function closeFileLogging() {
