@@ -355,6 +355,15 @@ export class SessionManager extends EventEmitter {
    *   stdin_disabled latch (#3540) on a session being restored from disk. Only used by
    *   `restoreState()`. Truthy = the prior process latched the flag; the new SdkSession
    *   reports it via `listSessions` and `serializeState` round-trips it on the next write.
+   * @param {string} [options.bootedModel] - Internal/restore-only: pre-seed
+   *   `session.bootedModel` so the dashboard can show the actual model on a restored
+   *   session immediately, instead of falling back to the registry default until the
+   *   next CLI init event lands (#3700b). Empty / non-string ignored.
+   * @param {number} [options.messageCounter] - Internal/restore-only: pre-seed
+   *   `session._messageCounter` so a restored session's next sendMessage generates
+   *   `msg-{N+1}` instead of restarting from `msg-1` and colliding with messages
+   *   the dashboard cached from the previous process (#3700). Non-finite or
+   *   negative values ignored.
    * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
    *   `restoreState()`, which must seed history and budget after createSession before the
    *   state file is rewritten; otherwise each flush would overwrite the on-disk file with

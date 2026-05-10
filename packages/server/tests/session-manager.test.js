@@ -2141,15 +2141,51 @@ describe('#3700 — messageId counter survives server restart (no dashboard coll
     }
   })
 
-  it('createSession ignores non-numeric / negative messageCounter', async () => {
+  it('createSession ignores non-numeric / negative / non-finite messageCounter', async () => {
+    const { CliSession } = await import('../src/cli-session.js')
+    const orig = CliSession.prototype.start
+    CliSession.prototype.start = function () { /* no-op */ }
+    try {
+      // Each garbage value should be ignored — session falls back to the
+      // BaseSession constructor default of 0. Run them through individual
+      // SessionManager instances so destroyAll between cases doesn't leak
+      // shared persistence state.
+      const garbageValues = [
+        ['negative number', -1],
+        ['NaN', NaN],
+        ['Infinity', Infinity],
+        ['-Infinity', -Infinity],
+        ['string', '5'],
+        ['null', null],
+      ]
+      for (const [label, val] of garbageValues) {
+        const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+        const sid = mgr.createSession({
+          name: `Bad ${label}`, cwd: '/tmp', provider: 'claude-cli', messageCounter: val,
+        })
+        assert.equal(
+          mgr._sessions.get(sid).session._messageCounter, 0,
+          `${label} should fall back to 0`
+        )
+        mgr._sessions.get(sid).session.destroy = () => {}
+        mgr.destroyAll()
+      }
+    } finally {
+      CliSession.prototype.start = orig
+    }
+  })
+
+  it('createSession accepts 0 as a valid messageCounter value', async () => {
+    // Edge case: an explicit 0 should be honoured (it's a valid counter
+    // for a fresh session that was persisted before any message was sent).
+    // The Number.isFinite + >=0 guard correctly admits 0.
     const { CliSession } = await import('../src/cli-session.js')
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
     const orig = CliSession.prototype.start
     CliSession.prototype.start = function () { /* no-op */ }
     try {
-      // negative — ignored, falls back to constructor default (0)
       const sid = mgr.createSession({
-        name: 'Bad', cwd: '/tmp', provider: 'claude-cli', messageCounter: -1,
+        name: 'Zero', cwd: '/tmp', provider: 'claude-cli', messageCounter: 0,
       })
       assert.equal(mgr._sessions.get(sid).session._messageCounter, 0)
       mgr._sessions.get(sid).session.destroy = () => {}
