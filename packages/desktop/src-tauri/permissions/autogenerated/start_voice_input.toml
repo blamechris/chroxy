@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-voice-input"
+description = "Enables the start_voice_input command without any pre-configured scope."
+commands.allow = ["start_voice_input"]
+
+[[permission]]
+identifier = "deny-start-voice-input"
+description = "Denies the start_voice_input command without any pre-configured scope."
+commands.deny = ["start_voice_input"]

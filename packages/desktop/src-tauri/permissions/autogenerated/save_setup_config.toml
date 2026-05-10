@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-setup-config"
+description = "Enables the save_setup_config command without any pre-configured scope."
+commands.allow = ["save_setup_config"]
+
+[[permission]]
+identifier = "deny-save-setup-config"
+description = "Denies the save_setup_config command without any pre-configured scope."
+commands.deny = ["save_setup_config"]

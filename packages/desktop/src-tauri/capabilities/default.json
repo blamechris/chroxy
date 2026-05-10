@@ -1,7 +1,13 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Chroxy desktop",
+  "description": "Default capabilities for Chroxy desktop. Allows the embedded dashboard, served from http://127.0.0.1:<server-port>, to invoke the custom commands declared in build.rs.",
   "windows": ["main", "dashboard", "qr_popup"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://localhost:*"
+    ]
+  },
   "permissions": [
     "core:default",
     "shell:allow-open",
@@ -11,6 +17,25 @@
     "process:allow-restart",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "allow-get-server-info",
+    "allow-get-server-logs",
+    "allow-get-startup-logs",
+    "allow-start-server",
+    "allow-stop-server",
+    "allow-restart-server",
+    "allow-get-qr-code-svg",
+    "allow-pick-directory",
+    "allow-check-dependencies",
+    "allow-get-setup-state",
+    "allow-save-setup-config",
+    "allow-get-tunnel-mode",
+    "allow-set-tunnel-mode",
+    "allow-get-allow-auto-permission-mode",
+    "allow-set-allow-auto-permission-mode",
+    "allow-voice-available",
+    "allow-start-voice-input",
+    "allow-stop-voice-input",
+    "allow-tile-window"
   ]
 }

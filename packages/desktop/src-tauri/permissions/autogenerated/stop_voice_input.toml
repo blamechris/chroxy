@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-voice-input"
+description = "Enables the stop_voice_input command without any pre-configured scope."
+commands.allow = ["stop_voice_input"]
+
+[[permission]]
+identifier = "deny-stop-voice-input"
+description = "Denies the stop_voice_input command without any pre-configured scope."
+commands.deny = ["stop_voice_input"]

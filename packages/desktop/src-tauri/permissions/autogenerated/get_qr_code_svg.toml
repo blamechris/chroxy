@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-qr-code-svg"
+description = "Enables the get_qr_code_svg command without any pre-configured scope."
+commands.allow = ["get_qr_code_svg"]
+
+[[permission]]
+identifier = "deny-get-qr-code-svg"
+description = "Denies the get_qr_code_svg command without any pre-configured scope."
+commands.deny = ["get_qr_code_svg"]
