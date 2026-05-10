@@ -338,3 +338,84 @@ describe('WsServer legacy cliSession mode — hook secret auto-registration', ()
     assert.equal(server._hookSecrets.size, 0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Tests: WsServer retroactively registers hook secrets for sessions that
+// already existed on the SessionManager at construction time (#3716).
+// server-cli.js calls sessionManager.restoreState() before constructing
+// WsServer, so restored sessions emit `session_created` before the handler
+// is attached — without retroactive registration their _hookSecret never
+// reaches _hookSecrets and every POST /permission 403s.
+// ---------------------------------------------------------------------------
+describe('WsServer retroactive hook secret registration (#3716)', () => {
+  function makeFakeSessionManager(sessions = []) {
+    const _sessions = new Map()
+    for (const { sessionId, hookSecret } of sessions) {
+      _sessions.set(sessionId, { session: { _hookSecret: hookSecret } })
+    }
+    const listeners = new Map()
+    return {
+      _sessions,
+      defaultCwd: '/tmp',
+      on(event, fn) {
+        if (!listeners.has(event)) listeners.set(event, [])
+        listeners.get(event).push(fn)
+      },
+      emit(event, payload) {
+        for (const fn of listeners.get(event) || []) fn(payload)
+      },
+      getSession(sessionId) { return _sessions.get(sessionId) || null },
+    }
+  }
+
+  it('registers _hookSecret for sessions that already exist when WsServer is constructed', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const sessionManager = makeFakeSessionManager([
+      { sessionId: 's1', hookSecret: 'restored-secret-1' },
+      { sessionId: 's2', hookSecret: 'restored-secret-2' },
+    ])
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, sessionManager })
+    assert.ok(server._hookSecrets.has('restored-secret-1'))
+    assert.ok(server._hookSecrets.has('restored-secret-2'))
+    assert.equal(server._sessionHookSecrets.get('s1'), 'restored-secret-1')
+    assert.equal(server._sessionHookSecrets.get('s2'), 'restored-secret-2')
+  })
+
+  it('skips sessions that have no _hookSecret', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const sessionManager = makeFakeSessionManager([
+      { sessionId: 's1', hookSecret: null },
+    ])
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, sessionManager })
+    assert.equal(server._hookSecrets.size, 0)
+    assert.equal(server._sessionHookSecrets.size, 0)
+  })
+
+  it('does not double-register when session_created fires after construction for the same session', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const sessionManager = makeFakeSessionManager([
+      { sessionId: 's1', hookSecret: 'restored-secret-1' },
+    ])
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, sessionManager })
+    // Simulate a duplicate session_created event for the same id (paranoia
+    // — shouldn't happen, but the guard keeps the maps consistent).
+    sessionManager.emit('session_created', { sessionId: 's1' })
+    assert.equal(server._hookSecrets.size, 1)
+    assert.equal(server._sessionHookSecrets.size, 1)
+  })
+
+  it('_validateHookAuth accepts a retroactively-registered restored-session secret', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const sessionManager = makeFakeSessionManager([
+      { sessionId: 's1', hookSecret: 'restored-secret-1' },
+    ])
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, sessionManager })
+
+    const req = { headers: { authorization: 'Bearer restored-secret-1' } }
+    let rejected = false
+    const res = { writeHead() { rejected = true }, end() {} }
+
+    assert.equal(server._validateHookAuth(req, res), true)
+    assert.equal(rejected, false)
+  })
+})

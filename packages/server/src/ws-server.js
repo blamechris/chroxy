@@ -652,6 +652,30 @@ export class WsServer {
       sessionManager.on('session_created', this._sessionCreatedHandler)
       sessionManager.on('session_destroyed', this._sessionDestroyedHandler)
       sessionManager.on('session_event', this._sessionEventAuditHandler)
+
+      // Retroactively register hook secrets for sessions that already exist
+      // on this SessionManager. server-cli.js calls sessionManager.restoreState()
+      // BEFORE constructing the WsServer, so the session_created events fire
+      // before _sessionCreatedHandler is attached and restored sessions never
+      // get their _hookSecret registered. Result: every POST /permission from
+      // a restored session's hook script fails _validateHookAuth with 403,
+      // the curl response has no `decision` field, and the script returns
+      // "ask" — surfacing as "Hook PreToolUse:Bash asked for confirmation"
+      // with no dashboard prompt ever appearing (#3716).
+      // Guard: many tests pass a stub sessionManager without _sessions.
+      // Resolve each entry through getSession() so we skip sessions marked
+      // _destroying — matches what _sessionCreatedHandler above does and
+      // mirrors clearAllPendingPermissions() at line 1443.
+      if (sessionManager._sessions instanceof Map && typeof sessionManager.getSession === 'function') {
+        for (const sessionId of sessionManager._sessions.keys()) {
+          const entry = sessionManager.getSession(sessionId)
+          const secret = entry?.session?._hookSecret
+          if (secret && !this._sessionHookSecrets.has(sessionId)) {
+            this.registerHookSecret(secret)
+            this._sessionHookSecrets.set(sessionId, secret)
+          }
+        }
+      }
     }
 
     // Dev server preview tunneling
