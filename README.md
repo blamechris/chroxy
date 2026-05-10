@@ -158,13 +158,14 @@ cargo tauri dev
 ```
 chroxy/
 ├── packages/
-│   ├── server/      # Node.js daemon + CLI + web dashboard
+│   ├── server/      # Node.js daemon, CLI, and bundled web dashboard server
+│   ├── dashboard/   # Web dashboard (React + Vite) — built into the server bundle
+│   ├── desktop/     # Tauri tray app (Rust) wrapping the dashboard
 │   ├── app/         # React Native mobile app (TypeScript, Expo 54)
-│   ├── desktop/     # Tauri tray app (Rust + web dashboard)
-│   ├── protocol/    # Shared protocol types and version
-│   └── store-core/  # Shared utilities and crypto
-├── docs/            # Setup guides, architecture
-└── scripts/         # Install helpers
+│   ├── protocol/    # Shared WebSocket protocol types and Zod schemas
+│   └── store-core/  # Shared store logic and crypto for app + dashboard
+├── docs/            # Setup guides, architecture, provider reference
+└── scripts/         # Install and tooling helpers
 ```
 
 ## Architecture
@@ -202,13 +203,13 @@ cargo tauri dev
 ### Running Tests
 
 ```bash
-# Server tests
+# Server tests (Node 22 required)
 cd packages/server
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test
 
-# Dashboard tests
-cd packages/server
-npm run dashboard:test
+# Dashboard tests (Vitest)
+cd packages/dashboard
+npm test
 
 # App type check
 cd packages/app
