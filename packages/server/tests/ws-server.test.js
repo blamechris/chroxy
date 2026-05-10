@@ -3531,7 +3531,9 @@ describe('provider capability gates', () => {
     sendMessage() {}
     interrupt() {}
     setModel() {}
-    setPermissionMode() {}
+    // #3729: handler now reads session.permissionMode after the call to
+    // detect silently-rejected mid-turn changes — keep the mock honest.
+    setPermissionMode(mode) { this.permissionMode = mode }
     respondToQuestion() {}
     respondToPermission() {}
   }

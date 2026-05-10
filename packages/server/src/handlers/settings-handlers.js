@@ -206,13 +206,31 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         } else {
           log.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
         }
-        const prevMode = entry.session._permissionMode || 'approve'
+        // BaseSession exposes the mode on the public `permissionMode` field.
+        // The earlier `_permissionMode` read was a typo that always resolved
+        // to `undefined`, so the audit log silently fell back to 'approve'
+        // regardless of the real previous mode (Copilot review on PR #3730).
+        // Reuse `previousMode` from above (line 203) — same source of truth.
         entry.session.setPermissionMode(msg.mode)
+        // #3729: setPermissionMode silently rejects mid-turn changes (and
+        // same-mode no-ops). Use the post-call value as ground truth — if
+        // the session is still on the previous mode, the call was rejected
+        // and we must not broadcast a misleading `permission_mode_changed`.
+        // Pre-fix the dashboard's optimistic update + this unconditional
+        // broadcast both confirmed an "auto" switch that never landed,
+        // leaving the user staring at fresh prompts in supposed bypass mode.
+        const actualMode = entry.session.permissionMode
+        if (actualMode !== msg.mode) {
+          log.warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
+          sendError(ws, msg?.requestId, 'PERMISSION_MODE_NOT_APPLIED',
+            `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
+          return
+        }
         if (ctx.permissionAudit) {
           ctx.permissionAudit.logModeChange({
             clientId: client.id,
             sessionId: permModeSessionId,
-            previousMode: prevMode,
+            previousMode,
             newMode: msg.mode,
           })
         }

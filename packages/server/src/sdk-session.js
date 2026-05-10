@@ -1005,6 +1005,14 @@ export class SdkSession extends BaseSession {
   setPermissionMode(mode) {
     if (!super.setPermissionMode(mode)) return
     this._permissions.clearRules()
+    // #3729: switching TO auto is a "panic button" — drain any pending
+    // permission prompts so the user isn't left staring at modals after
+    // declaring "approve everything". Without this, prompts that were
+    // emitted under the previous mode hang until the user resolves them
+    // or they hit the 5-min timeout, contradicting the bypass semantics.
+    if (mode === 'auto') {
+      this._permissions.autoAllowPending()
+    }
     log.info(`Permission mode changed to ${mode}`)
   }
 

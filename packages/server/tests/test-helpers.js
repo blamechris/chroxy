@@ -217,7 +217,16 @@ export function createMockSession(overrides = {}) {
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
   session.setModel = createSpy()
-  session.setPermissionMode = createSpy()
+  // #3729: handler now reads session.permissionMode AFTER setPermissionMode
+  // returns to detect silently-rejected mid-turn changes. Mock the real
+  // contract: state mutates on a successful set so handler tests don't
+  // see false PERMISSION_MODE_NOT_APPLIED rejections. Tests that override
+  // `session.setPermissionMode` after creation are responsible for
+  // updating `session.permissionMode` themselves if they want the change
+  // to propagate to the handler's broadcast path.
+  session.setPermissionMode = createSpy((mode) => {
+    session.permissionMode = mode
+  })
   session.setPromptEvaluator = createSpy((value) => {
     if (typeof value !== 'boolean' || value === session.promptEvaluator) return false
     session.promptEvaluator = value

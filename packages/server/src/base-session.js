@@ -423,7 +423,12 @@ export class BaseSession extends EventEmitter {
     if (!VALID_PERMISSION_MODES.includes(mode)) {
       return false
     }
-    if (this._isBusy) {
+    // 'auto' is the panic-button: a user mid-turn (i.e. _isBusy=true)
+    // staring at a permission prompt should be able to flip to bypass and
+    // have it actually take effect. The non-auto modes still defer until
+    // the turn completes — flipping to 'plan' or 'acceptEdits' mid-turn
+    // would change semantics partway through and is intentionally rejected.
+    if (this._isBusy && mode !== 'auto') {
       return false
     }
     if (mode === this.permissionMode) {

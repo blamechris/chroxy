@@ -134,6 +134,17 @@ export class PermissionManager extends EventEmitter {
       return this._handleAskUserQuestion(input, signal)
     }
 
+    // 'auto' (= SDK bypassPermissions) short-circuit: approve every tool
+    // call without consulting rules or emitting a prompt. SdkSession also
+    // skips canUseTool registration when starting a turn in auto mode, but
+    // a turn that started in another mode keeps its callback alive for the
+    // whole turn — without this guard, flipping to auto mid-turn (#3729)
+    // still emits prompts because session rules and the prompt path run
+    // before any mode check.
+    if (permissionMode === 'auto') {
+      return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
+    }
+
     // Session rules: check before acceptEdits and the prompt path
     const ruleDecision = this._matchesRule(toolName)
     if (ruleDecision !== null) {
@@ -376,6 +387,29 @@ export class PermissionManager extends EventEmitter {
       clearTimeout(this._questionTimer)
       this._questionTimer = null
     }
+  }
+
+  /**
+   * Auto-allow every outstanding permission request. Called when the
+   * session switches into auto/bypass mode (#3729) — the user has just
+   * declared "approve everything", so any prompt still on screen should
+   * resolve as if they had clicked Allow rather than sit there until
+   * timeout. Pending AskUserQuestion prompts are NOT touched: those are
+   * solicited user input, not permission gates.
+   */
+  autoAllowPending() {
+    if (this._pendingPermissions.size === 0) return
+    const pendingIds = Array.from(this._pendingPermissions.keys())
+    for (const requestId of pendingIds) {
+      const pending = this._pendingPermissions.get(requestId)
+      if (!pending) continue
+      this._pendingPermissions.delete(requestId)
+      this._lastPermissionData.delete(requestId)
+      this._clearPermissionTimer(requestId)
+      pending.resolve({ behavior: 'allow', updatedInput: pending.input })
+      this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
+    }
+    this._logInfo(`Auto-allowed ${pendingIds.length} pending permission(s) on auto mode switch`)
   }
 
   /**
