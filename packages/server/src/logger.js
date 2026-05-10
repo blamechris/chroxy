@@ -15,7 +15,7 @@
  *   // => 2026-02-22T12:34:56.789Z [INFO] [supervisor] Server ready
  */
 
-import { appendFileSync, statSync, renameSync, mkdirSync } from 'fs'
+import { appendFileSync, statSync, renameSync, mkdirSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -137,8 +137,32 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
   _logToFile = true
   _writeCount = 0
   if (logDir) _logDir = logDir
-  mkdirSync(_logDir, { recursive: true })
+  // #3734 review (Copilot): create the log directory at mode 0700, and
+  // chmod existing dirs the same way. Logs may contain sensitive data
+  // (tool inputs, tokens that slip past the redactor), so they must not
+  // be readable by group/world. mkdirSync's `mode` is subject to umask,
+  // but the explicit chmodSync afterward defeats umask AND tightens any
+  // pre-existing dir created at a looser mode by an earlier code path.
+  // Failures (read-only home, missing perms) propagate up — initFileLogging
+  // is wrapped in a try/catch at the boot site (server-cli.js).
+  mkdirSync(_logDir, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(_logDir, 0o700)
+  } catch {
+    // Best-effort — if we can't chmod (e.g. dir owned by another user),
+    // we keep going. The mkdir mode bit covers fresh-create.
+  }
   _logPath = join(_logDir, 'chroxy.log')
+}
+
+/**
+ * Return the current on-disk log path, or `null` if file logging is disabled.
+ * Used by /diagnostics (#3732) to point operators at the log file.
+ *
+ * @returns {string|null}
+ */
+export function getLogPath() {
+  return _logToFile ? _logPath : null
 }
 
 /**

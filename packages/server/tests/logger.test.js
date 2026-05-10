@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, chmodSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createLogger, initFileLogging, closeFileLogging, setLogListener, redactSensitive } from '../src/logger.js'
@@ -51,6 +51,21 @@ describe('initFileLogging', () => {
     assert.ok(existsSync(logPath), 'chroxy.log should exist')
     const content = readFileSync(logPath, 'utf8')
     assert.ok(content.includes('hello file'), 'log file should contain the message')
+  })
+
+  it('forces logDir mode to 0700 (Copilot review on PR #3734)', () => {
+    // Logs may contain sensitive content (tool inputs, tokens that slip
+    // past the redactor). Group/world-readable log dirs are a leak risk.
+    // The fix passes mode:0o700 to mkdirSync AND chmods existing dirs.
+    if (process.platform === 'win32') return // POSIX permission bits only
+    // Pre-create the dir at a deliberately loose mode to confirm the
+    // chmod-after-mkdir tightening kicks in for existing dirs.
+    chmodSync(logDir, 0o755)
+    initFileLogging({ logDir })
+    const stat = statSync(logDir)
+    // Mask off the file-type bits and compare just permission bits.
+    assert.equal(stat.mode & 0o777, 0o700,
+      `logDir mode should be 0700, got 0${(stat.mode & 0o777).toString(8)}`)
   })
 
   it('log file contains timestamp, level, component, and message', () => {
