@@ -140,28 +140,9 @@
   border-color: var(--accent-blue);
 }
 
-/* #3185: per-session promptEvaluator toggle in the header dropdown
-   group. Compact native checkbox with a label so accessibility is
-   inherited; sized to match the surrounding selects' font scale. */
-.prompt-evaluator-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--text-sm);
-  color: var(--text-primary);
-  cursor: pointer;
-  user-select: none;
-  /* Keep the label on a single line — without nowrap it breaks to "Auto-"
-     / "evaluate" stacked, increasing the wrapper's vertical height and
-     pushing surrounding controls. */
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.prompt-evaluator-toggle input[type='checkbox'] {
-  cursor: pointer;
-  accent-color: var(--accent-blue);
-}
+/* (#3185 prompt-evaluator-toggle CSS removed — toggle moved from the
+   header dropdown into SettingsPanel which uses .settings-field-checkbox
+   for inline-checkbox layout.) */
 
 /* #3209: SkillsPanel popover. Rendered inline next to the header
    selects when the operator clicks the Skills button. Native
