@@ -530,10 +530,21 @@ describe('SdkSession', () => {
       assert.equal(session.permissionMode, 'auto')
     })
 
-    it('ignores change when busy', () => {
+    it('ignores non-auto change when busy', () => {
+      session._isBusy = true
+      session.setPermissionMode('plan')
+      assert.equal(session.permissionMode, 'approve')
+    })
+
+    it('applies auto mode change even when busy (panic button, #3729)', () => {
+      // Pre-fix bug: setPermissionMode('auto') was silently rejected when
+      // _isBusy=true, but settings-handlers.js still broadcast
+      // permission_mode_changed, leaving the dashboard in an "auto" state
+      // while the server kept emitting prompts under the old mode. Auto
+      // is now the one mode that overrides the busy guard.
       session._isBusy = true
       session.setPermissionMode('auto')
-      assert.equal(session.permissionMode, 'approve')
+      assert.equal(session.permissionMode, 'auto')
     })
 
     it('rejects invalid modes', () => {
@@ -544,6 +555,37 @@ describe('SdkSession', () => {
     it('accepts acceptEdits mode', () => {
       session.setPermissionMode('acceptEdits')
       assert.equal(session.permissionMode, 'acceptEdits')
+    })
+
+    it('switching to auto auto-resolves pending permissions (#3729)', async () => {
+      // Reproduce the user's "I flipped to auto and the prompt stayed
+      // there" report: a prompt is pending under the previous mode, the
+      // user flips to auto, the prompt should resolve as 'allow' instead
+      // of sitting until the 5-min timeout.
+      const pmgr = session._permissions
+      const promise = pmgr.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      assert.equal(pmgr._pendingPermissions.size, 1)
+
+      session.setPermissionMode('auto')
+
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
+      assert.equal(pmgr._pendingPermissions.size, 0)
+    })
+
+    it('switching to auto while busy drains pending prompts (#3729)', async () => {
+      // The end-to-end scenario: SDK turn in progress (_isBusy=true), a
+      // permission prompt is on screen, user clicks "Auto bypass". Both
+      // the busy guard AND the pending-drain need to fire.
+      const pmgr = session._permissions
+      session._isBusy = true
+      const promise = pmgr.handlePermission('Bash', { command: 'rm' }, null, 'approve')
+
+      session.setPermissionMode('auto')
+
+      assert.equal(session.permissionMode, 'auto')
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
     })
   })
 

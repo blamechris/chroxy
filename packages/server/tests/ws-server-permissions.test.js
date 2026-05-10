@@ -281,7 +281,7 @@ describe('auto permission mode confirmation handshake', () => {
   it('auto mode requires confirmation (single-session)', async () => {
     const mockSession = createMockSession()
     let appliedMode = null
-    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode; mockSession.permissionMode = mode }
 
     server = new WsServer({
       port: 0,
@@ -322,7 +322,7 @@ describe('auto permission mode confirmation handshake', () => {
   it('confirmed auto mode applies normally (single-session)', async () => {
     const mockSession = createMockSession()
     let appliedMode = null
-    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode; mockSession.permissionMode = mode }
 
     server = new WsServer({
       port: 0,
@@ -359,7 +359,7 @@ describe('auto permission mode confirmation handshake', () => {
   it('non-auto modes bypass confirmation (single-session)', async () => {
     const mockSession = createMockSession()
     let appliedMode = null
-    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode; mockSession.permissionMode = mode }
 
     server = new WsServer({
       port: 0,
@@ -392,7 +392,7 @@ describe('auto permission mode confirmation handshake', () => {
   it('acceptEdits mode bypasses confirmation (single-session)', async () => {
     const mockSession = createMockSession()
     let appliedMode = null
-    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode; mockSession.permissionMode = mode }
 
     server = new WsServer({
       port: 0,
@@ -429,11 +429,56 @@ describe('auto permission mode confirmation handshake', () => {
     ws.close()
   })
 
+  it('rejected mode change does NOT broadcast permission_mode_changed (#3729)', async () => {
+    // Pre-fix: settings-handlers.js broadcast permission_mode_changed
+    // unconditionally after calling setPermissionMode, even when the
+    // session silently rejected the change (e.g. because _isBusy=true).
+    // The dashboard's optimistic update + this misleading broadcast left
+    // the UI showing the "new" mode while the server kept emitting
+    // prompts under the old one. The fix: read session.permissionMode
+    // after the call and emit PERMISSION_MODE_NOT_APPLIED if unchanged.
+    const mockSession = createMockSession()
+    // Override with a rejecting setter — leaves permissionMode at its
+    // initial 'approve' value, simulating the busy-rejection path.
+    mockSession.setPermissionMode = () => { /* reject: do not mutate */ }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'set_permission_mode', mode: 'acceptEdits', requestId: 'req-1' })
+
+    const errorMsg = await waitForMessageMatch(
+      messages,
+      m => m.type === 'error' && m.code === 'PERMISSION_MODE_NOT_APPLIED',
+      2000,
+      'error with code PERMISSION_MODE_NOT_APPLIED',
+    )
+    assert.ok(errorMsg, 'Should receive PERMISSION_MODE_NOT_APPLIED error')
+    assert.equal(errorMsg.requestId, 'req-1', 'error should echo requestId')
+
+    // No misleading permission_mode_changed should have been broadcast.
+    await new Promise(r => setTimeout(r, 100))
+    const modeChanged = messages.find(m => m.type === 'permission_mode_changed' && m.mode === 'acceptEdits')
+    assert.equal(modeChanged, undefined, 'must NOT broadcast permission_mode_changed for a rejected change')
+
+    ws.close()
+  })
+
   it('auto mode requires confirmation (multi-session)', async () => {
     const manager = new EventEmitter()
     const mockSession = createMockSession()
     let appliedMode = null
-    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode; mockSession.permissionMode = mode }
     mockSession.cwd = '/tmp/test'
 
     const sessionsMap = new Map()

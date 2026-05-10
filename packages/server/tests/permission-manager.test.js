@@ -278,6 +278,70 @@ describe('PermissionManager', () => {
     })
   })
 
+  // -- auto (bypass) mode --
+
+  describe('auto permission mode (#3729)', () => {
+    it('auto-allows tools that would otherwise prompt', async () => {
+      const events = []
+      pm.on('permission_request', (data) => events.push(data))
+
+      const result = await pm.handlePermission('Bash', { command: 'rm -rf /tmp/x' }, null, 'auto')
+      assert.equal(result.behavior, 'allow')
+      assert.deepEqual(result.updatedInput, { command: 'rm -rf /tmp/x' })
+      assert.equal(events.length, 0, 'auto mode must not emit permission_request')
+    })
+
+    it('auto mode bypasses session deny rules (panic-button overrides everything)', async () => {
+      // Pre-fix: rule lookup ran BEFORE any auto-mode check, so a deny
+      // rule would still block tools after the user flipped to bypass.
+      // The fix puts the auto-mode short-circuit first.
+      pm.setRules([{ tool: 'Read', decision: 'deny' }])
+      const result = await pm.handlePermission('Read', { file_path: '/x' }, null, 'auto')
+      assert.equal(result.behavior, 'allow')
+    })
+
+    it('AskUserQuestion still routes to user_question even in auto mode', async () => {
+      // AskUserQuestion is solicited user input, not a permission gate —
+      // auto mode must NOT auto-answer it. Otherwise the model gets a
+      // bogus 'allow' instead of the user's actual answer.
+      const events = []
+      pm.on('user_question', (data) => events.push(data))
+
+      const promise = pm.handlePermission('AskUserQuestion', { questions: [{ question: 'pick one' }] }, null, 'auto')
+      assert.equal(events.length, 1, 'should still emit user_question in auto mode')
+
+      pm.respondToQuestion('blue')
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
+    })
+
+    it('autoAllowPending() resolves all pending prompts as allow', async () => {
+      // Simulates the panic-button: prompts emitted under the previous
+      // mode are sitting open when the user flips to auto. They should
+      // resolve immediately rather than time out at 5min.
+      const promiseA = pm.handlePermission('Bash', { command: 'a' }, null, 'approve')
+      const promiseB = pm.handlePermission('Bash', { command: 'b' }, null, 'approve')
+      assert.equal(pm._pendingPermissions.size, 2)
+
+      const resolvedEvents = []
+      pm.on('permission_resolved', (e) => resolvedEvents.push(e))
+
+      pm.autoAllowPending()
+
+      const [resA, resB] = await Promise.all([promiseA, promiseB])
+      assert.equal(resA.behavior, 'allow')
+      assert.equal(resB.behavior, 'allow')
+      assert.equal(pm._pendingPermissions.size, 0, 'pending map drained')
+      assert.equal(resolvedEvents.length, 2)
+      assert.ok(resolvedEvents.every(e => e.reason === 'auto_mode'))
+    })
+
+    it('autoAllowPending() is a safe no-op when nothing is pending', () => {
+      // Defensive — switching to auto with an idle session must not throw.
+      assert.doesNotThrow(() => pm.autoAllowPending())
+    })
+  })
+
   // -- AskUserQuestion handling --
 
   describe('AskUserQuestion handling', () => {

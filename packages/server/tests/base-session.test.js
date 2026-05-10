@@ -625,9 +625,21 @@ describe('BaseSession', () => {
       assert.equal(session.setPermissionMode('invalid'), false)
     })
 
-    it('returns false when busy', () => {
+    it('rejects non-auto mode change when busy', () => {
+      // #3729: only 'auto' is permitted to override the busy guard —
+      // it's the panic-button that lets a user staring at a permission
+      // prompt declare "approve everything" and have it actually take
+      // effect. Other mode changes still defer until the turn settles.
       session._isBusy = true
-      assert.equal(session.setPermissionMode('auto'), false)
+      assert.equal(session.setPermissionMode('plan'), false)
+      assert.equal(session.setPermissionMode('acceptEdits'), false)
+    })
+
+    it('allows auto mode change even when busy (panic button, #3729)', () => {
+      session._isBusy = true
+      session.permissionMode = 'approve'
+      assert.equal(session.setPermissionMode('auto'), true)
+      assert.equal(session.permissionMode, 'auto')
     })
 
     it('returns false when unchanged', () => {
