@@ -694,7 +694,7 @@ describe('replayHistory', () => {
     assert.equal(startMsg.truncated, true)
   })
 
-  it('marks the auto-replay as fullHistory: true so clients clear before replay (#3741)', async () => {
+  it('marks the auto-replay as fullHistory: true so clients clear before replay (#3743)', async () => {
     // Without this flag, every reconnect to an already-loaded session
     // appends a fresh copy of the ring buffer on top of whatever the client
     // already had, producing duplicated turns and scrambled order. The

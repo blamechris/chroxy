@@ -288,7 +288,7 @@ export function sendSessionInfo(ctx, ws, sessionId) {
  * whatever the client already had. `isReplayDuplicate` cannot save us when
  * ring-buffer entries and live-broadcast entries have different messageIds —
  * the user-visible failure is duplicated assistant turns and scrambled order
- * (#3741 dogfood smoke-test).
+ * (#3743; discovered during the v0.7.16 dogfood smoke-test in #3741).
  */
 export function replayHistory(ctx, ws, sessionId) {
   const { sessionManager, send } = ctx
