@@ -55,6 +55,7 @@ export function ChatSettingsDropdown({
       {availableModels.length > 0 && (
         <select
           data-testid="chat-settings-trigger"
+          data-kind="model"
           value={activeModel === defaultModelId ? '' : (activeModel || '')}
           onChange={handleModelChange}
         >
@@ -74,6 +75,7 @@ export function ChatSettingsDropdown({
       {/* Permission Mode */}
       {availablePermissionModes.length > 0 && (
         <select
+          data-kind="permission"
           value={permissionMode || ''}
           onChange={e => onPermissionModeChange(e.target.value)}
         >
@@ -86,6 +88,7 @@ export function ChatSettingsDropdown({
       {/* Thinking Level */}
       {showThinkingLevel && (
         <select
+          data-kind="thinking"
           value={thinkingLevel || 'default'}
           onChange={e => onThinkingLevelChange(e.target.value)}
         >

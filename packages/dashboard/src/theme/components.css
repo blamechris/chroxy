@@ -124,15 +124,28 @@
   padding: 4px 8px;
   font-size: var(--text-base);
   cursor: pointer;
-  /* min-width gives a comfortable floor for the default labels; max-width
-     lets long model names ("Opus 4.7 (1M)") show fully. The grid layout
-     prevents this from pushing into other zones. */
-  min-width: 180px;
-  max-width: 240px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   flex-shrink: 1;
+}
+
+/* Per-kind widths. The earlier shared 180–240px floor was sized for the
+   model dropdown ("Default (Sonnet 4.6 (1M))") but applied to the
+   permission and thinking selects too, where it visually crowded the
+   right zone (icons + cost) for no reason — those selects' longest
+   labels are "Accept Edits" and "Default" respectively. */
+.header-center select[data-kind="model"] {
+  min-width: 180px;
+  max-width: 240px;
+}
+.header-center select[data-kind="permission"] {
+  min-width: 110px;
+  max-width: 160px;
+}
+.header-center select[data-kind="thinking"] {
+  min-width: 80px;
+  max-width: 110px;
 }
 
 .header-center select:focus {
@@ -3333,11 +3346,12 @@
   .header-center select {
     font-size: var(--text-sm);
     padding: 3px 6px;
-    /* Relax min-width on narrow viewports too (#3705) so the dropdown
-       can shrink when the grid's center column is squeezed. */
-    min-width: 100px;
-    max-width: 140px;
   }
+  /* Narrow-viewport floors: relaxed across all kinds (#3705) so the grid's
+     center column can shrink without overflow. Per-kind ratios preserved. */
+  .header-center select[data-kind="model"] { min-width: 120px; max-width: 160px; }
+  .header-center select[data-kind="permission"] { min-width: 80px; max-width: 110px; }
+  .header-center select[data-kind="thinking"] { min-width: 60px; max-width: 80px; }
   .header-center { gap: 4px; }
   .header-right { gap: 4px; }
   .status-bar { gap: 6px; padding: 4px 6px; }
