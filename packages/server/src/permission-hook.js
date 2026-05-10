@@ -57,13 +57,14 @@ export function withSettingsLock(fn) {
 function _isChroxyHookEntry(entry) {
   if (entry?._chroxy === true) return true
   const inner = Array.isArray(entry?.hooks) ? entry.hooks : []
+  // Path-match arm: tighten to chroxy-installed paths only — the basename
+  // alone could match an unrelated user script that happens to share the
+  // name. The regex accepts both `/` and `\\` separators so it works on
+  // any platform where Claude Code might run. (Earlier draft had a
+  // forward-slash-only `includes()` pre-filter that would have skipped
+  // the regex on Windows paths — see #3715 review.)
   return inner.some(h =>
     typeof h?.command === 'string' &&
-    h.command.includes('hooks/permission-hook.sh') &&
-    // Tighten the match to chroxy-installed paths only — the basename
-    // alone could match an unrelated script that happens to share the
-    // name. Match on the parent directory layout we always install
-    // under: `<chroxy>/hooks/permission-hook.sh`.
     /(?:Chroxy\.app|chroxy[/\\]packages[/\\]server|@chroxy[/\\]server).*hooks[/\\]permission-hook\.sh$/.test(h.command)
   )
 }

@@ -162,6 +162,34 @@ describe('createPermissionHookManager', () => {
     manager.destroy()
   })
 
+  it('register() strips orphan chroxy entries with Windows-style backslash paths (#3715 review)', async () => {
+    // The path-match regex accepts both `/` and `\\` separators so the
+    // orphan cleanup works regardless of which separator the previous
+    // chroxy install used to write the entry. (Earlier draft of the
+    // predicate had a forward-slash-only `includes()` pre-filter that
+    // would have skipped this entry — Copilot caught it.)
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: 'C:\\Program Files\\chroxy\\packages\\server\\hooks\\permission-hook.sh' }] },
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo hi' }] },
+        ],
+      },
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.register()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    const chroxyEntries = settings.hooks.PreToolUse.filter(e => e._chroxy)
+    assert.equal(chroxyEntries.length, 1, 'orphan with backslash path was stripped, then a single marked entry was added')
+    const userHook = settings.hooks.PreToolUse.find(e => !e._chroxy)
+    assert.equal(userHook.hooks[0].command, 'echo hi', 'unrelated user hook preserved')
+
+    manager.destroy()
+  })
+
   it('register() does not strip user hooks that share the basename but live elsewhere (#3714)', async () => {
     // Defensive: the path-match arm must require the chroxy install layout,
     // not just the basename. A user with their own permission-hook.sh in
