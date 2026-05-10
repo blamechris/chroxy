@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-startup-logs"
+description = "Enables the get_startup_logs command without any pre-configured scope."
+commands.allow = ["get_startup_logs"]
+
+[[permission]]
+identifier = "deny-get-startup-logs"
+description = "Denies the get_startup_logs command without any pre-configured scope."
+commands.deny = ["get_startup_logs"]

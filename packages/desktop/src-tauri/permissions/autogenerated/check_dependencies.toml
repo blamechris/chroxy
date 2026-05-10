@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-dependencies"
+description = "Enables the check_dependencies command without any pre-configured scope."
+commands.allow = ["check_dependencies"]
+
+[[permission]]
+identifier = "deny-check-dependencies"
+description = "Denies the check_dependencies command without any pre-configured scope."
+commands.deny = ["check_dependencies"]

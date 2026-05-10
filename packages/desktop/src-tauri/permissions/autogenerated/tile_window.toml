@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tile-window"
+description = "Enables the tile_window command without any pre-configured scope."
+commands.allow = ["tile_window"]
+
+[[permission]]
+identifier = "deny-tile-window"
+description = "Denies the tile_window command without any pre-configured scope."
+commands.deny = ["tile_window"]

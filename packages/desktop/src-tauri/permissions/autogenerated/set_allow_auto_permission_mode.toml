@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-allow-auto-permission-mode"
+description = "Enables the set_allow_auto_permission_mode command without any pre-configured scope."
+commands.allow = ["set_allow_auto_permission_mode"]
+
+[[permission]]
+identifier = "deny-set-allow-auto-permission-mode"
+description = "Denies the set_allow_auto_permission_mode command without any pre-configured scope."
+commands.deny = ["set_allow_auto_permission_mode"]
