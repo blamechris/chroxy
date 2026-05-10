@@ -593,12 +593,7 @@ export class WsServer {
     if (sessionManager && typeof sessionManager.on === 'function') {
       this._sessionCreatedHandler = ({ sessionId }) => {
         const entry = sessionManager.getSession(sessionId)
-        const secret = entry?.session?._hookSecret
-        if (secret) {
-          this.registerHookSecret(secret)
-          this._sessionHookSecrets.set(sessionId, secret)
-          log.debug(`Registered hook secret for session ${sessionId}`)
-        }
+        this._registerSessionHookSecretIfMissing(sessionId, entry)
       }
       this._sessionDestroyedHandler = ({ sessionId }) => {
         // Look up the stored secret — the session is already removed from the map
@@ -667,13 +662,9 @@ export class WsServer {
       // _destroying — matches what _sessionCreatedHandler above does and
       // mirrors clearAllPendingPermissions() at line 1443.
       if (sessionManager._sessions instanceof Map && typeof sessionManager.getSession === 'function') {
-        for (const sessionId of sessionManager._sessions.keys()) {
-          const entry = sessionManager.getSession(sessionId)
-          const secret = entry?.session?._hookSecret
-          if (secret && !this._sessionHookSecrets.has(sessionId)) {
-            this.registerHookSecret(secret)
-            this._sessionHookSecrets.set(sessionId, secret)
-          }
+        for (const [sessionId, entry] of sessionManager._sessions) {
+          if (entry?._destroying) continue
+          this._registerSessionHookSecretIfMissing(sessionId, sessionManager.getSession(sessionId))
         }
       }
     }
@@ -842,6 +833,22 @@ export class WsServer {
       return false
     }
     return true
+  }
+
+  /**
+   * Register a session's hook secret on this WsServer if not already tracked.
+   * Shared by the `session_created` handler and the constructor's retroactive
+   * scan over `sessionManager._sessions` (#3716, #3717). Caller is responsible
+   * for the outer `instanceof Map` check and any `_destroying` skip on the raw
+   * map entry; this helper handles the missing-secret and dedupe guards.
+   */
+  _registerSessionHookSecretIfMissing(sessionId, entry) {
+    const secret = entry?.session?._hookSecret
+    if (!secret) return
+    if (this._sessionHookSecrets.has(sessionId)) return
+    this.registerHookSecret(secret)
+    this._sessionHookSecrets.set(sessionId, secret)
+    log.debug(`Registered hook secret for session ${sessionId}`)
   }
 
   /**
