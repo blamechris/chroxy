@@ -167,8 +167,8 @@ describe('Provider Registry', () => {
 
     it('claude-sdk reports ready=true source=oauth when ~/.claude/auth.json exists (#3674)', () => {
       clearKeys()
-      writeFileSync(join(_tmpClaudeHome, 'auth.json'), '{}')
       try {
+        writeFileSync(join(_tmpClaudeHome, 'auth.json'), '{}')
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, true)
@@ -181,8 +181,8 @@ describe('Provider Registry', () => {
 
     it('claude-sdk reports ready=true source=oauth when ~/.claude/.credentials.json exists (#3674)', () => {
       clearKeys()
-      writeFileSync(join(_tmpClaudeHome, '.credentials.json'), '{}')
       try {
+        writeFileSync(join(_tmpClaudeHome, '.credentials.json'), '{}')
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, true)
@@ -194,11 +194,11 @@ describe('Provider Registry', () => {
 
     it('claude-sdk reports ready=true source=oauth when ~/.claude.json has claudeAiOauth block (#3674)', () => {
       clearKeys()
-      writeFileSync(
-        process.env.CHROXY_CLAUDE_CONFIG,
-        JSON.stringify({ claudeAiOauth: { refreshToken: 'fake' }, otherStuff: true }),
-      )
       try {
+        writeFileSync(
+          process.env.CHROXY_CLAUDE_CONFIG,
+          JSON.stringify({ claudeAiOauth: { refreshToken: 'fake' }, otherStuff: true }),
+        )
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, true)
