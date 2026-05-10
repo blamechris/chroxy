@@ -53,6 +53,13 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
     updateInputSettings: mockUpdateInputSettings,
     availableProviders: [],
+    // Per-session promptEvaluator toggle defaults — overridden by the
+    // Active session test cases. Default empty array + null id keeps the
+    // existing tests working without forcing them to know about the new
+    // section.
+    activeSessionId: null,
+    sessions: [],
+    setPromptEvaluator: vi.fn(),
     ...extra,
   }
 }
@@ -270,6 +277,91 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const row = screen.getByTestId('auth-status-claude-cli')
       expect(row).toHaveAttribute('data-tone', 'oauth')
+    })
+  })
+
+  // Per-session promptEvaluator toggle. Moved from ChatSettingsDropdown
+  // (header) into SettingsPanel so the label has room for a hint line.
+  // The capability gate is preserved: only renders when the active session
+  // reports a boolean `promptEvaluator` field — older servers (pre-#3185)
+  // omit it and a non-functional control would mislead.
+  describe('Active session — promptEvaluator toggle', () => {
+    function setActiveSessionState(extra: Record<string, unknown>) {
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', ...extra }],
+        setPromptEvaluator: vi.fn(),
+      })
+    }
+
+    it('does not render the section when no active session reports the field', () => {
+      // No promptEvaluator field on the session — capability gate fails.
+      setActiveSessionState({})
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('active-session-section')).toBeNull()
+      expect(screen.queryByTestId('prompt-evaluator-toggle')).toBeNull()
+    })
+
+    it('does not render when there is no active session at all', () => {
+      setMockState({
+        activeSessionId: null,
+        sessions: [],
+        setPromptEvaluator: vi.fn(),
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('active-session-section')).toBeNull()
+    })
+
+    it('renders the section when the active session reports a boolean promptEvaluator', () => {
+      setActiveSessionState({ promptEvaluator: false })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('active-session-section')).toBeInTheDocument()
+      expect(screen.getByTestId('prompt-evaluator-toggle')).toBeInTheDocument()
+    })
+
+    it('reflects promptEvaluator=true as a checked checkbox', () => {
+      setActiveSessionState({ promptEvaluator: true })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const cb = screen.getByTestId('prompt-evaluator-toggle') as HTMLInputElement
+      expect(cb.checked).toBe(true)
+    })
+
+    it('reflects promptEvaluator=false as an unchecked checkbox', () => {
+      setActiveSessionState({ promptEvaluator: false })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const cb = screen.getByTestId('prompt-evaluator-toggle') as HTMLInputElement
+      expect(cb.checked).toBe(false)
+    })
+
+    it('emits the new boolean value on click', () => {
+      const setPromptEvaluator = vi.fn()
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', promptEvaluator: false }],
+        setPromptEvaluator,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('prompt-evaluator-toggle'))
+      expect(setPromptEvaluator).toHaveBeenCalledWith(true)
+    })
+
+    it('emits false when toggling off', () => {
+      const setPromptEvaluator = vi.fn()
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', promptEvaluator: true }],
+        setPromptEvaluator,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('prompt-evaluator-toggle'))
+      expect(setPromptEvaluator).toHaveBeenCalledWith(false)
+    })
+
+    it('shows a hint explaining the per-session scope', () => {
+      setActiveSessionState({ promptEvaluator: false })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const section = screen.getByTestId('active-session-section')
+      expect(section.textContent).toContain('this session')
     })
   })
 })

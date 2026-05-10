@@ -74,12 +74,11 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/text-overflow:\s*ellipsis/)
   })
 
-  it('.prompt-evaluator-toggle stays on a single line (no Auto-/evaluate stacking)', () => {
-    const block = css.match(/\.prompt-evaluator-toggle\s*\{[^}]*\}/s)
-    expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/white-space:\s*nowrap/)
-    expect(block![0]).toMatch(/flex-shrink:\s*0/)
-  })
+  // Note: the prompt-evaluator-toggle moved out of the header into
+  // SettingsPanel (which uses `.settings-field-checkbox` styling). The
+  // old `.prompt-evaluator-toggle` CSS class was deleted in the same
+  // change — there is nothing to test here. Coverage for the new
+  // location lives in SettingsPanel.test.tsx ("Active session" describe).
 
   it('header buttons (.header-text-btn, .header-icon-btn) do not shrink', () => {
     // Combined selector at the end of the icon-btn block locks both classes.
