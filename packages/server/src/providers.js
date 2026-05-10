@@ -346,7 +346,7 @@ function getProviderAuthInfo(name, ProviderClass) {
  *
  * @returns {boolean}
  */
-function _hasClaudeOAuthCreds() {
+function _probeClaudeOAuthCreds() {
   try {
     const claudeHome = process.env.CHROXY_CLAUDE_HOME || join(homedir(), '.claude')
     if (existsSync(join(claudeHome, 'auth.json'))) return true
@@ -371,6 +371,40 @@ function _hasClaudeOAuthCreds() {
     // the missing-creds state instead of silently misreporting ready.
   }
   return false
+}
+
+/**
+ * 5s TTL cache around `_probeClaudeOAuthCreds()` (#3678).
+ *
+ * `listProviders()` is called from `handleListProviders` on every dashboard
+ * `list_providers` WS request and once per `auth_ok` from `ws-history.js`.
+ * Each call performs three `existsSync` + an optional small `readFileSync` +
+ * `JSON.parse`. The cache is keyed on the override env vars so a test (or a
+ * runtime tweak) that changes `CHROXY_CLAUDE_HOME` / `CHROXY_CLAUDE_CONFIG`
+ * naturally invalidates the previous result.
+ */
+let _credsCache = { value: null, expiresAt: 0, key: null }
+
+function _hasClaudeOAuthCreds() {
+  const key = `${process.env.CHROXY_CLAUDE_HOME ?? ''}|${process.env.CHROXY_CLAUDE_CONFIG ?? ''}`
+  const now = Date.now()
+  if (_credsCache.key === key && _credsCache.expiresAt > now) {
+    return _credsCache.value
+  }
+  const value = _probeClaudeOAuthCreds()
+  _credsCache = { value, expiresAt: now + 5_000, key }
+  return value
+}
+
+/**
+ * Test-only hook to drop the cached creds-probe result so suites that mutate
+ * the override env vars (or write/delete files under `CHROXY_CLAUDE_HOME`
+ * without changing the env-var values) start from a clean slate. Production
+ * code should never call this — the natural env-var-keyed invalidation plus
+ * the 5s TTL is what users see.
+ */
+export function _resetCredsCacheForTest() {
+  _credsCache = { value: null, expiresAt: 0, key: null }
 }
 
 function describeBillingIdentity(name, envVar) {

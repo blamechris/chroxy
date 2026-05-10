@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { registerProvider, getProvider, listProviders, registerDockerProvider } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
@@ -122,6 +122,11 @@ describe('Provider Registry', () => {
       _tmpClaudeHome = mkdtempSync(join(tmpdir(), 'chroxy-claude-home-'))
       process.env.CHROXY_CLAUDE_HOME = _tmpClaudeHome
       process.env.CHROXY_CLAUDE_CONFIG = join(_tmpClaudeHome, '.claude.json')
+      // #3678: drop the cached creds-probe result. The env-var-keyed cache
+      // already invalidates on key change, but tests sometimes write/delete
+      // files under CHROXY_CLAUDE_HOME after clearKeys() runs — explicitly
+      // resetting prevents a stale-cache flake under any future reordering.
+      _resetCredsCacheForTest()
     }
     function restoreKeys() {
       for (const k of ENV_KEYS) {
@@ -132,6 +137,9 @@ describe('Provider Registry', () => {
         try { rmSync(_tmpClaudeHome, { recursive: true, force: true }) } catch {}
         _tmpClaudeHome = null
       }
+      // #3678: drop the cache so the next test (or a parallel describe block)
+      // doesn't see a value bound to an env-var combo we just unset.
+      _resetCredsCacheForTest()
     }
 
     it('claude-sdk reports source=env and ready when ANTHROPIC_API_KEY is set', () => {
