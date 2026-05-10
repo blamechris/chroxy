@@ -116,4 +116,39 @@ describe('GET /diagnostics (#3732)', () => {
     })
     assert.equal(res.status, 403)
   })
+
+  it('does NOT serve prefix-aliased paths like /diagnostics-foo (Copilot review on PR #3734)', async () => {
+    // Pre-fix the route used `req.url?.startsWith('/diagnostics')`, which
+    // would have matched (and shadowed) any future `/diagnostics-foo` route.
+    // The fix matches the pathname exactly, allowing only an optional
+    // query string.
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-diag',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const res = await fetch(`http://127.0.0.1:${port}/diagnostics-foo`, {
+      headers: { 'Authorization': 'Bearer tok-diag' },
+    })
+    assert.notEqual(res.status, 200,
+      'prefix-aliased path must NOT be served by /diagnostics')
+  })
+
+  it('still matches /diagnostics with a query string (#3739 forward-compat)', async () => {
+    // The pathname check splits on `?` so future query-param tuning
+    // (e.g. ?logTailBytes=N from #3739) lands on the route correctly.
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-diag',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const res = await fetch(`http://127.0.0.1:${port}/diagnostics?foo=bar`, {
+      headers: { 'Authorization': 'Bearer tok-diag' },
+    })
+    assert.equal(res.status, 200, 'query-string variant of /diagnostics still serves')
+  })
 })

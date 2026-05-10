@@ -171,7 +171,13 @@ export function createHttpHandler(server) {
     // Returns server state, per-session busy/pending/timeout-pause flags, and
     // a tail of the on-disk log (#3731). Bearer-auth gated; sensitive content
     // (tool inputs) is omitted, only `tool` + `description` surface.
-    if (req.method === 'GET' && req.url?.startsWith('/diagnostics')) {
+    //
+    // #3734 review (Copilot): exact pathname match (allowing query string).
+    // The earlier startsWith('/diagnostics') would have shadowed any future
+    // `/diagnostics-foo` route — accidental aliasing is a real risk in a
+    // codebase that adds endpoints regularly.
+    const diagPathname = (req.url ?? '').split('?')[0]
+    if (req.method === 'GET' && diagPathname === '/diagnostics') {
       if (!server._validateBearerAuth(req, res)) return
       const snapshot = buildDiagnosticsSnapshot({ server, serverVersion: SERVER_VERSION })
       const accept = req.headers['accept'] || ''

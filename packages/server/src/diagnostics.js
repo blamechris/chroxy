@@ -125,9 +125,15 @@ function collectLogTail(maxBytes) {
     const start = Math.max(0, stats.size - maxBytes)
     const length = stats.size - start
     fd = openSync(path, 'r')
-    const buf = Buffer.allocUnsafe(length)
-    readSync(fd, buf, 0, length, start)
-    const text = buf.toString('utf8')
+    // #3734 review (Copilot): Buffer.alloc (zero-filled) + respect
+    // bytesRead. The earlier Buffer.allocUnsafe + ignoring readSync's
+    // return value would have disclosed uninitialized heap memory if
+    // the log file shrank between statSync and readSync — rare but
+    // possible during log rotation. Slicing on bytesRead also covers
+    // partial reads on slow filesystems.
+    const buf = Buffer.alloc(length)
+    const bytesRead = readSync(fd, buf, 0, length, start)
+    const text = buf.toString('utf8', 0, bytesRead)
     // Drop the first line if we sliced into the middle of one — preserves
     // the JSON-line guarantee in JSON-mode logs.
     const lines = text.split('\n').filter(Boolean)
