@@ -609,24 +609,12 @@ export class CliSession extends BaseSession {
         switch (event.type) {
           case 'content_block_start': {
             const blockType = event.content_block?.type
-            // Diagnostic for #3700 — capture the ctx state at every text-block
-            // open so we can see whether hasStreamStarted is already true
-            // (suppressing the post-tool stream_start) when the user reproduces
-            // the missing-text bubble. Throw-away once root-caused.
-            if (blockType === 'text') {
-              log.info(`[stream-debug] content_block_start type=text messageId=${messageId} hasStreamStarted=${ctx.hasStreamStarted} didStreamText=${ctx.didStreamText} prevBlockType=${ctx.currentContentBlockType}`)
-            } else if (blockType === 'tool_use') {
-              log.info(`[stream-debug] content_block_start type=tool_use messageId=${messageId} toolId=${event.content_block?.id || 'null'} toolName=${event.content_block?.name || 'null'} hasStreamStarted=${ctx.hasStreamStarted} didStreamText=${ctx.didStreamText}`)
-            }
             ctx.currentContentBlockType = blockType
 
             if (blockType === 'text') {
               if (!ctx.hasStreamStarted) {
                 ctx.hasStreamStarted = true
-                log.info(`[stream-debug] emit stream_start messageId=${messageId} source=content_block_start`)
                 this.emit('stream_start', { messageId })
-              } else {
-                log.info(`[stream-debug] SUPPRESSED stream_start (hasStreamStarted=true) messageId=${messageId} source=content_block_start`)
               }
             } else if (blockType === 'tool_use') {
               ctx.currentToolName = event.content_block.name
@@ -662,7 +650,6 @@ export class CliSession extends BaseSession {
             if (delta.type === 'text_delta' && ctx.currentContentBlockType === 'text') {
               if (!ctx.hasStreamStarted) {
                 ctx.hasStreamStarted = true
-                log.info(`[stream-debug] emit stream_start messageId=${messageId} source=content_block_delta`)
                 this.emit('stream_start', { messageId })
               }
               ctx.didStreamText = true
@@ -758,21 +745,6 @@ export class CliSession extends BaseSession {
         if (Array.isArray(content) && ctx && messageId) {
           // If stream_event deltas already drove streaming, skip assistant text
           if (ctx.didStreamText) {
-            // Diagnostic for #3700 — log skipped assistant events that contain
-            // text. If a NEW assistant turn (post-tool) emits text but we skip
-            // it because turn-1 set didStreamText, that's the smoking gun.
-            // Gated on `loggedSkippedAssistant` so the partial-message stream
-            // (which fires this same handler many times per turn) doesn't
-            // flood the log file — we only need the first occurrence per
-            // exchange to diagnose the bug.
-            if (!ctx.loggedSkippedAssistant) {
-              const hasText = content.some(b => b?.type === 'text' && b?.text)
-              if (hasText) {
-                ctx.loggedSkippedAssistant = true
-                const tlen = content.reduce((n, b) => n + ((b?.type === 'text' && b?.text) ? b.text.length : 0), 0)
-                log.info(`[stream-debug] SKIPPED assistant event (didStreamText=true) messageId=${messageId} hasText=true textLen=${tlen}`)
-              }
-            }
             break
           }
 
@@ -786,7 +758,6 @@ export class CliSession extends BaseSession {
           if (fullText.length > prevLen) {
             if (!ctx.hasStreamStarted) {
               ctx.hasStreamStarted = true
-              log.info(`[stream-debug] emit stream_start messageId=${messageId} source=assistant_event fullTextLen=${fullText.length} prevLen=${prevLen}`)
               this.emit('stream_start', { messageId })
             }
             this.emit('stream_delta', { messageId, delta: fullText.slice(prevLen) })
