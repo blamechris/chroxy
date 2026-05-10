@@ -80,10 +80,12 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
   // change — there is nothing to test here. Coverage for the new
   // location lives in SettingsPanel.test.tsx ("Active session" describe).
 
-  it('header buttons (.header-text-btn, .header-icon-btn) do not shrink', () => {
-    // Combined selector at the end of the icon-btn block locks both classes.
-    const combined = css.match(/\.header-text-btn,\s*\.header-icon-btn\s*\{[^}]*flex-shrink:\s*0/s)
-    expect(combined).toBeTruthy()
+  it('.header-icon-btn does not shrink (icon overlap protection)', () => {
+    // The .header-text-btn class was removed when Skills was converted to
+    // an icon-only button — only .header-icon-btn remains.
+    const block = css.match(/\.header-icon-btn\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/flex-shrink:\s*0/)
   })
 
   it('.status-bar (footer) has min-width: 0 and white-space: nowrap', () => {
