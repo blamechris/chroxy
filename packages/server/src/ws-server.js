@@ -663,8 +663,12 @@ export class WsServer {
       // "ask" — surfacing as "Hook PreToolUse:Bash asked for confirmation"
       // with no dashboard prompt ever appearing (#3716).
       // Guard: many tests pass a stub sessionManager without _sessions.
-      if (sessionManager._sessions && typeof sessionManager._sessions[Symbol.iterator] === 'function') {
-        for (const [sessionId, entry] of sessionManager._sessions) {
+      // Resolve each entry through getSession() so we skip sessions marked
+      // _destroying — matches what _sessionCreatedHandler above does and
+      // mirrors clearAllPendingPermissions() at line 1443.
+      if (sessionManager._sessions instanceof Map && typeof sessionManager.getSession === 'function') {
+        for (const sessionId of sessionManager._sessions.keys()) {
+          const entry = sessionManager.getSession(sessionId)
           const secret = entry?.session?._hookSecret
           if (secret && !this._sessionHookSecrets.has(sessionId)) {
             this.registerHookSecret(secret)
