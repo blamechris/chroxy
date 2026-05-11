@@ -203,7 +203,7 @@ export const ServerPermissionRequestSchema = z.object({
   tool: z.string(),
   description: z.string().optional(),
   input: z.any(),
-  remainingMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
+  remainingMs: z.number().int().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
   // #2832/#2905: server includes the chroxy sessionId on permission_request
   // payloads so the dashboard can route the prompt to the right session tab.
   // Emitted by ws-permissions.js (resendPendingPermissions + HTTP fallback).
@@ -547,7 +547,7 @@ export const ServerShutdownSchema = z.object({
   // 'crash' is emitted from uncaughtException/unhandledRejection handlers in
   // server-cli.js / server-cli-child.js via broadcastShutdown('crash', 0).
   reason: z.enum(['restart', 'shutdown', 'crash']),
-  restartEtaMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS),
+  restartEtaMs: z.number().int().nonnegative().finite().max(MAX_SANE_DURATION_MS),
 })
 
 export const ServerPongSchema = z.object({
