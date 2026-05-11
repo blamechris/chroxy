@@ -120,6 +120,81 @@ describe('@chroxy/protocol schemas', () => {
     }
   })
 
+  // #3768: 24h ceiling — guards against env-var typos (e.g.
+  // `CHROXY_RESULT_TIMEOUT_MS=999999999999999`) pushing a value onto
+  // the wire that passes integer/positive/finite but overflows the
+  // client's `Date.now() + ms` math.
+  it('rejects auth_ok with resultTimeoutMs above 24h ceiling (#3768)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const MAX = 24 * 60 * 60 * 1000
+    const base = {
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.7.18',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+    }
+    assert.ok(ServerAuthOkSchema.safeParse({ ...base, resultTimeoutMs: MAX }).success, 'exactly 24h should pass')
+    assert.ok(!ServerAuthOkSchema.safeParse({ ...base, resultTimeoutMs: MAX + 1 }).success, '24h + 1ms should reject')
+    assert.ok(!ServerAuthOkSchema.safeParse({ ...base, resultTimeoutMs: 999_999_999_999_999 }).success, 'env-typo huge value should reject')
+  })
+
+  // #3768: same ceiling applied to other ms-typed fields.
+  it('rejects permission_request with remainingMs above 24h ceiling (#3768)', async () => {
+    const { ServerPermissionRequestSchema } = await import('../src/schemas/server.ts')
+    const MAX = 24 * 60 * 60 * 1000
+    const base = { type: 'permission_request', requestId: 'r', tool: 't', input: {} }
+    assert.ok(ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: MAX }).success, 'exactly 24h should pass')
+    assert.ok(ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: 0 }).success, '0 should pass (request just expired)')
+    assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: MAX + 1 }).success, '24h + 1ms should reject')
+    assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: -1 }).success, 'negative should reject')
+    assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: Infinity }).success, 'Infinity should reject')
+  })
+
+  it('rejects server_shutdown with restartEtaMs above 24h ceiling (#3768)', async () => {
+    const { ServerShutdownSchema } = await import('../src/schemas/server.ts')
+    const MAX = 24 * 60 * 60 * 1000
+    const base = { type: 'server_shutdown', reason: 'restart' }
+    assert.ok(ServerShutdownSchema.safeParse({ ...base, restartEtaMs: MAX }).success, 'exactly 24h should pass')
+    assert.ok(ServerShutdownSchema.safeParse({ ...base, restartEtaMs: 0 }).success, '0 should pass (not coming back)')
+    assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: MAX + 1 }).success, '24h + 1ms should reject')
+    assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: -1 }).success, 'negative should reject')
+    assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: Infinity }).success, 'Infinity should reject')
+  })
+
+  // Wire-contract alignment surfaced by #3768 review:
+  // server emits permission_request with sessionId, and server_shutdown
+  // with reason='crash'. Schema must accept both.
+  it('accepts permission_request with sessionId (#3773)', async () => {
+    const { ServerPermissionRequestSchema } = await import('../src/schemas/server.ts')
+    const result = ServerPermissionRequestSchema.safeParse({
+      type: 'permission_request',
+      requestId: 'r',
+      tool: 't',
+      input: {},
+      sessionId: 'sess-abc',
+    })
+    assert.ok(result.success, 'Should accept permission_request with sessionId')
+    assert.equal(result.data.sessionId, 'sess-abc')
+  })
+
+  it('accepts server_shutdown with reason=crash (#3773)', async () => {
+    const { ServerShutdownSchema } = await import('../src/schemas/server.ts')
+    const result = ServerShutdownSchema.safeParse({
+      type: 'server_shutdown',
+      reason: 'crash',
+      restartEtaMs: 0,
+    })
+    assert.ok(result.success, 'Should accept reason=crash (emitted on uncaughtException)')
+  })
+
   it('validates encrypted envelope', async () => {
     const { EncryptedEnvelopeSchema } = await import('../src/schemas/client.ts')
     const result = EncryptedEnvelopeSchema.safeParse({

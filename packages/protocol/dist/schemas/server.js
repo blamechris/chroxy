@@ -5,6 +5,16 @@
  * across server, app, and dashboard.
  */
 import { z } from 'zod';
+/**
+ * Sanity ceiling for any ms-typed numeric field (#3768).
+ *
+ * 24 h is well past every legitimate session-timeout / restart-eta /
+ * permission TTL we emit today, and tight enough that an env-var typo
+ * (`CHROXY_RESULT_TIMEOUT_MS=999999999999999`) gets rejected at the
+ * schema boundary instead of corrupting `Date.now() + ms` arithmetic
+ * on the client.
+ */
+const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000;
 const ClientInfoSchema = z.object({
     clientId: z.string(),
     deviceName: z.string().nullable(),
@@ -39,7 +49,7 @@ export const ServerAuthOkSchema = z.object({
     // before #3763 don't emit it — the dashboard/app handlers fall back
     // to their hardcoded reference (DEFAULT_RESULT_TIMEOUT_MS = 20 min)
     // when absent.
-    resultTimeoutMs: z.number().int().positive().finite().optional(),
+    resultTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
 }).passthrough();
 export const ServerAuthFailSchema = z.object({
     type: z.literal('auth_fail'),
@@ -159,7 +169,11 @@ export const ServerPermissionRequestSchema = z.object({
     tool: z.string(),
     description: z.string().optional(),
     input: z.any(),
-    remainingMs: z.number().optional(),
+    remainingMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
+    // #2832/#2905: server includes the chroxy sessionId on permission_request
+    // payloads so the dashboard can route the prompt to the right session tab.
+    // Emitted by ws-permissions.js (resendPendingPermissions + HTTP fallback).
+    sessionId: z.string().optional(),
 });
 export const ServerUserQuestionSchema = z.object({
     type: z.literal('user_question'),
@@ -469,8 +483,10 @@ export const ServerPushTokenErrorSchema = z.object({
 });
 export const ServerShutdownSchema = z.object({
     type: z.literal('server_shutdown'),
-    reason: z.enum(['restart', 'shutdown']),
-    restartEtaMs: z.number(),
+    // 'crash' is emitted from uncaughtException/unhandledRejection handlers in
+    // server-cli.js / server-cli-child.js via broadcastShutdown('crash', 0).
+    reason: z.enum(['restart', 'shutdown', 'crash']),
+    restartEtaMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS),
 });
 export const ServerPongSchema = z.object({
     type: z.literal('pong'),
