@@ -98,7 +98,7 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.resultTimeoutMs, undefined)
   })
 
-  it('rejects auth_ok with non-finite resultTimeoutMs', async () => {
+  it('rejects auth_ok with invalid resultTimeoutMs (non-positive, non-integer, non-finite, or non-number)', async () => {
     const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
     for (const bad of [0, -1, 1.5, Infinity, NaN, '20']) {
       const result = ServerAuthOkSchema.safeParse({
