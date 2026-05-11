@@ -323,6 +323,40 @@ describe('auth_ok handler', () => {
       const state = store.getState();
       expect(state.webFeatures).toEqual({ available: false, remote: false, teleport: false });
     });
+
+    // #3760: server now broadcasts its effective inactivity timeout so the
+    // ActivityIndicator can render its "approaching timeout" warning against
+    // the real configured value instead of a hardcoded 20-min reference.
+    it('stores server resultTimeoutMs when present', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      handleMessage(createAuthOkMessage({ resultTimeoutMs: 45 * 60 * 1000 }), ctx as any);
+
+      expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
+        serverResultTimeoutMs: 45 * 60 * 1000,
+      }));
+    });
+
+    it('leaves serverResultTimeoutMs null when older server omits the field', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      handleMessage(createAuthOkMessage(), ctx as any);
+
+      expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
+        serverResultTimeoutMs: null,
+      }));
+    });
+
+    it('ignores malformed resultTimeoutMs values (non-positive, non-finite, or non-number)', () => {
+      // NaN/Infinity are explicitly rejected to mirror the server's
+      // Number.isFinite guard so the client never stores an unusable timeout.
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, 'twenty minutes', null]) {
+        jest.clearAllMocks();
+        const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+        handleMessage(createAuthOkMessage({ resultTimeoutMs: bad }), ctx as any);
+        expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
+          serverResultTimeoutMs: null,
+        }));
+      }
+    });
   });
 
   describe('post-auth messages', () => {
