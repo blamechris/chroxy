@@ -34,6 +34,14 @@ export const ServerAuthOkSchema = z.object({
   // emit this field are treated as "no advertised capabilities" by
   // the dashboard, so feature-gated UI hides itself fail-closed.
   capabilities: z.record(z.string(), z.boolean()).optional(),
+  // #3760: effective server inactivity timeout in ms. Surfaced so the
+  // ActivityIndicator "approaching timeout" warning can render against
+  // the real configured value instead of a hardcoded 20-min default.
+  // Must be a positive finite int (ms). Optional because servers from
+  // before #3763 don't emit it — the dashboard/app handlers fall back
+  // to their hardcoded reference (DEFAULT_RESULT_TIMEOUT_MS = 20 min)
+  // when absent.
+  resultTimeoutMs: z.number().int().positive().finite().optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({
