@@ -151,6 +151,19 @@ export {
   applyOrphanDeltas,
 } from './orphan-deltas'
 
+export type {
+  DisplayGroup,
+} from './group-messages'
+
+export {
+  groupMessages,
+  applyStreamingOverlay,
+  countToolUses,
+  summarizeToolCounts,
+  formatToolBreakdown,
+  formatToolName,
+} from './group-messages'
+
 export {
   PROVIDER_LABELS,
   getProviderLabel,

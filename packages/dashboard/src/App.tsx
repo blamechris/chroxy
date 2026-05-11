@@ -6,7 +6,13 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { DEFAULT_CONTEXT_WINDOW, deriveSessionVisualStatus, type SessionInfo } from '@chroxy/store-core'
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  deriveSessionVisualStatus,
+  groupMessages,
+  applyStreamingOverlay,
+  type SessionInfo,
+} from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
 import type { ChatViewMessage } from './components/ChatView'
@@ -30,6 +36,7 @@ import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
 import { ActivityIndicator } from './components/ActivityIndicator'
 import { ToolBubble } from './components/ToolBubble'
+import { ToolGroup } from './components/ToolGroup'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
@@ -643,10 +650,49 @@ export function App() {
     }
   }, [serverErrors, isCreatingSession])
 
-  // Convert store messages to ChatViewMessage[], filtering out system events from chat
-  const chatMessages = useMemo(
-    () => storeMessages.filter(m => m.type !== 'system').map(toChatViewMessage),
+  // Convert store messages to ChatViewMessage[], filtering out system events
+  // and collapsing contiguous tool_use/thinking runs into a single synthetic
+  // `tool_group` row (#3747). The full group payload is kept in
+  // `chatToolGroupPayloads` so renderMessage can look it up by synthetic id.
+  const chatFilteredMessages = useMemo(
+    () => storeMessages.filter(m => m.type !== 'system'),
     [storeMessages],
+  )
+  const chatDisplayGroups = useMemo(() => {
+    const base = groupMessages(chatFilteredMessages)
+    return applyStreamingOverlay(base, chatFilteredMessages, streamingMessageId ?? null)
+  }, [chatFilteredMessages, streamingMessageId])
+  // Singleton activity groups (1 tool, no thinking) pass through as plain
+  // `tool_use` rows so the existing ToolBubble — with its full expandable
+  // result panel — stays reachable. Groups only collapse into one
+  // `tool_group` row when there is a run of 2+ messages worth collapsing
+  // (#3794 review).
+  const chatToolGroupPayloads = useMemo(() => {
+    const map = new Map<string, { messages: ChatMessage[]; isActive: boolean }>()
+    for (const g of chatDisplayGroups) {
+      if (g.type === 'activity' && g.messages.length >= 2) {
+        map.set(g.key, { messages: g.messages, isActive: g.isActive })
+      }
+    }
+    return map
+  }, [chatDisplayGroups])
+  const chatMessages = useMemo<ChatViewMessage[]>(
+    () =>
+      chatDisplayGroups.map((g) => {
+        if (g.type === 'single') return toChatViewMessage(g.message)
+        if (g.messages.length < 2) {
+          // Singleton — emit as the original tool_use / thinking row.
+          return toChatViewMessage(g.messages[0]!)
+        }
+        const last = g.messages[g.messages.length - 1]
+        return {
+          id: g.key,
+          type: 'tool_group',
+          content: '',
+          timestamp: last?.timestamp ?? 0,
+        }
+      }),
+    [chatDisplayGroups],
   )
 
   // System events for the System tab
@@ -994,6 +1040,12 @@ export function App() {
 
   // Custom message renderer for permission prompts and tool bubbles
   const renderMessage = useCallback((msg: ChatViewMessage) => {
+    // Tool-group synthetic row (#3747) — id is a group key, not a store id.
+    if (msg.type === 'tool_group') {
+      const payload = chatToolGroupPayloads.get(msg.id)
+      if (!payload) return null
+      return <ToolGroup messages={payload.messages} isActive={payload.isActive} />
+    }
     const storeMsg = storeMsgMap.get(msg.id)
     if (!storeMsg) return null
 
@@ -1061,7 +1113,7 @@ export function App() {
 
     // Default rendering
     return null
-  }, [storeMsgMap, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
+  }, [storeMsgMap, chatToolGroupPayloads, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
 
   const SHORTCUTS: ShortcutEntry[] = useMemo(() => {
     // #2883: author entries with canonical `Cmd+...` labels and rewrite to

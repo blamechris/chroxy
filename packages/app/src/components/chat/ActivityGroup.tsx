@@ -11,8 +11,12 @@ import {
 import type { ChatMessage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
-import { formatToolName } from './chat-utils';
 import { ThinkingIndicator } from './ThinkingIndicator';
+import {
+  summarizeToolCounts,
+  formatToolBreakdown,
+  formatToolName,
+} from '@chroxy/store-core';
 
 function ActivityEntry({
   message,
@@ -40,10 +44,19 @@ function ActivityEntry({
     onToggleSelection(message.id);
   };
 
-  const hasResult = !!message.toolResult;
+  // `toolResult` is set (possibly to '') as soon as the server's result
+  // lands, so an explicit-undefined check distinguishes pending from
+  // completed even when the result body is empty (#3794 review).
+  const hasResult =
+    message.toolResult !== undefined ||
+    (message.toolResultImages?.length ?? 0) > 0;
   const imageCount = message.toolResultImages?.length || 0;
 
-  const displayTool = formatToolName(message.tool);
+  // Use the shared formatter so per-row labels match the header breakdown
+  // produced by `summarizeToolCounts` (e.g. "Github: List Repos" appears
+  // in both places). Passing `serverName` ensures non-MCP-prefixed tools
+  // routed through an MCP server still surface that origin (#3794 review).
+  const displayTool = formatToolName(message.tool ?? 'Tool', message.serverName);
 
   return (
     <TouchableOpacity
@@ -53,14 +66,7 @@ function ActivityEntry({
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
     >
       {hasResult ? <Icon name="check" size={12} color={COLORS.accentGreen} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
-      {message.serverName ? (
-        <Text style={styles.activityEntryTool}>
-          <Text style={styles.mcpServerTag}>{message.serverName}</Text>
-          {' '}{displayTool}
-        </Text>
-      ) : (
-        <Text style={styles.activityEntryTool}>{displayTool}</Text>
-      )}
+      <Text style={styles.activityEntryTool}>{displayTool}</Text>
       {imageCount > 0 && (
         <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
       )}
@@ -118,9 +124,14 @@ export function ActivityGroup({
     wasActiveRef.current = isActive;
   }, [isActive]);
 
-  const summary = isActive
+  // Per-tool breakdown for the header (e.g. "10 Bash, 2 Read") so users can
+  // see what the run actually did before expanding. Falls back to the bare
+  // count when only thinking messages are present (#3747).
+  const toolBreakdown = formatToolBreakdown(summarizeToolCounts(activityMessages));
+  const baseSummary = isActive
     ? `Working... (${toolCount} tool${toolCount !== 1 ? 's' : ''})`
     : `${toolCount} tool${toolCount !== 1 ? 's' : ''} used`;
+  const summary = toolBreakdown ? `${baseSummary} — ${toolBreakdown}` : baseSummary;
 
   return (
     <TouchableOpacity
@@ -207,11 +218,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     marginRight: 4,
-  },
-  mcpServerTag: {
-    color: COLORS.textMuted,
-    fontSize: 10,
-    fontWeight: '400',
   },
   selectedBubble: {
     borderColor: COLORS.accentBlue,

@@ -1498,6 +1498,119 @@
   display: block;
 }
 
+/* ---- Tool Group (#3747) ----
+ *
+ * Wraps a contiguous run of tool calls under a single collapsible block.
+ * Header: "12 tools used — 10 Bash, 2 Read". Expanded state shows one row
+ * per tool with a check/chevron marker so distinct calls read as discrete
+ * steps. While the run is active, a pulse dot appears next to the summary
+ * and the group auto-expands.
+ */
+.tool-group {
+  background: var(--bg-tool-bubble);
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  align-self: flex-start;
+  max-width: 85%;
+  cursor: pointer;
+}
+
+.tool-group:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-group-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
+.tool-group-summary {
+  flex: 1;
+  color: var(--accent-purple);
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.tool-group-chevron {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tool-group-list {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tool-group-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-radius: 4px;
+}
+
+.tool-group-entry + .tool-group-entry {
+  border-top: 1px solid color-mix(in srgb, var(--border-primary) 50%, transparent);
+}
+
+.tool-group-entry-marker {
+  font-size: 11px;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.tool-group-entry-marker--complete {
+  color: var(--accent-green);
+}
+
+.tool-group-entry-marker--pending {
+  color: var(--text-muted);
+}
+
+.tool-group-entry-name {
+  color: var(--accent-purple);
+  font-weight: 500;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.tool-group-entry-input {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-group-entry--thinking .tool-group-entry-name {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
 /* ---- Permission Prompt ---- */
 .permission-prompt {
   background: var(--bg-permission);
