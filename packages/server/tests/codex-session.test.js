@@ -230,6 +230,19 @@ describe('CodexSession', () => {
       assert.equal(session.isReady, false)
     })
 
+    // #3755: Leaf constructor must forward resultTimeoutMs through every
+    // layer (CodexSession → JsonlSubprocessSession → BaseSession). Otherwise
+    // SessionManager's providerOpts.resultTimeoutMs is silently dropped.
+    it('forwards resultTimeoutMs to BaseSession (#3755)', () => {
+      const session = new CodexSession({ cwd: '/tmp', resultTimeoutMs: 600_000 })
+      assert.equal(session._resultTimeoutMs, 600_000)
+    })
+
+    it('defaults _resultTimeoutMs to 20 min when omitted (#3755)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.equal(session._resultTimeoutMs, 20 * 60 * 1000)
+    })
+
     // -------------------------------------------------------------------
     // #3225: JsonlSubprocessSession's constructor previously dropped
     // `provider` and `activeManualSkills` (and the budget overrides). The
