@@ -19,7 +19,7 @@ import { COLORS } from '../constants/colors';
 import { ActivityGroup } from './chat/ActivityGroup';
 import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
-import { groupMessages, applyStreamingOverlay } from './chat/groupMessages';
+import { groupMessages, applyStreamingOverlay } from '@chroxy/store-core';
 
 // -- Props --
 

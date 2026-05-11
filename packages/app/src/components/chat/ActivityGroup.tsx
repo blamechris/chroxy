@@ -13,6 +13,7 @@ import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { formatToolName } from './chat-utils';
 import { ThinkingIndicator } from './ThinkingIndicator';
+import { summarizeToolCounts, formatToolBreakdown } from '@chroxy/store-core';
 
 function ActivityEntry({
   message,
@@ -118,9 +119,14 @@ export function ActivityGroup({
     wasActiveRef.current = isActive;
   }, [isActive]);
 
-  const summary = isActive
+  // Per-tool breakdown for the header (e.g. "10 Bash, 2 Read") so users can
+  // see what the run actually did before expanding. Falls back to the bare
+  // count when only thinking messages are present (#3747).
+  const toolBreakdown = formatToolBreakdown(summarizeToolCounts(activityMessages));
+  const baseSummary = isActive
     ? `Working... (${toolCount} tool${toolCount !== 1 ? 's' : ''})`
     : `${toolCount} tool${toolCount !== 1 ? 's' : ''} used`;
+  const summary = toolBreakdown ? `${baseSummary} — ${toolBreakdown}` : baseSummary;
 
   return (
     <TouchableOpacity

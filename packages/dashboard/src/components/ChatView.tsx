@@ -81,7 +81,12 @@ function senderIconFor(type: string): ReactNode | null {
 
 export interface ChatViewMessage {
   id: string
-  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use'
+  /**
+   * Discriminator for rendering. `tool_group` (#3747) is a synthetic type
+   * emitted by the App.tsx grouping pass — it has no store-side equivalent
+   * and is always rendered through the `renderMessage` callback.
+   */
+  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group'
   content: string
   timestamp: number
   isStreaming?: boolean
