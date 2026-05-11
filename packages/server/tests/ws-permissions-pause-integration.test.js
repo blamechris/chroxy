@@ -36,6 +36,13 @@ function createMockChild() {
   return child
 }
 
+// Pin the inactivity-timer window to 5 minutes for this test. It was
+// written before the timeout became configurable (#3749) and its tick
+// arithmetic assumes a 5-min window throughout. Overriding here keeps
+// the test semantics local instead of bleeding the prod default (20 min)
+// into every `mock.timers.tick(N * 60_000)` call.
+const TEST_RESULT_TIMEOUT_MS = 5 * 60_000
+
 function createReadyCliSession(opts = {}) {
   // Construct without `port` so no permission-hook manager is created.
   // `_hookSecret` is set unconditionally in the constructor, which is
@@ -43,7 +50,7 @@ function createReadyCliSession(opts = {}) {
   // Setting `port` would wire a hookManager whose destroy() path reads
   // and potentially writes the real ~/.claude/settings.json (see Issue
   // #429 / P1 test-contamination lesson).
-  const session = new CliSession({ cwd: '/tmp', ...opts })
+  const session = new CliSession({ cwd: '/tmp', resultTimeoutMs: TEST_RESULT_TIMEOUT_MS, ...opts })
   session._processReady = true
   session._child = createMockChild()
   return session
