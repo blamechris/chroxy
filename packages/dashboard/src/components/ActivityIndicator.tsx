@@ -13,7 +13,7 @@
  *
  * Color escalation:
  *   0–30s         → green   (active)
- *   30–60s        → amber   (quiet)
+ *   30–60s        → yellow  (quiet)
  *   60s–threshold → orange  (slow)
  *   approaching   → red     (last 60s before timeout)
  *
@@ -41,7 +41,7 @@ function formatElapsed(ms: number): string {
 function statusClass(elapsedMs: number, timeoutMs: number): string {
   if (elapsedMs >= timeoutMs - 60_000) return 'activity-indicator--red'
   if (elapsedMs >= 60_000) return 'activity-indicator--orange'
-  if (elapsedMs >= 30_000) return 'activity-indicator--amber'
+  if (elapsedMs >= 30_000) return 'activity-indicator--yellow'
   return 'activity-indicator--green'
 }
 

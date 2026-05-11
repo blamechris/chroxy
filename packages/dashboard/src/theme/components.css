@@ -6025,7 +6025,7 @@
   border-left: 1px solid currentColor;
 }
 
-.activity-indicator--green  { color: #22c55e; border-color: rgba(34, 197, 94, 0.35); }
-.activity-indicator--amber  { color: #eab308; border-color: rgba(234, 179, 8, 0.45); }
-.activity-indicator--orange { color: #f97316; border-color: rgba(249, 115, 22, 0.5); }
-.activity-indicator--red    { color: #ef4444; border-color: rgba(239, 68, 68, 0.55); }
+.activity-indicator--green  { color: var(--accent-green);      border-color: color-mix(in srgb, var(--accent-green) 35%, transparent); }
+.activity-indicator--yellow { color: var(--accent-yellow-500); border-color: color-mix(in srgb, var(--accent-yellow-500) 45%, transparent); }
+.activity-indicator--orange { color: var(--accent-orange-500); border-color: color-mix(in srgb, var(--accent-orange-500) 50%, transparent); }
+.activity-indicator--red    { color: var(--accent-red-500);    border-color: color-mix(in srgb, var(--accent-red-500) 55%, transparent); }

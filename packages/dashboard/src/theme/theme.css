@@ -67,6 +67,16 @@
   --accent-red-subtle: #ff4a4a22;
   --accent-red-border: #ff4a4a44;
 
+  /* Tailwind-scale tokens (#3789). Distinct base hexes from the
+   * Tailwind palette; mirror packages/app/src/constants/colors.ts'
+   * accentOrange500 / accentYellow500 / accentRed500. The legacy
+   * --accent-orange / --accent-red above are brand hexes with opacity
+   * variants; the *-500 tokens are different base hexes, not opacity
+   * variants of them. Used by the activity-indicator escalation. */
+  --accent-orange-500: #f97316;
+  --accent-yellow-500: #eab308;
+  --accent-red-500: #ef4444;
+
   /* ---- Borders ---- */
   --border-primary: #2a2a4e;
   --border-secondary: #3a3a5e;
