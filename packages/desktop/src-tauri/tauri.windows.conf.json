@@ -1,0 +1,5 @@
+{
+  "build": {
+    "beforeBuildCommand": "bash -c \"cd ../dashboard && TAURI_ENV_PLATFORM= npm run build && cd ../desktop && bash scripts/bundle-server.sh\""
+  }
+}
