@@ -18,8 +18,10 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useConnectionStore } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 
-const REFERENCE_TIMEOUT_MS = 20 * 60 * 1000;
+/** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754) */
+const FALLBACK_TIMEOUT_MS = 20 * 60 * 1000;
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return 'just now';
@@ -48,6 +50,9 @@ export function ActivityIndicator() {
     const id = s.activeSessionId;
     return id ? s.sessionStates[id]?.lastClientActivityAt ?? null : null;
   });
+  const referenceTimeoutMs = useConnectionLifecycleStore(
+    (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
+  );
 
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -68,9 +73,9 @@ export function ActivityIndicator() {
   }
 
   const elapsed = Math.max(0, now - lastActivityAt);
-  const remaining = REFERENCE_TIMEOUT_MS - elapsed;
+  const remaining = referenceTimeoutMs - elapsed;
   const approaching = remaining > 0 && remaining <= 60_000;
-  const color = statusColor(elapsed, REFERENCE_TIMEOUT_MS);
+  const color = statusColor(elapsed, referenceTimeoutMs);
 
   return (
     <View style={styles.container}>

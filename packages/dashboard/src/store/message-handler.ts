@@ -1773,6 +1773,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const authLatestVersion = authPayload.latestVersion;
       const authServerCommit = authPayload.serverCommit;
       const authProtocolVersion = authPayload.protocolVersion;
+      // #3760: server-advertised inactivity timeout. Older servers omit this
+      // field — we leave it null and ActivityIndicator falls back to its
+      // hardcoded reference timeout.
+      const authResultTimeoutMs =
+        typeof msg.resultTimeoutMs === 'number' && msg.resultTimeoutMs > 0
+          ? msg.resultTimeoutMs
+          : null;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
@@ -1823,6 +1830,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         latestVersion: authLatestVersion,
         serverCommit: authServerCommit,
         serverProtocolVersion: authProtocolVersion,
+        serverResultTimeoutMs: authResultTimeoutMs,
         streamingMessageId: null,
         myClientId: myClientId,
         connectedClients: clients,

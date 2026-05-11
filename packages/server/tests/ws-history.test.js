@@ -141,6 +141,40 @@ describe('sendPostAuthInfo — base auth_ok payload', () => {
   })
 })
 
+// #3760: surface the effective inactivity timeout in auth_ok so clients can
+// render their ActivityIndicator timeout warning against the real configured
+// value instead of a hardcoded reference.
+describe('sendPostAuthInfo — resultTimeoutMs (#3760)', () => {
+  it('uses the configured resultTimeoutMs when set', () => {
+    const ctx = makeCtx({ resultTimeoutMs: 45 * 60 * 1000 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.resultTimeoutMs, 45 * 60 * 1000)
+  })
+
+  it('falls back to BaseSession default (20 min) when ctx.resultTimeoutMs is null', () => {
+    const ctx = makeCtx({ resultTimeoutMs: null })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.resultTimeoutMs, 20 * 60 * 1000)
+  })
+
+  it('falls back to the default when ctx.resultTimeoutMs is non-positive or non-finite', () => {
+    for (const bad of [0, -1, NaN, Infinity]) {
+      const ctx = makeCtx({ resultTimeoutMs: bad })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws)
+      sendPostAuthInfo(ctx, ws)
+      const authOk = ctx._sends[0]
+      assert.equal(authOk.resultTimeoutMs, 20 * 60 * 1000, `bad input: ${bad}`)
+    }
+  })
+})
+
 describe('sendPostAuthInfo — cwd from sessionManager', () => {
   it('uses cwd from defaultSessionId when available', () => {
     const { manager } = createMockSessionManager([

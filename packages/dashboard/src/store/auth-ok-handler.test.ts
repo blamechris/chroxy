@@ -154,6 +154,31 @@ describe('auth_ok handler', () => {
       expect(store.getState().serverProtocolVersion).toBe(5)
     })
 
+    // #3760: server now broadcasts its effective inactivity timeout so the
+    // ActivityIndicator can render its "approaching timeout" warning against
+    // the real configured value instead of a hardcoded 20-min reference.
+    it('stores server resultTimeoutMs when present', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ resultTimeoutMs: 45 * 60 * 1000 }), ctx as any)
+
+      expect(store.getState().serverResultTimeoutMs).toBe(45 * 60 * 1000)
+    })
+
+    it('leaves serverResultTimeoutMs null when older server omits the field', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any)
+
+      expect(store.getState().serverResultTimeoutMs).toBeNull()
+    })
+
+    it('ignores malformed resultTimeoutMs values (non-positive or non-number)', () => {
+      for (const bad of [0, -1, 'twenty minutes', null]) {
+        const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+        handleMessage(createAuthOkMessage({ resultTimeoutMs: bad }), ctx as any)
+        expect(store.getState().serverResultTimeoutMs).toBeNull()
+      }
+    })
+
     it('clears connection error and retry count', () => {
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
       handleMessage(createAuthOkMessage(), ctx as any)
