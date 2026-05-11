@@ -163,7 +163,7 @@ cargo tauri dev
 
 ## Running on Windows
 
-The server runs on Windows natively — `platform.js`, `supervisor.js`, and `service.js` already handle Windows code paths. The Tauri desktop app builds on Windows from source; a pre-built MSI is on the roadmap (#3806).
+The server runs on Windows natively — `platform.js`, `supervisor.js`, and `service.js` already handle Windows code paths. The Tauri desktop app ships as a pre-built MSI from the `desktop-windows` release job (attached to each GitHub Release); see the build-from-source instructions below if you want to compile locally.
 
 ### Server (headless daemon)
 
@@ -182,12 +182,10 @@ npx chroxy start
 
 Same QR-code / manual-entry connection flow as macOS. All session features (model switching, files, git, plan mode, agents) work identically.
 
-**Run at startup:** native Windows service install is not supported by the CLI. Use one of:
+**Run at startup:** native Windows service install is not supported by the CLI. Pick one of:
 - **Task Scheduler** — schedule `node <chroxy-path> start` at logon
 - **NSSM** (https://nssm.cc/) — `nssm install Chroxy node <chroxy-path> start`
 - **PM2 with pm2-windows-service** — for full process-manager features
-
-Run `npx chroxy service install` on Windows to see this guidance in-CLI.
 
 ### Desktop tray app (build from source)
 
