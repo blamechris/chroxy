@@ -62,6 +62,33 @@ describe('SdkSession', () => {
       assert.equal(session._sandbox, null)
     })
 
+    // #3749: result-timeout window is configurable per server. Default
+    // is the BaseSession constant (20 min); explicit values flow from
+    // SessionManager → providerOpts.resultTimeoutMs → BaseSession.
+    it('defaults _resultTimeoutMs to 20 minutes (#3749)', () => {
+      assert.equal(session._resultTimeoutMs, 20 * 60 * 1000,
+        'fresh sessions must adopt the BaseSession default so legitimate slow tools do not time out at 5 min')
+    })
+
+    it('honours an explicit resultTimeoutMs option (#3749)', () => {
+      const s = createSession({ resultTimeoutMs: 600_000 })
+      assert.equal(s._resultTimeoutMs, 600_000,
+        'operators must be able to extend / shorten the inactivity safety net via config')
+      s.destroy()
+    })
+
+    it('falls back to the default when resultTimeoutMs is non-positive (#3749)', () => {
+      const s1 = createSession({ resultTimeoutMs: 0 })
+      const s2 = createSession({ resultTimeoutMs: -1 })
+      const s3 = createSession({ resultTimeoutMs: 'oops' })
+      assert.equal(s1._resultTimeoutMs, 20 * 60 * 1000)
+      assert.equal(s2._resultTimeoutMs, 20 * 60 * 1000)
+      assert.equal(s3._resultTimeoutMs, 20 * 60 * 1000)
+      s1.destroy()
+      s2.destroy()
+      s3.destroy()
+    })
+
     // #3540: the SidecarProcess `stdin_disabled` latch is persisted to
     // session metadata so a server restart preserves the disabled
     // state. Restored sessions are constructed with the persisted value

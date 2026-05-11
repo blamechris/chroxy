@@ -136,11 +136,36 @@ describe('validateConfig', () => {
     assert.equal(result.valid, false)
     assert.ok(result.warnings.some(w => w.includes('sandbox') && w.includes('object')))
   })
+
+  describe('resultTimeoutMs (#3749)', () => {
+    it('accepts a value within the allowed range', () => {
+      const result = validateConfig({ resultTimeoutMs: 600_000 })
+      assert.equal(result.valid, true)
+    })
+
+    it('rejects values below the 30s minimum', () => {
+      const result = validateConfig({ resultTimeoutMs: 1000 })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('resultTimeoutMs') && w.includes('minimum')))
+    })
+
+    it('rejects values above the 24h maximum', () => {
+      const result = validateConfig({ resultTimeoutMs: 25 * 60 * 60 * 1000 })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('resultTimeoutMs') && w.includes('maximum')))
+    })
+
+    it('warns when value is not a number', () => {
+      const result = validateConfig({ resultTimeoutMs: '5m' })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('resultTimeoutMs') && w.includes('number')))
+    })
+  })
 })
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS']
+  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS', 'CHROXY_RESULT_TIMEOUT_MS']
 
   beforeEach(() => {
     originalEnv = {}
@@ -339,6 +364,12 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({ defaults: {} })
     assert.ok(Array.isArray(merged.repos))
     assert.deepEqual(merged.repos, ['/home/user/project1', '/home/user/project2'])
+  })
+
+  it('reads resultTimeoutMs from CHROXY_RESULT_TIMEOUT_MS env var as number (#3749)', () => {
+    process.env.CHROXY_RESULT_TIMEOUT_MS = '600000'
+    const merged = mergeConfig({})
+    assert.equal(merged.resultTimeoutMs, 600_000)
   })
 })
 

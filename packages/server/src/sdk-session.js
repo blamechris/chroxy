@@ -233,8 +233,8 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern })
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, resultTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -511,7 +511,8 @@ export class SdkSession extends BaseSession {
     // agent tasks with many tool calls don't get falsely timed out.
     // Paused while permission prompts are outstanding (#2831): awaiting
     // user input on a permission is NOT "inactivity".
-    const RESULT_TIMEOUT_MS = 300_000 // 5 min of inactivity
+    // Timeout is configurable per server (#3749) — see BaseSession.
+    const RESULT_TIMEOUT_MS = this._resultTimeoutMs
     const resetResultTimeout = () => {
       if (this._resultTimeout) clearTimeout(this._resultTimeout)
       this._resultTimeout = null
@@ -1121,7 +1122,8 @@ export class SdkSession extends BaseSession {
    */
   _handleResultTimeout(messageId, hasStreamStarted) {
     if (!this._isBusy) return
-    log.warn('Result timeout (5 min inactivity) — force-clearing busy state')
+    const mins = Math.round(this._resultTimeoutMs / 60_000)
+    log.warn(`Result timeout (${mins} min inactivity) — force-clearing busy state`)
     if (hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
@@ -1138,7 +1140,7 @@ export class SdkSession extends BaseSession {
     // support .return()/.throw() uniformly.
     this._abortActiveQuery()
     this._clearMessageState()
-    this.emit('error', { message: 'Response timed out after 5 minutes of inactivity' })
+    this.emit('error', { message: `Response timed out after ${mins} minutes of inactivity` })
   }
 
   /**

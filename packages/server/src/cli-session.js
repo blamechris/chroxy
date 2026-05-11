@@ -157,8 +157,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -481,14 +481,15 @@ export class CliSession extends BaseSession {
   }
 
   /**
-   * Arm the 5-minute inactivity timer. No-op if paused because of a
-   * pending permission prompt (#2831).
+   * Arm the inactivity timer. No-op if paused because of a pending
+   * permission prompt (#2831). Window is configurable per server via
+   * config.resultTimeoutMs / CHROXY_RESULT_TIMEOUT_MS (#3749).
    */
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)
     this._resultTimeout = null
     if (this._resultTimeoutPaused) return
-    this._resultTimeout = setTimeout(() => this._handleResultTimeout(), 300_000)
+    this._resultTimeout = setTimeout(() => this._handleResultTimeout(), this._resultTimeoutMs)
   }
 
   /**
@@ -500,7 +501,8 @@ export class CliSession extends BaseSession {
    */
   _handleResultTimeout() {
     if (!this._isBusy) return
-    log.warn('Result timeout (5 min) — force-clearing busy state')
+    const mins = Math.round(this._resultTimeoutMs / 60_000)
+    log.warn(`Result timeout (${mins} min) — force-clearing busy state`)
     const messageId = this._currentMessageId
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
@@ -515,7 +517,7 @@ export class CliSession extends BaseSession {
     }
     this._pendingPermissionIds.clear()
     this._clearMessageState()
-    this.emit('error', { message: 'Response timed out after 5 minutes' })
+    this.emit('error', { message: `Response timed out after ${mins} minutes` })
   }
 
   /**
