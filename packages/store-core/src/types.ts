@@ -357,6 +357,14 @@ export interface BaseSessionState {
   lastResultDuration: number | null;
   sessionCost: number | null;
   isIdle: boolean;
+  /**
+   * Wall-clock timestamp (Date.now()) of the most recent activity-bearing
+   * server event for this session — stream_start/delta/end, tool_start/result,
+   * task_progress, message, result. Drives the "Working… last activity Ns ago"
+   * indicator (#3758) so users can tell a long-but-still-active turn from a
+   * frozen one. Null while idle or before the first event after restart.
+   */
+  lastClientActivityAt: number | null;
   health: SessionHealth;
   activeAgents: AgentInfo[];
   isPlanPending: boolean;

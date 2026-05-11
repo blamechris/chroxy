@@ -2,7 +2,7 @@
  * Tests for shared utility functions.
  */
 import { describe, it, expect } from 'vitest'
-import { createEmptyBaseSessionState } from './utils'
+import { createEmptyBaseSessionState, isActivityEvent, ACTIVITY_EVENT_TYPES } from './utils'
 import type { BaseSessionState } from './types'
 
 describe('createEmptyBaseSessionState', () => {
@@ -20,6 +20,7 @@ describe('createEmptyBaseSessionState', () => {
       lastResultDuration: null,
       sessionCost: null,
       isIdle: true,
+      lastClientActivityAt: null,
       health: 'healthy',
       activeAgents: [],
       isPlanPending: false,
@@ -49,5 +50,36 @@ describe('createEmptyBaseSessionState', () => {
     expect(state.health).toBe('healthy')
     expect(state.isIdle).toBe(true)
     expect(state.claudeReady).toBe(false)
+  })
+})
+
+describe('isActivityEvent (#3758)', () => {
+  it('returns true for the canonical stream/tool/message activity types', () => {
+    for (const t of ['stream_start', 'stream_delta', 'stream_end', 'tool_start', 'tool_result', 'message', 'result']) {
+      expect(isActivityEvent(t)).toBe(true)
+    }
+  })
+
+  it('returns true for user-blocking events (user_question, permission_request) — the agent is still alive, waiting on the user', () => {
+    expect(isActivityEvent('user_question')).toBe(true)
+    expect(isActivityEvent('permission_request')).toBe(true)
+  })
+
+  it('returns false for passive housekeeping events that should not reset the activity counter', () => {
+    for (const t of ['pong', 'server_status', 'session_list', 'session_updated', 'key_exchange_ok', 'auth_ok', 'history_replay_start', 'history_replay_end']) {
+      expect(isActivityEvent(t)).toBe(false)
+    }
+  })
+
+  it('returns false for non-string or unknown inputs', () => {
+    expect(isActivityEvent(undefined)).toBe(false)
+    expect(isActivityEvent(null)).toBe(false)
+    expect(isActivityEvent(42)).toBe(false)
+    expect(isActivityEvent('totally_made_up')).toBe(false)
+  })
+
+  it('exposes ACTIVITY_EVENT_TYPES as a read-only set with the same membership', () => {
+    expect(ACTIVITY_EVENT_TYPES.has('stream_delta')).toBe(true)
+    expect(ACTIVITY_EVENT_TYPES.has('pong')).toBe(false)
   })
 })

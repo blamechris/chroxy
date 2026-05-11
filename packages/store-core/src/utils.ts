@@ -75,6 +75,7 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     lastResultDuration: null,
     sessionCost: null,
     isIdle: true,
+    lastClientActivityAt: null,
     health: 'healthy',
     activeAgents: [],
     isPlanPending: false,
@@ -85,4 +86,40 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     mcpServers: [],
     devPreviews: [],
   };
+}
+
+/**
+ * WS message types that count as agent activity for the
+ * `lastClientActivityAt` indicator (#3758). Any incoming message with one of
+ * these types bumps the active session's last-activity timestamp so the
+ * "Working… last activity Ns ago" indicator resets. The set intentionally
+ * excludes passive housekeeping events (pong, server_status, session_list,
+ * key_exchange, etc.) so background chatter doesn't reset the elapsed
+ * counter and mask a genuinely-stalled agent.
+ *
+ * Stream events cover the per-token path; tool_* cover tool calls; message
+ * covers non-streamed assistant turns and history replays; result covers
+ * turn completion; user_question / permission_request are stalls the agent
+ * is waiting on the user for — still "alive", so they reset too.
+ */
+export const ACTIVITY_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'stream_start',
+  'stream_delta',
+  'stream_end',
+  'tool_start',
+  'tool_result',
+  'message',
+  'result',
+  'user_question',
+  'permission_request',
+])
+
+/**
+ * Returns true if the incoming WS message should reset the active session's
+ * last-activity timestamp. Caller is responsible for applying the bump to
+ * the right `sessionStates[sessionId]` slot. Centralised here so the mobile
+ * app and dashboard agree on what counts as activity (#3758).
+ */
+export function isActivityEvent(msgType: unknown): boolean {
+  return typeof msgType === 'string' && ACTIVITY_EVENT_TYPES.has(msgType)
 }

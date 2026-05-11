@@ -28,6 +28,7 @@ import { SkillsPanel } from './components/SkillsPanel'
 import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
+import { ActivityIndicator } from './components/ActivityIndicator'
 import { ToolBubble } from './components/ToolBubble'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { PlanApproval } from './components/PlanApproval'
@@ -1494,6 +1495,12 @@ export function App() {
                 onSubmit={(answer) => sendInput(answer)}
               />
             )}
+
+            {/* Activity indicator (#3758) — "Working… last activity Ns ago"
+                so users can distinguish a still-active long turn from a
+                stalled one. Self-gates on busy/idle; renders nothing when
+                idle. Sits immediately above the input bar. */}
+            <ActivityIndicator />
 
             {/* Input bar */}
             <InputBar
