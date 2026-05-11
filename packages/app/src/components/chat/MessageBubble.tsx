@@ -181,6 +181,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
                     setOtherActive(true);
                     return;
                   }
+                  // #3792: gate the option-button path through the same
+                  // one-shot guard as the free-text path. Otherwise the
+                  // sequence Send → Cancel → tap-option (while the
+                  // initial Send is still in flight over a cellular
+                  // tunnel) fires two user_question_response messages.
+                  if (submittedRef.current) return;
+                  submittedRef.current = true;
                   onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId);
                 }}
               >

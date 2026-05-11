@@ -4163,6 +4163,27 @@ describe('handleUserQuestion', () => {
     ])
   })
 
+  // #3752 review (#3792): if dedup leaves zero usable options, fall through
+  // to free-text-only — DO NOT append the sentinel as a sole tap target.
+  // That would invert the existing contract (zero options → renderers show
+  // free-text directly) into "user must tap Other to reach free-text".
+  it('returns empty options when dedup strips every model option (#3752)', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [
+          {
+            question: 'Pick',
+            // Only entry collides with the sentinel value — dropped by
+            // dedup. No real options remain.
+            options: [{ label: '__chroxy_other__' }],
+          },
+        ],
+      },
+      null,
+    )
+    expect(out!.chatMessage.options).toEqual([])
+  })
+
   it('truncates questionText to 60 characters', () => {
     const long = 'x'.repeat(120)
     const out = handleUserQuestion(

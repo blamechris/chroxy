@@ -2837,10 +2837,14 @@ export function handleUserQuestion(
   const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
   // #3746: append synthetic "Other" sentinel so renderers can offer a
   // free-text escape hatch alongside the model-provided options. Skip when
-  // there are zero options — renderers already show free-text-only in that
-  // case. When the model supplies its own "Other", surface it in the dedup'd
-  // position rather than appending the sentinel.
-  const options = rawOptions.length === 0
+  // there are zero usable post-dedup options — renderers already show
+  // free-text-only in that case. Critically, this gates on POST-dedup state:
+  // a model that only supplied a colliding entry (e.g.
+  // `[{label:'__chroxy_other__'}]`) ends up with empty baseOptions + no
+  // modelSuppliedOther, and must fall through to free-text-only rather
+  // than re-appending the sentinel as a sole tap target (#3752 review).
+  const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
+  const options = !hasUsableOptions
     ? []
     : modelSuppliedOther
       ? [...baseOptions, modelSuppliedOther]
