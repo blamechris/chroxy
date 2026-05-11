@@ -125,8 +125,7 @@ describe('@chroxy/protocol schemas', () => {
   // the wire that passes integer/positive/finite but overflows the
   // client's `Date.now() + ms` math.
   it('rejects auth_ok with resultTimeoutMs above 24h ceiling (#3768)', async () => {
-    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
-    const MAX = 24 * 60 * 60 * 1000
+    const { ServerAuthOkSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')
     const base = {
       type: 'auth_ok',
       clientId: 'c',
@@ -148,8 +147,7 @@ describe('@chroxy/protocol schemas', () => {
 
   // #3768: same ceiling applied to other ms-typed fields.
   it('rejects permission_request with remainingMs above 24h ceiling (#3768)', async () => {
-    const { ServerPermissionRequestSchema } = await import('../src/schemas/server.ts')
-    const MAX = 24 * 60 * 60 * 1000
+    const { ServerPermissionRequestSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')
     const base = { type: 'permission_request', requestId: 'r', tool: 't', input: {} }
     assert.ok(ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: MAX }).success, 'exactly 24h should pass')
     assert.ok(ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: 0 }).success, '0 should pass (request just expired)')
@@ -159,8 +157,7 @@ describe('@chroxy/protocol schemas', () => {
   })
 
   it('rejects server_shutdown with restartEtaMs above 24h ceiling (#3768)', async () => {
-    const { ServerShutdownSchema } = await import('../src/schemas/server.ts')
-    const MAX = 24 * 60 * 60 * 1000
+    const { ServerShutdownSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')
     const base = { type: 'server_shutdown', reason: 'restart' }
     assert.ok(ServerShutdownSchema.safeParse({ ...base, restartEtaMs: MAX }).success, 'exactly 24h should pass')
     assert.ok(ServerShutdownSchema.safeParse({ ...base, restartEtaMs: 0 }).success, '0 should pass (not coming back)')
