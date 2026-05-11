@@ -67,6 +67,19 @@ describe('GeminiSession', () => {
     assert.equal(session._activeManualSkills.has('gemini-skill'), true)
   })
 
+  // #3755: GeminiSession → JsonlSubprocessSession → BaseSession forwarding
+  // of resultTimeoutMs. SessionManager sets providerOpts.resultTimeoutMs;
+  // every layer must forward it to honour operator config.
+  it('forwards resultTimeoutMs to BaseSession (#3755)', () => {
+    const session = new GeminiSession({ cwd: '/tmp', resultTimeoutMs: 600_000 })
+    assert.equal(session._resultTimeoutMs, 600_000)
+  })
+
+  it('defaults _resultTimeoutMs to 20 min when omitted (#3755)', () => {
+    const session = new GeminiSession({ cwd: '/tmp' })
+    assert.equal(session._resultTimeoutMs, 20 * 60 * 1000)
+  })
+
   // ---------------------------------------------------------------------
   // PR #3231 review (agent-review): JsonlSubprocessSession was the
   // middle layer between GeminiSession and BaseSession and silently

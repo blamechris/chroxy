@@ -157,6 +157,39 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(s.isRunning, false)
       assert.equal(s.isReady, false)
     })
+
+    // #3755: middle-layer pattern — every BaseSession opt must forward
+    // through super(). resultTimeoutMs is not currently consumed by
+    // JsonlSubprocessSession (no inactivity timer), but the plumbing must
+    // be in place for when Codex/Gemini adopt the same pattern as
+    // SdkSession/CliSession.
+    it('forwards resultTimeoutMs to BaseSession (#3755)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', resultTimeoutMs: 600_000 })
+      assert.equal(s._resultTimeoutMs, 600_000,
+        'JsonlSubprocessSession must forward resultTimeoutMs so Codex/Gemini can honour operator config')
+    })
+
+    it('defaults _resultTimeoutMs to 20 min when omitted (#3755)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp' })
+      assert.equal(s._resultTimeoutMs, 20 * 60 * 1000,
+        'inherits BaseSession default when resultTimeoutMs is not provided')
+    })
+
+    // Mirrors sdk-session.test.js:80-89 — BaseSession's
+    // `Number.isFinite && > 0` guard rejects nonsense values back to the
+    // default. Pinning this at the middle layer guards against regression
+    // if BaseSession ever drops the validation.
+    it('falls back to the default when resultTimeoutMs is non-positive (#3755)', () => {
+      const P = makeTestProviderClass()
+      const s1 = new P({ cwd: '/tmp', resultTimeoutMs: 0 })
+      const s2 = new P({ cwd: '/tmp', resultTimeoutMs: -1 })
+      const s3 = new P({ cwd: '/tmp', resultTimeoutMs: 'oops' })
+      assert.equal(s1._resultTimeoutMs, 20 * 60 * 1000)
+      assert.equal(s2._resultTimeoutMs, 20 * 60 * 1000)
+      assert.equal(s3._resultTimeoutMs, 20 * 60 * 1000)
+    })
   })
 
   describe('start()', () => {
