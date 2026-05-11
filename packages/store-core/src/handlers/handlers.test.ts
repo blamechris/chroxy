@@ -4115,6 +4115,54 @@ describe('handleUserQuestion', () => {
     expect(out!.chatMessage.options).toEqual([])
   })
 
+  // #3752: model-supplied "Other" collides with the synthetic sentinel.
+  // Without dedup the user sees two "Other" rows; the model's wins.
+  it('prefers a model-supplied "Other" option over the synthetic sentinel (#3752)', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [
+          {
+            question: 'Pick',
+            options: [{ label: 'a' }, { label: 'Other' }, { label: 'c' }],
+          },
+        ],
+      },
+      null,
+    )
+    // Exactly one "Other" row, with value === 'Other' (label-derived),
+    // NOT value === '__chroxy_other__'. Free-text escape hatch yields
+    // to the model's literal value.
+    expect(out!.chatMessage.options).toEqual([
+      { label: 'a', value: 'a' },
+      { label: 'c', value: 'c' },
+      { label: 'Other', value: 'Other' },
+    ])
+  })
+
+  // #3752: defensive — if a model-derived value somehow lands on the
+  // sentinel string itself, strip it before appending. Without this,
+  // React keys collide in the dashboard's `key={opt.value}` map.
+  it('strips a model option whose value would collide with the sentinel value (#3752)', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [
+          {
+            question: 'Pick',
+            options: [{ label: 'a' }, { label: '__chroxy_other__' }, { label: 'c' }],
+          },
+        ],
+      },
+      null,
+    )
+    // The colliding row is dropped entirely (its value would shadow the
+    // sentinel's key in the renderer); the sentinel is then appended.
+    expect(out!.chatMessage.options).toEqual([
+      { label: 'a', value: 'a' },
+      { label: 'c', value: 'c' },
+      { label: 'Other', value: '__chroxy_other__' },
+    ])
+  })
+
   it('truncates questionText to 60 characters', () => {
     const long = 'x'.repeat(120)
     const out = handleUserQuestion(

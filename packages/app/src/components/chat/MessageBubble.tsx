@@ -35,6 +35,14 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   // #3746: free-text mode when user picks the synthetic "Other" option
   const [otherActive, setOtherActive] = useState(false);
   const [otherText, setOtherText] = useState('');
+  // #3753: mirror the dashboard's submittedRef — guarantee one-shot send
+  // even if the user rapid-taps Send / hits Enter before the store
+  // round-trip flips `message.answered`. Reset when the prompt is
+  // re-armed (answered cleared by a future flow).
+  const submittedRef = useRef(false);
+  useEffect(() => {
+    if (message.answered == null) submittedRef.current = false;
+  }, [message.answered]);
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
@@ -197,7 +205,8 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
             autoFocus
             onSubmitEditing={() => {
               const trimmed = otherText.trim();
-              if (!trimmed) return;
+              if (!trimmed || submittedRef.current) return;
+              submittedRef.current = true;
               onSelectOption?.(trimmed, message.id, message.requestId, message.toolUseId);
             }}
             returnKeyType="send"
@@ -207,7 +216,8 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
             disabled={!otherText.trim()}
             onPress={() => {
               const trimmed = otherText.trim();
-              if (!trimmed) return;
+              if (!trimmed || submittedRef.current) return;
+              submittedRef.current = true;
               onSelectOption?.(trimmed, message.id, message.requestId, message.toolUseId);
             }}
           >
@@ -358,6 +368,7 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 12,
     paddingVertical: 8,
+    minHeight: 44,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.accentOrangeBorderStrong,
@@ -368,6 +379,8 @@ const styles = StyleSheet.create({
   promptFreetextSend: {
     paddingHorizontal: 16,
     paddingVertical: 8,
+    minHeight: 44,
+    justifyContent: 'center',
     borderRadius: 8,
     backgroundColor: COLORS.accentOrange,
   },
@@ -379,6 +392,8 @@ const styles = StyleSheet.create({
   promptFreetextCancel: {
     paddingHorizontal: 12,
     paddingVertical: 8,
+    minHeight: 44,
+    justifyContent: 'center',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.textSecondary,
