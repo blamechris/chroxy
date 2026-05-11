@@ -425,13 +425,14 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
 
 /// Reject an IPC call that did not originate from the `main` window.
 ///
-/// Voice commands interact with the system microphone. Restricting them to the
-/// main window prevents a compromised `dashboard` or `qr_popup` window from
-/// silently starting a recording after the initial microphone permission has
-/// been granted by the user.
+/// Used by commands that access privileged resources (microphone, clipboard
+/// image data) — restricting them to the main window prevents a compromised
+/// `dashboard` or `qr_popup` window from silently invoking the capability
+/// after the initial user-granted permission. Generic message so it reads
+/// correctly for every caller (#3796).
 fn require_main_window(window: &tauri::Window) -> Result<(), String> {
     if window.label() != "main" {
-        return Err("voice commands are restricted to the main window".into());
+        return Err("this command is restricted to the main window".into());
     }
     Ok(())
 }
@@ -465,6 +466,62 @@ fn stop_voice_input(
     let s = lock_or_recover(&state);
     speech::stop(&s);
     Ok(())
+}
+
+/// Read the current clipboard image and return it as a base64-encoded PNG.
+///
+/// Returns `Ok(None)` when the clipboard does not currently hold an image —
+/// the JS-side Ctrl+V handler surfaces this as a "No image on clipboard"
+/// toast (#3748). Returns `Err(...)` only for real platform failures.
+#[tauri::command]
+fn read_clipboard_image(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose, Engine as _};
+    use image::{ColorType, ImageEncoder};
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    require_main_window(&window)?;
+
+    let img = match app.clipboard().read_image() {
+        Ok(img) => img,
+        // The plugin returns Err when the clipboard holds anything other
+        // than an image (including empty). Distinguishing those from real
+        // backend failures is unreliable across platforms, so we treat
+        // every read_image failure as "no image" to give the user a
+        // consistent toast. Log the underlying cause to stderr so genuine
+        // backend issues (permission denial, platform driver failure)
+        // remain diagnosable from the desktop logs (#3796 review).
+        Err(e) => {
+            eprintln!("[clipboard] read_image returned no image: {}", e);
+            return Ok(None);
+        }
+    };
+
+    let rgba = img.rgba();
+    let width = img.width();
+    let height = img.height();
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "clipboard image dimensions overflow".to_string())?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "clipboard image buffer size {} does not match {}x{}x4",
+            rgba.len(),
+            width,
+            height
+        ));
+    }
+
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+    encoder
+        .write_image(rgba, width, height, ColorType::Rgba8.into())
+        .map_err(|e| format!("PNG encode failed: {}", e))?;
+
+    Ok(Some(general_purpose::STANDARD.encode(&png_bytes)))
 }
 
 pub fn run() {
@@ -519,6 +576,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             stop_voice_input,
             tile_window,
+            read_clipboard_image,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))

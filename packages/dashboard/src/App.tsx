@@ -25,7 +25,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
-import { processImageFiles, filterImageFiles } from './utils/image-utils'
+import { processImageFiles, processBase64Image, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
@@ -51,7 +51,8 @@ import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
-import { formatShortcutKeys } from './utils/platform'
+import { formatShortcutKeys, isMacPlatform } from './utils/platform'
+import { readClipboardImage } from './utils/clipboard-image'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer } from './hooks/useTauriIPC'
@@ -459,12 +460,66 @@ export function App() {
     destroySession(sessionId)
   }, [sessions, destroySession, createSession])
 
+  /**
+   * Append processed image attachments to the composer's pending-image
+   * tray. Hoisted above the keydown listener so the Ctrl+V Tauri path
+   * (which produces a single base64-decoded attachment) and the File-based
+   * paste/drop paths in `handleImagePaste` / `handleImageDrop` (which
+   * produce arrays from `processImageFiles`) all share one append point
+   * (#3796 review).
+   */
+  const appendImageAttachments = useCallback((attachments: ImageAttachment[]) => {
+    if (attachments.length === 0) return
+    setImageAttachments(prev => [...prev, ...attachments])
+  }, [])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Prevent Backspace from triggering browser/webview "back" navigation
       const target = e.target instanceof HTMLElement ? e.target : null
       if (e.key === 'Backspace' && (!target || (!['INPUT', 'TEXTAREA'].includes(target.tagName) && !target.isContentEditable))) {
         e.preventDefault()
+        return
+      }
+      // Ctrl+V on macOS in Tauri = paste image from clipboard (#3748).
+      // Cmd+V remains the native text paste (handled by the OS / textarea
+      // onPaste handler, untouched here). On non-Mac platforms Ctrl+V is
+      // the native text paste — we leave it alone there. On non-Tauri
+      // (web dashboard) there's no way to read the OS clipboard image
+      // reliably, so the shortcut only fires inside the Tauri webview.
+      if (
+        isTauri() &&
+        isMacPlatform() &&
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.key === 'v' || e.key === 'V')
+      ) {
+        e.preventDefault()
+        void (async () => {
+          try {
+            const image = await readClipboardImage()
+            if (!image) {
+              useConnectionStore.getState().addInfoNotification('No image on clipboard')
+              return
+            }
+            // Use processBase64Image (not processImageFiles) to skip the
+            // base64 → Blob → File → FileReader → base64 round-trip the
+            // File path would otherwise perform on a payload we already
+            // have in the canonical shape (#3796 review).
+            const { accepted, rejected } = await processBase64Image(image.base64, image.mediaType, image.name)
+            if (accepted) {
+              appendImageAttachments([accepted])
+            } else if (rejected) {
+              useConnectionStore.getState().addInfoNotification(rejected)
+            }
+          } catch (err) {
+            useConnectionStore.getState().addInfoNotification(
+              `Failed to read clipboard image: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        })()
         return
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -933,15 +988,15 @@ export function App() {
     const images = filterImageFiles(files)
     if (images.length === 0) return
     const { accepted } = await processImageFiles(images)
-    setImageAttachments(prev => [...prev, ...accepted])
-  }, [])
+    appendImageAttachments(accepted)
+  }, [appendImageAttachments])
 
   const handleImageDrop = useCallback(async (files: File[]) => {
     const images = filterImageFiles(files)
     if (images.length === 0) return
     const { accepted } = await processImageFiles(images)
-    setImageAttachments(prev => [...prev, ...accepted])
-  }, [])
+    appendImageAttachments(accepted)
+  }, [appendImageAttachments])
 
   const handleRemoveImage = useCallback((index: number) => {
     setImageAttachments(prev => prev.filter((_, i) => i !== index))
@@ -1139,6 +1194,16 @@ export function App() {
       { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
       { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
     ]
+    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on macOS,
+    // since on other platforms Ctrl+V is the native text-paste shortcut.
+    // Show the entry only where the shortcut is actually wired.
+    if (isTauri() && isMacPlatform()) {
+      rawEntries.push({
+        keys: 'Ctrl+V',
+        description: 'Paste image from clipboard (Cmd+V stays as text paste)',
+        section: 'Input',
+      })
+    }
     return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
   }, [])
 

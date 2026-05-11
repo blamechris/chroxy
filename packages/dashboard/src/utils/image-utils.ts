@@ -150,3 +150,40 @@ export function filterImageFiles(files: FileList | File[]): File[] {
     ALLOWED_IMAGE_TYPES.includes(f.type as AllowedImageType)
   )
 }
+
+/**
+ * Process a base64-encoded image directly (no File round-trip).
+ *
+ * Used by the Tauri Ctrl+V clipboard-paste path (#3748/#3796): the Rust
+ * side already produces a base64 PNG, so wrapping it in a File just to
+ * have `processImageFiles` re-encode it via FileReader is wasted CPU
+ * and memory. This helper validates size + media type from the base64
+ * string and runs the same `compressImage` pipeline that File-based
+ * pastes use, returning the canonical `ImageAttachment` shape.
+ *
+ * Returns `{ accepted, rejected }` matching `processImageFiles` so call
+ * sites can share an error-handling shape.
+ */
+export async function processBase64Image(
+  base64: string,
+  mediaType: string,
+  name: string,
+): Promise<{ accepted: ImageAttachment | null; rejected: string | null }> {
+  if (!ALLOWED_IMAGE_TYPES.includes(mediaType as AllowedImageType)) {
+    return { accepted: null, rejected: `Unsupported image type: ${mediaType || 'unknown'}. Accepted: jpeg, png, gif, webp.` }
+  }
+  const sizeBytes = Math.ceil(base64.length * 3 / 4)
+  if (sizeBytes > MAX_IMAGE_SIZE) {
+    return { accepted: null, rejected: `${name} exceeds 2MB limit (${(sizeBytes / (1024 * 1024)).toFixed(1)}MB).` }
+  }
+  const compressed = await compressImage(base64, mediaType)
+  return {
+    accepted: {
+      type: 'image',
+      mediaType: compressed.mediaType,
+      data: compressed.data,
+      name,
+    },
+    rejected: null,
+  }
+}
