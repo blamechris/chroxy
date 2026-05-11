@@ -1775,9 +1775,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const authProtocolVersion = authPayload.protocolVersion;
       // #3760: server-advertised inactivity timeout. Older servers omit this
       // field — we leave it null and ActivityIndicator falls back to its
-      // hardcoded reference timeout.
+      // hardcoded reference timeout. Mirror the server's Number.isFinite
+      // guard so Infinity/NaN never reach the store (the server would have
+      // rejected them upstream, but clients shouldn't trust the wire).
       const authResultTimeoutMs =
-        typeof msg.resultTimeoutMs === 'number' && msg.resultTimeoutMs > 0
+        typeof msg.resultTimeoutMs === 'number' &&
+        Number.isFinite(msg.resultTimeoutMs) &&
+        msg.resultTimeoutMs > 0
           ? msg.resultTimeoutMs
           : null;
       // Parse connected clients list with self-detection via clientId

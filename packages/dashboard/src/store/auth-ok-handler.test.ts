@@ -171,8 +171,10 @@ describe('auth_ok handler', () => {
       expect(store.getState().serverResultTimeoutMs).toBeNull()
     })
 
-    it('ignores malformed resultTimeoutMs values (non-positive or non-number)', () => {
-      for (const bad of [0, -1, 'twenty minutes', null]) {
+    it('ignores malformed resultTimeoutMs values (non-positive, non-finite, or non-number)', () => {
+      // NaN/Infinity are explicitly rejected to mirror the server's
+      // Number.isFinite guard so the client never stores an unusable timeout.
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, 'twenty minutes', null]) {
         const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
         handleMessage(createAuthOkMessage({ resultTimeoutMs: bad }), ctx as any)
         expect(store.getState().serverResultTimeoutMs).toBeNull()
