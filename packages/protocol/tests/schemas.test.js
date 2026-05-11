@@ -169,6 +169,32 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: Infinity }).success, 'Infinity should reject')
   })
 
+  // Wire-contract alignment surfaced by #3768 review:
+  // server emits permission_request with sessionId, and server_shutdown
+  // with reason='crash'. Schema must accept both.
+  it('accepts permission_request with sessionId (#3773)', async () => {
+    const { ServerPermissionRequestSchema } = await import('../src/schemas/server.ts')
+    const result = ServerPermissionRequestSchema.safeParse({
+      type: 'permission_request',
+      requestId: 'r',
+      tool: 't',
+      input: {},
+      sessionId: 'sess-abc',
+    })
+    assert.ok(result.success, 'Should accept permission_request with sessionId')
+    assert.equal(result.data.sessionId, 'sess-abc')
+  })
+
+  it('accepts server_shutdown with reason=crash (#3773)', async () => {
+    const { ServerShutdownSchema } = await import('../src/schemas/server.ts')
+    const result = ServerShutdownSchema.safeParse({
+      type: 'server_shutdown',
+      reason: 'crash',
+      restartEtaMs: 0,
+    })
+    assert.ok(result.success, 'Should accept reason=crash (emitted on uncaughtException)')
+  })
+
   it('validates encrypted envelope', async () => {
     const { EncryptedEnvelopeSchema } = await import('../src/schemas/client.ts')
     const result = EncryptedEnvelopeSchema.safeParse({

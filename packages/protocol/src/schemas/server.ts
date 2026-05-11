@@ -190,6 +190,10 @@ export const ServerPermissionRequestSchema = z.object({
   description: z.string().optional(),
   input: z.any(),
   remainingMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
+  // #2832/#2905: server includes the chroxy sessionId on permission_request
+  // payloads so the dashboard can route the prompt to the right session tab.
+  // Emitted by ws-permissions.js (resendPendingPermissions + HTTP fallback).
+  sessionId: z.string().optional(),
 })
 
 export const ServerUserQuestionSchema = z.object({
@@ -526,7 +530,9 @@ export const ServerPushTokenErrorSchema = z.object({
 
 export const ServerShutdownSchema = z.object({
   type: z.literal('server_shutdown'),
-  reason: z.enum(['restart', 'shutdown']),
+  // 'crash' is emitted from uncaughtException/unhandledRejection handlers in
+  // server-cli.js / server-cli-child.js via broadcastShutdown('crash', 0).
+  reason: z.enum(['restart', 'shutdown', 'crash']),
   restartEtaMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS),
 })
 
