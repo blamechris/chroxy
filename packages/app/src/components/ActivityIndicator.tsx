@@ -11,7 +11,7 @@
  *
  * Color escalation:
  *   0-30s         green   (active)
- *   30-60s        amber   (quiet)
+ *   30-60s        yellow  (quiet)
  *   60s-threshold orange  (slow)
  *   approaching   red     (last 60s before timeout)
  */

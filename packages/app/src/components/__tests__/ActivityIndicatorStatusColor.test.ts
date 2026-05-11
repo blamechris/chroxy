@@ -19,17 +19,17 @@ describe('ActivityIndicator statusColor()', () => {
       expect(statusColor(0, TIMEOUT_20MIN)).toBe(COLORS.accentGreen);
     });
 
-    it('returns green just below the amber boundary', () => {
+    it('returns green just below the yellow boundary', () => {
       expect(statusColor(29_999, TIMEOUT_20MIN)).toBe(COLORS.accentGreen);
     });
   });
 
-  describe('amber band (30 s ≤ elapsed < 60 s)', () => {
-    it('flips to amber exactly at 30 000 ms', () => {
+  describe('yellow band (30 s ≤ elapsed < 60 s)', () => {
+    it('flips to yellow exactly at 30 000 ms', () => {
       expect(statusColor(30_000, TIMEOUT_20MIN)).toBe(COLORS.accentYellow500);
     });
 
-    it('stays amber just below the orange boundary', () => {
+    it('stays yellow just below the orange boundary', () => {
       expect(statusColor(59_999, TIMEOUT_20MIN)).toBe(COLORS.accentYellow500);
     });
   });
@@ -74,9 +74,9 @@ describe('ActivityIndicator statusColor()', () => {
 
     it('handles an unusually short 90 s configured timeout', () => {
       const TIMEOUT_90S = 90_000;
-      // At 30 s, the green→amber boundary still fires (band is fixed),
+      // At 30 s, the green→yellow boundary still fires (band is fixed),
       // but the red boundary collapses inward: timeoutMs - 60_000 = 30 000.
-      // So 30 s is simultaneously the amber boundary AND the red boundary.
+      // So 30 s is simultaneously the yellow boundary AND the red boundary.
       // The red check runs FIRST, so red wins (#3757 guarded the
       // configured-timeout-respecting behaviour).
       expect(statusColor(30_000, TIMEOUT_90S)).toBe(COLORS.accentRed500);
