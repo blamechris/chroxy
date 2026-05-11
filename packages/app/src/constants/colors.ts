@@ -89,12 +89,25 @@ export const COLORS = {
   accentOrangeBorder: '#f59e0b44',
   /** Strong orange border: higher opacity (40%) */
   accentOrangeBorderStrong: '#f59e0b66',
-  /** Bright orange (Tailwind orange-500): activity indicator "slow" escalation (60s+) */
-  accentOrangeBright: '#f97316',
+  /**
+   * Tailwind orange-500: activity indicator "slow" escalation (60s+).
+   *
+   * Naming convention: tokens suffixed with the Tailwind scale number (e.g.
+   * `500`) are distinct hex values pulled from the Tailwind palette — NOT
+   * opacity variants of the bare `accentOrange` base. The `Light`/`Subtle`/
+   * `Medium`/`Border` suffixes above denote alpha-opacity variants of the
+   * legacy brand hex (`#f59e0b`); the `500` suffix here denotes a different
+   * base hex (#f97316) altogether.
+   */
+  accentOrange500: '#f97316',
 
-  // -- Accent Colors: Amber (Activity Indicator) --
-  /** Amber (Tailwind yellow-500): activity indicator "quiet" escalation (30-60s) */
-  accentAmber: '#eab308',
+  // -- Accent Colors: Yellow (Activity Indicator) --
+  /**
+   * Tailwind yellow-500: activity indicator "quiet" escalation (30-60s).
+   * Note: this is yellow-500, not amber-500 (Tailwind's amber-500 is
+   * `#f59e0b`, which is already the legacy `accentOrange`).
+   */
+  accentYellow500: '#eab308',
 
   // -- Accent Colors: Red (Error/Interrupt) --
   /** Primary red accent: error state */
@@ -105,8 +118,8 @@ export const COLORS = {
   accentRedSubtle: '#ff4a4a22',
   /** Red border: standard opacity (27%) */
   accentRedBorder: '#ff4a4a44',
-  /** Bright red (Tailwind red-500): activity indicator "approaching timeout" escalation */
-  accentRedBright: '#ef4444',
+  /** Tailwind red-500: activity indicator "approaching timeout" escalation. See `accentOrange500` for the `500`-suffix naming convention. */
+  accentRed500: '#ef4444',
 
   // -- Accent Colors: Gray (System Messages) --
   /** System message text: muted gray */

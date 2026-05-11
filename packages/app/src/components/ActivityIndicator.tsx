@@ -11,7 +11,7 @@
  *
  * Color escalation:
  *   0-30s         green   (active)
- *   30-60s        amber   (quiet)
+ *   30-60s        yellow  (quiet)
  *   60s-threshold orange  (slow)
  *   approaching   red     (last 60s before timeout)
  */
@@ -36,9 +36,9 @@ function formatElapsed(ms: number): string {
 }
 
 export function statusColor(elapsedMs: number, timeoutMs: number): string {
-  if (elapsedMs >= timeoutMs - 60_000) return COLORS.accentRedBright;
-  if (elapsedMs >= 60_000) return COLORS.accentOrangeBright;
-  if (elapsedMs >= 30_000) return COLORS.accentAmber;
+  if (elapsedMs >= timeoutMs - 60_000) return COLORS.accentRed500;
+  if (elapsedMs >= 60_000) return COLORS.accentOrange500;
+  if (elapsedMs >= 30_000) return COLORS.accentYellow500;
   return COLORS.accentGreen;
 }
 
