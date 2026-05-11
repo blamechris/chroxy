@@ -103,6 +103,7 @@ import {
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
+  isActivityEvent,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
@@ -882,6 +883,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   const get = () => getStore().getState();
   const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
     (s) => getStore().setState(s as ConnectionState);
+
+  // #3758 — bump lastClientActivityAt for activity-bearing events BEFORE the
+  // per-case handler runs. Doing it here keeps the bump in one place instead
+  // of threading it through every stream_*/tool_*/message handler below.
+  // Resolves the target session the same way the case handlers do: explicit
+  // msg.sessionId wins, otherwise activeSessionId.
+  if (isActivityEvent(msg.type)) {
+    const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
+    if (targetId && get().sessionStates[targetId]) {
+      updateSession(targetId, () => ({ lastClientActivityAt: Date.now() }));
+    }
+  }
 
   switch (msg.type) {
     case 'pong':

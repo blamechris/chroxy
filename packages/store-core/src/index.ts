@@ -125,6 +125,8 @@ export {
   withJitter,
   filterThinking,
   createEmptyBaseSessionState,
+  ACTIVITY_EVENT_TYPES,
+  isActivityEvent,
 } from './utils'
 
 export type {

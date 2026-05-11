@@ -5992,3 +5992,40 @@
 
 .evaluator-clarify-send:hover { opacity: 0.85; }
 .evaluator-clarify-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ActivityIndicator (#3758) — "Working… last activity Ns ago"
+ * Sits in the chat composer area; only rendered while the active session
+ * is busy. Color escalates from green (active) through amber/orange to red
+ * (approaching the inactivity timeout) so a long-but-active turn looks
+ * different from a stalled one. */
+.activity-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid transparent;
+}
+
+.activity-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.activity-indicator__warning {
+  font-weight: 600;
+  padding-left: 4px;
+  border-left: 1px solid currentColor;
+}
+
+.activity-indicator--green  { color: #22c55e; border-color: rgba(34, 197, 94, 0.35); }
+.activity-indicator--amber  { color: #eab308; border-color: rgba(234, 179, 8, 0.45); }
+.activity-indicator--orange { color: #f97316; border-color: rgba(249, 115, 22, 0.5); }
+.activity-indicator--red    { color: #ef4444; border-color: rgba(239, 68, 68, 0.55); }

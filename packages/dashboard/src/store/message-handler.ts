@@ -88,6 +88,7 @@ import {
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
+  isActivityEvent,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -1737,6 +1738,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   const get = () => getStore().getState();
   const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
     (s) => getStore().setState(s as ConnectionState);
+
+  // #3758 — bump lastClientActivityAt for activity-bearing events BEFORE
+  // any per-case handler runs. Doing it here keeps the bump in one place
+  // instead of threading it through every stream_*/tool_*/message handler.
+  // Mirrors the logic in packages/app/src/store/message-handler.ts.
+  if (isActivityEvent(msg.type)) {
+    const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
+    if (targetId && get().sessionStates[targetId]) {
+      updateSession(targetId, () => ({ lastClientActivityAt: Date.now() }));
+    }
+  }
 
   // Dispatch to the handler map first — extracted, self-contained cases.
   const handler = HANDLERS[msg.type];

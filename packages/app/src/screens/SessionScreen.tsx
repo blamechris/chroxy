@@ -25,6 +25,7 @@ import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { WebTasksPanel } from '../components/WebTasksPanel';
 import { InputBar } from '../components/InputBar';
+import { ActivityIndicator } from '../components/ActivityIndicator';
 import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { CheckpointView } from '../components/CheckpointView';
@@ -1192,6 +1193,11 @@ export function SessionScreen() {
           </ErrorBoundary>
         )
       )}
+
+      {/* Activity indicator (#3758) — "Working… last activity Ns ago"
+          so users can distinguish a still-active long turn from a stalled
+          one. Self-gates on busy/idle; renders nothing when idle. */}
+      <ActivityIndicator />
 
       {/* Input area */}
       <InputBar

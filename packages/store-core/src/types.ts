@@ -357,6 +357,17 @@ export interface BaseSessionState {
   lastResultDuration: number | null;
   sessionCost: number | null;
   isIdle: boolean;
+  /**
+   * Wall-clock timestamp (Date.now()) of the most recent activity-bearing
+   * server event for this session. The canonical set lives in
+   * `ACTIVITY_EVENT_TYPES` (utils.ts): stream_start, stream_delta, stream_end,
+   * tool_start, tool_result, message, result, user_question,
+   * permission_request. Drives the "Working… last activity Ns ago" indicator
+   * (#3758) so users can tell a long-but-still-active turn from a frozen one.
+   * Null until the first activity event arrives for the session (e.g. fresh
+   * connect, just after history replay clears state).
+   */
+  lastClientActivityAt: number | null;
   health: SessionHealth;
   activeAgents: AgentInfo[];
   isPlanPending: boolean;
