@@ -154,6 +154,9 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: MAX + 1 }).success, '24h + 1ms should reject')
     assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: -1 }).success, 'negative should reject')
     assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: Infinity }).success, 'Infinity should reject')
+    // #3785: ms duration must be a whole number — guards against accidental
+    // fractional values from a future emitter (e.g. `Date.now() / 2`).
+    assert.ok(!ServerPermissionRequestSchema.safeParse({ ...base, remainingMs: 100.5 }).success, 'fractional ms should reject')
   })
 
   it('rejects server_shutdown with restartEtaMs above 24h ceiling (#3768)', async () => {
@@ -164,6 +167,8 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: MAX + 1 }).success, '24h + 1ms should reject')
     assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: -1 }).success, 'negative should reject')
     assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: Infinity }).success, 'Infinity should reject')
+    // #3785: ms duration must be a whole number.
+    assert.ok(!ServerShutdownSchema.safeParse({ ...base, restartEtaMs: 100.5 }).success, 'fractional ms should reject')
   })
 
   // Wire-contract alignment surfaced by #3768 review:
