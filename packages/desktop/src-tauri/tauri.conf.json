@@ -6,7 +6,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd ../dashboard && npm run dev",
-    "beforeBuildCommand": "cd ../dashboard && TAURI_ENV_PLATFORM= npm run build && cd ../desktop && bash scripts/bundle-server.sh"
+    "beforeBuildCommand": "bash scripts/before-build.sh"
   },
   "app": {
     "withGlobalTauri": true,
