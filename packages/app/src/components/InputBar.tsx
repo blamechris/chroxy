@@ -10,6 +10,11 @@ import { formatFileSize } from '../utils/attachments';
 
 // -- Props --
 
+export interface PastedTextBlockChip {
+  id: number;
+  content: string;
+}
+
 export interface InputBarProps {
   inputText: string;
   onChangeText: (text: string) => void;
@@ -34,6 +39,12 @@ export interface InputBarProps {
   onAttach?: () => void;
   onCamera?: () => void;
   onRemoveAttachment?: (id: string) => void;
+  /** #3797 — chips for collapsed-paste blocks staged in the composer. */
+  pastedTextBlocks?: PastedTextBlockChip[];
+  /** #3797 — tap a chip to open the inspect modal. */
+  onInspectPastedText?: (id: number) => void;
+  /** #3797 — tap × on a chip to remove the chip and its inline marker. */
+  onRemovePastedText?: (id: number) => void;
 }
 
 // -- Component --
@@ -62,6 +73,9 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   onAttach,
   onCamera,
   onRemoveAttachment,
+  pastedTextBlocks = [],
+  onInspectPastedText,
+  onRemovePastedText,
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
 
@@ -145,6 +159,51 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             <Text style={styles.specialKeyText}>Clear</Text>
           </TouchableOpacity>
         </View>
+      )}
+      {pastedTextBlocks.length > 0 && (
+        <ScrollView
+          horizontal
+          style={styles.pastedTextStrip}
+          contentContainerStyle={styles.pastedTextStripContent}
+          keyboardShouldPersistTaps="handled"
+          showsHorizontalScrollIndicator={false}
+          testID="pasted-text-strip"
+        >
+          {pastedTextBlocks.map((block) => {
+            let lineCount = 1;
+            for (let i = 0; i < block.content.length; i++) {
+              if (block.content.charCodeAt(i) === 10) lineCount++;
+            }
+            const label = lineCount > 1
+              ? `Pasted text #${block.id} · ${lineCount} lines`
+              : `Pasted text #${block.id} · ${block.content.length} chars`;
+            return (
+              <TouchableOpacity
+                key={block.id}
+                style={styles.pastedTextChip}
+                onPress={() => onInspectPastedText?.(block.id)}
+                accessibilityRole="button"
+                accessibilityLabel={`${label}. Tap to view the full pasted text.`}
+                testID={`pasted-text-chip-${block.id}`}
+              >
+                <Text style={styles.pastedTextChipIcon} accessibilityElementsHidden>📋</Text>
+                <Text style={styles.pastedTextChipLabel}>{label}</Text>
+                {onRemovePastedText && (
+                  <TouchableOpacity
+                    style={styles.pastedTextChipRemove}
+                    onPress={() => onRemovePastedText(block.id)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove ${label}`}
+                    testID={`pasted-text-chip-remove-${block.id}`}
+                  >
+                    <Icon name="close" size={12} color={COLORS.textPrimary} />
+                  </TouchableOpacity>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
       )}
       {attachments.length > 0 && (
         <ScrollView
@@ -348,6 +407,43 @@ const styles = StyleSheet.create({
     maxHeight: 80,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.borderPrimary,
+  },
+  pastedTextStrip: {
+    maxHeight: 56,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  pastedTextStripContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 6,
+    alignItems: 'center',
+  },
+  pastedTextChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    minHeight: 36,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundCard,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.borderPrimary,
+  },
+  pastedTextChipIcon: {
+    fontSize: 12,
+  },
+  pastedTextChipLabel: {
+    color: COLORS.textPrimary,
+    fontSize: 12,
+  },
+  pastedTextChipRemove: {
+    marginLeft: 2,
+    minWidth: 20,
+    minHeight: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   attachmentStripContent: {
     paddingHorizontal: 12,

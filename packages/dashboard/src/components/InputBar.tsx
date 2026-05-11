@@ -12,6 +12,8 @@ import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand, EvaluatorResultPayload } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
+import { shouldCollapsePaste } from '@chroxy/store-core'
+import { PastedTextChip } from './PastedTextChip'
 
 export interface FileAttachment {
   path: string
@@ -61,6 +63,18 @@ export interface InputBarProps {
    * for rewrite verdicts the user gets an "Apply rewrite" button that swaps
    * the input value. */
   onEvaluate?: (draft: string) => Promise<EvaluatorResultPayload>
+  /** #3797 — large-paste collapse. When the user pastes text that meets the
+   * shared `shouldCollapsePaste` threshold, the textarea intercepts the
+   * paste, calls `onLargePaste(text)` so the parent can stash the content,
+   * and splices the returned marker string into the draft at the cursor.
+   * If the prop is omitted, paste behaviour is unchanged. */
+  onLargePaste?: (text: string) => string
+  /** #3797 — chips for collapsed pastes currently in the composer. */
+  pastedTextBlocks?: { id: number; content: string }[]
+  /** #3797 — click handler for the eye / chip body (open the inspect modal). */
+  onInspectPastedText?: (id: number) => void
+  /** #3797 — × handler that removes the chip and strips the inline marker. */
+  onRemovePastedText?: (id: number) => void
 }
 
 type EvaluatorState =
@@ -69,7 +83,7 @@ type EvaluatorState =
   | { kind: 'result', result: EvaluatorResultPayload }
   | { kind: 'error', message: string }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -357,15 +371,41 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   const hasChips = dedupedAttachments && dedupedAttachments.length > 0
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (disabled || !onImagePaste) return
+    if (disabled) return
+    // Image paste takes priority — only fall through to text handling when
+    // the clipboard has no image payload.
     const files = e.clipboardData?.files
-    if (!files || files.length === 0) return
-    const imageFiles = filterImageFiles(files)
-    if (imageFiles.length > 0) {
-      e.preventDefault()
-      onImagePaste(imageFiles)
+    if (onImagePaste && files && files.length > 0) {
+      const imageFiles = filterImageFiles(files)
+      if (imageFiles.length > 0) {
+        e.preventDefault()
+        onImagePaste(imageFiles)
+        return
+      }
     }
-  }, [disabled, onImagePaste])
+    // #3797 — large text paste → collapse to inline marker.
+    if (onLargePaste) {
+      const text = e.clipboardData?.getData('text/plain') ?? ''
+      if (text && shouldCollapsePaste(text)) {
+        e.preventDefault()
+        const marker = onLargePaste(text)
+        const el = textareaRef.current
+        const start = el?.selectionStart ?? value.length
+        const end = el?.selectionEnd ?? value.length
+        const next = value.slice(0, start) + marker + value.slice(end)
+        setValue(next)
+        // Position the cursor immediately after the inserted marker on the
+        // next tick so React has re-rendered with the new value.
+        requestAnimationFrame(() => {
+          const t = textareaRef.current
+          if (!t) return
+          const caret = start + marker.length
+          t.setSelectionRange(caret, caret)
+          t.focus()
+        })
+      }
+    }
+  }, [disabled, onImagePaste, onLargePaste, value, setValue])
 
   const [dragging, setDragging] = useState(false)
 
@@ -445,6 +485,26 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           {imageAttachments.length > 1 && (
             <span className="image-count">{imageAttachments.length} images</span>
           )}
+        </div>
+      )}
+      {pastedTextBlocks && pastedTextBlocks.length > 0 && (
+        <div className="attachment-chips pasted-text-chips" data-testid="pasted-text-chips">
+          {pastedTextBlocks.map(block => {
+            let lineCount = 1
+            for (let i = 0; i < block.content.length; i++) {
+              if (block.content.charCodeAt(i) === 10) lineCount++
+            }
+            return (
+              <PastedTextChip
+                key={block.id}
+                id={block.id}
+                lineCount={lineCount}
+                charCount={block.content.length}
+                onInspect={onInspectPastedText ?? (() => {})}
+                onRemove={onRemovePastedText ?? (() => {})}
+              />
+            )
+          })}
         </div>
       )}
       <span id={shortcutsId} className="sr-only">

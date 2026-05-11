@@ -165,6 +165,17 @@ export {
 } from './group-messages'
 
 export {
+  PASTE_COLLAPSE_CHAR_THRESHOLD,
+  PASTE_COLLAPSE_LINE_THRESHOLD,
+  PASTE_MARKER_REGEX,
+  shouldCollapsePaste,
+  formatPasteMarker,
+  expandPasteMarkers,
+  findActiveMarkerIds,
+  detectPasteFromDiff,
+} from './paste-text'
+
+export {
   PROVIDER_LABELS,
   getProviderLabel,
   getProviderInfo,

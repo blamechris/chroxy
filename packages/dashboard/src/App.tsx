@@ -11,6 +11,8 @@ import {
   deriveSessionVisualStatus,
   groupMessages,
   applyStreamingOverlay,
+  formatPasteMarker,
+  expandPasteMarkers,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -37,6 +39,7 @@ import { QuestionPrompt } from './components/QuestionPrompt'
 import { ActivityIndicator } from './components/ActivityIndicator'
 import { ToolBubble } from './components/ToolBubble'
 import { ToolGroup } from './components/ToolGroup'
+import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
@@ -925,12 +928,57 @@ export function App() {
     setInputDraftValue(text)
     if (activeSessionId) inputDraftsRef.current.set(activeSessionId, text)
   }, [activeSessionId])
-  // Restore draft when switching sessions
+
+  // Per-session collapsed-paste storage (#3797). Each composer paste that
+  // crosses the size threshold is stashed by id; the textarea sees only
+  // the marker. Mirrors the draft-text per-session storage so switching
+  // sessions preserves both the marker text and its associated content —
+  // expanding back to the original payload on send.
+  type PastedTextBlock = { id: number; content: string }
+  const pastedTextBlocksRef = useRef<Map<string, PastedTextBlock[]>>(new Map())
+  const pastedTextNextIdRef = useRef<Map<string, number>>(new Map())
+  const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([])
+  const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null)
+  // Restore draft + paste blocks when switching sessions
   useEffect(() => {
     if (activeSessionId) {
       setInputDraftValue(inputDraftsRef.current.get(activeSessionId) ?? '')
+      setPastedTextBlocks(pastedTextBlocksRef.current.get(activeSessionId) ?? [])
+      setInspectedPastedTextId(null)
     }
   }, [activeSessionId])
+
+  const handleLargePaste = useCallback((text: string): string => {
+    const sid = activeSessionId
+    if (!sid) return text
+    const nextId = (pastedTextNextIdRef.current.get(sid) ?? 0) + 1
+    pastedTextNextIdRef.current.set(sid, nextId)
+    const block: PastedTextBlock = { id: nextId, content: text }
+    const updated = [...(pastedTextBlocksRef.current.get(sid) ?? []), block]
+    pastedTextBlocksRef.current.set(sid, updated)
+    setPastedTextBlocks(updated)
+    return formatPasteMarker(nextId, text)
+  }, [activeSessionId])
+
+  const handleRemovePastedText = useCallback((id: number) => {
+    const sid = activeSessionId
+    if (!sid) return
+    const updated = (pastedTextBlocksRef.current.get(sid) ?? []).filter(b => b.id !== id)
+    pastedTextBlocksRef.current.set(sid, updated)
+    setPastedTextBlocks(updated)
+    // Strip the marker for this id from the draft. Build a per-id regex so
+    // we only target the matching marker (not other ids' markers).
+    const markerRe = new RegExp(`\\[Pasted text #${id} \\+\\d+ (?:lines|chars)\\]`, 'g')
+    const currentDraft = inputDraftsRef.current.get(sid) ?? ''
+    const cleaned = currentDraft.replace(markerRe, '')
+    inputDraftsRef.current.set(sid, cleaned)
+    setInputDraftValue(cleaned)
+    if (inspectedPastedTextId === id) setInspectedPastedTextId(null)
+  }, [activeSessionId, inspectedPastedTextId])
+
+  const handleInspectPastedText = useCallback((id: number) => {
+    setInspectedPastedTextId(id)
+  }, [])
 
   // Handlers
   const handleSend = useCallback((text: string, files?: FileAttachment[]) => {
@@ -939,12 +987,26 @@ export function App() {
       allFiles.length > 0 ? allFiles : undefined,
       imageAttachments.length > 0 ? imageAttachments : undefined,
     )
-    sendInput(text, wire.length > 0 ? wire : undefined)
+    // #3797: expand `[Pasted text #N +M lines]` markers to their original
+    // content before the message hits the wire. Build the lookup from
+    // the active session's stashed blocks; markers without a match (e.g.
+    // user manually typed something marker-shaped) pass through unchanged.
+    const sid = activeSessionId
+    const blocks = sid ? pastedTextBlocksRef.current.get(sid) ?? [] : []
+    const blockMap = new Map(blocks.map(b => [b.id, b.content]))
+    const expanded = blockMap.size > 0 ? expandPasteMarkers(text, blockMap) : text
+    sendInput(expanded, wire.length > 0 ? wire : undefined)
     setFileAttachments([])
     setImageAttachments([])
-    // Clear draft for the session that sent the message
-    if (activeSessionId) inputDraftsRef.current.delete(activeSessionId)
+    // Clear draft + pasted-text blocks for the session that sent the message
+    if (sid) {
+      inputDraftsRef.current.delete(sid)
+      pastedTextBlocksRef.current.delete(sid)
+      pastedTextNextIdRef.current.delete(sid)
+    }
     setInputDraftValue('')
+    setPastedTextBlocks([])
+    setInspectedPastedTextId(null)
   }, [sendInput, fileAttachments, imageAttachments, activeSessionId])
 
   const handleInterrupt = useCallback(() => {
@@ -1643,6 +1705,10 @@ export function App() {
               sendOnEnter={inputSettings.chatEnterToSend}
               voiceInput={voiceInput.isAvailable ? voiceInput : undefined}
               onEvaluate={isConnected ? evaluateDraft : undefined}
+              onLargePaste={handleLargePaste}
+              pastedTextBlocks={pastedTextBlocks}
+              onInspectPastedText={handleInspectPastedText}
+              onRemovePastedText={handleRemovePastedText}
             />
           </>
         )}
@@ -1679,6 +1745,21 @@ export function App() {
 
       {/* Keyboard shortcut help */}
       <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />
+
+      {/* Pasted-text inspect modal (#3797) — read-only viewer for the
+          collapsed paste whose chip the user clicked. */}
+      {inspectedPastedTextId != null && (() => {
+        const block = pastedTextBlocks.find(b => b.id === inspectedPastedTextId)
+        if (!block) return null
+        return (
+          <PastedTextModal
+            id={block.id}
+            content={block.content}
+            onClose={() => setInspectedPastedTextId(null)}
+            onRemove={handleRemovePastedText}
+          />
+        )
+      })()}
 
       {/* QR code modal — shared by linking-mode QR and per-session "Share" QR (#3070) */}
       <QrModal
