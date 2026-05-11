@@ -47,7 +47,7 @@ import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
-import { shouldCollapsePaste, formatPasteMarker, expandPasteMarkers, detectPasteFromDiff, PASTE_COLLAPSE_CHAR_THRESHOLD } from '@chroxy/store-core';
+import { shouldCollapsePaste, formatPasteMarker, expandPasteMarkers, detectPasteFromDiff } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 
 
@@ -696,12 +696,17 @@ export function SessionScreen() {
     }
     isDictationUpdateRef.current = false;
 
-    // Paste detection — single-tick diff ≥ char threshold AND the
-    // inserted substring meets the shared `shouldCollapsePaste` predicate
-    // (which also covers line count). RN `TextInput` has no native paste
-    // event, so the diff is the only signal.
+    // Paste detection — RN `TextInput` has no native paste event, so we
+    // detect by diffing prev→next on each `onChangeText` and feeding the
+    // inserted span through the shared `shouldCollapsePaste` predicate
+    // (covers both the char and the line thresholds). The previous
+    // implementation short-circuited on a char-only fast-path which
+    // missed multi-line pastes that fell below 1500 chars but crossed
+    // the 20-line threshold (#3798 review, #3799). Running
+    // `detectPasteFromDiff` on every grow keeps both clients honouring
+    // the same criteria.
     const prev = inputText;
-    if (text.length - prev.length >= PASTE_COLLAPSE_CHAR_THRESHOLD) {
+    if (text.length > prev.length) {
       const diff = detectPasteFromDiff(prev, text);
       if (diff && shouldCollapsePaste(diff.inserted)) {
         const nextId = pastedTextNextIdRef.current + 1;

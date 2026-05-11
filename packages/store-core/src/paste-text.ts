@@ -18,7 +18,8 @@
  *
  * Either trigger fires the collapse, whichever comes first:
  *   - char count ≥ PASTE_COLLAPSE_CHAR_THRESHOLD
- *   - newline count ≥ PASTE_COLLAPSE_LINE_THRESHOLD
+ *   - line count ≥ PASTE_COLLAPSE_LINE_THRESHOLD (lines = newlines + 1,
+ *     so a 20-line paste contains 19 LF chars)
  *
  * Values chosen to mirror the Claude Code CLI's observed behaviour: a
  * 20-line snippet or a ~1.5KB JSON blob feels disruptive in the

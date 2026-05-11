@@ -57,7 +57,7 @@ export function PastedTextModal({ visible, id, content, onClose, onRemove }: Pas
         >
           <View style={styles.header}>
             <Text style={styles.headerText} numberOfLines={1}>
-              Pasted text #{id} · {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {content.length} chars
+              {`Pasted text #${id} · ${lineCount} ${lineCount === 1 ? 'line' : 'lines'} · ${content.length} chars`}
             </Text>
             <TouchableOpacity
               onPress={onClose}

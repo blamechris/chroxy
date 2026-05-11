@@ -990,3 +990,161 @@ describe('InputBar evaluator panel ARIA live regions (#3091)', () => {
     })
   })
 })
+
+describe('InputBar large-text paste (#3797)', () => {
+  function bigText(lines: number, charsPerLine = 100): string {
+    const line = 'x'.repeat(charsPerLine)
+    return Array(lines).fill(line).join('\n')
+  }
+
+  it('intercepts oversized text paste, calls onLargePaste, and splices the marker', () => {
+    const onLargePaste = vi.fn().mockReturnValue('[Pasted text #1 +30 lines]')
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    const text = bigText(30)
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) => (type === 'text/plain' ? text : ''),
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onLargePaste).toHaveBeenCalledWith(text)
+    expect(onValueChange).toHaveBeenCalledWith('[Pasted text #1 +30 lines]')
+  })
+
+  it('splices the marker at the current selection, preserving prefix/suffix', () => {
+    const onLargePaste = vi.fn().mockReturnValue('[Pasted text #1 +30 lines]')
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="hello world"
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    textarea.setSelectionRange(6, 6)
+
+    const text = bigText(30)
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) => (type === 'text/plain' ? text : ''),
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onValueChange).toHaveBeenCalledWith('hello [Pasted text #1 +30 lines]world')
+  })
+
+  it('does NOT intercept paste when text is below the threshold', () => {
+    const onLargePaste = vi.fn()
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) => (type === 'text/plain' ? 'short text' : ''),
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onLargePaste).not.toHaveBeenCalled()
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('does NOT intercept paste when onLargePaste is undefined (graceful fallback)', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    const text = bigText(30)
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) => (type === 'text/plain' ? text : ''),
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    // No onLargePaste prop, so the default paste behavior runs — onValueChange
+    // fires through native paste, which we don't simulate here. Critically,
+    // nothing crashes and no marker injection happens.
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('image paste takes priority over text paste when clipboard has both', () => {
+    const onImagePaste = vi.fn()
+    const onLargePaste = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={vi.fn()}
+        onImagePaste={onImagePaste}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    const file = new File([new ArrayBuffer(1000)], 'screenshot.png', { type: 'image/png' })
+    const clipboardData = {
+      files: [file],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+      getData: (type: string) => (type === 'text/plain' ? 'x'.repeat(2000) : ''),
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onImagePaste).toHaveBeenCalled()
+    expect(onLargePaste).not.toHaveBeenCalled()
+  })
+
+  it('renders chips for staged paste blocks', () => {
+    const blocks = [
+      { id: 1, content: 'a'.repeat(2000) },
+      { id: 2, content: 'b\n'.repeat(25) },
+    ]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={vi.fn()}
+        pastedTextBlocks={blocks}
+        onInspectPastedText={vi.fn()}
+        onRemovePastedText={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByTestId('pasted-text-chip-1')).toBeInTheDocument()
+    expect(screen.getByTestId('pasted-text-chip-2')).toBeInTheDocument()
+  })
+})

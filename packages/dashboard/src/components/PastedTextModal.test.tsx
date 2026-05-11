@@ -1,7 +1,9 @@
 /**
  * PastedTextModal tests (#3797) — render the full paste content, close on
  * Escape / overlay click / Close button, remove via the explicit remove
- * action.
+ * action. The shared `Modal` component handles focus trap, aria-modal,
+ * and topmost-only Escape; this test exercises the PastedTextModal
+ * surface (title formatting, body content, remove button).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
@@ -22,11 +24,10 @@ describe('PastedTextModal', () => {
     expect(screen.getByTestId('pasted-text-modal-body')).toHaveTextContent('line one line two line three')
   })
 
-  it('shows line count and char count in the header', () => {
+  it('renders title with line count and char count', () => {
     render(<PastedTextModal {...baseProps} />)
-    const header = screen.getByText(/Pasted text #7/)
-    expect(header).toHaveTextContent('3 lines')
-    expect(header).toHaveTextContent('28 chars')
+    expect(screen.getByText(/Pasted text #7/)).toHaveTextContent('3 lines')
+    expect(screen.getByText(/Pasted text #7/)).toHaveTextContent('28 chars')
   })
 
   it('uses "1 line" (singular) for a single-line paste', () => {
@@ -41,24 +42,17 @@ describe('PastedTextModal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('calls onClose when the overlay is clicked', () => {
+  it('calls onClose when the modal overlay is clicked (shared Modal behaviour)', () => {
     const onClose = vi.fn()
     render(<PastedTextModal {...baseProps} onClose={onClose} />)
-    fireEvent.click(screen.getByTestId('pasted-text-modal-overlay'))
+    fireEvent.click(screen.getByTestId('modal-overlay'))
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('does NOT call onClose when the dialog body is clicked (overlay-only)', () => {
+  it('closes on Escape (via shared Modal)', () => {
     const onClose = vi.fn()
     render(<PastedTextModal {...baseProps} onClose={onClose} />)
-    fireEvent.click(screen.getByTestId('pasted-text-modal'))
-    expect(onClose).not.toHaveBeenCalled()
-  })
-
-  it('closes on Escape', () => {
-    const onClose = vi.fn()
-    render(<PastedTextModal {...baseProps} onClose={onClose} />)
-    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
   })
 
@@ -69,5 +63,11 @@ describe('PastedTextModal', () => {
     fireEvent.click(screen.getByTestId('pasted-text-modal-remove'))
     expect(onRemove).toHaveBeenCalledWith(7)
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('renders inside the shared Modal (aria-modal="true" + role="dialog")', () => {
+    render(<PastedTextModal {...baseProps} />)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
   })
 })

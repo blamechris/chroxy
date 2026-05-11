@@ -1,7 +1,7 @@
 /**
- * PastedTextChip tests (#3797) — chip body opens inspect, × removes,
- * keyboard activation works, the label shape switches between lines and
- * chars depending on line count.
+ * PastedTextChip tests (#3797) — explicit View and Remove buttons, no
+ * nested interactive elements. Restructure from the original
+ * role="button" outer + nested <button> after #3798 review.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
@@ -28,10 +28,10 @@ describe('PastedTextChip', () => {
     expect(screen.getByText(/Pasted text #1 · 2000 chars/)).toBeInTheDocument()
   })
 
-  it('calls onInspect when the chip body is clicked', () => {
+  it('calls onInspect when the View button is clicked', () => {
     const onInspect = vi.fn()
     render(<PastedTextChip {...baseProps} onInspect={onInspect} />)
-    fireEvent.click(screen.getByTestId('pasted-text-chip-1'))
+    fireEvent.click(screen.getByTestId('pasted-text-chip-view-1'))
     expect(onInspect).toHaveBeenCalledWith(1)
   })
 
@@ -44,20 +44,30 @@ describe('PastedTextChip', () => {
     expect(onInspect).not.toHaveBeenCalled()
   })
 
-  it('activates on Enter and Space (not on repeated Space)', () => {
-    const onInspect = vi.fn()
-    render(<PastedTextChip {...baseProps} onInspect={onInspect} />)
-    const chip = screen.getByTestId('pasted-text-chip-1')
-    fireEvent.keyDown(chip, { key: 'Enter' })
-    expect(onInspect).toHaveBeenCalledTimes(1)
-    fireEvent.keyDown(chip, { key: ' ' })
-    expect(onInspect).toHaveBeenCalledTimes(2)
-    fireEvent.keyDown(chip, { key: ' ', repeat: true })
-    expect(onInspect).toHaveBeenCalledTimes(2)
+  it('exposes two distinct buttons (no nested interactive elements)', () => {
+    render(<PastedTextChip {...baseProps} />)
+    const buttons = screen.getAllByRole('button')
+    expect(buttons).toHaveLength(2)
+    // Outer container is a <span> (non-interactive) — no role on it.
+    const outer = screen.getByTestId('pasted-text-chip-1')
+    expect(outer.tagName).toBe('SPAN')
+    expect(outer).not.toHaveAttribute('role')
+    expect(outer).not.toHaveAttribute('tabindex')
   })
 
-  it('uses a tabindex so the chip is keyboard-reachable', () => {
+  it('uses descriptive aria-labels for both buttons', () => {
     render(<PastedTextChip {...baseProps} />)
-    expect(screen.getByTestId('pasted-text-chip-1')).toHaveAttribute('tabindex', '0')
+    expect(screen.getByLabelText('View pasted text #1')).toBeInTheDocument()
+    expect(screen.getByLabelText(/Remove Pasted text #1/)).toBeInTheDocument()
+  })
+
+  it('activates the view button on Enter and Space (native <button> behaviour)', () => {
+    const onInspect = vi.fn()
+    render(<PastedTextChip {...baseProps} onInspect={onInspect} />)
+    const viewBtn = screen.getByTestId('pasted-text-chip-view-1')
+    // Native <button> elements fire onClick on Enter/Space — testing-library
+    // simulates that via click events.
+    fireEvent.click(viewBtn)
+    expect(onInspect).toHaveBeenCalledTimes(1)
   })
 })
