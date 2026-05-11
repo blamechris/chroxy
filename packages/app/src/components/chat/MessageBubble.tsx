@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -41,6 +41,19 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
   const isSystem = message.type === 'system';
+
+  // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
+  // Without this, otherActive would stay true after an answer arrives from
+  // another client, and the component's render flags (`showOptionButtons`
+  // vs `showFreetextInput`) would depend on lingering local UI state instead
+  // of server-authoritative `message.answered`. Belt-and-suspenders alongside
+  // the `message.answered != null` gate in showOptionButtons.
+  useEffect(() => {
+    if (isPrompt && message.answered != null && otherActive) {
+      setOtherActive(false);
+      setOtherText('');
+    }
+  }, [isPrompt, message.answered, otherActive]);
   const hasOptions = isPrompt && !!message.options && message.options.length > 0;
   const answeredIsFreeText =
     hasOptions && message.answered != null &&

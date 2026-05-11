@@ -7,7 +7,7 @@
  * The "Other" sentinel option (#3746) swaps the button row for a
  * free-text input so the user can always supply a custom answer.
  */
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core'
 
 export interface QuestionPromptProps {
@@ -21,6 +21,19 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
   const [text, setText] = useState('')
   const [otherActive, setOtherActive] = useState(false)
   const submittedRef = useRef(false)
+
+  // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
+  // Without this, otherActive would stay true after an answer arrives from
+  // another client, and the component's render flags (`showOptions` vs
+  // `showFreeText`) would depend on lingering local UI state instead of
+  // server-authoritative `answered`. Belt-and-suspenders alongside the
+  // `answered != null` gate in showOptions.
+  useEffect(() => {
+    if (answered != null && otherActive) {
+      setOtherActive(false)
+      setText('')
+    }
+  }, [answered, otherActive])
 
   const handleSubmit = () => {
     if (submittedRef.current) return
