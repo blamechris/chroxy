@@ -25,7 +25,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
-import { processImageFiles, filterImageFiles } from './utils/image-utils'
+import { processImageFiles, processBase64Image, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
@@ -52,7 +52,7 @@ import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
-import { readClipboardImageAsFile } from './utils/clipboard-image'
+import { readClipboardImage } from './utils/clipboard-image'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer } from './hooks/useTauriIPC'
@@ -460,6 +460,19 @@ export function App() {
     destroySession(sessionId)
   }, [sessions, destroySession, createSession])
 
+  /**
+   * Append processed image attachments to the composer's pending-image
+   * tray. Hoisted above the keydown listener so the Ctrl+V Tauri path
+   * (which produces a single base64-decoded attachment) and the File-based
+   * paste/drop paths in `handleImagePaste` / `handleImageDrop` (which
+   * produce arrays from `processImageFiles`) all share one append point
+   * (#3796 review).
+   */
+  const appendImageAttachments = useCallback((attachments: ImageAttachment[]) => {
+    if (attachments.length === 0) return
+    setImageAttachments(prev => [...prev, ...attachments])
+  }, [])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Prevent Backspace from triggering browser/webview "back" navigation
@@ -486,18 +499,20 @@ export function App() {
         e.preventDefault()
         void (async () => {
           try {
-            const file = await readClipboardImageAsFile()
-            if (!file) {
+            const image = await readClipboardImage()
+            if (!image) {
               useConnectionStore.getState().addInfoNotification('No image on clipboard')
               return
             }
-            // Inlined image-attach logic — mirrors handleImagePaste below.
-            // Done inline because handleImagePaste is declared later in the
-            // component body and would be in the TDZ for this keydown
-            // listener's deps array.
-            const { accepted } = await processImageFiles([file])
-            if (accepted.length > 0) {
-              setImageAttachments(prev => [...prev, ...accepted])
+            // Use processBase64Image (not processImageFiles) to skip the
+            // base64 → Blob → File → FileReader → base64 round-trip the
+            // File path would otherwise perform on a payload we already
+            // have in the canonical shape (#3796 review).
+            const { accepted, rejected } = await processBase64Image(image.base64, image.mediaType, image.name)
+            if (accepted) {
+              appendImageAttachments([accepted])
+            } else if (rejected) {
+              useConnectionStore.getState().addInfoNotification(rejected)
             }
           } catch (err) {
             useConnectionStore.getState().addInfoNotification(
@@ -973,15 +988,15 @@ export function App() {
     const images = filterImageFiles(files)
     if (images.length === 0) return
     const { accepted } = await processImageFiles(images)
-    setImageAttachments(prev => [...prev, ...accepted])
-  }, [])
+    appendImageAttachments(accepted)
+  }, [appendImageAttachments])
 
   const handleImageDrop = useCallback(async (files: File[]) => {
     const images = filterImageFiles(files)
     if (images.length === 0) return
     const { accepted } = await processImageFiles(images)
-    setImageAttachments(prev => [...prev, ...accepted])
-  }, [])
+    appendImageAttachments(accepted)
+  }, [appendImageAttachments])
 
   const handleRemoveImage = useCallback((index: number) => {
     setImageAttachments(prev => prev.filter((_, i) => i !== index))

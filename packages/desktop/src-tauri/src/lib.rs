@@ -425,13 +425,14 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
 
 /// Reject an IPC call that did not originate from the `main` window.
 ///
-/// Voice commands interact with the system microphone. Restricting them to the
-/// main window prevents a compromised `dashboard` or `qr_popup` window from
-/// silently starting a recording after the initial microphone permission has
-/// been granted by the user.
+/// Used by commands that access privileged resources (microphone, clipboard
+/// image data) — restricting them to the main window prevents a compromised
+/// `dashboard` or `qr_popup` window from silently invoking the capability
+/// after the initial user-granted permission. Generic message so it reads
+/// correctly for every caller (#3796).
 fn require_main_window(window: &tauri::Window) -> Result<(), String> {
     if window.label() != "main" {
-        return Err("voice commands are restricted to the main window".into());
+        return Err("this command is restricted to the main window".into());
     }
     Ok(())
 }
@@ -488,9 +489,14 @@ fn read_clipboard_image(
         // The plugin returns Err when the clipboard holds anything other
         // than an image (including empty). Distinguishing those from real
         // backend failures is unreliable across platforms, so we treat
-        // every read_image failure as "no image" rather than surfacing
-        // platform-specific error strings to the user.
-        Err(_) => return Ok(None),
+        // every read_image failure as "no image" to give the user a
+        // consistent toast. Log the underlying cause to stderr so genuine
+        // backend issues (permission denial, platform driver failure)
+        // remain diagnosable from the desktop logs (#3796 review).
+        Err(e) => {
+            eprintln!("[clipboard] read_image returned no image: {}", e);
+            return Ok(None);
+        }
     };
 
     let rgba = img.rgba();
