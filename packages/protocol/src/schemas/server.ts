@@ -6,6 +6,17 @@
  */
 import { z } from 'zod'
 
+/**
+ * Sanity ceiling for any ms-typed numeric field (#3768).
+ *
+ * 24 h is well past every legitimate session-timeout / restart-eta /
+ * permission TTL we emit today, and tight enough that an env-var typo
+ * (`CHROXY_RESULT_TIMEOUT_MS=999999999999999`) gets rejected at the
+ * schema boundary instead of corrupting `Date.now() + ms` arithmetic
+ * on the client.
+ */
+const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+
 const ClientInfoSchema = z.object({
   clientId: z.string(),
   deviceName: z.string().nullable(),
@@ -41,7 +52,7 @@ export const ServerAuthOkSchema = z.object({
   // before #3763 don't emit it — the dashboard/app handlers fall back
   // to their hardcoded reference (DEFAULT_RESULT_TIMEOUT_MS = 20 min)
   // when absent.
-  resultTimeoutMs: z.number().int().positive().finite().optional(),
+  resultTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({
@@ -178,7 +189,7 @@ export const ServerPermissionRequestSchema = z.object({
   tool: z.string(),
   description: z.string().optional(),
   input: z.any(),
-  remainingMs: z.number().optional(),
+  remainingMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
 })
 
 export const ServerUserQuestionSchema = z.object({
@@ -516,7 +527,7 @@ export const ServerPushTokenErrorSchema = z.object({
 export const ServerShutdownSchema = z.object({
   type: z.literal('server_shutdown'),
   reason: z.enum(['restart', 'shutdown']),
-  restartEtaMs: z.number(),
+  restartEtaMs: z.number().nonnegative().finite().max(MAX_SANE_DURATION_MS),
 })
 
 export const ServerPongSchema = z.object({
