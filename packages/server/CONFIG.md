@@ -31,6 +31,7 @@ Configuration values are resolved in the following order (highest priority first
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
 | `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
 | `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
+| `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session inactivity safety net in milliseconds. When no SDK / CLI event arrives within this window, the server force-clears busy state and emits a timeout error. See [Inactivity safety net](#inactivity-safety-net) below. Default `1200000` (20 min); range `30000`–`86400000` (30 s – 24 h). |
 
 ### Prompt evaluator skip heuristic
 
@@ -135,6 +136,29 @@ directly. Format:
 
 A corrupted or missing trust file is treated as empty (fail-open) so a single
 bad write can't lock every skill out of every session.
+
+### Inactivity safety net
+
+`resultTimeoutMs` (env var `CHROXY_RESULT_TIMEOUT_MS`) caps how long a session
+may go without any SDK / CLI event before the server force-clears its busy
+state and emits a `result_timeout` error. Default `1200000` (20 min); valid
+range `30000`–`86400000` (30 s – 24 h).
+
+The legacy value was 5 min (#3749), which proved too aggressive for
+legitimately slow tools (large fetches, long Bash commands, extended
+thinking). Lengthen this if long-running operations frequently hit the timeout;
+shorten it for faster recovery from genuinely stuck sessions.
+
+Values outside the range emit a warn-only log line during validation — the
+runtime applies whatever was set. The matching WS protocol schema
+(`@chroxy/protocol`) rejects ms-typed fields above 24 h (#3768), so values
+above the ceiling never reach the dashboard / app.
+
+While a permission prompt is outstanding the inactivity timer is paused; on
+resolution it re-arms with this same window (#2831, #3757). The configured
+value is broadcast to clients as `resultTimeoutMs` on the `auth_ok` message
+(#3760), letting the dashboard / app `ActivityIndicator` warn the user when
+a turn is approaching the configured timeout.
 
 ### Provider selection
 
