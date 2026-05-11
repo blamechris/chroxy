@@ -54,6 +54,72 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(result.success, 'Should validate auth_ok message')
   })
 
+  // #3760/#3765: resultTimeoutMs is the server's effective inactivity timeout,
+  // surfaced so clients can render the ActivityIndicator warning at the right
+  // moment. Optional for back-compat with servers from before #3763.
+  it('validates auth_ok with resultTimeoutMs (#3760)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.7.18',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      resultTimeoutMs: 20 * 60 * 1000,
+    })
+    assert.ok(result.success, 'Should validate auth_ok with resultTimeoutMs')
+    assert.equal(result.data.resultTimeoutMs, 1_200_000)
+  })
+
+  it('accepts auth_ok without resultTimeoutMs (older servers)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.7.16',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+    })
+    assert.ok(result.success, 'Should accept auth_ok without resultTimeoutMs')
+    assert.equal(result.data.resultTimeoutMs, undefined)
+  })
+
+  it('rejects auth_ok with invalid resultTimeoutMs (non-positive, non-integer, non-finite, or non-number)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    for (const bad of [0, -1, 1.5, Infinity, NaN, '20']) {
+      const result = ServerAuthOkSchema.safeParse({
+        type: 'auth_ok',
+        clientId: 'c',
+        serverMode: 'cli',
+        serverVersion: '0.7.18',
+        latestVersion: null,
+        serverCommit: 'abc',
+        cwd: null,
+        connectedClients: [],
+        encryption: 'disabled',
+        protocolVersion: 1,
+        minProtocolVersion: 1,
+        maxProtocolVersion: 1,
+        resultTimeoutMs: bad,
+      })
+      assert.ok(!result.success, `Should reject bad resultTimeoutMs: ${String(bad)}`)
+    }
+  })
+
   it('validates encrypted envelope', async () => {
     const { EncryptedEnvelopeSchema } = await import('../src/schemas/client.ts')
     const result = EncryptedEnvelopeSchema.safeParse({
