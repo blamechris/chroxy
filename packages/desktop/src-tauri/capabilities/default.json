@@ -36,6 +36,7 @@
     "allow-voice-available",
     "allow-start-voice-input",
     "allow-stop-voice-input",
-    "allow-tile-window"
+    "allow-tile-window",
+    "allow-read-clipboard-image"
   ]
 }

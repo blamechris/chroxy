@@ -522,6 +522,7 @@ dependencies = [
 name = "chroxy-desktop"
 version = "0.7.17"
 dependencies = [
+ "base64 0.22.1",
  "cocoa",
  "dirs 5.0.1",
  "image",

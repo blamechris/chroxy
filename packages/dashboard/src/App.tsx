@@ -51,7 +51,8 @@ import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
-import { formatShortcutKeys } from './utils/platform'
+import { formatShortcutKeys, isMacPlatform } from './utils/platform'
+import { readClipboardImageAsFile } from './utils/clipboard-image'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer } from './hooks/useTauriIPC'
@@ -465,6 +466,45 @@ export function App() {
       const target = e.target instanceof HTMLElement ? e.target : null
       if (e.key === 'Backspace' && (!target || (!['INPUT', 'TEXTAREA'].includes(target.tagName) && !target.isContentEditable))) {
         e.preventDefault()
+        return
+      }
+      // Ctrl+V on macOS in Tauri = paste image from clipboard (#3748).
+      // Cmd+V remains the native text paste (handled by the OS / textarea
+      // onPaste handler, untouched here). On non-Mac platforms Ctrl+V is
+      // the native text paste — we leave it alone there. On non-Tauri
+      // (web dashboard) there's no way to read the OS clipboard image
+      // reliably, so the shortcut only fires inside the Tauri webview.
+      if (
+        isTauri() &&
+        isMacPlatform() &&
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.key === 'v' || e.key === 'V')
+      ) {
+        e.preventDefault()
+        void (async () => {
+          try {
+            const file = await readClipboardImageAsFile()
+            if (!file) {
+              useConnectionStore.getState().addInfoNotification('No image on clipboard')
+              return
+            }
+            // Inlined image-attach logic — mirrors handleImagePaste below.
+            // Done inline because handleImagePaste is declared later in the
+            // component body and would be in the TDZ for this keydown
+            // listener's deps array.
+            const { accepted } = await processImageFiles([file])
+            if (accepted.length > 0) {
+              setImageAttachments(prev => [...prev, ...accepted])
+            }
+          } catch (err) {
+            useConnectionStore.getState().addInfoNotification(
+              `Failed to read clipboard image: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        })()
         return
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -1139,6 +1179,16 @@ export function App() {
       { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
       { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
     ]
+    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on macOS,
+    // since on other platforms Ctrl+V is the native text-paste shortcut.
+    // Show the entry only where the shortcut is actually wired.
+    if (isTauri() && isMacPlatform()) {
+      rawEntries.push({
+        keys: 'Ctrl+V',
+        description: 'Paste image from clipboard (Cmd+V stays as text paste)',
+        section: 'Input',
+      })
+    }
     return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
   }, [])
 

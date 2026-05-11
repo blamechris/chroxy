@@ -467,6 +467,57 @@ fn stop_voice_input(
     Ok(())
 }
 
+/// Read the current clipboard image and return it as a base64-encoded PNG.
+///
+/// Returns `Ok(None)` when the clipboard does not currently hold an image —
+/// the JS-side Ctrl+V handler surfaces this as a "No image on clipboard"
+/// toast (#3748). Returns `Err(...)` only for real platform failures.
+#[tauri::command]
+fn read_clipboard_image(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose, Engine as _};
+    use image::{ColorType, ImageEncoder};
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    require_main_window(&window)?;
+
+    let img = match app.clipboard().read_image() {
+        Ok(img) => img,
+        // The plugin returns Err when the clipboard holds anything other
+        // than an image (including empty). Distinguishing those from real
+        // backend failures is unreliable across platforms, so we treat
+        // every read_image failure as "no image" rather than surfacing
+        // platform-specific error strings to the user.
+        Err(_) => return Ok(None),
+    };
+
+    let rgba = img.rgba();
+    let width = img.width();
+    let height = img.height();
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "clipboard image dimensions overflow".to_string())?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "clipboard image buffer size {} does not match {}x{}x4",
+            rgba.len(),
+            width,
+            height
+        ));
+    }
+
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+    encoder
+        .write_image(rgba, width, height, ColorType::Rgba8.into())
+        .map_err(|e| format!("PNG encode failed: {}", e))?;
+
+    Ok(Some(general_purpose::STANDARD.encode(&png_bytes)))
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -519,6 +570,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             stop_voice_input,
             tile_window,
+            read_clipboard_image,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
