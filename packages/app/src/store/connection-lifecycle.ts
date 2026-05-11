@@ -36,6 +36,7 @@ interface ServerInfo {
   latestVersion?: string | null;
   serverCommit?: string | null;
   serverProtocolVersion?: number | null;
+  serverResultTimeoutMs?: number | null;
   sessionCwd?: string | null;
   isEncrypted?: boolean;
 }
@@ -55,6 +56,13 @@ interface ConnectionLifecycleState {
   latestVersion: string | null;
   serverCommit: string | null;
   serverProtocolVersion: number | null;
+  /**
+   * #3760 — effective server inactivity timeout in ms, as advertised in
+   * auth_ok. Used by ActivityIndicator to render the "approaching timeout"
+   * warning against the real configured value. Null when connecting to an
+   * older server that doesn't broadcast the field.
+   */
+  serverResultTimeoutMs: number | null;
   isEncrypted: boolean;
 
   // Connection quality
@@ -89,6 +97,7 @@ const initialState = {
   latestVersion: null as string | null,
   serverCommit: null as string | null,
   serverProtocolVersion: null as number | null,
+  serverResultTimeoutMs: null as number | null,
   isEncrypted: false,
   latencyMs: null as number | null,
   connectionQuality: null as 'good' | 'fair' | 'poor' | null,

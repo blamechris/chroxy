@@ -17,16 +17,15 @@
  *   60s–threshold → orange  (slow)
  *   approaching   → red     (last 60s before timeout)
  *
- * The reference timeout is hardcoded to 20 min (the new
- * BaseSession.DEFAULT_RESULT_TIMEOUT_MS from #3754). Configurable
- * server-side timeouts will need a `server_status` field to surface
- * the actual configured value to the client — tracked as a follow-up.
+ * The reference timeout comes from `serverResultTimeoutMs` in the auth_ok
+ * payload (#3760), falling back to BaseSession.DEFAULT_RESULT_TIMEOUT_MS
+ * (20 min) when connected to an older server that doesn't broadcast it.
  */
 import { useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 
-/** Same default as the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754) */
-const REFERENCE_TIMEOUT_MS = 20 * 60 * 1000
+/** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754) */
+const FALLBACK_TIMEOUT_MS = 20 * 60 * 1000
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return 'just now'
@@ -55,6 +54,9 @@ export function ActivityIndicator() {
     const id = s.activeSessionId
     return id ? s.sessionStates[id]?.lastClientActivityAt ?? null : null
   })
+  const referenceTimeoutMs = useConnectionStore(
+    (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
+  )
 
   // Tick once per second so the elapsed text updates live. The setState
   // here is a `now` clock — we recompute elapsed from lastActivityAt on
@@ -81,9 +83,9 @@ export function ActivityIndicator() {
   }
 
   const elapsed = Math.max(0, now - lastActivityAt)
-  const remaining = REFERENCE_TIMEOUT_MS - elapsed
+  const remaining = referenceTimeoutMs - elapsed
   const approaching = remaining > 0 && remaining <= 60_000
-  const klass = statusClass(elapsed, REFERENCE_TIMEOUT_MS)
+  const klass = statusClass(elapsed, referenceTimeoutMs)
 
   return (
     <div className={`activity-indicator ${klass}`} aria-label="Agent is working">

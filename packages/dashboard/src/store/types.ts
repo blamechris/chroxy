@@ -421,6 +421,14 @@ export interface ConnectionState {
   latestVersion: string | null;
   serverCommit: string | null;
   serverProtocolVersion: number | null;
+  /**
+   * #3760 — effective server inactivity timeout in ms, as advertised in
+   * auth_ok. Used by ActivityIndicator to render the "approaching timeout"
+   * warning against the real configured value instead of a hardcoded 20-min
+   * reference. Null when connecting to an older server that doesn't broadcast
+   * the field (the indicator falls back to its built-in default).
+   */
+  serverResultTimeoutMs: number | null;
 
   // Multi-session state
   sessions: SessionInfo[];
