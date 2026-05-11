@@ -14,6 +14,7 @@ import { parseMcpToolName } from './mcp-tools.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
+import { formatIdleDuration } from './session-timeout-manager.js'
 
 const log = createLogger('cli-session')
 
@@ -157,8 +158,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -474,21 +475,24 @@ export class CliSession extends BaseSession {
       this._skillsPrepended = true
     }
 
-    // Safety timeout: force-clear if result never arrives (5 min).
+    // Safety timeout: force-clear if result never arrives. Window is
+    // configurable per server via config.resultTimeoutMs (#3749) — see
+    // BaseSession.DEFAULT_RESULT_TIMEOUT_MS for the default.
     // Paused while permission prompts are outstanding (#2831): awaiting
     // user input on a permission is NOT "inactivity".
     this._armResultTimeout()
   }
 
   /**
-   * Arm the 5-minute inactivity timer. No-op if paused because of a
-   * pending permission prompt (#2831).
+   * Arm the inactivity timer. No-op if paused because of a pending
+   * permission prompt (#2831). Window is configurable per server via
+   * config.resultTimeoutMs / CHROXY_RESULT_TIMEOUT_MS (#3749).
    */
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)
     this._resultTimeout = null
     if (this._resultTimeoutPaused) return
-    this._resultTimeout = setTimeout(() => this._handleResultTimeout(), 300_000)
+    this._resultTimeout = setTimeout(() => this._handleResultTimeout(), this._resultTimeoutMs)
   }
 
   /**
@@ -500,7 +504,8 @@ export class CliSession extends BaseSession {
    */
   _handleResultTimeout() {
     if (!this._isBusy) return
-    log.warn('Result timeout (5 min) — force-clearing busy state')
+    const friendly = formatIdleDuration(this._resultTimeoutMs)
+    log.warn(`Result timeout (${friendly}) — force-clearing busy state`)
     const messageId = this._currentMessageId
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
@@ -515,7 +520,7 @@ export class CliSession extends BaseSession {
     }
     this._pendingPermissionIds.clear()
     this._clearMessageState()
-    this.emit('error', { message: 'Response timed out after 5 minutes' })
+    this.emit('error', { message: `Response timed out after ${friendly}` })
   }
 
   /**

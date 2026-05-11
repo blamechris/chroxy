@@ -121,6 +121,15 @@ const CONFIG_SCHEMA = {
   // implicit.
   // Documented in CONFIG.md.
   trustMismatchMode: 'string',
+  // #3749: max ms of inactivity (no SDK / CLI event) before the server
+  // force-clears busy state and emits a timeout error. Defaults to
+  // 1200000 (20 min). Was a hardcoded 5 min before — too aggressive for
+  // legitimate slow tools (large fetches, long Bash, extended thinking).
+  // Range: 30s minimum, 24h maximum — validateConfig logs a warning for
+  // out-of-range values (warn-only, not clamped); the runtime still
+  // applies whatever was set. Operators should fix the warning rather
+  // than rely on silent normalisation.
+  resultTimeoutMs: 'number',
 }
 
 /**
@@ -196,6 +205,18 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'maxPayload': ${config.maxPayload} (minimum 1KB / 1024 bytes)`)
     } else if (config.maxPayload > 100 * 1024 * 1024) {
       warnings.push(`Invalid value for 'maxPayload': ${config.maxPayload} (maximum 100MB)`)
+    }
+  }
+
+  // #3749: result-timeout range. Below 30s a slow tool reliably tips into
+  // false positives; above 24h the safety net is effectively disabled.
+  // Number.isFinite rejects NaN/Infinity (typeof both === 'number') so a
+  // sentinel-like sentinel can't silently slip past the bounds check.
+  if (Number.isFinite(config.resultTimeoutMs)) {
+    if (config.resultTimeoutMs < 30_000) {
+      warnings.push(`Invalid value for 'resultTimeoutMs': ${config.resultTimeoutMs} (minimum 30000 / 30s)`)
+    } else if (config.resultTimeoutMs > 24 * 60 * 60 * 1000) {
+      warnings.push(`Invalid value for 'resultTimeoutMs': ${config.resultTimeoutMs} (maximum 86400000 / 24h)`)
     }
   }
 
@@ -334,6 +355,7 @@ function envKeyForConfig(key) {
     repos: 'CHROXY_REPOS',
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
+    resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
   }
   return envMap[key] || key.toUpperCase()
 }

@@ -14,8 +14,15 @@ import { armResultTimeoutForTest } from './test-helpers.js'
  * no response ever streamed.
  */
 
+// Pin the inactivity-timer window to 5 minutes for these tests. They were
+// written before the timeout became configurable (#3749) and their tick
+// arithmetic assumes a 5-min window throughout. Overriding here keeps the
+// test semantics local instead of bleeding the prod default (20 min) into
+// every `mock.timers.tick(N * 60_000)` call.
+const TEST_RESULT_TIMEOUT_MS = 5 * 60_000
+
 function createSession(opts = {}) {
-  return new SdkSession({ cwd: '/tmp', ...opts })
+  return new SdkSession({ cwd: '/tmp', resultTimeoutMs: TEST_RESULT_TIMEOUT_MS, ...opts })
 }
 
 describe('SdkSession — inactivity timer pause/resume (#2831)', () => {

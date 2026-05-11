@@ -168,6 +168,7 @@ export class SessionManager extends EventEmitter {
     maxTotalSkillBytes,
     providerSkillAllowlist,
     trustMismatchMode,
+    resultTimeoutMs,
 
     // State persistence
     stateFilePath,
@@ -200,6 +201,12 @@ export class SessionManager extends EventEmitter {
     this._maxToolInput = maxToolInput || null
     this._transforms = transforms || []
     this._sandbox = sandbox || null
+    // #3749: per-server inactivity timeout (ms) forwarded to providers
+    // via providerOpts. null = use BaseSession's DEFAULT_RESULT_TIMEOUT_MS.
+    this._resultTimeoutMs =
+      Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
+        ? resultTimeoutMs
+        : null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     // Setting either to 0 in config disables that cap.
@@ -497,6 +504,7 @@ export class SessionManager extends EventEmitter {
       provider: resolvedProvider,
     }
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
+    if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
     // Skills size budgets — pass through if configured. BaseSession forwards
     // these to loadActiveSkillsLayered. (#3202)
     if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes
