@@ -2813,7 +2813,7 @@ export function handleUserQuestion(
   const q = questions[0] as Record<string, unknown>
   if (!q || typeof q !== 'object' || typeof q.question !== 'string') return null
   const questionContent = q.question as string
-  const baseOptions = Array.isArray(q.options)
+  const rawOptions = Array.isArray(q.options)
     ? (q.options as unknown[])
         .filter(
           (o: unknown): o is { label: string } =>
@@ -2823,13 +2823,32 @@ export function handleUserQuestion(
         )
         .map((o: { label: string }) => ({ label: o.label, value: o.label }))
     : []
+  // #3752: dedup against the synthetic sentinel BEFORE appending it.
+  // If the model itself supplied a "{label:'Other'}" option, prefer the
+  // model's own row over our sentinel (the user gets one "Other" row that
+  // resolves to the model's literal value, not the free-text escape hatch).
+  // If anything else happens to use OTHER_OPTION_VALUE as its label-derived
+  // value (astronomical, but possible — and React `key={opt.value}` collides
+  // either way), strip it defensively so the sentinel append below remains
+  // unique.
+  const baseOptions = rawOptions.filter(
+    (o) => o.label !== OTHER_OPTION_LABEL && o.value !== OTHER_OPTION_VALUE,
+  )
+  const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
   // #3746: append synthetic "Other" sentinel so renderers can offer a
   // free-text escape hatch alongside the model-provided options. Skip when
-  // there are zero options — renderers already show free-text-only in that
-  // case.
-  const options = baseOptions.length > 0
-    ? [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
-    : []
+  // there are zero usable post-dedup options — renderers already show
+  // free-text-only in that case. Critically, this gates on POST-dedup state:
+  // a model that only supplied a colliding entry (e.g.
+  // `[{label:'__chroxy_other__'}]`) ends up with empty baseOptions + no
+  // modelSuppliedOther, and must fall through to free-text-only rather
+  // than re-appending the sentinel as a sole tap target (#3752 review).
+  const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
+  const options = !hasUsableOptions
+    ? []
+    : modelSuppliedOther
+      ? [...baseOptions, modelSuppliedOther]
+      : [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
   const chatMessage: ChatMessage = {
     id: nextMessageId('question'),
     type: 'prompt',
