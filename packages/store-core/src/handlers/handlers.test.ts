@@ -4045,7 +4045,7 @@ describe('handleUserQuestion', () => {
     expect(out!.sessionId).toBeNull()
   })
 
-  it('filters options to only objects with string label and sets value=label', () => {
+  it('filters options to only objects with string label and sets value=label, appending Other sentinel (#3746)', () => {
     const out = handleUserQuestion(
       {
         questions: [
@@ -4069,10 +4069,11 @@ describe('handleUserQuestion', () => {
       { label: 'a', value: 'a' },
       { label: 'b', value: 'b' },
       { label: 'c', value: 'c' },
+      { label: 'Other', value: '__chroxy_other__' },
     ])
   })
 
-  it('options defaults to [] when q.options is missing or non-array', () => {
+  it('options defaults to [] (no Other sentinel) when q.options is missing or non-array (#3746)', () => {
     const out1 = handleUserQuestion(
       { questions: [{ question: 'Q?' }] },
       null,
@@ -4088,6 +4089,30 @@ describe('handleUserQuestion', () => {
       null,
     )
     expect(out3!.chatMessage.options).toEqual([])
+  })
+
+  it('appends Other sentinel after model-provided options (#3746)', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Pick a colour', options: [{ label: 'red' }, { label: 'blue' }] }],
+      },
+      null,
+    )
+    expect(out!.chatMessage.options).toEqual([
+      { label: 'red', value: 'red' },
+      { label: 'blue', value: 'blue' },
+      { label: 'Other', value: '__chroxy_other__' },
+    ])
+  })
+
+  it('does not append Other sentinel when all options are filtered out (#3746)', () => {
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Q?', options: [null, 'x', { notLabel: 'y' }] }],
+      },
+      null,
+    )
+    expect(out!.chatMessage.options).toEqual([])
   })
 
   it('truncates questionText to 60 characters', () => {

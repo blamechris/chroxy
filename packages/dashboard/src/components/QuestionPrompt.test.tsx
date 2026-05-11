@@ -184,4 +184,84 @@ describe('QuestionPrompt', () => {
     const sendBtn = screen.getByRole('button', { name: 'Send' })
     expect(sendBtn).not.toBeDisabled()
   })
+
+  describe('Other / free-text escape hatch (#3746)', () => {
+    const withOther = [
+      { label: 'Option A', value: 'a' },
+      { label: 'Option B', value: 'b' },
+      { label: 'Other', value: '__chroxy_other__' },
+    ]
+
+    it('clicking Other swaps option buttons for a free-text input', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={withOther}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.click(screen.getByText('Other'))
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(screen.queryByText('Option A')).not.toBeInTheDocument()
+      expect(screen.queryByText('Option B')).not.toBeInTheDocument()
+      expect(screen.getByPlaceholderText('Type your response…')).toBeInTheDocument()
+    })
+
+    it('submits the typed answer when Send is clicked from Other mode', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={withOther}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.click(screen.getByText('Other'))
+      fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'custom answer' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      expect(onSelect).toHaveBeenCalledWith('custom answer')
+    })
+
+    it('Cancel returns to the option buttons without submitting', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={withOther}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.click(screen.getByText('Other'))
+      fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'aborted' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(screen.getByText('Option A')).toBeInTheDocument()
+    })
+
+    it('clicking a regular option after Other was never opened still submits that option', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={withOther}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.click(screen.getByText('Option A'))
+      expect(onSelect).toHaveBeenCalledWith('a')
+    })
+
+    it('shows the typed answer when answered does not match any option', () => {
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={withOther}
+          answered="my custom answer"
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.getByText('my custom answer')).toBeInTheDocument()
+    })
+  })
 })

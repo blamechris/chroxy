@@ -1715,6 +1715,22 @@
   outline-offset: 2px;
 }
 
+.question-freetext-cancel {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.question-freetext-cancel:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
 .question-answered {
   font-size: var(--text-base);
   color: var(--text-secondary);

@@ -2751,6 +2751,19 @@ export function handleSearchResults(
 // `pushSessionNotification`) stay at the call site.
 // ---------------------------------------------------------------------------
 
+/**
+ * Sentinel `value` appended to the option list of every multi-choice
+ * `user_question` (#3746). Renderers detect this value and swap their
+ * option buttons for a free-text input so the user can always supply a
+ * custom answer outside the model-provided choices — matching the
+ * upstream `AskUserQuestion` tool contract.
+ *
+ * Only appended when at least one real option was provided; questions
+ * with zero options keep their free-text-only rendering.
+ */
+export const OTHER_OPTION_VALUE = '__chroxy_other__'
+export const OTHER_OPTION_LABEL = 'Other'
+
 export interface UserQuestionPayload {
   /**
    * Resolved session for the question. Falls back to the active session
@@ -2800,7 +2813,7 @@ export function handleUserQuestion(
   const q = questions[0] as Record<string, unknown>
   if (!q || typeof q !== 'object' || typeof q.question !== 'string') return null
   const questionContent = q.question as string
-  const options = Array.isArray(q.options)
+  const baseOptions = Array.isArray(q.options)
     ? (q.options as unknown[])
         .filter(
           (o: unknown): o is { label: string } =>
@@ -2809,6 +2822,13 @@ export function handleUserQuestion(
             typeof (o as Record<string, unknown>).label === 'string',
         )
         .map((o: { label: string }) => ({ label: o.label, value: o.label }))
+    : []
+  // #3746: append synthetic "Other" sentinel so renderers can offer a
+  // free-text escape hatch alongside the model-provided options. Skip when
+  // there are zero options — renderers already show free-text-only in that
+  // case.
+  const options = baseOptions.length > 0
+    ? [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
     : []
   const chatMessage: ChatMessage = {
     id: nextMessageId('question'),

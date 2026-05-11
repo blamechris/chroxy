@@ -217,6 +217,8 @@ export type {
 } from './handlers'
 
 export {
+  OTHER_OPTION_VALUE,
+  OTHER_OPTION_LABEL,
   resolveSessionId,
   handleModelChanged,
   handlePermissionModeChanged,
