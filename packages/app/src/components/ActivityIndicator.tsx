@@ -35,7 +35,7 @@ function formatElapsed(ms: number): string {
   return `${h}h ${m % 60}m ago`;
 }
 
-function statusColor(elapsedMs: number, timeoutMs: number): string {
+export function statusColor(elapsedMs: number, timeoutMs: number): string {
   if (elapsedMs >= timeoutMs - 60_000) return COLORS.accentRedBright;
   if (elapsedMs >= 60_000) return COLORS.accentOrangeBright;
   if (elapsedMs >= 30_000) return COLORS.accentAmber;
