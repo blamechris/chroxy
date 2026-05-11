@@ -73,7 +73,7 @@ export function ActivityIndicator() {
     // Render the indicator in its baseline green state without an elapsed
     // value so users still see "Working…" rather than nothing.
     return (
-      <div className="activity-indicator activity-indicator--green" role="status" aria-live="polite">
+      <div className="activity-indicator activity-indicator--green" aria-label="Agent is working">
         <span className="activity-indicator__dot" aria-hidden="true" />
         <span className="activity-indicator__label">Working…</span>
       </div>
@@ -86,7 +86,7 @@ export function ActivityIndicator() {
   const klass = statusClass(elapsed, REFERENCE_TIMEOUT_MS)
 
   return (
-    <div className={`activity-indicator ${klass}`} role="status" aria-live="polite">
+    <div className={`activity-indicator ${klass}`} aria-label="Agent is working">
       <span className="activity-indicator__dot" aria-hidden="true" />
       <span className="activity-indicator__label">Working… last activity {formatElapsed(elapsed)}</span>
       {approaching && (
