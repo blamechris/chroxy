@@ -19,6 +19,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
+import { COLORS } from '../constants/colors';
 
 /** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754) */
 const FALLBACK_TIMEOUT_MS = 20 * 60 * 1000;
@@ -35,10 +36,10 @@ function formatElapsed(ms: number): string {
 }
 
 function statusColor(elapsedMs: number, timeoutMs: number): string {
-  if (elapsedMs >= timeoutMs - 60_000) return '#ef4444';
-  if (elapsedMs >= 60_000) return '#f97316';
-  if (elapsedMs >= 30_000) return '#eab308';
-  return '#22c55e';
+  if (elapsedMs >= timeoutMs - 60_000) return COLORS.accentRedBright;
+  if (elapsedMs >= 60_000) return COLORS.accentOrangeBright;
+  if (elapsedMs >= 30_000) return COLORS.accentAmber;
+  return COLORS.accentGreen;
 }
 
 export function ActivityIndicator() {
@@ -66,8 +67,8 @@ export function ActivityIndicator() {
   if (lastActivityAt == null) {
     return (
       <View style={styles.container}>
-        <View style={[styles.dot, { backgroundColor: '#22c55e' }]} />
-        <Text style={[styles.label, { color: '#22c55e' }]}>Working…</Text>
+        <View style={[styles.dot, { backgroundColor: COLORS.accentGreen }]} />
+        <Text style={[styles.label, { color: COLORS.accentGreen }]}>Working…</Text>
       </View>
     );
   }
