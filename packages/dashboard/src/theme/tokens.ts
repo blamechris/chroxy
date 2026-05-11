@@ -64,6 +64,9 @@ export const colors = {
     redLight: '#ff4a4a11',
     redSubtle: '#ff4a4a22',
     redBorder: '#ff4a4a44',
+    orange500: '#f97316',
+    yellow500: '#eab308',
+    red500: '#ef4444',
   },
   border: {
     primary: '#2a2a4e',

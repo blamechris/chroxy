@@ -5995,7 +5995,7 @@
 
 /* ActivityIndicator (#3758) — "Working… last activity Ns ago"
  * Sits in the chat composer area; only rendered while the active session
- * is busy. Color escalates from green (active) through amber/orange to red
+ * is busy. Color escalates from green (active) through yellow/orange to red
  * (approaching the inactivity timeout) so a long-but-active turn looks
  * different from a stalled one. */
 .activity-indicator {
