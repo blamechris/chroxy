@@ -6,12 +6,12 @@
  *
  * **ms-typed fields (#3775):** if you add a field whose value is a duration
  * in milliseconds (timeout, TTL, ETA, interval), follow the convention
- * documented next to `MAX_SANE_DURATION_MS` in `./server.ts` — import that
+ * documented next to `MAX_SANE_DURATION_MS` in `./server` — import that
  * constant (or promote to a shared `../constants.ts` module if more than one
- * client schema needs it) and declare the field as
- * `z.number().int().finite().max(MAX_SANE_DURATION_MS)` with
- * `.nonnegative()` / `.positive()` chosen to match the field's range.
- * This keeps server and client schemas on a single sanity ceiling.
+ * client schema needs it) and declare the field with
+ * `z.number().finite().max(MAX_SANE_DURATION_MS)` plus `.nonnegative()` /
+ * `.positive()` (and `.int()` when the field is a whole number of ms — most
+ * are). This keeps server and client schemas on a single sanity ceiling.
  */
 import { z } from 'zod';
 // -- Attachment schema (reusable) --
