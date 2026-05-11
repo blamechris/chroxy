@@ -204,4 +204,50 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       await qPromise
     })
   })
+
+  // #3757: The pre-existing tests above use a 5-min fixture and assume the
+  // resume path re-arms with that window. After #3754 made resultTimeoutMs
+  // configurable, the resume path must read this._resultTimeoutMs at
+  // re-arm time — not a hardcoded constant. Pin that contract: a session
+  // constructed with an unusual 90-second window must re-arm to 90 s after
+  // permission resolution, not the default 20 min and not the legacy 5 min.
+  describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
+    const NINETY_S = 90_000
+
+    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/20 min', async () => {
+      const s = new SdkSession({ cwd: '/tmp', resultTimeoutMs: NINETY_S })
+      s._processReady = true
+      const errors = []
+      s.on('error', (d) => errors.push(d))
+
+      try {
+        s._isBusy = true
+        s._currentMessageId = 'msg-cfg'
+        armResultTimeoutForTest(s, 'msg-cfg', false)
+
+        // Bump PermissionManager auto-deny so it doesn't resolve early.
+        s._permissions._timeoutMs = 60 * 60_000
+
+        const p = s._handlePermission('Bash', { command: 'ls' }, null)
+        mock.timers.tick(10_000) // 10s while paused
+        assert.equal(errors.length, 0, 'no fire while paused')
+
+        // Resolve — re-arms a fresh 90-second window
+        const reqId = Array.from(s._pendingPermissions.keys())[0]
+        s.respondToPermission(reqId, 'allow')
+        await p
+
+        // 89.999s elapsed since resume → must NOT fire
+        mock.timers.tick(NINETY_S - 1)
+        assert.equal(errors.length, 0, 'timer must not fire 1ms before configured window')
+
+        // 1ms more → must fire
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'timer must fire at exactly the configured 90s window')
+        assert.match(errors[0].message, /timed out/)
+      } finally {
+        s.destroy()
+      }
+    })
+  })
 })
