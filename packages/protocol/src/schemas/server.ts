@@ -14,6 +14,20 @@ import { z } from 'zod'
  * (`CHROXY_RESULT_TIMEOUT_MS=999999999999999`) gets rejected at the
  * schema boundary instead of corrupting `Date.now() + ms` arithmetic
  * on the client.
+ *
+ * **Convention for ms-typed fields (#3775):** any field whose value is a
+ * duration in milliseconds — timeouts, TTLs, ETAs, intervals — MUST be
+ * declared with the required constraint set
+ * `z.number().finite().max(MAX_SANE_DURATION_MS)`, plus `.nonnegative()`
+ * or `.positive()` chosen by the field's allowed range. Add `.int()` when
+ * the field is intended to be a whole number of ms (most ms fields are);
+ * omit it only when sub-ms / fractional values are legitimately expected.
+ * This applies to both this file and `client.ts`. `client.ts` currently
+ * has no ms-typed fields, so the sweep in #3773 was server-only; when the
+ * first ms-typed client field is added, import this constant from
+ * `./server` (or promote to `../constants.ts` shared module at that
+ * point) and apply the same constraint set so server and client agree on
+ * the sanity ceiling.
  */
 export const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
 
