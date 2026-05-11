@@ -40,7 +40,7 @@ describe('ActivityIndicator statusColor()', () => {
     });
 
     it('stays orange just below the red boundary', () => {
-      // timeout - 60 000 - 1 = 19 min 58 999 ms
+      // timeout - 60 001 ms = 1 139 999 ms = 18 min 59.999 s
       expect(statusColor(TIMEOUT_20MIN - 60_001, TIMEOUT_20MIN)).toBe(COLORS.accentOrangeBright);
     });
   });
