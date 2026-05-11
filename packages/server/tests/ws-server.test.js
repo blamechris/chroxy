@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
+import { DEFAULT_RESULT_TIMEOUT_MS } from '../src/base-session.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -4405,7 +4406,11 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
     }
   })
 
-  /** Invoke _sendPostAuthInfo() with a fake ws and return all captured payloads. */
+  /**
+   * Invoke _sendPostAuthInfo() with a fake ws and return the first auth_ok
+   * payload sent. Throws if no auth_ok was emitted (which would otherwise
+   * surface as an opaque TypeError on .resultTimeoutMs in the caller).
+   */
   function captureAuthOk(srv) {
     const sent = []
     const mockWs = {
@@ -4427,7 +4432,11 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
     } finally {
       srv.clients.delete(mockWs)
     }
-    return sent.find(m => m.type === 'auth_ok')
+    const authOk = sent.find(m => m.type === 'auth_ok')
+    if (!authOk) {
+      throw new Error(`Expected auth_ok in captured payloads, got types: [${sent.map(m => m.type).join(', ')}]`)
+    }
+    return authOk
   }
 
   it('uses the configured resultTimeoutMs in auth_ok', () => {
@@ -4451,8 +4460,7 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
       config: {},
     })
     const authOk = captureAuthOk(server)
-    // BaseSession.DEFAULT_RESULT_TIMEOUT_MS — 20 minutes
-    assert.equal(authOk.resultTimeoutMs, 20 * 60 * 1000)
+    assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
   })
 
   it('reflects post-construction config mutations on the next auth_ok', () => {
@@ -4484,6 +4492,6 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
       // config not passed → this.config = null
     })
     const authOk = captureAuthOk(server)
-    assert.equal(authOk.resultTimeoutMs, 20 * 60 * 1000)
+    assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
   })
 })
