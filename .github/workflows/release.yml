@@ -181,9 +181,69 @@ jobs:
             packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz.sig
             packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/**/latest.json
 
+  desktop-windows:
+    name: Desktop (Windows)
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          workspaces: packages/desktop/src-tauri
+
+      - name: Cache Tauri CLI binary
+        id: cache-tauri
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: cargo-tauri-v2-windows-${{ runner.arch }}-${{ hashFiles('packages/desktop/src-tauri/Cargo.lock') }}
+
+      - name: Install cargo-binstall
+        if: steps.cache-tauri.outputs.cache-hit != 'true'
+        uses: cargo-bins/cargo-binstall@7691a5b29cda4f5499b819e5618012ba4b6c3334 # v1.17.5
+
+      - name: Install Tauri CLI
+        if: steps.cache-tauri.outputs.cache-hit != 'true'
+        run: cargo binstall tauri-cli --version "^2" --no-confirm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Tauri app (MSI)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: packages/desktop
+        run: cargo tauri build --target x86_64-pc-windows-msvc --bundles msi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chroxy-windows
+          path: |
+            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip
+            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip.sig
+            packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/latest.json
+
   github-release:
     name: GitHub Release
-    needs: [validate, docker, desktop-macos]
+    needs: [validate, docker, desktop-macos, desktop-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -208,12 +268,20 @@ jobs:
           name: chroxy-macos
           path: artifacts/
 
+      - name: Download Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: chroxy-windows
+          path: artifacts/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           body: ${{ steps.changelog.outputs.body }}
           files: |
             artifacts/**/*.dmg
+            artifacts/**/*.msi
+            artifacts/**/*.msi.zip
             artifacts/**/*.tar.gz
             artifacts/**/*.sig
             artifacts/**/latest.json

@@ -50,12 +50,20 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
 - **Node.js 22+** — Required for the server:
   ```bash
+  # macOS
   brew install node@22
+
+  # Windows
+  winget install OpenJS.NodeJS.LTS
   ```
 
 - **cloudflared** — Cloudflare's tunnel client for remote access (no account needed for Quick Tunnels):
   ```bash
+  # macOS
   brew install cloudflared
+
+  # Windows
+  winget install Cloudflare.cloudflared
   ```
 
 ## Quick Start
@@ -152,6 +160,50 @@ The desktop app is a Tauri tray application wrapping the web dashboard:
 cd packages/desktop
 cargo tauri dev
 ```
+
+## Running on Windows
+
+The server runs on Windows natively — `platform.js`, `supervisor.js`, and `service.js` already handle Windows code paths. The Tauri desktop app builds on Windows from source; a pre-built MSI is on the roadmap (#3806).
+
+### Server (headless daemon)
+
+```powershell
+# Prereqs
+winget install OpenJS.NodeJS.LTS
+winget install Cloudflare.cloudflared
+
+# Install and run
+git clone https://github.com/blamechris/chroxy
+cd chroxy
+npm install
+npx chroxy init
+npx chroxy start
+```
+
+Same QR-code / manual-entry connection flow as macOS. All session features (model switching, files, git, plan mode, agents) work identically.
+
+**Run at startup:** native Windows service install is not supported by the CLI. Use one of:
+- **Task Scheduler** — schedule `node <chroxy-path> start` at logon
+- **NSSM** (https://nssm.cc/) — `nssm install Chroxy node <chroxy-path> start`
+- **PM2 with pm2-windows-service** — for full process-manager features
+
+Run `npx chroxy service install` on Windows to see this guidance in-CLI.
+
+### Desktop tray app (build from source)
+
+```powershell
+# Toolchain prereqs
+winget install Rustlang.Rustup
+rustup default stable-x86_64-pc-windows-msvc
+winget install Microsoft.VisualStudio.2022.BuildTools
+# In the installer, select "Desktop development with C++"
+
+# Build
+cd packages\desktop
+cargo tauri build
+```
+
+The MSI lands at `packages\desktop\src-tauri\target\release\bundle\msi\Chroxy_<version>_x64_en-US.msi`. WebView2 is preinstalled on Windows 11; on Windows 10, install it once from https://developer.microsoft.com/microsoft-edge/webview2/.
 
 ## Project Structure
 
