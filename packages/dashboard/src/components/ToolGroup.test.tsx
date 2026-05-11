@@ -99,6 +99,45 @@ describe('ToolGroup', () => {
     expect(screen.getByTestId('tool-group-entry-2')).toHaveTextContent('›')
   })
 
+  it('counts an empty toolResult as complete (server may emit "")', () => {
+    const messages = [
+      tool('1', 'Bash', { toolResult: '' }),
+      tool('2', 'Read'),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('✓')
+    expect(screen.getByTestId('tool-group-entry-2')).toHaveTextContent('›')
+  })
+
+  it('counts toolResultImages as complete even when toolResult is missing', () => {
+    const messages = [
+      tool('1', 'Bash', { toolResultImages: [{ data: 'x', mediaType: 'image/png' }] }),
+      tool('2', 'Read'),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('✓')
+    expect(screen.getByTestId('tool-group-entry-2')).toHaveTextContent('›')
+  })
+
+  it('uses the shared formatter so MCP-prefixed names match the header label', () => {
+    const messages = [
+      tool('1', 'mcp__github__list_repos'),
+      tool('2', 'mcp__github__list_repos'),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByText(/2 Github: List Repos/)).toBeInTheDocument()
+    expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('Github: List Repos')
+  })
+
+  it('includes serverName in entry labels for non-MCP-prefixed tools', () => {
+    const messages = [
+      tool('1', 'Read', { serverName: 'fs' }),
+      tool('2', 'Read', { serverName: 'fs' }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('fs Read')
+  })
+
   it('shows a Thinking entry for thinking messages, no tool/result marker', () => {
     const messages = [thinking('t1'), tool('1', 'Bash')]
     render(<ToolGroup messages={messages} isActive={true} />)

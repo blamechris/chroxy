@@ -10,29 +10,15 @@
  */
 import { useState, useEffect, useRef } from 'react'
 import type { ChatMessage } from '@chroxy/store-core'
-import { summarizeToolCounts, formatToolBreakdown } from '@chroxy/store-core'
+import {
+  summarizeToolCounts,
+  formatToolBreakdown,
+  formatToolName,
+} from '@chroxy/store-core'
 
 export interface ToolGroupProps {
   messages: ChatMessage[]
   isActive: boolean
-}
-
-function formatToolName(name: string): string {
-  const MCP_PREFIX = 'mcp__'
-  if (name.startsWith(MCP_PREFIX)) {
-    const withoutPrefix = name.slice(MCP_PREFIX.length)
-    const sep = withoutPrefix.indexOf('__')
-    if (sep > 0) {
-      const server = withoutPrefix.slice(0, sep).split('_').filter(Boolean).map(capitalize).join(' ')
-      const tool = withoutPrefix.slice(sep + 2).split('_').filter(Boolean).map(capitalize).join(' ')
-      return tool ? `${server}: ${tool}` : server
-    }
-  }
-  return name.split('_').filter(Boolean).map(capitalize).join(' ')
-}
-
-function capitalize(word: string): string {
-  return word ? word.charAt(0).toUpperCase() + word.slice(1) : ''
 }
 
 function getInputSummary(input: ChatMessage['toolInput']): string {
@@ -56,12 +42,19 @@ function ToolGroupEntry({ message }: { message: ChatMessage }) {
       </div>
     )
   }
-  const toolName = formatToolName(message.tool ?? 'Tool')
+  const toolName = formatToolName(message.tool ?? 'Tool', message.serverName)
   const summary = getInputSummary(message.toolInput)
-  const hasResult = !!message.toolResult
+  // `toolResult` is set to the server's result string by handleToolResult,
+  // including the empty string when the tool produced no output. A bare
+  // truthiness check (`!!toolResult`) wrongly classifies an empty result
+  // as pending; presence-check covers all non-pending shapes (#3794 review).
+  const hasResult =
+    message.toolResult !== undefined ||
+    (message.toolResultImages?.length ?? 0) > 0
+  const markerClass = `tool-group-entry-marker tool-group-entry-marker--${hasResult ? 'complete' : 'pending'}`
   return (
     <div className="tool-group-entry" data-testid={`tool-group-entry-${message.id}`}>
-      <span className="tool-group-entry-marker" aria-hidden="true">
+      <span className={markerClass} aria-hidden="true">
         {hasResult ? '✓' : '›'}
       </span>
       <span className="tool-group-entry-name">{toolName}</span>

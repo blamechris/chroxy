@@ -1575,10 +1575,17 @@
 }
 
 .tool-group-entry-marker {
-  color: var(--accent-green);
   font-size: 11px;
   width: 12px;
   flex-shrink: 0;
+}
+
+.tool-group-entry-marker--complete {
+  color: var(--accent-green);
+}
+
+.tool-group-entry-marker--pending {
+  color: var(--text-muted);
 }
 
 .tool-group-entry-name {

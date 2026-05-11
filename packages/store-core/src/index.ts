@@ -161,6 +161,7 @@ export {
   countToolUses,
   summarizeToolCounts,
   formatToolBreakdown,
+  formatToolName,
 } from './group-messages'
 
 export {

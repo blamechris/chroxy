@@ -11,9 +11,12 @@ import {
 import type { ChatMessage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
-import { formatToolName } from './chat-utils';
 import { ThinkingIndicator } from './ThinkingIndicator';
-import { summarizeToolCounts, formatToolBreakdown } from '@chroxy/store-core';
+import {
+  summarizeToolCounts,
+  formatToolBreakdown,
+  formatToolName,
+} from '@chroxy/store-core';
 
 function ActivityEntry({
   message,
@@ -41,10 +44,19 @@ function ActivityEntry({
     onToggleSelection(message.id);
   };
 
-  const hasResult = !!message.toolResult;
+  // `toolResult` is set (possibly to '') as soon as the server's result
+  // lands, so an explicit-undefined check distinguishes pending from
+  // completed even when the result body is empty (#3794 review).
+  const hasResult =
+    message.toolResult !== undefined ||
+    (message.toolResultImages?.length ?? 0) > 0;
   const imageCount = message.toolResultImages?.length || 0;
 
-  const displayTool = formatToolName(message.tool);
+  // Use the shared formatter so per-row labels match the header breakdown
+  // produced by `summarizeToolCounts` (e.g. "Github: List Repos" appears
+  // in both places). Passing `serverName` ensures non-MCP-prefixed tools
+  // routed through an MCP server still surface that origin (#3794 review).
+  const displayTool = formatToolName(message.tool ?? 'Tool', message.serverName);
 
   return (
     <TouchableOpacity
@@ -54,14 +66,7 @@ function ActivityEntry({
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
     >
       {hasResult ? <Icon name="check" size={12} color={COLORS.accentGreen} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
-      {message.serverName ? (
-        <Text style={styles.activityEntryTool}>
-          <Text style={styles.mcpServerTag}>{message.serverName}</Text>
-          {' '}{displayTool}
-        </Text>
-      ) : (
-        <Text style={styles.activityEntryTool}>{displayTool}</Text>
-      )}
+      <Text style={styles.activityEntryTool}>{displayTool}</Text>
       {imageCount > 0 && (
         <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
       )}
@@ -213,11 +218,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     marginRight: 4,
-  },
-  mcpServerTag: {
-    color: COLORS.textMuted,
-    fontSize: 10,
-    fontWeight: '400',
   },
   selectedBubble: {
     borderColor: COLORS.accentBlue,

@@ -109,8 +109,11 @@ export function formatToolBreakdown(
  *  - `mcp__github__list_repos` → `Github: List Repos`
  *  - `read_file` → `Read File`
  *  - `Read` + serverName `gh` → `gh Read` (MCP server prefix preserved)
+ *
+ *  Exported so per-row labels in both clients match the header breakdown
+ *  produced by `summarizeToolCounts` (#3794 review).
  */
-function formatToolName(name: string, serverName?: string): string {
+export function formatToolName(name: string, serverName?: string): string {
   const MCP_PREFIX = 'mcp__'
   if (name.startsWith(MCP_PREFIX)) {
     const withoutPrefix = name.slice(MCP_PREFIX.length)

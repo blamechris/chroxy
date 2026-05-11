@@ -662,10 +662,15 @@ export function App() {
     const base = groupMessages(chatFilteredMessages)
     return applyStreamingOverlay(base, chatFilteredMessages, streamingMessageId ?? null)
   }, [chatFilteredMessages, streamingMessageId])
+  // Singleton activity groups (1 tool, no thinking) pass through as plain
+  // `tool_use` rows so the existing ToolBubble — with its full expandable
+  // result panel — stays reachable. Groups only collapse into one
+  // `tool_group` row when there is a run of 2+ messages worth collapsing
+  // (#3794 review).
   const chatToolGroupPayloads = useMemo(() => {
     const map = new Map<string, { messages: ChatMessage[]; isActive: boolean }>()
     for (const g of chatDisplayGroups) {
-      if (g.type === 'activity') {
+      if (g.type === 'activity' && g.messages.length >= 2) {
         map.set(g.key, { messages: g.messages, isActive: g.isActive })
       }
     }
@@ -675,6 +680,10 @@ export function App() {
     () =>
       chatDisplayGroups.map((g) => {
         if (g.type === 'single') return toChatViewMessage(g.message)
+        if (g.messages.length < 2) {
+          // Singleton — emit as the original tool_use / thinking row.
+          return toChatViewMessage(g.messages[0]!)
+        }
         const last = g.messages[g.messages.length - 1]
         return {
           id: g.key,
