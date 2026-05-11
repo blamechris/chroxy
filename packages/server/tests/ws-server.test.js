@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
+import { DEFAULT_RESULT_TIMEOUT_MS } from '../src/base-session.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -4384,5 +4385,113 @@ describe('WsServer auth_ok / session_list hydrates stdinDroppedTotals (#3573)', 
     assert.equal(typeof entry.stdinDroppedCount, 'number')
 
     ws.close()
+  })
+})
+
+// #3766: PR #3763 wires resultTimeoutMs into _historyCtx via a late-bound
+// getter (`get resultTimeoutMs() { return self.config?.resultTimeoutMs ?? null }`)
+// specifically so config mutations after construction are reflected on the
+// next auth_ok. A future refactor that snapshots the value at construction
+// time would silently break the operator-override path that PR #3763 exists
+// to fix. These tests pin the late-binding contract through a real WsServer
+// (the ws-history unit tests use a synthetic ctx and don't exercise this
+// wiring).
+describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /**
+   * Invoke _sendPostAuthInfo() with a fake ws and return the first auth_ok
+   * payload sent. Throws if no auth_ok was emitted (which would otherwise
+   * surface as an opaque TypeError on .resultTimeoutMs in the caller).
+   */
+  function captureAuthOk(srv) {
+    const sent = []
+    const mockWs = {
+      readyState: WebSocket.OPEN,
+      send(data) { sent.push(JSON.parse(data)) },
+      close() {},
+    }
+    srv.clients.set(mockWs, {
+      id: 'mock-client',
+      _seq: 0,
+      activeSessionId: null,
+      encryptionPending: false,
+      encryptionState: null,
+      postAuthQueue: null,
+      socketIp: '127.0.0.1',
+    })
+    try {
+      srv._sendPostAuthInfo(mockWs)
+    } finally {
+      srv.clients.delete(mockWs)
+    }
+    const authOk = sent.find(m => m.type === 'auth_ok')
+    if (!authOk) {
+      throw new Error(`Expected auth_ok in captured payloads, got types: [${sent.map(m => m.type).join(', ')}]`)
+    }
+    return authOk
+  }
+
+  it('uses the configured resultTimeoutMs in auth_ok', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: { resultTimeoutMs: 45 * 60 * 1000 },
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.resultTimeoutMs, 45 * 60 * 1000)
+  })
+
+  it('falls back to BaseSession default when config omits resultTimeoutMs', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: {},
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
+  })
+
+  it('reflects post-construction config mutations on the next auth_ok', () => {
+    // The whole reason _historyCtx uses a late-bound getter: a runtime
+    // config mutation (e.g. a hot-reload path) must show up on the next
+    // auth_ok without rebuilding the WsServer.
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: { resultTimeoutMs: 30 * 60 * 1000 },
+    })
+
+    const first = captureAuthOk(server)
+    assert.equal(first.resultTimeoutMs, 30 * 60 * 1000)
+
+    server.config.resultTimeoutMs = 60 * 60 * 1000
+    const second = captureAuthOk(server)
+    assert.equal(second.resultTimeoutMs, 60 * 60 * 1000, 'late-binding must surface the new value')
+  })
+
+  it('falls back to default when config is null entirely', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      // config not passed → this.config = null
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
   })
 })
