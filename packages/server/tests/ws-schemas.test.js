@@ -368,7 +368,11 @@ describe('ServerAuthOkSchema', () => {
 describe('ServerShutdownSchema', () => {
   it('accepts valid and rejects invalid reason enum', () => {
     assert.ok(ServerShutdownSchema.safeParse({ type: 'server_shutdown', reason: 'restart', restartEtaMs: 5000 }).success)
-    assert.ok(!ServerShutdownSchema.safeParse({ type: 'server_shutdown', reason: 'crash', restartEtaMs: 0 }).success)
+    assert.ok(ServerShutdownSchema.safeParse({ type: 'server_shutdown', reason: 'shutdown', restartEtaMs: 0 }).success)
+    // 'crash' is intentionally part of the enum — emitted from
+    // uncaughtException/unhandledRejection in server-cli.js (#3773).
+    assert.ok(ServerShutdownSchema.safeParse({ type: 'server_shutdown', reason: 'crash', restartEtaMs: 0 }).success)
+    assert.ok(!ServerShutdownSchema.safeParse({ type: 'server_shutdown', reason: 'reboot', restartEtaMs: 0 }).success)
   })
 })
 
