@@ -1,12 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   StyleSheet,
   Image,
   LayoutAnimation,
 } from 'react-native';
+import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -30,12 +32,40 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
     message.expiresAt != null && message.expiresAt <= Date.now()
   );
   const [permissionExpanded, setPermissionExpanded] = useState(false);
+  // #3746: free-text mode when user picks the synthetic "Other" option
+  const [otherActive, setOtherActive] = useState(false);
+  const [otherText, setOtherText] = useState('');
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
   const isSystem = message.type === 'system';
+
+  // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
+  // Without this, otherActive would stay true after an answer arrives from
+  // another client, and the component's render flags (`showOptionButtons`
+  // vs `showFreetextInput`) would depend on lingering local UI state instead
+  // of server-authoritative `message.answered`. Belt-and-suspenders alongside
+  // the `message.answered != null` gate in showOptionButtons.
+  useEffect(() => {
+    if (isPrompt && message.answered != null && otherActive) {
+      setOtherActive(false);
+      setOtherText('');
+    }
+  }, [isPrompt, message.answered, otherActive]);
+  const hasOptions = isPrompt && !!message.options && message.options.length > 0;
+  const answeredIsFreeText =
+    hasOptions && message.answered != null &&
+    !message.options!.some(o => o.value === message.answered);
+  // Hide option buttons in free-text-answered case and while user is in
+  // "Other" mode without an answer yet. Once an answer arrives, ignore
+  // lingering otherActive so the chosen option still renders (e.g. when
+  // another client answers while local Other mode is open).
+  const showOptionButtons =
+    hasOptions && !answeredIsFreeText &&
+    (message.answered != null || !otherActive);
+  const showFreetextInput = isPrompt && otherActive && !message.answered && !isExpired;
 
   // Answered permission prompts (with requestId) collapse to a compact pill.
   // user_question prompts (no requestId) are NOT collapsed.
@@ -123,9 +153,9 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
           ))}
         </View>
       )}
-      {isPrompt && message.options && (
+      {showOptionButtons && (
         <View style={styles.promptOptions}>
-          {message.options.map((opt, i) => {
+          {message.options!.map((opt, i) => {
             const isAnswered = message.answered != null;
             const isDisabled = isAnswered || isExpired;
             const isChosen = message.answered === opt.value;
@@ -138,7 +168,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
                   isChosen && styles.promptOptionChosen,
                 ]}
                 disabled={isDisabled}
-                onPress={() => onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId)}
+                onPress={() => {
+                  if (opt.value === OTHER_OPTION_VALUE) {
+                    setOtherActive(true);
+                    return;
+                  }
+                  onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId);
+                }}
               >
                 <Text style={[
                   styles.promptOptionText,
@@ -149,6 +185,47 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
             );
           })}
         </View>
+      )}
+      {showFreetextInput && (
+        <View style={styles.promptFreetextRow}>
+          <TextInput
+            value={otherText}
+            onChangeText={setOtherText}
+            placeholder="Type your response…"
+            placeholderTextColor={COLORS.textSecondary}
+            style={styles.promptFreetextInput}
+            autoFocus
+            onSubmitEditing={() => {
+              const trimmed = otherText.trim();
+              if (!trimmed) return;
+              onSelectOption?.(trimmed, message.id, message.requestId, message.toolUseId);
+            }}
+            returnKeyType="send"
+          />
+          <TouchableOpacity
+            style={[styles.promptFreetextSend, !otherText.trim() && styles.promptOptionDisabled]}
+            disabled={!otherText.trim()}
+            onPress={() => {
+              const trimmed = otherText.trim();
+              if (!trimmed) return;
+              onSelectOption?.(trimmed, message.id, message.requestId, message.toolUseId);
+            }}
+          >
+            <Text style={styles.promptFreetextSendText}>Send</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.promptFreetextCancel}
+            onPress={() => {
+              setOtherActive(false);
+              setOtherText('');
+            }}
+          >
+            <Text style={styles.promptFreetextCancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      {answeredIsFreeText && (
+        <Text style={styles.promptFreetextAnswered}>{message.answered}</Text>
       )}
       {isPrompt && message.requestId && message.answered && permissionExpanded && (
         <Text style={permissionStyles.permissionInfoNote}>
@@ -270,6 +347,51 @@ const styles = StyleSheet.create({
   },
   promptOptionTextChosen: {
     color: '#fff',
+  },
+  promptFreetextRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  promptFreetextInput: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.accentOrangeBorderStrong,
+    backgroundColor: COLORS.backgroundInput,
+    color: COLORS.textPrimary,
+    fontSize: 14,
+  },
+  promptFreetextSend: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: COLORS.accentOrange,
+  },
+  promptFreetextSendText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  promptFreetextCancel: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.textSecondary,
+  },
+  promptFreetextCancelText: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+  },
+  promptFreetextAnswered: {
+    marginTop: 10,
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    fontStyle: 'italic',
   },
   errorBubble: {
     backgroundColor: COLORS.accentRedLight,

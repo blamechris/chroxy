@@ -2459,8 +2459,11 @@ describe('user_question handler', () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].type).toBe('prompt');
     expect(msgs[0].content).toBe('Which approach?');
-    expect(msgs[0].options).toHaveLength(2);
+    // #3746: shared handler appends an "Other" sentinel after model options
+    expect(msgs[0].options).toHaveLength(3);
     expect(msgs[0].options![0].label).toBe('Option A');
+    expect(msgs[0].options![1].label).toBe('Option B');
+    expect(msgs[0].options![2]).toEqual({ label: 'Other', value: '__chroxy_other__' });
     expect(msgs[0].toolUseId).toBe('q-use-1');
   });
 
