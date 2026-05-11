@@ -10,6 +10,7 @@ import { parseMcpToolName } from './mcp-tools.js'
 import { createLogger } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
+import { formatIdleDuration } from './session-timeout-manager.js'
 
 const log = createLogger('sdk')
 
@@ -1113,17 +1114,19 @@ export class SdkSession extends BaseSession {
   }
 
   /**
-   * Handle a true inactivity timeout — the 5-min result timer fired
-   * while the session was still busy. Emits stream_end (if streaming),
-   * auto-denies any pending permissions, emits `permission_expired` for
-   * each so the client UI clears stale prompts, then clears state and
-   * emits an error. Issue #2831 added the permission cleanup so late
-   * user approvals don't resolve into an abandoned SDK turn.
+   * Handle a true inactivity timeout — the configured result timer fired
+   * (default 20 min, see BaseSession.DEFAULT_RESULT_TIMEOUT_MS, override
+   * via config.resultTimeoutMs / CHROXY_RESULT_TIMEOUT_MS) while the
+   * session was still busy. Emits stream_end (if streaming), auto-denies
+   * any pending permissions, emits `permission_expired` for each so the
+   * client UI clears stale prompts, then clears state and emits an error.
+   * Issue #2831 added the permission cleanup so late user approvals
+   * don't resolve into an abandoned SDK turn.
    */
   _handleResultTimeout(messageId, hasStreamStarted) {
     if (!this._isBusy) return
-    const mins = Math.round(this._resultTimeoutMs / 60_000)
-    log.warn(`Result timeout (${mins} min inactivity) — force-clearing busy state`)
+    const friendly = formatIdleDuration(this._resultTimeoutMs)
+    log.warn(`Result timeout (${friendly} inactivity) — force-clearing busy state`)
     if (hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
@@ -1140,7 +1143,7 @@ export class SdkSession extends BaseSession {
     // support .return()/.throw() uniformly.
     this._abortActiveQuery()
     this._clearMessageState()
-    this.emit('error', { message: `Response timed out after ${mins} minutes of inactivity` })
+    this.emit('error', { message: `Response timed out after ${friendly} of inactivity` })
   }
 
   /**

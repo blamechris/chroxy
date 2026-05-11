@@ -14,6 +14,7 @@ import { parseMcpToolName } from './mcp-tools.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
+import { formatIdleDuration } from './session-timeout-manager.js'
 
 const log = createLogger('cli-session')
 
@@ -474,7 +475,9 @@ export class CliSession extends BaseSession {
       this._skillsPrepended = true
     }
 
-    // Safety timeout: force-clear if result never arrives (5 min).
+    // Safety timeout: force-clear if result never arrives. Window is
+    // configurable per server via config.resultTimeoutMs (#3749) — see
+    // BaseSession.DEFAULT_RESULT_TIMEOUT_MS for the default.
     // Paused while permission prompts are outstanding (#2831): awaiting
     // user input on a permission is NOT "inactivity".
     this._armResultTimeout()
@@ -501,8 +504,8 @@ export class CliSession extends BaseSession {
    */
   _handleResultTimeout() {
     if (!this._isBusy) return
-    const mins = Math.round(this._resultTimeoutMs / 60_000)
-    log.warn(`Result timeout (${mins} min) — force-clearing busy state`)
+    const friendly = formatIdleDuration(this._resultTimeoutMs)
+    log.warn(`Result timeout (${friendly}) — force-clearing busy state`)
     const messageId = this._currentMessageId
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
@@ -517,7 +520,7 @@ export class CliSession extends BaseSession {
     }
     this._pendingPermissionIds.clear()
     this._clearMessageState()
-    this.emit('error', { message: `Response timed out after ${mins} minutes` })
+    this.emit('error', { message: `Response timed out after ${friendly}` })
   }
 
   /**

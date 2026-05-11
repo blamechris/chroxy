@@ -1,5 +1,6 @@
 import { SessionManager } from './session-manager.js'
 import { DEFAULT_RESULT_TIMEOUT_MS } from './base-session.js'
+import { formatIdleDuration } from './session-timeout-manager.js'
 import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
@@ -359,7 +360,7 @@ export async function startCliServer(config) {
     Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
       ? config.resultTimeoutMs
       : DEFAULT_RESULT_TIMEOUT_MS
-  log.info(`Inactivity timeout: ${Math.round(effectiveResultTimeoutMs / 60_000)} min (${effectiveResultTimeoutMs}ms)`)
+  log.info(`Inactivity timeout: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms)`)
 
   // 2. Try restoring session state from a previous instance
   let defaultSessionId
