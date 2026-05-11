@@ -47,6 +47,8 @@ import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
+import { shouldCollapsePaste, formatPasteMarker, expandPasteMarkers, detectPasteFromDiff, PASTE_COLLAPSE_CHAR_THRESHOLD } from '@chroxy/store-core';
+import { PastedTextModal } from '../components/PastedTextModal';
 
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
@@ -510,8 +512,17 @@ export function SessionScreen() {
   const handleSend = () => {
     const hasAttachments = pendingAttachments.length > 0;
     if ((!inputText.trim() && !hasAttachments) || streamingMessageId) return;
-    const text = inputText.trim();
+    // Expand any collapsed-paste markers back to their original content
+    // before send (#3797). Trim happens AFTER expansion so an expanded
+    // payload with surrounding whitespace still sends cleanly.
+    const blockMap = new Map(pastedTextBlocks.map(b => [b.id, b.content]));
+    const expanded = blockMap.size > 0 ? expandPasteMarkers(inputText, blockMap) : inputText;
+    const text = expanded.trim();
     setInputText('');
+    // Clear paste state alongside the input — neither persists across sends.
+    setPastedTextBlocks([]);
+    pastedTextNextIdRef.current = 0;
+    setInspectedPastedTextId(null);
 
     // Detect & prefix for Claude Code Web tasks — check before addUserMessage
     // to avoid adding a thinking indicator for fire-and-forget operations
@@ -666,15 +677,57 @@ export function SessionScreen() {
   // Track whether the latest inputText change came from dictation (vs manual edit)
   const isDictationUpdateRef = useRef(false);
 
-  // Wrap setInputText to detect manual edits during dictation
+  // Pasted-text-block storage for the composer (#3797). React Native
+  // `TextInput` has no native paste event, so we detect large pastes by
+  // diffing the previous and next text on each `onChangeText` — anything
+  // that grew by more than the shared threshold in a single tick is
+  // treated as a paste and collapsed to an inline marker.
+  type PastedTextBlock = { id: number; content: string };
+  const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([]);
+  const pastedTextNextIdRef = useRef(0);
+  const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null);
+
+  // Wrap setInputText to detect manual edits during dictation AND to
+  // collapse oversized pastes (#3797).
   const handleChangeText = useCallback((text: string) => {
     if (!isDictationUpdateRef.current && isRecognizing) {
       // User manually edited text during dictation — update anchor point
       dictationStartRef.current = text.length;
     }
     isDictationUpdateRef.current = false;
+
+    // Paste detection — single-tick diff ≥ char threshold AND the
+    // inserted substring meets the shared `shouldCollapsePaste` predicate
+    // (which also covers line count). RN `TextInput` has no native paste
+    // event, so the diff is the only signal.
+    const prev = inputText;
+    if (text.length - prev.length >= PASTE_COLLAPSE_CHAR_THRESHOLD) {
+      const diff = detectPasteFromDiff(prev, text);
+      if (diff && shouldCollapsePaste(diff.inserted)) {
+        const nextId = pastedTextNextIdRef.current + 1;
+        pastedTextNextIdRef.current = nextId;
+        const marker = formatPasteMarker(nextId, diff.inserted);
+        setPastedTextBlocks(prev => [...prev, { id: nextId, content: diff.inserted }]);
+        setInputText(diff.prefix + marker + diff.suffix);
+        return;
+      }
+    }
+
     setInputText(text);
-  }, [isRecognizing]);
+  }, [isRecognizing, inputText]);
+
+  const handleRemovePastedText = useCallback((id: number) => {
+    setPastedTextBlocks(prev => prev.filter(b => b.id !== id));
+    // Strip this block's marker from the input. Per-id regex so we only
+    // touch the matching marker, not unrelated ones.
+    const markerRe = new RegExp(`\\[Pasted text #${id} \\+\\d+ (?:lines|chars)\\]`, 'g');
+    setInputText(prev => prev.replace(markerRe, ''));
+    setInspectedPastedTextId(curr => (curr === id ? null : curr));
+  }, []);
+
+  const handleInspectPastedText = useCallback((id: number) => {
+    setInspectedPastedTextId(id);
+  }, []);
 
   // Voice input: toggle start/stop and merge transcript into input text
   const handleMicPress = useCallback(() => {
@@ -1228,6 +1281,18 @@ export function SessionScreen() {
         onAttach={handleAttach}
         onCamera={handleCamera}
         onRemoveAttachment={handleRemoveAttachment}
+        pastedTextBlocks={pastedTextBlocks}
+        onInspectPastedText={handleInspectPastedText}
+        onRemovePastedText={handleRemovePastedText}
+      />
+
+      {/* Pasted-text inspect modal (#3797) */}
+      <PastedTextModal
+        visible={inspectedPastedTextId != null}
+        id={inspectedPastedTextId}
+        content={pastedTextBlocks.find(b => b.id === inspectedPastedTextId)?.content ?? ''}
+        onClose={() => setInspectedPastedTextId(null)}
+        onRemove={handleRemovePastedText}
       />
 
       {/* Create session modal */}
