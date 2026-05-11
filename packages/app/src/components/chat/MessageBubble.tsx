@@ -45,7 +45,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   const answeredIsFreeText =
     hasOptions && message.answered != null &&
     !message.options!.some(o => o.value === message.answered);
-  const showOptionButtons = hasOptions && !otherActive && !answeredIsFreeText;
+  // Hide option buttons in free-text-answered case and while user is in
+  // "Other" mode without an answer yet. Once an answer arrives, ignore
+  // lingering otherActive so the chosen option still renders (e.g. when
+  // another client answers while local Other mode is open).
+  const showOptionButtons =
+    hasOptions && !answeredIsFreeText &&
+    (message.answered != null || !otherActive);
   const showFreetextInput = isPrompt && otherActive && !message.answered && !isExpired;
 
   // Answered permission prompts (with requestId) collapse to a compact pill.

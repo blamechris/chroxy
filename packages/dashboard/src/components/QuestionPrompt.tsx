@@ -47,10 +47,17 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
 
   const answeredMatchesOption =
     answered != null && options.some((o) => o.value === answered)
+  const isFreeTextAnswered = answered != null && !answeredMatchesOption
   const showFreeText =
     !answered && (options.length === 0 || otherActive)
-  const showOptions = options.length > 0 && !otherActive
-  const showFreeTextAnswered = answered != null && !answeredMatchesOption
+  // Show option buttons whenever there are options to render — but hide them
+  // when the answer is free-text (avoid the mixed disabled-buttons-plus-answer
+  // state) and while the user is in "Other" mode without an answer yet. Once
+  // an answer arrives, ignore lingering otherActive so the chosen option still
+  // renders (e.g. when another client answers while local Other mode is open).
+  const showOptions =
+    options.length > 0 && !isFreeTextAnswered &&
+    (answered != null || !otherActive)
 
   return (
     <div className="question-prompt" data-testid="question-prompt">
@@ -99,7 +106,7 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
           )}
         </div>
       )}
-      {showFreeTextAnswered && (
+      {isFreeTextAnswered && (
         <div className="question-answered">{answered}</div>
       )}
     </div>

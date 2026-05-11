@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { OTHER_OPTION_VALUE } from '@chroxy/store-core'
 import { QuestionPrompt } from './QuestionPrompt'
 
 afterEach(cleanup)
@@ -189,7 +190,7 @@ describe('QuestionPrompt', () => {
     const withOther = [
       { label: 'Option A', value: 'a' },
       { label: 'Option B', value: 'b' },
-      { label: 'Other', value: '__chroxy_other__' },
+      { label: 'Other', value: OTHER_OPTION_VALUE },
     ]
 
     it('clicking Other swaps option buttons for a free-text input', () => {

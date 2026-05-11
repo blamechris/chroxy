@@ -1731,6 +1731,11 @@
   border-color: var(--text-secondary);
 }
 
+.question-freetext-cancel:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
 .question-answered {
   font-size: var(--text-base);
   color: var(--text-secondary);
