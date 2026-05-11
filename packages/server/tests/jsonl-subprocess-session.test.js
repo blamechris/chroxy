@@ -157,6 +157,25 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(s.isRunning, false)
       assert.equal(s.isReady, false)
     })
+
+    // #3755: middle-layer pattern — every BaseSession opt must forward
+    // through super(). resultTimeoutMs is not currently consumed by
+    // JsonlSubprocessSession (no inactivity timer), but the plumbing must
+    // be in place for when Codex/Gemini adopt the same pattern as
+    // SdkSession/CliSession.
+    it('forwards resultTimeoutMs to BaseSession (#3755)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', resultTimeoutMs: 600_000 })
+      assert.equal(s._resultTimeoutMs, 600_000,
+        'JsonlSubprocessSession must forward resultTimeoutMs so Codex/Gemini can honour operator config')
+    })
+
+    it('defaults _resultTimeoutMs to 20 min when omitted (#3755)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp' })
+      assert.equal(s._resultTimeoutMs, 20 * 60 * 1000,
+        'inherits BaseSession default when resultTimeoutMs is not provided')
+    })
   })
 
   describe('start()', () => {
