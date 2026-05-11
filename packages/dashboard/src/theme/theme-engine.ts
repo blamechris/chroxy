@@ -26,6 +26,7 @@ const ALL_CSS_VARS = [
   'accent-orange-light', 'accent-orange-subtle', 'accent-orange-medium',
   'accent-orange-border', 'accent-orange-border-strong',
   'accent-red-light', 'accent-red-subtle', 'accent-red-border',
+  'accent-orange-500', 'accent-yellow-500', 'accent-red-500',
   'border-primary', 'border-secondary', 'border-subtle', 'border-focus',
   'border-permission', 'border-question',
   'banner-border-subtle',
