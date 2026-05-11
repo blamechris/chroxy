@@ -141,4 +141,40 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
       assert.equal(session._currentMessageId, null, 'message id cleared')
     })
   })
+
+  // #3757: resume path must re-arm with this._resultTimeoutMs (not a
+  // hardcoded constant). Construct a session with a 90-second window
+  // (unusual, neither the legacy 5 min nor the new 20-min default) and
+  // verify the re-armed timer honours that exact value.
+  describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
+    const NINETY_S = 90_000
+
+    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/20 min', async () => {
+      const s = createReadySession({ resultTimeoutMs: NINETY_S })
+      const errors = []
+      s.on('error', (d) => errors.push(d))
+
+      try {
+        await s.sendMessage('do something')
+        assert.equal(s._isBusy, true)
+
+        s.notifyPermissionPending('perm-cfg')
+        mock.timers.tick(10_000)
+        assert.equal(errors.length, 0, 'no fire while paused')
+
+        s.notifyPermissionResolved('perm-cfg')
+
+        // 89.999s elapsed since resume → must NOT fire
+        mock.timers.tick(NINETY_S - 1)
+        assert.equal(errors.length, 0, 'timer must not fire 1ms before configured window')
+
+        // 1ms more → must fire
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'timer must fire at exactly the configured 90s window')
+        assert.match(errors[0].message, /timed out/)
+      } finally {
+        s.destroy()
+      }
+    })
+  })
 })

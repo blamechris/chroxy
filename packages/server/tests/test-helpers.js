@@ -310,9 +310,15 @@ export function withEnv(overrides, fn) {
 
 /**
  * Test helper: arm the SdkSession result-inactivity timeout without going
- * through sendMessage(). Lets unit tests exercise the 5-minute pause/resume
- * path in isolation. Lives in test-helpers so production module exports
+ * through sendMessage(). Lets unit tests exercise the pause/resume path
+ * in isolation. Lives in test-helpers so production module exports
  * only production API (#2870).
+ *
+ * Reads `session._resultTimeoutMs` so the helper mirrors prod behavior
+ * (the production reset closure in `sdk-session.js` does the same).
+ * Previously hardcoded to 300_000, which silently broke the regression
+ * window for #3757 — any test that constructed a session with a
+ * non-default window would still get a 5-min timer here.
  *
  * @param {import('../src/sdk-session.js').SdkSession} session
  * @param {string} messageId
@@ -325,7 +331,7 @@ export function armResultTimeoutForTest(session, messageId, hasStreamStarted = f
     if (session._resultTimeoutPaused) return
     session._resultTimeout = setTimeout(() => {
       session._handleResultTimeout(messageId, hasStreamStarted)
-    }, 300_000)
+    }, session._resultTimeoutMs)
   }
   session._resetResultTimeout = reset
   reset()
