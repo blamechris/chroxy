@@ -87,13 +87,13 @@ const CONFIG_SCHEMA = {
   // Per-session regex source string used by `shouldSkipEvaluator` to extend
   // the default continuation-pattern skip list. Wrapped in try/catch when
   // compiled — malformed sources are logged and ignored, the default
-  // pattern still applies. Documented in docs/CONFIG.md. Added in #3187.
+  // pattern still applies. Documented in CONFIG.md. Added in #3187.
   promptEvaluatorSkipPattern: 'string',
   // Per-skill byte cap and global skills-context budget (#3202). Skills
   // exceeding the per-skill cap are rejected; a merged set exceeding the
   // global cap is pruned by ascending priority then alphabetical name.
   // Defaults: 32768 (32KB) per skill, 262144 (256KB) total. Setting either
-  // to 0 disables that cap. Documented in docs/CONFIG.md.
+  // to 0 disables that cap. Documented in CONFIG.md.
   maxSkillBytes: 'number',
   maxTotalSkillBytes: 'number',
   // Per-provider skill allowlist (#3207). An object keyed by provider id
@@ -108,7 +108,7 @@ const CONFIG_SCHEMA = {
   //     listed in the allowlist for that provider load. A missing key
   //     OR an empty array filters out ALL skills for that provider —
   //     fail-secure.
-  // Documented in docs/CONFIG.md.
+  // Documented in CONFIG.md.
   providerSkillAllowlist: 'object',
   // Skill content-hash mismatch mode (#3204). One of:
   //   - 'warn': a hash mismatch logs a sanitised warn and emits a
@@ -119,7 +119,7 @@ const CONFIG_SCHEMA = {
   // explicitly opt into 'warn' or 'block' to enable it. This was an
   // intentional design choice so the trust ledger is opt-in, not
   // implicit.
-  // Documented in docs/CONFIG.md.
+  // Documented in CONFIG.md.
   trustMismatchMode: 'string',
   // #3749: max ms of inactivity (no SDK / CLI event) before the server
   // force-clears busy state and emits a timeout error. Defaults to
