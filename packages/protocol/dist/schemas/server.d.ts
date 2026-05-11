@@ -5,6 +5,16 @@
  * across server, app, and dashboard.
  */
 import { z } from 'zod';
+/**
+ * Sanity ceiling for any ms-typed numeric field (#3768).
+ *
+ * 24 h is well past every legitimate session-timeout / restart-eta /
+ * permission TTL we emit today, and tight enough that an env-var typo
+ * (`CHROXY_RESULT_TIMEOUT_MS=999999999999999`) gets rejected at the
+ * schema boundary instead of corrupting `Date.now() + ms` arithmetic
+ * on the client.
+ */
+export declare const MAX_SANE_DURATION_MS: number;
 export declare const ServerAuthOkSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_ok">;
     clientId: z.ZodString;
@@ -140,6 +150,7 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
     description: z.ZodOptional<z.ZodString>;
     input: z.ZodAny;
     remainingMs: z.ZodOptional<z.ZodNumber>;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerUserQuestionSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question">;
@@ -408,6 +419,7 @@ export declare const ServerShutdownSchema: z.ZodObject<{
     reason: z.ZodEnum<{
         restart: "restart";
         shutdown: "shutdown";
+        crash: "crash";
     }>;
     restartEtaMs: z.ZodNumber;
 }, z.core.$strip>;

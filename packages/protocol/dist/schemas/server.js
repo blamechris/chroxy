@@ -14,7 +14,7 @@ import { z } from 'zod';
  * schema boundary instead of corrupting `Date.now() + ms` arithmetic
  * on the client.
  */
-const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000;
+export const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000;
 const ClientInfoSchema = z.object({
     clientId: z.string(),
     deviceName: z.string().nullable(),
