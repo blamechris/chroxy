@@ -15,6 +15,37 @@ import { filterImageFiles } from '../utils/image-utils'
 import { shouldCollapsePaste } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
 
+/**
+ * Convert a clipboard HTML payload to plain text. Used as a fallback when
+ * a paste source (e.g. rendered markdown in WKWebView) only populates
+ * `text/html` and leaves `text/plain` empty, which otherwise causes the
+ * large-paste collapse path in handlePaste to skip the paste entirely.
+ *
+ * DOMParser handles entity decoding and tag stripping correctly; the
+ * `<br>` / block-level normalisation keeps line counts close to the
+ * visual original so the line-count threshold still triggers.
+ */
+function htmlToPlainText(html: string): string {
+  if (!html) return ''
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    // Replace <br> with newlines and append a newline after block-level
+    // close tags so visible line structure survives the strip.
+    doc.querySelectorAll('br').forEach(el => el.replaceWith('\n'))
+    const blockTags = 'p, div, li, tr, h1, h2, h3, h4, h5, h6, pre, blockquote'
+    doc.querySelectorAll(blockTags).forEach(el => el.append('\n'))
+    // #3842 — preserve leading whitespace (indented code blocks, YAML inside
+    // `<pre>`, etc.). The block-tag normalisation above appends `\n` after
+    // every block close, so a single trailing newline is an artefact worth
+    // dropping; leading whitespace and interior whitespace must be left
+    // intact because the collapsed-paste path sends this text verbatim.
+    const out = doc.body.textContent ?? ''
+    return out.endsWith('\n') ? out.slice(0, -1) : out
+  } catch {
+    return ''
+  }
+}
+
 export interface FileAttachment {
   path: string
   name: string
@@ -385,7 +416,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     }
     // #3797 — large text paste → collapse to inline marker.
     if (onLargePaste) {
-      const text = e.clipboardData?.getData('text/plain') ?? ''
+      let text = e.clipboardData?.getData('text/plain') ?? ''
+      // Fallback for sources that put HTML on the clipboard with an empty
+      // text/plain payload — common when copying rendered markdown out of
+      // Tauri's WKWebView (the visible chat view in chroxy itself) or out
+      // of other WebKit/Mac apps. Strip tags and reuse the same threshold.
+      // #3844 — also fall through when text/plain is present but
+      // whitespace-only (some Electron apps / browser extensions emit
+      // `"   "` or `"\n\n"` alongside meaningful HTML).
+      if (!text.trim()) {
+        const html = e.clipboardData?.getData('text/html') ?? ''
+        if (html) text = htmlToPlainText(html)
+      }
       if (text && shouldCollapsePaste(text)) {
         e.preventDefault()
         const marker = onLargePaste(text)

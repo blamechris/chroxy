@@ -1100,6 +1100,114 @@ describe('InputBar large-text paste (#3797)', () => {
     expect(onValueChange).not.toHaveBeenCalled()
   })
 
+  it('falls back to text/html when text/plain is empty (WKWebView markdown copy)', () => {
+    // Repro for the bug: copying rendered markdown out of the chroxy chat view
+    // in Tauri's WKWebView puts HTML on the clipboard with no text/plain
+    // payload. Without the fallback the paste fell through to default
+    // browser handling and never collapsed.
+    const onLargePaste = vi.fn().mockReturnValue('[Pasted text #1 +30 lines]')
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    // Build an HTML payload that's well over the line threshold once stripped.
+    const htmlLines = Array(30).fill('<p>line of <strong>rendered</strong> content</p>').join('')
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) =>
+        type === 'text/plain' ? '' : type === 'text/html' ? htmlLines : '',
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onLargePaste).toHaveBeenCalledTimes(1)
+    const arg = onLargePaste.mock.calls[0]![0] as string
+    expect(arg).toContain('line of rendered content')
+    expect(arg.split('\n').length).toBeGreaterThanOrEqual(20)
+    expect(onValueChange).toHaveBeenCalledWith('[Pasted text #1 +30 lines]')
+  })
+
+  it('preserves leading whitespace on the first line of HTML fallback pastes (#3842)', () => {
+    // Regression: `.trim()` on the htmlToPlainText output silently stripped
+    // the indentation off the first line of indented code blocks / YAML
+    // copied out of a rendered `<pre>`. The collapsed-paste path later
+    // sends the stashed content verbatim, so the model received the paste
+    // with the first line's indentation removed.
+    const onLargePaste = vi.fn().mockReturnValue('[Pasted text #1 +30 lines]')
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    // Indented first line, plus enough additional lines to clear the
+    // 20-line collapse threshold.
+    const extraLines = Array(30).fill('<p>more content</p>').join('')
+    const html = `<pre>    def foo():\n        return 1</pre>${extraLines}`
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) =>
+        type === 'text/plain' ? '' : type === 'text/html' ? html : '',
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onLargePaste).toHaveBeenCalledTimes(1)
+    const arg = onLargePaste.mock.calls[0]![0] as string
+    // The four leading spaces from the indented `<pre>` first line must
+    // survive into the stashed paste content.
+    expect(arg.startsWith('    def foo():')).toBe(true)
+  })
+
+  it('falls back to text/html when text/plain is whitespace-only (#3844)', () => {
+    // Regression: some clipboard sources (browser extensions, custom
+    // Electron apps, Windows-native sources) emit whitespace-only
+    // `text/plain` alongside meaningful `text/html`. The previous
+    // `if (!text)` guard treated `"   "` as truthy and fell through to
+    // default paste behaviour, skipping the HTML fallback entirely.
+    const onLargePaste = vi.fn().mockReturnValue('[Pasted text #1 +30 lines]')
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    const htmlLines = Array(30).fill('<p>line of <strong>rendered</strong> content</p>').join('')
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) =>
+        type === 'text/plain' ? '   ' : type === 'text/html' ? htmlLines : '',
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onLargePaste).toHaveBeenCalledTimes(1)
+    const arg = onLargePaste.mock.calls[0]![0] as string
+    expect(arg).toContain('line of rendered content')
+    expect(arg.split('\n').length).toBeGreaterThanOrEqual(20)
+    expect(onValueChange).toHaveBeenCalledWith('[Pasted text #1 +30 lines]')
+  })
+
   it('image paste takes priority over text paste when clipboard has both', () => {
     const onImagePaste = vi.fn()
     const onLargePaste = vi.fn()
