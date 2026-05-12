@@ -15,6 +15,10 @@ export interface ChatSettingsDropdownProps {
   availablePermissionModes: { id: string; label: string }[]
   permissionMode: string | null
   onPermissionModeChange: (mode: string) => void
+  // Hide the permission-mode picker when the active provider doesn't expose
+  // a permission-mode switch (e.g. Codex). Default true keeps Claude behavior
+  // unchanged. #3835.
+  showPermissionMode?: boolean
   showThinkingLevel: boolean
   thinkingLevel: string | null
   onThinkingLevelChange: (level: string) => void
@@ -33,6 +37,7 @@ export function ChatSettingsDropdown({
   availablePermissionModes,
   permissionMode,
   onPermissionModeChange,
+  showPermissionMode = true,
   showThinkingLevel,
   thinkingLevel,
   onThinkingLevelChange,
@@ -73,7 +78,7 @@ export function ChatSettingsDropdown({
       )}
 
       {/* Permission Mode */}
-      {availablePermissionModes.length > 0 && (
+      {showPermissionMode && availablePermissionModes.length > 0 && (
         <select
           data-kind="permission"
           value={permissionMode || ''}
