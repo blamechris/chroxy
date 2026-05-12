@@ -53,58 +53,76 @@ fn main() {
         let swift_arm64 = format!("{}/speech-helper-arm64", out_dir);
         let swift_x86_64 = format!("{}/speech-helper-x86_64", out_dir);
 
+        // Emit cargo directives unconditionally so cargo's rerun tracking stays
+        // consistent even if speech-helper.swift is temporarily absent.
+        println!("cargo:rerun-if-changed={}", swift_src);
+        println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
+
+        // Helper: run a command, panic with captured stderr on failure.
+        fn run(label: &str, cmd: &mut std::process::Command) {
+            let output = cmd.output().unwrap_or_else(|e| {
+                panic!("Failed to invoke {label}: {e}")
+            });
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                panic!("{label} failed (exit {}):\n--- stderr ---\n{}\n--- stdout ---\n{}",
+                    output.status.code().unwrap_or(-1), stderr, stdout);
+            }
+        }
+
         if std::path::Path::new(&swift_src).exists() {
             for (arch, out) in [("arm64", &swift_arm64), ("x86_64", &swift_x86_64)] {
                 let target = format!("{}-apple-macos11", arch);
-                let status = std::process::Command::new("swiftc")
-                    .args([
+                run(
+                    &format!("swiftc ({arch})"),
+                    std::process::Command::new("swiftc").args([
                         "-O",
                         "-target", &target,
                         &swift_src,
                         "-o", out,
                         "-framework", "Speech",
                         "-framework", "AVFoundation",
-                    ])
-                    .status()
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to invoke swiftc for {arch} — is Xcode CLI tools installed? ({e})")
-                    });
-                if !status.success() {
-                    panic!("swiftc failed to compile speech-helper.swift for {arch}");
-                }
+                    ]),
+                );
             }
 
-            let status = std::process::Command::new("lipo")
-                .args(["-create", &swift_arm64, &swift_x86_64, "-output", &swift_out])
-                .status()
-                .expect("Failed to invoke lipo");
-            if !status.success() {
-                panic!("lipo failed to merge speech-helper architectures");
-            }
+            run(
+                "lipo (universal speech-helper)",
+                std::process::Command::new("lipo").args([
+                    "-create", &swift_arm64, &swift_x86_64,
+                    "-output", &swift_out,
+                ]),
+            );
 
             // Codesign the universal binary with the Developer ID cert when one
             // is configured. Skipping when adhoc ("-") keeps local dev working
             // without any Apple credentials.
             if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
                 if !identity.is_empty() && identity != "-" {
-                    let status = std::process::Command::new("codesign")
-                        .args([
+                    run(
+                        "codesign (speech-helper)",
+                        std::process::Command::new("codesign").args([
                             "--force",
                             "--options", "runtime",
                             "--timestamp",
                             "--sign", &identity,
                             &swift_out,
-                        ])
-                        .status()
-                        .expect("Failed to invoke codesign for speech-helper");
-                    if !status.success() {
-                        panic!("codesign failed for speech-helper");
-                    }
+                        ]),
+                    );
+                    // Fail-fast verification: catches bad signatures here instead of
+                    // letting them propagate to a ~15-minute Apple notarytool rejection.
+                    run(
+                        "codesign --verify (speech-helper)",
+                        std::process::Command::new("codesign").args([
+                            "--verify",
+                            "--strict",
+                            "--verbose=2",
+                            &swift_out,
+                        ]),
+                    );
                 }
             }
-
-            println!("cargo:rerun-if-changed={}", swift_src);
-            println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
         }
     }
 
