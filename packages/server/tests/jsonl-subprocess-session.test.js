@@ -401,8 +401,13 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.match(errs[0].message, /totally broken/)
     })
 
-    it('respects _shouldSkipStderr to drop ignored stderr lines', async () => {
-      writeShim([], { exitCode: 1, stderr: 'DeprecationWarning: ignore me' })
+    it('prefers non-skipped stderr lines over filtered ones in exit detail', async () => {
+      // High-signal line takes priority — the skipped DeprecationWarning
+      // must not crowd out the real ERROR line.
+      writeShim([], {
+        exitCode: 1,
+        stderr: 'DeprecationWarning: ignore me\nERROR: real failure\n',
+      })
       const P = makeTestProviderClass({
         displayLabel: 'Skippy',
         shouldSkipStderr: (msg) => msg.includes('DeprecationWarning'),
@@ -416,7 +421,28 @@ describe('JsonlSubprocessSession (base)', () => {
 
       await s.sendMessage('hi')
       await waitFor(() => errs.length >= 1, { label: 'error' })
+      assert.match(errs[0].message, /real failure/)
       assert.doesNotMatch(errs[0].message, /DeprecationWarning/)
+    })
+
+    it('falls back to skipped stderr when no high-signal line was captured (#3834)', async () => {
+      // When every stderr line gets filtered, the user must still see *some*
+      // explanation rather than a bare "exited with code N".
+      writeShim([], { exitCode: 1, stderr: 'DeprecationWarning: only signal we have' })
+      const P = makeTestProviderClass({
+        displayLabel: 'Skippy',
+        shouldSkipStderr: (msg) => msg.includes('DeprecationWarning'),
+      })
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+
+      const errs = []
+      s.on('error', (e) => errs.push(e))
+      s.on('result', () => {})
+
+      await s.sendMessage('hi')
+      await waitFor(() => errs.length >= 1, { label: 'error' })
+      assert.match(errs[0].message, /only signal we have/)
     })
 
     it('clears _isBusy after the child exits', async () => {

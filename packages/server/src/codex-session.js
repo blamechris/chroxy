@@ -57,13 +57,18 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
 /**
  * Build the argv passed to `codex exec`. Exported for unit testing.
  *
+ * `--skip-git-repo-check` is always passed: chroxy owns its own session-trust
+ * gate, and Codex's git-repo heuristic refuses non-git directories outright
+ * with a bare `exit 1`, which surfaced as an undiagnosable error in the UI
+ * (#3834).
+ *
  * @param {string} text   User prompt
  * @param {string|null} model  Optional model ID. If falsy, no `-c model=` flag
  *                              is appended — Codex CLI uses its own default.
  * @returns {string[]}
  */
 export function buildCodexArgs(text, model) {
-  const args = ['exec', text, '--json']
+  const args = ['exec', text, '--json', '--skip-git-repo-check']
   if (model) {
     args.push('-c', `model="${model}"`)
   }
@@ -236,19 +241,6 @@ export class CodexSession extends JsonlSubprocessSession {
 
   _buildChildEnv() {
     return buildSpawnEnv('codex')
-  }
-
-  /**
-   * Only buffer stderr lines that look like actual errors/warnings —
-   * Codex can be noisy with diagnostic output.
-   */
-  _shouldSkipStderr(msg) {
-    return !(
-      msg.includes('ERROR') ||
-      msg.includes('WARN') ||
-      msg.includes('error') ||
-      msg.includes('not set')
-    )
   }
 
   _processJsonlLine(event, ctx) {
