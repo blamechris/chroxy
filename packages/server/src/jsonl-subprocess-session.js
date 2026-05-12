@@ -303,7 +303,14 @@ export class JsonlSubprocessSession extends BaseSession {
       didEmitResult: false,
       proc,
     }
+    // Two buffers: `stderrBuf` collects high-signal lines (those the
+    // subclass did NOT skip via _shouldSkipStderr); `rawStderrBuf` collects
+    // every line as a fallback so non-zero exits never surface as a bare
+    // "exited with code N" with no detail (#3834). A subclass filter that's
+    // too aggressive — or a CLI that writes its real failure reason in a
+    // line that doesn't match the filter — would otherwise hide the cause.
     let stderrBuf = ''
+    let rawStderrBuf = ''
 
     const rl = createInterface({ input: proc.stdout })
 
@@ -324,6 +331,9 @@ export class JsonlSubprocessSession extends BaseSession {
       for (const line of lines) {
         const msg = line.trim()
         if (!msg) continue
+        if (rawStderrBuf.length < DEFAULT_STDERR_CAP) {
+          rawStderrBuf += (rawStderrBuf ? '\n' : '') + msg
+        }
         if (this._shouldSkipStderr(msg)) continue
         if (stderrBuf.length < DEFAULT_STDERR_CAP) {
           stderrBuf += (stderrBuf ? '\n' : '') + msg
@@ -340,7 +350,10 @@ export class JsonlSubprocessSession extends BaseSession {
         ctx.didStreamStart = false
       }
       if (code !== 0 && code !== null) {
-        const detail = stderrBuf ? `: ${stderrBuf.slice(0, STDERR_SLICE_FOR_ERROR)}` : ''
+        // Prefer high-signal stderr; fall back to raw so the user always
+        // sees *some* explanation when the child died.
+        const sourceBuf = stderrBuf || rawStderrBuf
+        const detail = sourceBuf ? `: ${sourceBuf.slice(0, STDERR_SLICE_FOR_ERROR)}` : ''
         this.emit('error', {
           message: `${Klass.displayLabel} process exited with code ${code}${detail}`,
         })

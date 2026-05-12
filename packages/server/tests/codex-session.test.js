@@ -873,6 +873,14 @@ describe('CodexSession', () => {
       assert.ok(idx >= 0, '-c flag should be present when model is set')
       assert.equal(args[idx + 1], 'model="o3"')
     })
+
+    it('always passes --skip-git-repo-check (#3834)', () => {
+      // Codex exec refuses non-trusted (non-git) dirs without this flag and
+      // exits 1 with no diagnostic the user can see. Chroxy owns its own
+      // session-trust gate so the codex git-repo heuristic is redundant.
+      assert.ok(buildCodexArgs('hi', null).includes('--skip-git-repo-check'))
+      assert.ok(buildCodexArgs('hi', 'o3').includes('--skip-git-repo-check'))
+    })
   })
 
   describe('binary candidate list', () => {
@@ -1067,7 +1075,7 @@ describe('CodexSession', () => {
       assert.equal(errors.length, 1)
       // Codex uses displayLabel 'OpenAI Codex' (verified by the static).
       assert.match(errors[0].message, /OpenAI Codex.*code 13/)
-      // _shouldSkipStderr keeps lines containing "ERROR" → message includes detail.
+      // Stderr is surfaced in the exit error so users see *why* codex died.
       assert.match(errors[0].message, /codex blew up/)
     })
 
