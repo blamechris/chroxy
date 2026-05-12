@@ -34,7 +34,13 @@ function htmlToPlainText(html: string): string {
     doc.querySelectorAll('br').forEach(el => el.replaceWith('\n'))
     const blockTags = 'p, div, li, tr, h1, h2, h3, h4, h5, h6, pre, blockquote'
     doc.querySelectorAll(blockTags).forEach(el => el.append('\n'))
-    return (doc.body.textContent ?? '').trim()
+    // #3842 — preserve leading whitespace (indented code blocks, YAML inside
+    // `<pre>`, etc.). The block-tag normalisation above appends `\n` after
+    // every block close, so a single trailing newline is an artefact worth
+    // dropping; leading whitespace and interior whitespace must be left
+    // intact because the collapsed-paste path sends this text verbatim.
+    const out = doc.body.textContent ?? ''
+    return out.endsWith('\n') ? out.slice(0, -1) : out
   } catch {
     return ''
   }
@@ -415,7 +421,10 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       // text/plain payload — common when copying rendered markdown out of
       // Tauri's WKWebView (the visible chat view in chroxy itself) or out
       // of other WebKit/Mac apps. Strip tags and reuse the same threshold.
-      if (!text) {
+      // #3844 — also fall through when text/plain is present but
+      // whitespace-only (some Electron apps / browser extensions emit
+      // `"   "` or `"\n\n"` alongside meaningful HTML).
+      if (!text.trim()) {
         const html = e.clipboardData?.getData('text/html') ?? ''
         if (html) text = htmlToPlainText(html)
       }
