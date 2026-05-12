@@ -207,6 +207,31 @@ jobs:
             echo "::notice::Apple notarization disabled (need APPLE_TEAM_ID + APPLE_ID + APPLE_PASSWORD + APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD all set)"
           fi
 
+      - name: Pre-sign macOS helper binaries
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        working-directory: packages/desktop
+        run: |
+          # Tauri's bundler signs the main app binary + the .app, but NOT
+          # arbitrary executables under Contents/Resources/. Apple notarization
+          # rejects any embedded binary that is adhoc-signed, missing the
+          # hardened runtime, or missing a secure timestamp.
+          #
+          # Pre-sign each helper here BEFORE `cargo tauri build` copies it
+          # into the bundle, so the .app ships with proper signatures end to end.
+          if [ "$APPLE_SIGNING_IDENTITY" = "-" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "::notice::Skipping macOS helper signing — no Developer ID identity configured"
+            exit 0
+          fi
+          if [ -f src-tauri/swift/speech-helper ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              src-tauri/swift/speech-helper
+            codesign -dvv src-tauri/swift/speech-helper 2>&1 \
+              | grep -E "^(Signature|TeamIdentifier|Authority|Timestamp)" | head -4
+          fi
+
       - name: Build Tauri app (universal)
         shell: bash
         env:
