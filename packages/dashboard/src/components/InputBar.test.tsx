@@ -1100,6 +1100,41 @@ describe('InputBar large-text paste (#3797)', () => {
     expect(onValueChange).not.toHaveBeenCalled()
   })
 
+  it('falls back to text/html when text/plain is empty (WKWebView markdown copy)', () => {
+    // Repro for the bug: copying rendered markdown out of the chroxy chat view
+    // in Tauri's WKWebView puts HTML on the clipboard with no text/plain
+    // payload. Without the fallback the paste fell through to default
+    // browser handling and never collapsed.
+    const onLargePaste = vi.fn().mockReturnValue('[Pasted text #1 +30 lines]')
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        onLargePaste={onLargePaste}
+      />,
+    )
+    const textarea = screen.getByRole('textbox')
+
+    // Build an HTML payload that's well over the line threshold once stripped.
+    const htmlLines = Array(30).fill('<p>line of <strong>rendered</strong> content</p>').join('')
+    const clipboardData = {
+      files: [],
+      items: [],
+      getData: (type: string) =>
+        type === 'text/plain' ? '' : type === 'text/html' ? htmlLines : '',
+    }
+    fireEvent.paste(textarea, { clipboardData })
+
+    expect(onLargePaste).toHaveBeenCalledTimes(1)
+    const arg = onLargePaste.mock.calls[0]![0] as string
+    expect(arg).toContain('line of rendered content')
+    expect(arg.split('\n').length).toBeGreaterThanOrEqual(20)
+    expect(onValueChange).toHaveBeenCalledWith('[Pasted text #1 +30 lines]')
+  })
+
   it('image paste takes priority over text paste when clipboard has both', () => {
     const onImagePaste = vi.fn()
     const onLargePaste = vi.fn()
