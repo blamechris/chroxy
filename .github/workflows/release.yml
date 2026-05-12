@@ -159,14 +159,44 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+      - name: Configure signing env
+        shell: bash
+        env:
+          TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          # Tauri updater signing — only export env vars when password is non-empty.
+          # An empty password trips Windows minisign-verify; see release-secrets docs.
+          if [ -n "$TAURI_PWD" ]; then
+            {
+              echo "TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
+              echo "$TAURI_KEY"
+              echo "TAURI_KEY_EOF"
+              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_PWD"
+            } >> "$GITHUB_ENV"
+            echo "::notice::Tauri updater signing enabled"
+          else
+            echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret is empty or unset)"
+          fi
+
+          # Apple notarization — only export when all three are non-empty.
+          if [ -n "$APPLE_TEAM_ID_SECRET" ] && [ -n "$APPLE_ID_SECRET" ] && [ -n "$APPLE_PASSWORD_SECRET" ]; then
+            {
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_SECRET"
+              echo "APPLE_ID=$APPLE_ID_SECRET"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD_SECRET"
+            } >> "$GITHUB_ENV"
+            echo "::notice::Apple notarization enabled"
+          else
+            echo "::notice::Apple notarization disabled (need APPLE_TEAM_ID, APPLE_ID, and APPLE_PASSWORD all set)"
+          fi
+
       - name: Build Tauri app (universal)
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg
 
@@ -224,10 +254,27 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Build Tauri app (MSI)
+      - name: Configure signing env
+        shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # Tauri updater signing — only export env vars when password is non-empty.
+          # An empty password trips Windows minisign-verify; see release-secrets docs.
+          if [ -n "$TAURI_PWD" ]; then
+            {
+              echo "TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
+              echo "$TAURI_KEY"
+              echo "TAURI_KEY_EOF"
+              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_PWD"
+            } >> "$GITHUB_ENV"
+            echo "::notice::Tauri updater signing enabled"
+          else
+            echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret is empty or unset)"
+          fi
+
+      - name: Build Tauri app (MSI)
         working-directory: packages/desktop
         run: cargo tauri build --target x86_64-pc-windows-msvc --bundles msi
 
