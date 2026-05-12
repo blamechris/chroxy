@@ -78,6 +78,24 @@ describe('ChatSettingsDropdown', () => {
     expect(selects).toHaveLength(3)
   })
 
+  it('hides permission mode select when showPermissionMode is false (#3835)', () => {
+    // Codex and other providers without permission-mode switching must not
+    // surface the "Approve / Auto / Plan" selector — the concept doesn't
+    // apply to them and the dropdown values would be misleading.
+    renderDropdown({ showPermissionMode: false })
+    const selects = screen.getAllByRole('combobox')
+    // Only the model select remains.
+    expect(selects).toHaveLength(1)
+  })
+
+  it('defaults to showing permission mode when showPermissionMode is omitted', () => {
+    // Backwards-compat: existing Claude callers that never set the prop
+    // continue to see the permission picker.
+    renderDropdown()
+    const selects = screen.getAllByRole('combobox')
+    expect(selects).toHaveLength(2)
+  })
+
   it('calls onModelChange when model is selected', () => {
     const onModelChange = vi.fn()
     renderDropdown({ onModelChange })
