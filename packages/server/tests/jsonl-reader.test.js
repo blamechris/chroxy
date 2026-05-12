@@ -15,8 +15,8 @@ import {
 describe('encodeProjectPath', () => {
   it('replaces slashes with dashes', () => {
     assert.equal(
-      encodeProjectPath('/Users/blamechris/Projects/chroxy'),
-      '-Users-blamechris-Projects-chroxy',
+      encodeProjectPath('/Users/alice/projects/myrepo'),
+      '-Users-alice-projects-myrepo',
     )
   })
 

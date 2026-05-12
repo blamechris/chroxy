@@ -8,7 +8,7 @@ const MAX_MESSAGES = 500
 /**
  * Encode a filesystem path the same way Claude Code does for its project directories.
  * Replaces all `/` with `-`.
- * e.g. '/Users/blamechris/Projects/chroxy' -> '-Users-blamechris-Projects-chroxy'
+ * e.g. '/Users/alice/projects/myrepo' -> '-Users-alice-projects-myrepo'
  */
 export function encodeProjectPath(cwd) {
   return cwd.replace(/\//g, '-')

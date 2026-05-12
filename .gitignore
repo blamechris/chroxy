@@ -68,3 +68,7 @@ tmp/
 # Local docs (never commit)
 ROADMAP.local.md
 tests/screenshots/
+
+# Personal session notes (do not commit)
+/chris-freedom-*.md
+/*-session.md
