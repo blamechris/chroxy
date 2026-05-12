@@ -62,6 +62,15 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * with a bare `exit 1`, which surfaced as an undiagnosable error in the UI
  * (#3834).
  *
+ * `--sandbox workspace-write` is always passed (#3837 stopgap): without it
+ * Codex falls back to `read-only` in any directory that isn't explicitly
+ * listed under `[projects."…"]` with `trust_level = "trusted"` in
+ * `~/.codex/config.toml`, which makes Codex unable to write files in
+ * fresh chroxy sessions and looks like a chroxy bug. The user picking
+ * a directory in chroxy IS the trust signal, so workspace-write is the
+ * right default. A per-session sandbox selector (read-only / workspace-write
+ * / danger-full-access) is tracked separately under #3837.
+ *
  * SECURITY INVARIANT (#3843): `text` and `model` are interpolated into argv
  * passed directly to `spawn()` — no shell, so shell metacharacters can't
  * escape. However, `model` is interpolated into the `-c model="${model}"`
@@ -81,7 +90,7 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * @returns {string[]}
  */
 export function buildCodexArgs(text, model) {
-  const args = ['exec', text, '--json', '--skip-git-repo-check']
+  const args = ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
   if (model) {
     args.push('-c', `model="${model}"`)
   }

@@ -881,6 +881,21 @@ describe('CodexSession', () => {
       assert.ok(buildCodexArgs('hi', null).includes('--skip-git-repo-check'))
       assert.ok(buildCodexArgs('hi', 'o3').includes('--skip-git-repo-check'))
     })
+
+    it('always passes --sandbox workspace-write (#3837)', () => {
+      // Without this, codex exec defaults to read-only in any directory
+      // not explicitly trusted in ~/.codex/config.toml, so Codex can't
+      // edit files in fresh chroxy sessions. The user picking the directory
+      // in chroxy is the trust signal.
+      const args = buildCodexArgs('hi', null)
+      const idx = args.indexOf('--sandbox')
+      assert.ok(idx >= 0, '--sandbox flag should be present')
+      assert.equal(args[idx + 1], 'workspace-write')
+      // Also present when a model is configured.
+      const withModel = buildCodexArgs('hi', 'o3')
+      const idxModel = withModel.indexOf('--sandbox')
+      assert.equal(withModel[idxModel + 1], 'workspace-write')
+    })
   })
 
   describe('binary candidate list', () => {
