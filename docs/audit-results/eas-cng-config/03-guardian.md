@@ -129,7 +129,7 @@ The exact failure mode we hit today, in scripted form.
 
 ```bash
 # 1. IDENTIFY: which Expo component bumped?
-cd <repo-root>
+cd /path/to/chroxy
 git log --oneline --since="2 weeks ago" -- package-lock.json packages/app/package.json
 # Look for "expo" bump. Also check packages/app/package.json's `expo: ^54.0.0` range —
 # caret-range means patches auto-adopted on every fresh npm ci.
@@ -178,7 +178,7 @@ Most dangerous scenario because the instinct is to run `expo prebuild --clean`. 
 
 ```bash
 # 1. BACK UP the LiveActivity target before touching anything:
-cd <repo-root>
+cd /path/to/chroxy
 cp -R packages/app/ios /tmp/chroxy-ios-backup-$(date +%s)
 
 # 2. DIAGNOSE what is stale. The three usual suspects:
@@ -225,7 +225,7 @@ git status packages/app/ios  # should show clean
 
 ```bash
 # 1. IDENTIFY which prepare is failing:
-cd <repo-root>
+cd /path/to/chroxy
 npm install 2>&1 | tee /tmp/install.log
 grep -B2 -A10 "prepare\|build:crypto\|tsc" /tmp/install.log | grep -i error
 
