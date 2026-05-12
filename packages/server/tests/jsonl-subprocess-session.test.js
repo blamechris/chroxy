@@ -445,6 +445,64 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.match(errs[0].message, /only signal we have/)
     })
 
+    it('logs a warning when raw-stderr fallback supplies the only signal (#3841)', async () => {
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const logs = []
+      const listener = (entry) => logs.push(entry)
+      addLogListener(listener)
+      try {
+        writeShim([], { exitCode: 1, stderr: 'DeprecationWarning: filtered' })
+        const P = makeTestProviderClass({
+          displayLabel: 'Skippy',
+          providerName: 'skippy',
+          shouldSkipStderr: (msg) => msg.includes('DeprecationWarning'),
+        })
+        const s = new P({ cwd: '/tmp' })
+        s._processReady = true
+
+        s.on('error', () => {})
+        s.on('result', () => {})
+
+        await s.sendMessage('hi')
+        await waitFor(() => logs.some((e) => e.level === 'warn' && /filtered all stderr/.test(e.message)), {
+          label: 'fallback warning',
+        })
+
+        const warn = logs.find((e) => e.level === 'warn' && /filtered all stderr/.test(e.message))
+        assert.ok(warn, 'warn log fired')
+        assert.match(warn.message, /\[skippy\]/, 'warning includes provider name')
+        assert.match(warn.message, /exited 1/, 'warning includes exit code')
+      } finally {
+        removeLogListener(listener)
+      }
+    })
+
+    it('does NOT log the raw-fallback warning on the happy path (#3841)', async () => {
+      const { addLogListener, removeLogListener } = await import('../src/logger.js')
+      const logs = []
+      const listener = (entry) => logs.push(entry)
+      addLogListener(listener)
+      try {
+        // High-signal line present → primary buffer wins → no fallback → no warn.
+        writeShim([], { exitCode: 1, stderr: 'ERROR: a real failure' })
+        const P = makeTestProviderClass({ displayLabel: 'Noisy', providerName: 'noisy' })
+        const s = new P({ cwd: '/tmp' })
+        s._processReady = true
+
+        s.on('error', () => {})
+        s.on('result', () => {})
+
+        await s.sendMessage('hi')
+        // Give the close handler a beat to run.
+        await new Promise((r) => setTimeout(r, 50))
+
+        const hit = logs.find((e) => e.level === 'warn' && /filtered all stderr/.test(e.message))
+        assert.equal(hit, undefined, 'no fallback warning when high-signal stderr exists')
+      } finally {
+        removeLogListener(listener)
+      }
+    })
+
     it('clears _isBusy after the child exits', async () => {
       writeShim([{ type: 'done' }])
       const P = makeTestProviderClass()

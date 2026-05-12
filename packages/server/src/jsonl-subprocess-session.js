@@ -1,6 +1,9 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { BaseSession } from './base-session.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('jsonl-subprocess-session')
 
 /**
  * JsonlSubprocessSession — shared spawn/readline/event-handling for session
@@ -353,6 +356,15 @@ export class JsonlSubprocessSession extends BaseSession {
         // Prefer high-signal stderr; fall back to raw so the user always
         // sees *some* explanation when the child died.
         const sourceBuf = stderrBuf || rawStderrBuf
+        // #3841 — surface a one-shot warning when the raw fallback was the
+        // only signal. That means the subclass's _shouldSkipStderr filter
+        // swallowed every stderr line yet the child still died, so the
+        // filter is over-aggressive and worth tightening.
+        if (!stderrBuf && rawStderrBuf) {
+          log.warn(
+            `[${Klass.providerName}] _shouldSkipStderr filtered all stderr but child exited ${code} — using raw fallback`,
+          )
+        }
         const detail = sourceBuf ? `: ${sourceBuf.slice(0, STDERR_SLICE_FOR_ERROR)}` : ''
         this.emit('error', {
           message: `${Klass.displayLabel} process exited with code ${code}${detail}`,

@@ -62,9 +62,22 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * with a bare `exit 1`, which surfaced as an undiagnosable error in the UI
  * (#3834).
  *
+ * SECURITY INVARIANT (#3843): `text` and `model` are interpolated into argv
+ * passed directly to `spawn()` — no shell, so shell metacharacters can't
+ * escape. However, `model` is interpolated into the `-c model="${model}"`
+ * config flag *without* re-validation here. **Callers MUST pre-validate the
+ * model ID against `CodexSession.getAllowedModels()` before calling.** The
+ * production gate is `handleSetModel` in `handlers/settings-handlers.js`,
+ * which rejects any value not in the per-provider allowlist before
+ * `session.setModel()` writes to `this.model`. If a future refactor exposes
+ * `buildCodexArgs` to a new caller (e.g. an alternate spawn path), preserve
+ * that invariant or add validation here.
+ *
  * @param {string} text   User prompt
- * @param {string|null} model  Optional model ID. If falsy, no `-c model=` flag
- *                              is appended — Codex CLI uses its own default.
+ * @param {string|null} model  Optional model ID. Caller must validate against
+ *                              `CodexSession.getAllowedModels()`. If falsy,
+ *                              no `-c model=` flag is appended — Codex CLI
+ *                              uses its own default.
  * @returns {string[]}
  */
 export function buildCodexArgs(text, model) {
