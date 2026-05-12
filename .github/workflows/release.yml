@@ -228,8 +228,11 @@ jobs:
             codesign --force --options runtime --timestamp \
               --sign "$APPLE_SIGNING_IDENTITY" \
               src-tauri/swift/speech-helper
-            codesign -dvv src-tauri/swift/speech-helper 2>&1 \
-              | grep -E "^(Signature|TeamIdentifier|Authority|Timestamp)" | head -4
+            # Fail fast on a bad signature instead of waiting ~15min for
+            # Apple notarization to reject it. --verify --strict exits
+            # non-zero on any issue (missing hardened runtime, missing
+            # timestamp, broken cert chain, etc.) and prints the reason.
+            codesign --verify --strict --verbose=2 src-tauri/swift/speech-helper
           fi
 
       - name: Build Tauri app (universal)
