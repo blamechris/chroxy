@@ -290,6 +290,28 @@ export function App() {
     [activeMismatched],
   )
 
+  // #3839: dropdown-gating flags derived from the active session's provider
+  // capabilities. Hoisted out of the JSX so the lookups don't re-run on every
+  // render of <App>, which fires on most WS messages.
+  const dropdownFlags = useMemo(() => {
+    const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+    const providerInfo = availableProviders.find(p => p.name === activeProvider)
+    const caps = providerInfo?.capabilities
+    // The store carries one `availableModels` slot tagged with the provider
+    // that pushed it. If the active session is a different provider (server
+    // hasn't pushed the matching list yet), suppress the picker instead of
+    // showing the wrong models.
+    const modelsMatchProvider =
+      availableModelsProvider == null ||
+      activeProvider == null ||
+      availableModelsProvider === activeProvider
+    return {
+      showModelPicker: caps?.modelSwitch !== false && modelsMatchProvider,
+      showPermissionMode: caps?.permissionModeSwitch !== false,
+      showThinkingLevel: !!caps?.thinkingLevel,
+    }
+  }, [sessions, activeSessionId, availableProviders, availableModelsProvider])
+
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
     storeMessages
@@ -1376,41 +1398,19 @@ export function App() {
           <span className={`status-dot ${serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null) ? 'connecting' : connectionPhase}`} />
         </div>
         <div className="header-center">
-          {(() => {
-            // Gate each dropdown by the active provider's capabilities (#3835).
-            // Without this, switching to a Codex tab would still show Claude's
-            // model list and the "Approve" permission selector even though
-            // Codex doesn't support permission-mode switching at all.
-            const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
-            const providerInfo = availableProviders.find(p => p.name === activeProvider)
-            const caps = providerInfo?.capabilities
-            // The store carries one `availableModels` slot tagged with the
-            // provider that pushed it. If the active session is a different
-            // provider (server hasn't pushed the matching list yet), suppress
-            // the picker instead of showing the wrong models.
-            const modelsMatchProvider =
-              availableModelsProvider == null ||
-              activeProvider == null ||
-              availableModelsProvider === activeProvider
-            const showModelPicker = caps?.modelSwitch !== false && modelsMatchProvider
-            const showPermissionMode = caps?.permissionModeSwitch !== false
-            const showThinkingLevel = !!caps?.thinkingLevel
-            return (
-              <ChatSettingsDropdown
-                availableModels={showModelPicker ? availableModels : []}
-                activeModel={activeModel}
-                defaultModelId={defaultModelId}
-                onModelChange={setModel}
-                availablePermissionModes={availablePermissionModes}
-                permissionMode={permissionMode}
-                onPermissionModeChange={setPermissionMode}
-                showPermissionMode={showPermissionMode}
-                showThinkingLevel={showThinkingLevel}
-                thinkingLevel={thinkingLevel}
-                onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
-              />
-            )
-          })()}
+          <ChatSettingsDropdown
+            availableModels={dropdownFlags.showModelPicker ? availableModels : []}
+            activeModel={activeModel}
+            defaultModelId={defaultModelId}
+            onModelChange={setModel}
+            availablePermissionModes={availablePermissionModes}
+            permissionMode={permissionMode}
+            onPermissionModeChange={setPermissionMode}
+            showPermissionMode={dropdownFlags.showPermissionMode}
+            showThinkingLevel={dropdownFlags.showThinkingLevel}
+            thinkingLevel={thinkingLevel}
+            onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
+          />
         </div>
         <div className="header-right">
           {/* #3209: Skills toggle, moved to header-right as an icon
