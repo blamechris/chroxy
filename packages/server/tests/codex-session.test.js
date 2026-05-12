@@ -894,6 +894,8 @@ describe('CodexSession', () => {
       // Also present when a model is configured.
       const withModel = buildCodexArgs('hi', 'o3')
       const idxModel = withModel.indexOf('--sandbox')
+      assert.ok(idxModel >= 0, '--sandbox flag should be present with model')
+      assert.ok(idxModel + 1 < withModel.length, '--sandbox should have a value')
       assert.equal(withModel[idxModel + 1], 'workspace-write')
     })
   })
