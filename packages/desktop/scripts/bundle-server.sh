@@ -65,6 +65,18 @@ require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n')
 echo "[bundle-server] Installing production dependencies..."
 npm install --omit=dev --no-audit --no-fund 2>&1
 
+# Prune Bare-runtime prebuilds.
+#
+# `bare-fs`, `bare-url`, `bare-os` and friends ship `.bare` native binaries for
+# the Holepunch Bare runtime. They arrive as transitive deps of
+# `tar-fs@3 → bare-fs`, pulled in by `@kubernetes/client-node`. When the server
+# runs on Node.js (always, for us), `bare-fs` is never required — `tar-fs`
+# uses Node's native `fs` directly. The prebuilds are pure dead weight (~3 MB)
+# AND they fail Apple notarization because they're unsigned native binaries
+# embedded inside the Tauri app bundle.
+echo "[bundle-server] Pruning Bare-runtime prebuilds (unused under Node.js)..."
+find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -exec rm -rf {} +
+
 # Copy workspace packages AFTER npm install (npm wipes node_modules during install).
 # Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
 PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
