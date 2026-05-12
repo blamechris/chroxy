@@ -8,8 +8,10 @@ Used by both macOS and Windows desktop jobs to sign the auto-update artifacts (`
 
 | Secret | Required? | Notes |
 |--------|-----------|-------|
-| `TAURI_SIGNING_PRIVATE_KEY` | ⚠ Only when `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is set | The full minisign-style private key as emitted by `cargo tauri signer generate -w` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Required to enable signing | **Must be non-empty.** Empty-password keys trip Windows `minisign-verify` on `windows-latest` runners. |
+| `TAURI_SIGNING_PRIVATE_KEY` | Required (paired with password) | The full minisign-style private key as emitted by `cargo tauri signer generate -w` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Required (paired with key) | **Must be non-empty.** Empty-password keys trip Windows `minisign-verify` on `windows-latest` runners. |
+
+Both must be set and non-empty for signing to run. If either is missing, the workflow passes `-c '{"bundle":{"createUpdaterArtifacts":false}}'` to `cargo tauri build` to suppress the updater bundle entirely. The MSI / DMG / `.app` still build and upload; the `.sig` / `latest.json` outputs do not. The committed `plugins.updater.pubkey` in `tauri.conf.json` remains untouched — only the runtime artifact generation is skipped.
 
 ### Generating a new key
 
@@ -27,7 +29,9 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/chroxy-updater.key
 gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body 'YOUR_STRONG_PASSWORD'
 ```
 
-If you rotated the key, also update the `plugins.updater.pubkey` field in `packages/desktop/src-tauri/tauri.conf.json` with the contents of `~/.tauri/chroxy-updater.key.pub` (base64-encoded, single line). Commit that change — it ships with the app and is what the auto-updater uses to verify updates.
+Skip the next paragraph if you are only setting a password on an existing key — the pubkey in `tauri.conf.json` stays valid. Only update the pubkey if you generated a fresh keypair.
+
+If you regenerated the keypair (not just changed the password), also update the `plugins.updater.pubkey` field in `packages/desktop/src-tauri/tauri.conf.json` with the contents of `~/.tauri/chroxy-updater.key.pub` (base64-encoded, single line). Commit that change — it ships with the app and is what the auto-updater uses to verify updates. **⚠ Rotating the keypair invalidates auto-update for any already-installed app**; only do this pre-1.0 or as part of a planned forced-reinstall release.
 
 ## macOS code signing & notarization
 
@@ -42,7 +46,7 @@ Used by the `desktop-macos` job to produce a Gatekeeper-trusted, notarized `.dmg
 | `APPLE_CERTIFICATE` | Yes (for non-adhoc signing) | base64-encoded `.p12` export of your Developer ID Application certificate |
 | `APPLE_CERTIFICATE_PASSWORD` | Yes (paired with above) | The password you set when exporting the `.p12` from Keychain |
 
-All five Apple secrets must be set for notarization to run. If any of `APPLE_TEAM_ID` / `APPLE_ID` / `APPLE_PASSWORD` is missing, the workflow skips the notarization environment entirely and the build produces an adhoc-signed artifact instead.
+**All five of `APPLE_TEAM_ID`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_CERTIFICATE`, and `APPLE_CERTIFICATE_PASSWORD` must be set and non-empty for notarization to run.** If any are missing, the workflow skips the notarization environment entirely and the build produces an adhoc-signed artifact (which won't pass Gatekeeper on a fresh-installed Mac, but is fine for local installs and CI smoke tests). `APPLE_SIGNING_IDENTITY` defaults to `-` (adhoc signing) when unset, regardless of the other secrets.
 
 ### Getting your Team ID
 
@@ -60,7 +64,9 @@ Log in to https://developer.apple.com/account — your 10-character Team ID is s
 1. Open **Keychain Access** on macOS
 2. Find **Developer ID Application: Your Name (TEAMID)** under "login" keychain
 3. Right-click → **Export** → save as `.p12`, set a password during export
-4. Base64-encode for the secret: `base64 -i cert.p12 | pbcopy`
+4. Base64-encode for the secret:
+   - **macOS** (BSD `base64`): `base64 -i cert.p12 | pbcopy`
+   - **Linux** (GNU `base64`): `base64 -w0 cert.p12 | xclip -selection clipboard`
 
 ### Setting the secrets
 

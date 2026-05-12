@@ -167,23 +167,36 @@ jobs:
           APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_CERT_SECRET: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERT_PWD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          # Tauri updater signing — only export env vars when password is non-empty.
-          # An empty password trips Windows minisign-verify; see release-secrets docs.
-          if [ -n "$TAURI_PWD" ]; then
+          # Tauri updater signing — requires BOTH private key and non-empty password.
+          # Tauri v2 cannot skip signing via env-var absence (tauri.conf.json's pubkey
+          # triggers sign_updaters unconditionally for Updater/MSI/etc. bundles), so when
+          # either secret is missing we pass a config merge via -c that disables
+          # createUpdaterArtifacts. The build step always reads TAURI_CONFIG_OVERRIDE.
+          if [ -n "$TAURI_KEY" ] && [ -n "$TAURI_PWD" ]; then
             {
               echo "TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
               echo "$TAURI_KEY"
               echo "TAURI_KEY_EOF"
               echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_PWD"
+              echo "TAURI_CONFIG_OVERRIDE={}"
             } >> "$GITHUB_ENV"
             echo "::notice::Tauri updater signing enabled"
           else
-            echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret is empty or unset)"
+            echo 'TAURI_CONFIG_OVERRIDE={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+            echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY and/or TAURI_SIGNING_PRIVATE_KEY_PASSWORD not configured) — createUpdaterArtifacts overridden to false"
           fi
 
-          # Apple notarization — only export when all three are non-empty.
-          if [ -n "$APPLE_TEAM_ID_SECRET" ] && [ -n "$APPLE_ID_SECRET" ] && [ -n "$APPLE_PASSWORD_SECRET" ]; then
+          # Apple notarization — needs team id, apple id, app-specific password,
+          # plus a Developer ID certificate + its password. Adhoc-signed binaries
+          # can't be notarized, so we require the cert too.
+          if [ -n "$APPLE_TEAM_ID_SECRET" ] \
+             && [ -n "$APPLE_ID_SECRET" ] \
+             && [ -n "$APPLE_PASSWORD_SECRET" ] \
+             && [ -n "$APPLE_CERT_SECRET" ] \
+             && [ -n "$APPLE_CERT_PWD_SECRET" ]; then
             {
               echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_SECRET"
               echo "APPLE_ID=$APPLE_ID_SECRET"
@@ -191,14 +204,15 @@ jobs:
             } >> "$GITHUB_ENV"
             echo "::notice::Apple notarization enabled"
           else
-            echo "::notice::Apple notarization disabled (need APPLE_TEAM_ID, APPLE_ID, and APPLE_PASSWORD all set)"
+            echo "::notice::Apple notarization disabled (need APPLE_TEAM_ID + APPLE_ID + APPLE_PASSWORD + APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD all set)"
           fi
 
       - name: Build Tauri app (universal)
+        shell: bash
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
         working-directory: packages/desktop
-        run: cargo tauri build --target universal-apple-darwin --bundles app,dmg
+        run: cargo tauri build --target universal-apple-darwin --bundles app,dmg -c "$TAURI_CONFIG_OVERRIDE"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -260,23 +274,27 @@ jobs:
           TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # Tauri updater signing — only export env vars when password is non-empty.
-          # An empty password trips Windows minisign-verify; see release-secrets docs.
-          if [ -n "$TAURI_PWD" ]; then
+          # Tauri updater signing — requires BOTH private key and non-empty password.
+          # See release-secrets.md and the macOS Configure signing env step header for
+          # the rationale behind the createUpdaterArtifacts:false fallback.
+          if [ -n "$TAURI_KEY" ] && [ -n "$TAURI_PWD" ]; then
             {
               echo "TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
               echo "$TAURI_KEY"
               echo "TAURI_KEY_EOF"
               echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_PWD"
+              echo "TAURI_CONFIG_OVERRIDE={}"
             } >> "$GITHUB_ENV"
             echo "::notice::Tauri updater signing enabled"
           else
-            echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret is empty or unset)"
+            echo 'TAURI_CONFIG_OVERRIDE={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+            echo "::notice::Tauri updater signing disabled (TAURI_SIGNING_PRIVATE_KEY and/or TAURI_SIGNING_PRIVATE_KEY_PASSWORD not configured) — createUpdaterArtifacts overridden to false"
           fi
 
       - name: Build Tauri app (MSI)
+        shell: bash
         working-directory: packages/desktop
-        run: cargo tauri build --target x86_64-pc-windows-msvc --bundles msi
+        run: cargo tauri build --target x86_64-pc-windows-msvc --bundles msi -c "$TAURI_CONFIG_OVERRIDE"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
