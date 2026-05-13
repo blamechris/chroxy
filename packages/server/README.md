@@ -2,9 +2,7 @@
 
 Node.js daemon that bridges your phone to Claude Code via WebSocket over Cloudflare tunnel.
 
-**Two modes:**
-- **CLI headless (default)**: Uses the Claude Agent SDK for in-process streaming. No tmux needed.
-- **PTY/tmux (opt-in with `--terminal`)**: Spawns tmux session for raw terminal access.
+The server runs in **CLI headless mode**: it executes the Claude Agent SDK (default), `claude -p`, `gemini -p`, or `codex exec` in-process and streams parsed events to clients. No tmux, no PTY.
 
 ## Quick Start
 
@@ -23,18 +21,16 @@ The server will print a QR code. Scan it with the Chroxy app.
 | Command | Description |
 |---------|-------------|
 | `chroxy init` | Interactive setup — generates API token and config file |
-| `chroxy start` | Start server in CLI headless mode (default) |
-| `chroxy start --terminal` | Start server in PTY/tmux mode |
+| `chroxy start` | Start server (default: Quick Tunnel) |
 | `chroxy start --tunnel named` | Use a named tunnel for stable URLs (requires Cloudflare account) |
 | `chroxy start --tunnel cloudflare:named` | Explicit provider:mode syntax |
 | `chroxy start --tunnel none` | Disable tunnel (local only) |
-| `chroxy start --no-auth` | Start without authentication (CLI mode only, binds to localhost) |
+| `chroxy start --no-auth` | Start without authentication (localhost only) |
 | `chroxy start --no-supervisor` | Disable supervisor auto-restart (named tunnel mode) |
 | `chroxy start --config /path` | Use a specific config file |
-| `chroxy start --resume` | Resume the previous session |
-| `chroxy start --cwd /path` | Set working directory (CLI mode) |
-| `chroxy start --model opus` | Use a specific Claude model (CLI mode) |
-| `chroxy start --allowed-tools tool1,tool2` | Restrict exposed tools (CLI mode) |
+| `chroxy start --cwd /path` | Set working directory |
+| `chroxy start --model opus` | Use a specific Claude model |
+| `chroxy start --allowed-tools tool1,tool2` | Restrict exposed tools |
 | `chroxy start --provider name` | Use a specific session provider (default: `claude-sdk`) |
 | `chroxy start --no-encrypt` | Disable end-to-end encryption |
 | `chroxy dev` | Development mode (supervisor + auto-restart) |
@@ -45,11 +41,9 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy resume [session]` | Resume a Chroxy session in your terminal |
 | `chroxy tunnel setup` | Interactive named tunnel setup (default: Cloudflare) |
 | `chroxy tunnel setup --provider <name>` | Setup a specific tunnel provider |
-| `chroxy wrap -n name` | Create a discoverable tmux session running Claude |
 
 ## Architecture
 
-**CLI Headless Mode (default):**
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    index.js                         │
@@ -62,41 +56,17 @@ The server will print a QR code. Scan it with the Chroxy app.
 │ server-cli.js │ │ ws-server │ │   tunnel/    │
 │               │ │           │ │               │
 │ Orchestrates  │ │ WebSocket │ │ cloudflared   │
-│ SDK sessions  │ │ + auth    │ │ management    │
-└───────┬───────┘ └───────────┘ └───────────────┘
+│ sessions via  │ │ + auth    │ │ management    │
+│ providers.js  │ └───────────┘ └───────────────┘
+└───────┬───────┘
         │
         ▼
 ┌───────────────┐
-│sdk-session.js │
-│               │
-│ Claude Agent  │
-│ SDK query()   │
-└───────────────┘
-```
-
-**PTY/tmux Mode (`--terminal` flag):**
-```
-┌─────────────────────────────────────────────────────┐
-│                    index.js                         │
-│                   (entry point)                     │
-└─────────────────────┬───────────────────────────────┘
-                      │
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-┌───────────────┐ ┌───────────┐ ┌───────────────┐
-│  pty-manager  │ │ ws-server │ │   tunnel/    │
-│               │ │           │ │               │
-│ Spawns tmux,  │ │ WebSocket │ │ cloudflared   │
-│ handles PTY   │ │ + auth    │ │ management    │
-└───────┬───────┘ └─────┬─────┘ └───────────────┘
-        │               │
-        ▼               │
-┌───────────────┐       │
-│ output-parser │◄──────┘
-│               │
-│ Raw PTY →     │
-│ structured    │
-│ messages      │
+│sdk-session.js │  (default — Claude Agent SDK)
+│cli-session.js │  (legacy claude -p)
+│gemini-session │  (Google Gemini)
+│codex-session  │  (OpenAI Codex)
+│docker-session │  (containerized — opt-in)
 └───────────────┘
 ```
 
@@ -107,6 +77,8 @@ The server will print a QR code. Scan it with the Chroxy app.
 | ProviderRegistry | `providers.js` | Provider adapter interface + built-in registrations |
 | SdkSession | `sdk-session.js` | Claude Agent SDK executor (default provider) |
 | CliSession | `cli-session.js` | Legacy headless executor via `claude -p` |
+| GeminiSession | `gemini-session.js` | Google Gemini CLI executor |
+| CodexSession | `codex-session.js` | OpenAI Codex CLI executor |
 | SessionManager | `session-manager.js` | Multi-session lifecycle management |
 | WsServer | `ws-server.js` | WebSocket protocol with auth + encryption |
 | TunnelRegistry | `tunnel/registry.js` | Pluggable tunnel adapter registry |
@@ -114,8 +86,6 @@ The server will print a QR code. Scan it with the Chroxy app.
 | CloudflareTunnelAdapter | `tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | Supervisor | `supervisor.js` | Tunnel owner + child auto-restart (named tunnel) |
 | PushManager | `push.js` | Push notifications via Expo Push API |
-| PtyManager | `pty-manager.js` | tmux session management (PTY mode) |
-| OutputParser | `output-parser.js` | Terminal output parser (PTY mode) |
 
 ## Development
 

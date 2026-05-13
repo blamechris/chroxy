@@ -2,6 +2,14 @@
 
 Thanks for your interest in contributing! This document covers how to get started.
 
+## What to expect
+
+- All changes go through a PR; `main` is protected.
+- CI runs lint, type-check, and tests across the `server`, `dashboard`, `app`, `store-core`, and `protocol` packages — these must pass before merge.
+- We squash-merge to keep history linear.
+- Be patient on review turnaround — this is a solo-maintained project.
+- For non-trivial changes, open an issue first so we can agree on the approach before you spend time on it.
+
 ## Development Setup
 
 1. **Fork and clone the repo**
