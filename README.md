@@ -25,6 +25,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 ## Why Chroxy?
 
 - **Works with Claude Code, Gemini, and Codex** — Pluggable providers let you pick `claude-sdk` (default), `claude-cli`, `gemini`, or `codex` per session. See [docs/providers.md](docs/providers.md).
+- **Provider flexibility** — If you're hitting your Claude programmatic credit cap, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Codex and Gemini bill separately from Anthropic. See [Billing & API usage](#billing--api-usage) below.
 - **No tmux required** — CLI headless mode wraps your AI CLI directly (via the Agent SDK for Claude, or `gemini -p` / `codex exec` for the others). Just start and connect.
 - **Two views, one session** — Switch between a clean chat UI (markdown-rendered) and a full xterm.js terminal emulator.
 - **Multi-session** — Run multiple AI sessions from one server. Create, switch, and destroy from any client.
@@ -34,6 +35,24 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 - **Voice input** — Dictate messages with speech-to-text on mobile and macOS desktop.
 - **Docker isolation** — Run sessions in Docker containers with resource limits and security guards.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
+
+## Billing & API usage
+
+Chroxy uses the Claude Agent SDK (or `claude -p`), which Anthropic classifies as **programmatic usage**. Starting **June 15, 2026**, programmatic usage on Claude subscriptions draws from a separate monthly credit pool — not the interactive Claude Code allowance:
+
+| Plan | Programmatic credit / month |
+|---|---|
+| Pro | $20 |
+| Max 5x | $100 |
+| Max 20x | $200 |
+| Team Standard | $20 / seat |
+| Team Premium | $100 / seat |
+
+Credits reset each billing cycle and don't roll over. When the credit is exhausted, you can either enable paid usage credits (billed at API rates) or have programmatic usage pause until reset.
+
+**For heavy users:** set `ANTHROPIC_API_KEY` to bypass the subscription credit pool entirely and bill the raw Anthropic API account directly. Same SDK, predictable per-token pricing.
+
+Chroxy includes cost controls to help you stay within budget — see `CHROXY_COST_BUDGET` and `CHROXY_SESSION_TIMEOUT` in [packages/server/CONFIG.md](packages/server/CONFIG.md). Prompt caching is enabled by default and typically reduces credit burn 5–10x on long sessions.
 
 ## Features
 
@@ -55,6 +74,12 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
   # Windows
   winget install OpenJS.NodeJS.LTS
+
+  # Linux — use nvm or fnm to get Node 22 (distro packages are usually older)
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+  # nvm isn't on PATH until you reload your shell:
+  export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  nvm install 22 && nvm use 22
   ```
 
 - **cloudflared** — Cloudflare's tunnel client for remote access (no account needed for Quick Tunnels):
@@ -64,6 +89,12 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
   # Windows
   winget install Cloudflare.cloudflared
+
+  # Linux (Debian/Ubuntu) — official signed repository
+  sudo mkdir -p --mode=0755 /usr/share/keyrings
+  curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+  echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+  sudo apt-get update && sudo apt-get install cloudflared
   ```
 
 ## Quick Start
@@ -74,11 +105,11 @@ Chroxy reads provider API keys from environment variables at server startup. The
 
 | Provider | Env var | Get a key |
 |----------|---------|-----------|
-| Claude (default) | `ANTHROPIC_API_KEY` | https://console.anthropic.com/settings/keys |
+| Claude (default) | `ANTHROPIC_API_KEY` *(optional)* | https://console.anthropic.com/settings/keys |
 | Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
 | Codex (OpenAI) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
 
-> Claude can also authenticate via your existing `claude` CLI login if you'd rather not set `ANTHROPIC_API_KEY`.
+> Claude can also authenticate via your existing `claude` CLI login if you'd rather not set `ANTHROPIC_API_KEY`. Setting the key bypasses your Claude subscription's programmatic credit pool and bills the raw API account — see [Billing & API usage](#billing--api-usage).
 
 Add the keys you'll use to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
@@ -97,7 +128,13 @@ If you create a session for a provider whose key isn't set, the server returns a
 
 ### Server (on your dev machine)
 
+Chroxy is not published to npm yet, so `npx chroxy` resolves from your local clone. Clone the repo and install dependencies first:
+
 ```bash
+git clone https://github.com/blamechris/chroxy.git
+cd chroxy
+npm install
+
 # Install and configure
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 
@@ -106,6 +143,25 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
 The server prints a QR code. Scan it with the Chroxy mobile app, or open the dashboard URL in your browser.
+
+#### Verify it worked
+
+A healthy server prints something like:
+
+```
+[✓] Server ready! (CLI headless mode, cloudflare:quick)
+
+📱 Scan this QR code with the Chroxy app:
+
+   <QR code>
+
+Or connect manually:
+   URL:   wss://<random>.trycloudflare.com
+   Token: ********  (use --show-token to see full token)
+   Dashboard: https://<random>.trycloudflare.com/dashboard (use --show-token to see full URL)
+```
+
+If something looks off, `npx chroxy doctor` reports which dependencies are missing or misconfigured.
 
 ### Development mode
 
@@ -117,7 +173,13 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy dev
 
 ### Local WiFi (same network)
 
-If your phone and dev machine are on the same WiFi, connect directly without the tunnel:
+If your phone and dev machine are on the same WiFi, connect directly without the tunnel. Start the server with `--tunnel none` to skip the tunnel entirely:
+
+```bash
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --tunnel none
+```
+
+Then:
 
 1. Find your machine's local IP:
    ```bash
@@ -135,13 +197,14 @@ If your phone and dev machine are on the same WiFi, connect directly without the
 | Named Tunnel | `--tunnel named` | Stable URL that survives restarts. Requires Cloudflare account + domain. |
 | No Tunnel | `--tunnel none` | Local only. Use with `--no-auth` for development. |
 
+> **Quick Tunnel security note.** The tunnel URL is randomized, but anyone with both your tunnel URL *and* your API token can connect. The token is the actual secret — protect it, rotate it if leaked (`npx chroxy init` regenerates), and prefer a Named Tunnel + IP allowlist for anything production-shaped.
+
 ### Mobile App
 
-The app requires a **custom dev build** (not Expo Go) because native modules are included:
+The app requires a **custom dev build** (not Expo Go) because native modules are included. The root `npm install` already covers the workspace:
 
 ```bash
 cd packages/app
-npm install
 
 # Build a dev client (one-time, or when native deps change)
 npx expo run:ios    # or npx expo run:android
@@ -157,6 +220,12 @@ See `packages/app/README.md` for EAS cloud build instructions.
 The desktop app is a Tauri tray application wrapping the web dashboard:
 
 ```bash
+# One-time: install the Tauri CLI (pick one)
+cargo install tauri-cli --version "^2"                       # standard, ~3 min
+# or, faster via prebuilt binaries:
+cargo install cargo-binstall && \
+  cargo binstall tauri-cli --version "^2" --no-confirm
+
 cd packages/desktop
 cargo tauri dev
 ```
@@ -171,8 +240,9 @@ The server runs on Windows natively — `platform.js`, `supervisor.js`, and `ser
 # Prereqs
 winget install OpenJS.NodeJS.LTS
 winget install Cloudflare.cloudflared
+winget install Git.Git
 
-# Install and run
+# Restart PowerShell so the new tools land on PATH, then:
 git clone https://github.com/blamechris/chroxy
 cd chroxy
 npm install
@@ -187,7 +257,13 @@ Same QR-code / manual-entry connection flow as macOS. All session features (mode
 - **NSSM** (https://nssm.cc/) — `nssm install Chroxy node <chroxy-path> start`
 - **PM2 with pm2-windows-service** — for full process-manager features
 
-### Desktop tray app (build from source)
+### Desktop tray app (recommended)
+
+Download the latest MSI from the [Releases page](https://github.com/blamechris/chroxy/releases/latest) and double-click to install. WebView2 is preinstalled on Windows 11; on Windows 10, install it once from https://developer.microsoft.com/microsoft-edge/webview2/.
+
+### Desktop tray app — build from source
+
+Only needed if you want to compile locally:
 
 ```powershell
 # Toolchain prereqs
@@ -196,12 +272,16 @@ rustup default stable-x86_64-pc-windows-msvc
 winget install Microsoft.VisualStudio.2022.BuildTools
 # In the installer, select "Desktop development with C++"
 
+# Tauri CLI (one-time)
+cargo install tauri-cli --version "^2"
+# or faster via prebuilts: cargo install cargo-binstall && cargo binstall tauri-cli --version "^2" --no-confirm
+
 # Build
 cd packages\desktop
 cargo tauri build
 ```
 
-The MSI lands at `packages\desktop\src-tauri\target\release\bundle\msi\Chroxy_<version>_x64_en-US.msi`. WebView2 is preinstalled on Windows 11; on Windows 10, install it once from https://developer.microsoft.com/microsoft-edge/webview2/.
+The MSI lands at `packages\desktop\src-tauri\target\release\bundle\msi\Chroxy_<version>_x64_en-US.msi`.
 
 ## Project Structure
 
