@@ -279,8 +279,8 @@ jobs:
           TAURI_PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           # Tauri updater signing — requires BOTH private key and non-empty password.
-          # See release-secrets.md and the macOS Configure signing env step header for
-          # the rationale behind the createUpdaterArtifacts:false fallback.
+          # See docs/release-signing.md and the macOS Configure signing env step header
+          # for the rationale behind the createUpdaterArtifacts:false fallback.
           if [ -n "$TAURI_KEY" ] && [ -n "$TAURI_PWD" ]; then
             {
               echo "TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"

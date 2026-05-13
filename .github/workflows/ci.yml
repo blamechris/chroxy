@@ -279,8 +279,7 @@ jobs:
       # Run expo-doctor to catch app.json schema errors, native-module duplication,
       # SDK-version drift, and other latent config bugs before they reach an EAS
       # build. Added 2026-04-11 after a cascade of five failed EAS preview builds
-      # traced to bugs that expo-doctor would have flagged instantly. See
-      # docs/audit-results/eas-cng-config/ for the full post-mortem.
+      # traced to bugs that expo-doctor would have flagged instantly.
       #
       # The "non-CNG project with native config" check is excluded — the project
       # intentionally commits packages/app/ios/ for LiveActivity custom targets

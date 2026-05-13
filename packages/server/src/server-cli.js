@@ -402,9 +402,7 @@ export async function startCliServer(config) {
       // already covers. Because the two pushes used different rate-limit buckets
       // (idle=60s, activity_update=10s) they never deduped each other, so every
       // unattended completion produced two OS-level notifications on the phone.
-      // Removed in favor of the single activity_update fire below; see the
-      // notification audit note in docs/audit-results/eas-cng-config/ for the
-      // deeper post-mortem.
+      // Removed in favor of the single activity_update fire below.
     } else if (event === 'result') {
       // result without cost (e.g. Gemini providers) — log duration if available
       if (data.duration != null) {
