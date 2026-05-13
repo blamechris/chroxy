@@ -70,3 +70,5 @@ ROADMAP.local.md
 tests/screenshots/
 docs/audit-results/
 docs/audits/
+docs/qa-log.md
+docs/smoke-test.md

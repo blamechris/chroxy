@@ -1,4 +1,4 @@
-# Release Secrets
+# Release Signing
 
 This document describes the GitHub Actions secrets used by `release.yml` to sign, notarize, and publish the Tauri desktop builds. The release workflow is designed to **degrade gracefully** — if a given secret is unset, the corresponding signing/notarization step is skipped automatically and the build still produces an unsigned artifact.
 
