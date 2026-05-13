@@ -564,9 +564,6 @@ Tauri tray application wrapping the web dashboard with native integrations.
 |------|---------|
 | `CLAUDE.md` | Essential dev workflow and conventions |
 | `docs/architecture/reference.md` | This file — detailed component/protocol reference |
-| `docs/architecture/in-app-dev.md` | In-app iterative development design |
-| `docs/qa-log.md` | QA audit log with coverage matrix |
-| `docs/smoke-test.md` | Manual smoke test checklist |
 | `docs/named-tunnel-guide.md` | Named tunnel setup guide |
 | `docs/self-hosting-guide.md` | Self-hosting requirements and deployment |
 | `docs/guides/container-isolation.md` | Container isolation guide (sandbox, Docker, combined) |
