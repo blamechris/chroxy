@@ -77,6 +77,8 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
   # Linux — use nvm or fnm to get Node 22 (distro packages are usually older)
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+  # nvm isn't on PATH until you reload your shell:
+  export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
   nvm install 22 && nvm use 22
   ```
 
@@ -103,7 +105,7 @@ Chroxy reads provider API keys from environment variables at server startup. The
 
 | Provider | Env var | Get a key |
 |----------|---------|-----------|
-| Claude (default) | `ANTHROPIC_API_KEY` *(optional — uses `claude` CLI login if unset)* | https://console.anthropic.com/settings/keys |
+| Claude (default) | `ANTHROPIC_API_KEY` *(optional)* | https://console.anthropic.com/settings/keys |
 | Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
 | Codex (OpenAI) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
 
@@ -195,7 +197,7 @@ Then:
 | Named Tunnel | `--tunnel named` | Stable URL that survives restarts. Requires Cloudflare account + domain. |
 | No Tunnel | `--tunnel none` | Local only. Use with `--no-auth` for development. |
 
-> **Quick Tunnel security note.** The tunnel URL is randomized, but anyone with both your tunnel URL *and* your API token can connect. The token — stored in your OS keychain (or `~/.chroxy/config.json` as fallback) — is the actual secret. Protect it, rotate it if leaked (`npx chroxy init` regenerates), and prefer a Named Tunnel + IP allowlist for anything production-shaped.
+> **Quick Tunnel security note.** The tunnel URL is randomized, but anyone with both your tunnel URL *and* your API token can connect. The token is the actual secret — protect it, rotate it if leaked (`npx chroxy init` regenerates), and prefer a Named Tunnel + IP allowlist for anything production-shaped.
 
 ### Mobile App
 
@@ -218,9 +220,11 @@ See `packages/app/README.md` for EAS cloud build instructions.
 The desktop app is a Tauri tray application wrapping the web dashboard:
 
 ```bash
-# One-time: install the Tauri CLI
-cargo install cargo-binstall          # optional but fast
-cargo binstall tauri-cli --version "^2" --no-confirm
+# One-time: install the Tauri CLI (pick one)
+cargo install tauri-cli --version "^2"                       # standard, ~3 min
+# or, faster via prebuilt binaries:
+cargo install cargo-binstall && \
+  cargo binstall tauri-cli --version "^2" --no-confirm
 
 cd packages/desktop
 cargo tauri dev
@@ -269,8 +273,8 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 # In the installer, select "Desktop development with C++"
 
 # Tauri CLI (one-time)
-cargo install cargo-binstall
-cargo binstall tauri-cli --version "^2" --no-confirm
+cargo install tauri-cli --version "^2"
+# or faster via prebuilts: cargo install cargo-binstall && cargo binstall tauri-cli --version "^2" --no-confirm
 
 # Build
 cd packages\desktop

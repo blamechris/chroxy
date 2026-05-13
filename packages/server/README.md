@@ -2,7 +2,7 @@
 
 Node.js daemon that bridges your phone to Claude Code via WebSocket over Cloudflare tunnel.
 
-The server runs in **CLI headless mode**: it executes the Claude Agent SDK (default), `claude -p`, `gemini -p`, or `codex exec` in-process and streams parsed events to clients. No tmux, no PTY.
+The server runs in **CLI headless mode**: it executes the Claude Agent SDK in-process by default, or shells out to `claude -p`, `gemini -p`, or `codex exec` for the other providers, and streams parsed events to clients. No tmux, no PTY.
 
 ## Quick Start
 
