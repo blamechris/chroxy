@@ -459,13 +459,26 @@ export async function startCliServer(config) {
           const alreadyNotified = _idleNotifiedSessions.has(sessionId)
           if (allowed && !alreadyNotified) {
             const sessionName = sessionManager.getSession(sessionId)?.name
-            pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
-              sessionId,
-              sessionName,
-              state: 'idle',
-              ...(data.duration != null && { elapsed: data.duration }),
-            })
+            // #3870: latch SYNCHRONOUSLY before send() returns its promise
+            // so a second `result` arriving in the same tick can't double-
+            // fire (passes the !alreadyNotified gate twice). If the async
+            // send rejects (Expo 5xx after retries, network timeout,
+            // _sendToTokenSet throw), surface the failure at warn and
+            // RELEASE the latch so the next active→idle cycle gets a fresh
+            // chance — without this the user was silently dropped *and*
+            // permanently latched until the session went busy again.
             _idleNotifiedSessions.add(sessionId)
+            Promise.resolve(
+              pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
+                sessionId,
+                sessionName,
+                state: 'idle',
+                ...(data.duration != null && { elapsed: data.duration }),
+              })
+            ).catch(err => {
+              log.warn(`Idle push send failed for ${sessionId}: ${err?.message || err}`)
+              _idleNotifiedSessions.delete(sessionId)
+            })
           } else if (!allowed) {
             // Diagnostic for #3866: surface why a push was suppressed so we
             // can tell registration failures apart from "user is viewing".
