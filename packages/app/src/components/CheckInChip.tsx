@@ -87,6 +87,12 @@ export function CheckInChip() {
         accessibilityState={{ disabled: !isConnected }}
         disabled={!isConnected}
         onPress={handleCheckIn}
+        // The visual chip stays compact so it stacks neatly with the
+        // ActivityIndicator chip above it, but the actionable tap area
+        // expands via hitSlop to meet the 44pt accessibility minimum.
+        // Vertical 11pt + 22pt rendered height = 44pt total; horizontal
+        // 14pt cushion accommodates the typical short-prefab button.
+        hitSlop={{ top: 11, bottom: 11, left: 14, right: 14 }}
         style={({ pressed }) => [
           styles.button,
           !isConnected && styles.buttonDisabled,

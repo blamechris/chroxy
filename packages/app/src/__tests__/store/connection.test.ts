@@ -1739,3 +1739,74 @@ describe('markPromptAnsweredByRequestId', () => {
     expect(msgs).toHaveLength(0);
   });
 });
+
+describe('inactivityWarning cleanup (#3899)', () => {
+  const WARNING = { idleMs: 1_800_000, prefab: 'Status update?', receivedAt: 1 };
+
+  it('sendInput clears the active session warning when the input is queued (no socket)', () => {
+    useConnectionStore.setState({
+      socket: null,
+      activeSessionId: 's-active',
+      sessionStates: {
+        's-active': { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
+      },
+    });
+
+    const result = useConnectionStore.getState().sendInput('Status update?');
+
+    // No live socket → queued, but the chip should still dismiss.
+    expect(result).toBe('queued');
+    const ss = useConnectionStore.getState().sessionStates['s-active']!;
+    expect(ss.inactivityWarning).toBeNull();
+  });
+
+  it('sendInput leaves other-session warnings intact', () => {
+    useConnectionStore.setState({
+      socket: null,
+      activeSessionId: 's-active',
+      sessionStates: {
+        's-active': { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
+        's-other': { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
+      },
+    });
+
+    useConnectionStore.getState().sendInput('Status update?');
+
+    const states = useConnectionStore.getState().sessionStates;
+    expect(states['s-active']!.inactivityWarning).toBeNull();
+    expect(states['s-other']!.inactivityWarning).toEqual(WARNING);
+  });
+
+  it('disconnect clears warnings across ALL sessions, not just the active one', () => {
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
+        s2: { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
+        s3: { ...createEmptySessionState() }, // no warning — unaffected
+      },
+    });
+
+    useConnectionStore.getState().disconnect();
+
+    const states = useConnectionStore.getState().sessionStates;
+    expect(states.s1!.inactivityWarning).toBeNull();
+    expect(states.s2!.inactivityWarning).toBeNull();
+    expect(states.s3!.inactivityWarning).toBeNull();
+  });
+
+  it('disconnect is a no-op for warning state when no session has one outstanding', () => {
+    const before = createEmptySessionState();
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: before },
+    });
+    // Capture pre-disconnect reference equality
+    const sessionsRefBefore = useConnectionStore.getState().sessionStates.s1;
+
+    useConnectionStore.getState().disconnect();
+
+    const sessionsRefAfter = useConnectionStore.getState().sessionStates.s1;
+    expect(sessionsRefAfter).toBe(sessionsRefBefore);
+  });
+});

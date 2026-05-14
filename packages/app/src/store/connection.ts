@@ -264,6 +264,40 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
   };
 }
 
+/**
+ * #3899 — wipe `inactivityWarning` on every session in the store.
+ *
+ * Used by both the `socket.onclose` cleanup (transport-level drop) and
+ * the user-initiated `disconnect()` path (which nulls `socket.onclose`
+ * so the close handler never runs). Iterating all sessions instead of
+ * just the active one matters because a background session can carry a
+ * stale chip too, and there's no way to re-derive the value after
+ * reconnect — the server doesn't replay `inactivity_warning`.
+ *
+ * Pure shape: skips the store mutation when no warnings are outstanding
+ * so we don't churn referential equality unnecessarily.
+ */
+function clearInactivityWarningsAcrossSessions(
+  set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void,
+  get: () => ConnectionState,
+): void {
+  const sessionStates = get().sessionStates;
+  const ids = Object.keys(sessionStates);
+  if (ids.length === 0) return;
+  let changed = false;
+  const next: Record<string, SessionState> = {};
+  for (const id of ids) {
+    const ss = sessionStates[id];
+    if (ss && ss.inactivityWarning) {
+      next[id] = { ...ss, inactivityWarning: null };
+      changed = true;
+    } else if (ss) {
+      next[id] = ss;
+    }
+  }
+  if (changed) set({ sessionStates: next });
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
   sessions: [],
@@ -640,14 +674,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           patch.isPlanPending = false;
           patch.planAllowedPrompts = [];
         }
-        // #3899: server does NOT replay `inactivity_warning` on reconnect,
-        // so a chip from before the drop would point at stale state. Clear
-        // it; if the agent is still quiet post-reconnect, the next soft-
-        // timeout firing server-side will re-emit. Mirrors the dashboard's
-        // onclose cleanup.
-        if (ss.inactivityWarning) patch.inactivityWarning = null;
         return Object.keys(patch).length > 0 ? patch : {};
       });
+      // #3899: server does NOT replay `inactivity_warning` on reconnect,
+      // so a chip left over from before the drop would point at stale
+      // state. Sweep ALL sessions (not just the active one) because a
+      // background session could carry a stale warning too. If the
+      // agent is still quiet post-reconnect, the next soft-timeout
+      // firing server-side will re-emit.
+      clearInactivityWarningsAcrossSessions(set, get);
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
@@ -718,6 +753,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       socket.onclose = null;
       socket.close();
     }
+    // #3899: same warning-sweep as onclose — user-initiated disconnect
+    // nulls socket.onclose above, so the onclose cleanup never runs
+    // and any outstanding check-in chip would survive into the next
+    // connection. Mirror the cleanup across all sessions here.
+    clearInactivityWarningsAcrossSessions(set, get);
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
     // Flush and clear any pending delta buffer
