@@ -87,10 +87,23 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  *                              `CodexSession.getAllowedModels()`. If falsy,
  *                              no `-c model=` flag is appended — Codex CLI
  *                              uses its own default.
+ * @param {string|null} threadId  Optional Codex thread_id captured from a
+ *                                 previous turn's `thread.started` event.
+ *                                 When set, switches to `exec resume <id>`
+ *                                 form so the CLI replays prior conversation
+ *                                 state instead of treating each message as
+ *                                 a fresh thread (#3865).
  * @returns {string[]}
  */
-export function buildCodexArgs(text, model) {
-  const args = ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+export function buildCodexArgs(text, model, threadId = null) {
+  // INVARIANT: --sandbox must be passed to the parent `exec`, not to the
+  // `resume` subcommand. `codex exec resume --sandbox ...` errors out with
+  // `unexpected argument '--sandbox' found` (verified against codex-cli
+  // 0.128.0) because --sandbox is only declared on the parent `exec` command.
+  // Keep --sandbox BEFORE the `resume` subcommand on the resume path.
+  const args = threadId
+    ? ['exec', '--sandbox', 'workspace-write', 'resume', threadId, text, '--json', '--skip-git-repo-check']
+    : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
   if (model) {
     args.push('-c', `model="${model}"`)
   }
@@ -246,11 +259,11 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId })
   }
 
   // ------------------------------------------------------------------
@@ -258,7 +271,7 @@ export class CodexSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
 
   _buildArgs(text) {
-    return buildCodexArgs(text, this.model)
+    return buildCodexArgs(text, this.model, this.resumeSessionId)
   }
 
   _buildChildEnv() {
@@ -269,6 +282,17 @@ export class CodexSession extends JsonlSubprocessSession {
     if (!event.type) return
 
     switch (event.type) {
+      case 'thread.started': {
+        // Codex CLI emits this as the first JSONL line of every `codex exec`
+        // invocation. Capturing thread_id is what lets subsequent turns
+        // resume the conversation (#3865) — without it, every sendMessage
+        // spawns `codex exec "<prompt>"` with no prior context.
+        if (event.thread_id) {
+          this.resumeSessionId = event.thread_id
+        }
+        break
+      }
+
       case 'item.completed': {
         const item = event.item
         if (!item) break
@@ -311,7 +335,7 @@ export class CodexSession extends JsonlSubprocessSession {
             input_tokens: usage.input_tokens || 0,
             output_tokens: usage.output_tokens || 0,
           },
-          sessionId: null,
+          sessionId: this.resumeSessionId,
         })
         break
       }

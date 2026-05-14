@@ -219,6 +219,21 @@ describe('CodexSession', () => {
       assert.equal(session.resumeSessionId, null)
     })
 
+    // #3865: SessionManager persists resumeSessionId via serializeState() and
+    // re-passes it through createSession() on restoreState(). Before this fix
+    // the value was silently dropped by the JsonlSubprocessSession middle
+    // layer, so a Codex thread captured before a server restart was lost
+    // even though every other persistence layer carried it.
+    it('accepts resumeSessionId from constructor so restoreState() can rehydrate the thread', () => {
+      const session = new CodexSession({ cwd: '/tmp', resumeSessionId: 't-restored' })
+      assert.equal(session.resumeSessionId, 't-restored')
+    })
+
+    it('treats resumeSessionId=null as no captured thread (back-compat)', () => {
+      const session = new CodexSession({ cwd: '/tmp', resumeSessionId: null })
+      assert.equal(session.resumeSessionId, null)
+    })
+
     it('initialises _process to null', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       assert.equal(session._process, null)
@@ -780,9 +795,8 @@ describe('CodexSession', () => {
       cleanupShim()
     })
 
-    it('unknown JSONL types (thread.started, turn.started) are silently ignored', async () => {
+    it('unknown JSONL types (turn.started) are silently ignored', async () => {
       writeShim([
-        { type: 'thread.started', thread_id: 't1' },
         { type: 'turn.started' },
         { type: 'turn.completed', usage: {} },
       ])
@@ -897,6 +911,131 @@ describe('CodexSession', () => {
       assert.ok(idxModel >= 0, '--sandbox flag should be present with model')
       assert.ok(idxModel + 1 < withModel.length, '--sandbox should have a value')
       assert.equal(withModel[idxModel + 1], 'workspace-write')
+    })
+
+    // #3865: multi-turn context loss. Without a threadId, every sendMessage
+    // spawns `codex exec "<prompt>"` as a fresh thread and Codex has no
+    // memory of prior turns. When a threadId is supplied, argv switches to
+    // `codex exec resume <thread_id> <text>` so the CLI replays state.
+    describe('threadId resume (#3865)', () => {
+      it('emits the resume form when threadId is supplied', () => {
+        const args = buildCodexArgs('continue', null, 'thread-abc-123')
+        assert.equal(args[0], 'exec')
+        // SESSION_ID and PROMPT follow the `resume` subcommand
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(resumeIdx > 0, 'resume subcommand must be present')
+        assert.equal(args[resumeIdx + 1], 'thread-abc-123')
+        assert.equal(args[resumeIdx + 2], 'continue')
+        assert.ok(args.includes('--json'))
+        assert.ok(args.includes('--skip-git-repo-check'))
+        const sandboxIdx = args.indexOf('--sandbox')
+        assert.equal(args[sandboxIdx + 1], 'workspace-write')
+      })
+
+      // codex-cli 0.128.0 — `codex exec resume --sandbox ...` errors with
+      // `unexpected argument '--sandbox' found`. The flag is only declared on
+      // the parent `exec` command, so argv must place --sandbox BEFORE the
+      // `resume` subcommand. This pins that contract so the bug can't slip
+      // back in via a future refactor.
+      it('places --sandbox BEFORE the resume subcommand (codex-cli requires this)', () => {
+        const args = buildCodexArgs('continue', null, 'thread-abc')
+        const sandboxIdx = args.indexOf('--sandbox')
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(sandboxIdx >= 0, '--sandbox must be present')
+        assert.ok(resumeIdx >= 0, 'resume subcommand must be present')
+        assert.ok(
+          sandboxIdx < resumeIdx,
+          `--sandbox (idx ${sandboxIdx}) must come before resume (idx ${resumeIdx}); ` +
+          'codex exec resume rejects --sandbox as a subcommand flag',
+        )
+      })
+
+      it('emits the resume form with model override', () => {
+        const args = buildCodexArgs('continue', 'o3', 'thread-abc')
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(resumeIdx > 0)
+        assert.equal(args[resumeIdx + 1], 'thread-abc')
+        const cIdx = args.indexOf('-c')
+        assert.equal(args[cIdx + 1], 'model="o3"')
+      })
+
+      it('falls back to first-turn form when threadId is null', () => {
+        const args = buildCodexArgs('hi', null, null)
+        assert.equal(args[0], 'exec')
+        assert.equal(args[1], 'hi')
+        assert.ok(!args.includes('resume'))
+      })
+
+      it('falls back to first-turn form when threadId is omitted', () => {
+        const args = buildCodexArgs('hi', null)
+        assert.equal(args[0], 'exec')
+        assert.equal(args[1], 'hi')
+        assert.ok(!args.includes('resume'))
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------
+  // #3865 — thread.started capture and resume-form argv selection.
+  // Without this, every sendMessage on a Codex session spawns a fresh
+  // subprocess with no prior conversation context.
+  // -------------------------------------------------------------------
+  describe('thread.started capture (#3865)', () => {
+    it('captures thread_id from thread.started and stores it on resumeSessionId', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.equal(session.resumeSessionId, null)
+      session._processJsonlLine(
+        { type: 'thread.started', thread_id: 't-deadbeef' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+      assert.equal(session.resumeSessionId, 't-deadbeef')
+    })
+
+    it('ignores thread.started with missing thread_id', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      session._processJsonlLine(
+        { type: 'thread.started' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+      assert.equal(session.resumeSessionId, null)
+    })
+
+    it('_buildArgs switches to resume form after thread_id is captured', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const first = session._buildArgs('hi')
+      assert.equal(first[0], 'exec')
+      assert.equal(first[1], 'hi')
+      assert.ok(!first.includes('resume'))
+
+      session._processJsonlLine(
+        { type: 'thread.started', thread_id: 't-1234' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+
+      const second = session._buildArgs('continue')
+      assert.equal(second[0], 'exec')
+      const resumeIdx = second.indexOf('resume')
+      assert.ok(resumeIdx > 0, 'resume subcommand present on subsequent turns')
+      assert.equal(second[resumeIdx + 1], 't-1234')
+      assert.equal(second[resumeIdx + 2], 'continue')
+    })
+
+    it('result event includes the captured sessionId (was null pre-#3865)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const results = []
+      session.on('result', (d) => results.push(d))
+
+      session._processJsonlLine(
+        { type: 'thread.started', thread_id: 't-99' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+      session._processJsonlLine(
+        { type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 2 } },
+        { didStreamStart: false, didEmitResult: false },
+      )
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 't-99')
     })
   })
 

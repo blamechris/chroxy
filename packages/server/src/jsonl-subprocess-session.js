@@ -101,6 +101,7 @@ export class JsonlSubprocessSession extends BaseSession {
     promptEvaluator,
     promptEvaluatorSkipPattern,
     resultTimeoutMs,
+    resumeSessionId,
   } = {}) {
     super({
       cwd,
@@ -119,7 +120,13 @@ export class JsonlSubprocessSession extends BaseSession {
       promptEvaluatorSkipPattern,
       resultTimeoutMs,
     })
-    this.resumeSessionId = null
+    // #3865: accept resumeSessionId from constructor so SessionManager's
+    // serializeState/restoreState path carries a captured Codex thread_id
+    // across server restarts. Without this, persistence was wired up at
+    // every layer EXCEPT here, so restored Codex sessions silently lost
+    // their thread and the user experienced the same "context loss" the
+    // PR was supposed to fix.
+    this.resumeSessionId = resumeSessionId || null
     this._process = null
     // Skills MVP (#2957) — providers without a system-prompt flag (Codex,
     // Gemini) prepend skills text to the first user message only.
