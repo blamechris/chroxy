@@ -384,6 +384,42 @@ export function handlePlanReady(
 }
 
 // ---------------------------------------------------------------------------
+// inactivity_warning (#3899)
+//
+// Soft warning fired after `resultTimeoutMs` of silence. The server keeps
+// the session alive — pending permissions remain pending, busy state is
+// preserved — and asks the client to surface a one-click "Status update?"
+// affordance. The handler validates the wire payload (idleMs > 0, prefab
+// is a non-empty string) and produces a patch that stores the warning on
+// the targeted session. Bad payloads return a null patch so the call site
+// can ignore them without crashing.
+// ---------------------------------------------------------------------------
+
+export function handleInactivityWarning(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch | null {
+  const idleMsRaw = msg.idleMs
+  const prefabRaw = msg.prefab
+  if (typeof idleMsRaw !== 'number' || !Number.isFinite(idleMsRaw) || idleMsRaw <= 0) {
+    return null
+  }
+  if (typeof prefabRaw !== 'string' || !prefabRaw.trim()) {
+    return null
+  }
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      inactivityWarning: {
+        idleMs: Math.floor(idleMsRaw),
+        prefab: prefabRaw,
+        receivedAt: Date.now(),
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // dev_preview / dev_preview_stopped
 //
 // These handlers are stateful in a way the others aren't: the new devPreviews

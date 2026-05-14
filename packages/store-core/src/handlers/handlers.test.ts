@@ -18,6 +18,7 @@ import {
   handleBudgetResumed,
   handlePlanStarted,
   handlePlanReady,
+  handleInactivityWarning,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,
@@ -459,6 +460,79 @@ describe('handlePlanReady', () => {
   it('returns null sessionId when neither is available', () => {
     const result = handlePlanReady({}, null)
     expect(result.sessionId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleInactivityWarning (#3899)
+// ---------------------------------------------------------------------------
+describe('handleInactivityWarning', () => {
+  it('produces a patch with idleMs, prefab, and receivedAt timestamp', () => {
+    const before = Date.now()
+    const result = handleInactivityWarning(
+      { sessionId: 'sess-1', messageId: 'm-1', idleMs: 1_800_000, prefab: 'Status update?' },
+      'active-1',
+    )
+    const after = Date.now()
+    expect(result).not.toBeNull()
+    expect(result!.sessionId).toBe('sess-1')
+    const warning = result!.patch.inactivityWarning as { idleMs: number; prefab: string; receivedAt: number }
+    expect(warning.idleMs).toBe(1_800_000)
+    expect(warning.prefab).toBe('Status update?')
+    expect(warning.receivedAt).toBeGreaterThanOrEqual(before)
+    expect(warning.receivedAt).toBeLessThanOrEqual(after)
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const result = handleInactivityWarning(
+      { messageId: 'm-1', idleMs: 30_000, prefab: 'Status update?' },
+      'active-1',
+    )
+    expect(result!.sessionId).toBe('active-1')
+  })
+
+  it('floors fractional idleMs (server may report sub-ms drift)', () => {
+    const result = handleInactivityWarning(
+      { idleMs: 1_800_500.7, prefab: 'Status update?' },
+      'active-1',
+    )
+    expect((result!.patch.inactivityWarning as { idleMs: number }).idleMs).toBe(1_800_500)
+  })
+
+  it('returns null when idleMs is missing', () => {
+    expect(handleInactivityWarning({ prefab: 'Status update?' }, 'active-1')).toBeNull()
+  })
+
+  it('returns null when idleMs is non-positive', () => {
+    expect(
+      handleInactivityWarning({ idleMs: 0, prefab: 'Status update?' }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleInactivityWarning({ idleMs: -1, prefab: 'Status update?' }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when idleMs is non-finite', () => {
+    expect(
+      handleInactivityWarning({ idleMs: Number.POSITIVE_INFINITY, prefab: 'x' }, 'a'),
+    ).toBeNull()
+    expect(
+      handleInactivityWarning({ idleMs: NaN, prefab: 'x' }, 'a'),
+    ).toBeNull()
+  })
+
+  it('returns null when prefab is missing or blank', () => {
+    expect(handleInactivityWarning({ idleMs: 1000 }, 'active-1')).toBeNull()
+    expect(handleInactivityWarning({ idleMs: 1000, prefab: '' }, 'a')).toBeNull()
+    expect(handleInactivityWarning({ idleMs: 1000, prefab: '   ' }, 'a')).toBeNull()
+  })
+
+  it('returns null sessionId when neither explicit nor active is set', () => {
+    const result = handleInactivityWarning(
+      { idleMs: 1000, prefab: 'Status update?' },
+      null,
+    )
+    expect(result!.sessionId).toBeNull()
   })
 })
 

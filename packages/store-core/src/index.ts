@@ -41,6 +41,7 @@ export type {
   QueuedMessage,
   Checkpoint,
   BaseSessionState,
+  InactivityWarning,
   // Git result element types (#3132)
   GitFileStatus,
   GitBranch,
@@ -260,6 +261,7 @@ export {
   handleBudgetResumed,
   handlePlanStarted,
   handlePlanReady,
+  handleInactivityWarning,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,

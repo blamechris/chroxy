@@ -30,6 +30,7 @@ describe('createEmptyBaseSessionState', () => {
       sessionContext: null,
       mcpServers: [],
       devPreviews: [],
+      inactivityWarning: null,
     })
   })
 
