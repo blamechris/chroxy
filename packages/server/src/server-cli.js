@@ -424,9 +424,16 @@ export async function startCliServer(config) {
     }
 
     // Reset the idle-push dedupe at the start of each busy cycle (#3866).
-    // stream_start fires per turn before any output is streamed; clearing
-    // here means the next active→idle transition is allowed to push again.
-    if (event === 'stream_start') {
+    // Different providers emit different "session became busy" signals:
+    //   - SDK / Claude CLI turns typically fire stream_start first
+    //   - Codex tool-only turns can fire tool_start without any stream_start
+    //     (see codex-session.js _processJsonlLine — `item.type === 'tool_call'`
+    //     emits tool_start unconditionally)
+    // Without clearing on tool_start, a Codex turn that runs a tool and
+    // returns no streamed text would leave the dedupe latched, and the
+    // *next* turn's result would be wrongly suppressed as "already
+    // notified" (#3872, Copilot review).
+    if (event === 'stream_start' || event === 'tool_start') {
       _idleNotifiedSessions.delete(sessionId)
     }
 
