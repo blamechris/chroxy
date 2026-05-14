@@ -194,6 +194,24 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #3899: soft inactivity warning. Session emits this after the soft
+  // window of silence; we forward it as a transient WS message so the
+  // dashboard / mobile app can render the check-in chip. Session stays
+  // alive (no `agent_idle`, no `result`) so existing busy/pending state
+  // is preserved. Push notification is dispatched by server-cli's own
+  // listener — keep the WS path unmuted so an actively-watching client
+  // still gets the chip even if push is suppressed.
+  inactivity_warning: (data) => ({
+    messages: [{
+      msg: {
+        type: 'inactivity_warning',
+        messageId: data.messageId,
+        idleMs: data.idleMs,
+        prefab: data.prefab,
+      },
+    }],
+  }),
+
   result: (data, ctx) => {
     const messages = [
       { msg: { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId } },

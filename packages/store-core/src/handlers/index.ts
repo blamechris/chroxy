@@ -401,7 +401,15 @@ export function handleInactivityWarning(
 ): SessionPatch | null {
   const idleMsRaw = msg.idleMs
   const prefabRaw = msg.prefab
-  if (typeof idleMsRaw !== 'number' || !Number.isFinite(idleMsRaw) || idleMsRaw <= 0) {
+  if (typeof idleMsRaw !== 'number' || !Number.isFinite(idleMsRaw)) {
+    return null
+  }
+  // Floor BEFORE the threshold check so sub-1ms values (e.g. 0.5) don't
+  // sneak past `> 0` and store a stale `idleMs: 0`. The wire schema
+  // already requires `.int().positive()`, so this is a defence-in-depth
+  // backstop against a malformed payload, not the primary gate.
+  const idleMs = Math.floor(idleMsRaw)
+  if (idleMs <= 0) {
     return null
   }
   if (typeof prefabRaw !== 'string' || !prefabRaw.trim()) {
@@ -411,7 +419,7 @@ export function handleInactivityWarning(
     sessionId: resolveSessionId(msg, activeSessionId),
     patch: {
       inactivityWarning: {
-        idleMs: Math.floor(idleMsRaw),
+        idleMs,
         prefab: prefabRaw,
         receivedAt: Date.now(),
       },

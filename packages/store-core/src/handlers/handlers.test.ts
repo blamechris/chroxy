@@ -512,6 +512,18 @@ describe('handleInactivityWarning', () => {
     ).toBeNull()
   })
 
+  it('returns null when idleMs floors to zero (sub-1ms values)', () => {
+    // 0.5 passes a naive `> 0` check but floors to 0 — the handler
+    // floors before the threshold to reject this defence-in-depth case
+    // even though the wire schema's `.int()` already prevents it.
+    expect(
+      handleInactivityWarning({ idleMs: 0.5, prefab: 'Status update?' }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleInactivityWarning({ idleMs: 0.999, prefab: 'Status update?' }, 'active-1'),
+    ).toBeNull()
+  })
+
   it('returns null when idleMs is non-finite', () => {
     expect(
       handleInactivityWarning({ idleMs: Number.POSITIVE_INFINITY, prefab: 'x' }, 'a'),

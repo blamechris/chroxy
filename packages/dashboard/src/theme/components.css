@@ -6181,7 +6181,7 @@
 
 .check-in-chip__action {
   background: var(--accent-yellow-500);
-  color: var(--bg-canvas, #111);
+  color: var(--bg-primary);
   border: none;
   border-radius: 8px;
   padding: 2px 10px;
