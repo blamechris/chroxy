@@ -75,7 +75,14 @@ npm install --omit=dev --no-audit --no-fund 2>&1
 # AND they fail Apple notarization because they're unsigned native binaries
 # embedded inside the Tauri app bundle.
 echo "[bundle-server] Pruning Bare-runtime prebuilds (unused under Node.js)..."
-find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -exec rm -rf {} +
+# -print emits each matched dir before -exec deletes it, so we can count
+# in a single pass without re-traversing. tr -d ' ' strips the leading
+# space BSD `wc -l` prefixes (GNU wc doesn't). #3824 — if this drops to 0
+# in a future bump, the workaround has become unnecessary and the prune
+# can be removed; if it changes, the dep graph drifted and notarization
+# may be at risk.
+PRUNED_COUNT=$(find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
+echo "[bundle-server] Pruned $PRUNED_COUNT bare-runtime prebuilds dir(s)"
 
 # Copy workspace packages AFTER npm install (npm wipes node_modules during install).
 # Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
