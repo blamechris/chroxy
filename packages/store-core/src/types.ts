@@ -340,6 +340,23 @@ export interface Checkpoint {
 }
 
 /**
+ * #3899 — soft inactivity warning state. Set when the server emits an
+ * `inactivity_warning` for this session and cleared on any subsequent
+ * activity event or on the next user_input. The dashboard / mobile app
+ * render a one-click "Status update?" affordance off this field.
+ *
+ * - `idleMs`: elapsed silence the server reported (matches the schema bound)
+ * - `prefab`: short text to send when the user clicks the check-in button
+ * - `receivedAt`: client wall-clock when the warning arrived; used purely
+ *   for rendering ("Quiet for Ns ago") without re-asking the server.
+ */
+export interface InactivityWarning {
+  idleMs: number;
+  prefab: string;
+  receivedAt: number;
+}
+
+/**
  * Base session state shared by both the mobile app and web dashboard.
  *
  * Each consumer extends this with platform-specific fields:
@@ -377,4 +394,13 @@ export interface BaseSessionState {
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
+  // #3899 — most recent soft inactivity warning for this session, or null
+  // when none is outstanding. The dashboard's `inactivity_warning` case
+  // populates this and clears it on any activity event (`isActivityEvent`)
+  // or via `sendInput` once the user sends a fresh message. The mobile
+  // app's store does NOT yet dispatch the handler — the slot is here so
+  // the follow-up React Native PR only needs to add the dispatch + UI,
+  // not re-shape the base type. Until that lands, this field remains
+  // perpetually null on mobile and consumers must self-gate accordingly.
+  inactivityWarning: InactivityWarning | null;
 }

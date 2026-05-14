@@ -384,6 +384,63 @@ export function handlePlanReady(
 }
 
 // ---------------------------------------------------------------------------
+// inactivity_warning (#3899)
+//
+// Soft warning fired after `resultTimeoutMs` of silence. The server keeps
+// the session alive — pending permissions remain pending, busy state is
+// preserved — and asks the client to surface a one-click "Status update?"
+// affordance. The handler validates the wire payload (idleMs > 0, prefab
+// is a non-empty string) and produces a patch that stores the warning on
+// the targeted session. Bad payloads return a null patch so the call site
+// can ignore them without crashing.
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound for `idleMs` in the inactivity_warning handler.
+ *
+ * Mirrors the `MAX_SANE_DURATION_MS = 24h` ceiling that
+ * `ServerInactivityWarningSchema` enforces on the wire (see
+ * packages/protocol/src/schemas/server.ts). Duplicated as a literal
+ * here so store-core stays free of the @chroxy/protocol dependency for
+ * mobile build size — protocol is the source of truth, this is the
+ * defence-in-depth backstop the handler applies when dashboard /
+ * mobile dispatch a message without re-running Zod parse.
+ */
+const MAX_INACTIVITY_IDLE_MS = 24 * 60 * 60 * 1000
+
+export function handleInactivityWarning(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch | null {
+  const idleMsRaw = msg.idleMs
+  const prefabRaw = msg.prefab
+  if (typeof idleMsRaw !== 'number' || !Number.isFinite(idleMsRaw)) {
+    return null
+  }
+  // Floor BEFORE the threshold check so sub-1ms values (e.g. 0.5) don't
+  // sneak past `> 0` and store a stale `idleMs: 0`. The wire schema
+  // already requires `.int().positive()`, so this is a defence-in-depth
+  // backstop against a malformed payload, not the primary gate.
+  const idleMs = Math.floor(idleMsRaw)
+  if (idleMs <= 0 || idleMs > MAX_INACTIVITY_IDLE_MS) {
+    return null
+  }
+  if (typeof prefabRaw !== 'string' || !prefabRaw.trim()) {
+    return null
+  }
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      inactivityWarning: {
+        idleMs,
+        prefab: prefabRaw,
+        receivedAt: Date.now(),
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // dev_preview / dev_preview_stopped
 //
 // These handlers are stateful in a way the others aren't: the new devPreviews

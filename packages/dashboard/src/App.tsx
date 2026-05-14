@@ -37,6 +37,7 @@ import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
 import { ActivityIndicator } from './components/ActivityIndicator'
+import { CheckInChip } from './components/CheckInChip'
 import { ToolBubble } from './components/ToolBubble'
 import { ToolGroup } from './components/ToolGroup'
 import { PastedTextModal } from './components/PastedTextModal'
@@ -1700,6 +1701,14 @@ export function App() {
                 stalled one. Self-gates on busy/idle; renders nothing when
                 idle. Sits immediately above the input bar. */}
             <ActivityIndicator />
+
+            {/* Check-in chip (#3899) — soft inactivity prompt with a one-
+                click "Status update?" follow-up. Self-gates on the active
+                session's inactivityWarning slot; renders nothing when none
+                is outstanding. Stacks below the activity indicator so the
+                user sees "still working, but quiet" with a single
+                actionable affordance. */}
+            <CheckInChip />
 
             {/* Input bar */}
             <InputBar

@@ -6144,3 +6144,68 @@
 .activity-indicator--yellow { color: var(--accent-yellow-500); border-color: color-mix(in srgb, var(--accent-yellow-500) 45%, transparent); }
 .activity-indicator--orange { color: var(--accent-orange-500); border-color: color-mix(in srgb, var(--accent-orange-500) 50%, transparent); }
 .activity-indicator--red    { color: var(--accent-red-500);    border-color: color-mix(in srgb, var(--accent-red-500) 55%, transparent); }
+
+/* #3899 — CheckInChip: surfaces an inactivity_warning with a one-click
+   prefab follow-up. Same chip shape as activity-indicator so the two
+   stack naturally above the InputBar. Amber palette to signal "quiet,
+   not broken" — distinct from the red "approaching timeout" state the
+   activity indicator uses for the pre-kill final minute. */
+.check-in-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--accent-yellow-500) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-yellow-500) 50%, transparent);
+  color: var(--accent-yellow-500);
+  margin: 4px 0;
+  align-self: flex-start;
+}
+
+.check-in-chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.check-in-chip__label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.check-in-chip__action {
+  background: var(--accent-yellow-500);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 8px;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.check-in-chip__action:hover { opacity: 0.85; }
+.check-in-chip__action:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Visually-hidden text node for the chip's live region. Lets screen
+   readers hear the initial "Agent has gone quiet" announcement once
+   per warning without forcing the ticking elapsed-time label through
+   `aria-live` (which would re-announce every second). */
+.check-in-chip__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

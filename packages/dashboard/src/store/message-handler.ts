@@ -31,6 +31,7 @@ import {
   handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
+  handleInactivityWarning as sharedInactivityWarning,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
@@ -1743,10 +1744,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // any per-case handler runs. Doing it here keeps the bump in one place
   // instead of threading it through every stream_*/tool_*/message handler.
   // Mirrors the logic in packages/app/src/store/message-handler.ts.
+  //
+  // #3899 — any activity event also dismisses an outstanding inactivity
+  // warning: by definition the silence has ended, so the chip should
+  // disappear without waiting for the user to dismiss it manually.
   if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
     if (targetId && get().sessionStates[targetId]) {
-      updateSession(targetId, () => ({ lastClientActivityAt: Date.now() }));
+      updateSession(targetId, (ss) => {
+        const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
+        if (ss.inactivityWarning) patch.inactivityWarning = null;
+        return patch;
+      });
     }
   }
 
@@ -2304,6 +2313,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const planReady = sharedPlanReady(msg, get().activeSessionId);
       if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
         updateSession(planReady.sessionId, () => planReady.patch);
+      }
+      break;
+    }
+
+    case 'inactivity_warning': {
+      // #3899 — server fired the soft check-in prompt. Store on the
+      // targeted session so the CheckInChip can render the prefab
+      // button. Activity event handler above clears this on the next
+      // stream_*/tool_*/result/message; sendInput clears it locally
+      // when the user actually sends a follow-up.
+      const warning = sharedInactivityWarning(msg, get().activeSessionId);
+      if (warning && warning.sessionId && get().sessionStates[warning.sessionId]) {
+        updateSession(warning.sessionId, () => warning.patch);
       }
       break;
     }

@@ -316,6 +316,29 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: inactivity_warning (#3899) ----
+
+  describe('inactivity_warning event', () => {
+    it('forwards messageId, idleMs, and prefab to the WS payload', () => {
+      const data = { messageId: 'm-7', idleMs: 1_800_000, prefab: 'Status update?' }
+      const result = normalizer.normalize('inactivity_warning', data, makeCtx())
+      assert.equal(result.messages.length, 1)
+      assert.deepEqual(result.messages[0].msg, {
+        type: 'inactivity_warning',
+        messageId: 'm-7',
+        idleMs: 1_800_000,
+        prefab: 'Status update?',
+      })
+    })
+
+    it('does not emit agent_idle / result (session stays alive)', () => {
+      const data = { messageId: 'm-7', idleMs: 30_000, prefab: 'Status update?' }
+      const result = normalizer.normalize('inactivity_warning', data, makeCtx())
+      const types = result.messages.map((m) => m.msg.type)
+      assert.deepEqual(types, ['inactivity_warning'])
+    })
+  })
+
   // ---- EVENT_MAP: result ----
 
   describe('result event', () => {
@@ -750,7 +773,7 @@ describe('EVENT_MAP', () => {
     const expectedEvents = [
       'ready', 'conversation_id', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
-      'mcp_servers', 'plan_started', 'plan_ready', 'result',
+      'mcp_servers', 'plan_started', 'plan_ready', 'inactivity_warning', 'result',
       'user_question', 'permission_request', 'error', 'skill_changed',
       'stdin_dropped_totals',
     ]
@@ -776,6 +799,7 @@ describe('EVENT_MAP', () => {
       mcp_servers: { servers: [{ name: 'fs', status: 'connected' }] },
       plan_started: {},
       plan_ready: { allowedPrompts: [] },
+      inactivity_warning: { messageId: 'm1', idleMs: 30_000, prefab: 'Status update?' },
       result: { cost: 0, duration: 0, usage: {} },
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },

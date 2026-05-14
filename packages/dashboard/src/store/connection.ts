@@ -473,6 +473,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #3646: always-present, defaulted to `null` (parity with
       // createEmptySessionState).
       pendingEvaluatorClarify: null,
+      // #3899: no warning is ever surfaced in the flat-state fallback;
+      // inactivity_warning only arrives once SessionStates is populated.
+      inactivityWarning: null,
     };
   },
 
@@ -771,6 +774,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // contract: a reconnect drops any in-flight clarify question
         // rather than leaving it on screen with stale state.
         if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+        // #3899: same contract for the inactivity check-in chip — the
+        // server does NOT replay `inactivity_warning` on reconnect, so
+        // a chip left over from before the drop would point at stale
+        // state. Clear it; if the agent is still quiet post-reconnect,
+        // the next soft-timeout firing will re-emit the warning.
+        if (ss.inactivityWarning) patch.inactivityWarning = null;
         return Object.keys(patch).length > 0 ? patch : {};
       });
 
@@ -1135,10 +1144,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // pending reconnect). Clearing optimistically inside addUserMessage
     // would lose the question if the queue is full and the message is
     // dropped — the operator would be stuck without context to retry.
+    //
+    // #3899: same idea for an outstanding inactivity warning — once
+    // the user's check-in has been sent or queued, dismiss the chip
+    // so it doesn't linger while the agent processes the prefab.
     if ((result === 'sent' || result === 'queued') && activeSessionId) {
       const ss = get().sessionStates[activeSessionId];
-      if (ss?.pendingEvaluatorClarify) {
-        updateActiveSession(() => ({ pendingEvaluatorClarify: null }));
+      if (ss?.pendingEvaluatorClarify || ss?.inactivityWarning) {
+        updateActiveSession((curr) => {
+          const patch: Partial<SessionState> = {};
+          if (curr.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+          if (curr.inactivityWarning) patch.inactivityWarning = null;
+          return patch;
+        });
       }
     }
     return result;

@@ -2332,4 +2332,101 @@ describe('dashboard message-handler dispatch', () => {
       _testSetEncryptionHandshake({ pending: false, established: false })
     })
   })
+
+  // #3899 — soft inactivity warning dispatch. Verifies the case stores the
+  // warning on the right session and that the activity-bump branch wipes
+  // it on the next activity event. Hard-cap kill path is exercised by the
+  // server-side timeout tests (cli-session-timeout-pause / sdk-session).
+  describe('inactivity_warning dispatch (#3899)', () => {
+    it('stores idleMs + prefab on the targeted session', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState() },
+        },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'inactivity_warning',
+          sessionId: 's1',
+          messageId: 'm-1',
+          idleMs: 1_800_000,
+          prefab: 'Status update?',
+        },
+        ctx() as any,
+      )
+
+      const warning = (store.getState() as any).sessionStates.s1.inactivityWarning
+      expect(warning).not.toBeNull()
+      expect(warning.idleMs).toBe(1_800_000)
+      expect(warning.prefab).toBe('Status update?')
+      expect(typeof warning.receivedAt).toBe('number')
+    })
+
+    it('drops the warning when the targeted session is unknown', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'inactivity_warning',
+          sessionId: 'unknown-sess',
+          messageId: 'm-1',
+          idleMs: 1_800_000,
+          prefab: 'Status update?',
+        },
+        ctx() as any,
+      )
+
+      expect((store.getState() as any).sessionStates.s1.inactivityWarning).toBeNull()
+    })
+
+    it('ignores malformed payloads (idleMs <= 0)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'inactivity_warning',
+          sessionId: 's1',
+          messageId: 'm-1',
+          idleMs: 0,
+          prefab: 'Status update?',
+        },
+        ctx() as any,
+      )
+
+      expect((store.getState() as any).sessionStates.s1.inactivityWarning).toBeNull()
+    })
+
+    it('activity event clears an outstanding warning on the same session', () => {
+      // Pre-seed a session that already has an inactivity warning.
+      const seeded = {
+        ...createEmptySessionState(),
+        inactivityWarning: { idleMs: 1_800_000, prefab: 'Status update?', receivedAt: 100 },
+      }
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: seeded },
+      }))
+      setStore(store)
+
+      // result is an ACTIVITY_EVENT_TYPES member — dispatching it should
+      // wipe the warning regardless of what the per-case handler does.
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+
+      expect((store.getState() as any).sessionStates.s1.inactivityWarning).toBeNull()
+    })
+  })
 })
