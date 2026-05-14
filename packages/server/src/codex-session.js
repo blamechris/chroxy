@@ -71,16 +71,28 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * right default. A per-session sandbox selector (read-only / workspace-write
  * / danger-full-access) is tracked separately under #3837.
  *
- * SECURITY INVARIANT (#3843): `text` and `model` are interpolated into argv
- * passed directly to `spawn()` — no shell, so shell metacharacters can't
- * escape. However, `model` is interpolated into the `-c model="${model}"`
- * config flag *without* re-validation here. **Callers MUST pre-validate the
- * model ID against `CodexSession.getAllowedModels()` before calling.** The
- * production gate is `handleSetModel` in `handlers/settings-handlers.js`,
- * which rejects any value not in the per-provider allowlist before
- * `session.setModel()` writes to `this.model`. If a future refactor exposes
- * `buildCodexArgs` to a new caller (e.g. an alternate spawn path), preserve
- * that invariant or add validation here.
+ * SECURITY INVARIANT (#3843, #3869): `text`, `model`, and `threadId` are
+ * interpolated into argv passed directly to `spawn()` — no shell, so shell
+ * metacharacters can't escape.
+ *
+ * - `model` is interpolated into `-c model="${model}"` *without* re-validation
+ *   here. **Callers MUST pre-validate the model ID against
+ *   `CodexSession.getAllowedModels()` before calling.** The production gate is
+ *   `handleSetModel` in `handlers/settings-handlers.js`, which rejects any
+ *   value not in the per-provider allowlist before `session.setModel()`
+ *   writes to `this.model`.
+ *
+ * - `threadId` (#3865) is **trusted because it comes from Codex CLI's own
+ *   `thread.started` JSONL stdout** — captured in `_processJsonlLine`, never
+ *   from user input. If a future caller wires this to a different source
+ *   (e.g. a user-supplied resume input from the dashboard), validate it as a
+ *   UUID first. Note that `codex exec resume <id>` silently falls back to a
+ *   *new* thread when the id is malformed or unknown rather than erroring —
+ *   so a "resume isn't resuming" bug report likely means the threadId path
+ *   is wrong, not that the CLI rejected the value.
+ *
+ * If a future refactor exposes `buildCodexArgs` to a new caller (e.g. an
+ * alternate spawn path), preserve these invariants or add validation here.
  *
  * @param {string} text   User prompt
  * @param {string|null} model  Optional model ID. Caller must validate against
