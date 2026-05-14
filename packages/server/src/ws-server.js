@@ -269,6 +269,7 @@ function _isSecureRequest(req) {
  *   { type: 'agent_idle' }                           — agent finished processing (per-session)
  *   { type: 'plan_started' }                         — Claude entered plan mode (transient)
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
+ *   { type: 'inactivity_warning', messageId, idleMs, prefab } — soft check-in prompt, session stays alive (#3899)
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable, sessionId? } — server-side error forwarded to app
