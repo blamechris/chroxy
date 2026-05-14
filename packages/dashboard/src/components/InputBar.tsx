@@ -272,6 +272,13 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     if (pastedTextBlocks && onRemovePastedText) {
       for (const blk of pastedTextBlocks) onRemovePastedText(blk.id)
     }
+    // #3853 review: reset the explicit height set by handleChange's auto-
+    // resize logic. setValue('') alone doesn't re-run the resize path, so
+    // a cleared multi-line draft would leave the textarea visually tall.
+    // Mirrors the height reset send() does after a successful send.
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
     textareaRef.current?.focus()
     return true
   }, [value, attachments, imageAttachments, pastedTextBlocks, onRemoveAttachment, onRemoveImage, onRemovePastedText, setValue])

@@ -177,6 +177,20 @@ describe('InputBar', () => {
       expect(document.activeElement).toBe(textarea)
     })
 
+    // Copilot review of #3853: handleChange's auto-resize sets an explicit
+    // height on the textarea. setValue('') alone doesn't re-run that path,
+    // so without this reset a cleared multi-line draft would leave the
+    // textarea visually tall.
+    it('resets the explicit height set by auto-resize', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      // Simulate a multi-line draft that's already been auto-resized
+      fireEvent.change(textarea, { target: { value: 'line1\nline2\nline3\nline4' } })
+      textarea.style.height = '120px'
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(textarea.style.height).toBe('auto')
+    })
+
     it('is a no-op when the composer is empty', () => {
       const onRemoveAttachment = vi.fn()
       const onRemoveImage = vi.fn()
