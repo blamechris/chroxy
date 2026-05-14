@@ -26,19 +26,21 @@ After agent-review completes, run the `/check-pr` skill on the same PR. By now, 
 - Processes every review comment (Copilot + human + agent-review findings if inline)
 - Fixes, dismisses, or defers each comment with inline replies
 - Pushes all fixes and verifies every thread has a reply
+- **Resolves every conversation thread via GraphQL** so branch protection's "conversations resolved" gate clears. Replies alone don't do this.
 - Cross-references fixes against open from-review issues
 
 **Capture the results:** comments processed, fixes committed, issues created/closed.
 
-### Phase 2.5: Verify CI
+### Phase 2.5: Verify CI (Optional)
 
-Always capture the current CI state for the summary table. If check-pr pushed fix commits in Phase 2, CI may need intervention (concurrency groups commonly cancel the in-progress run when fixes are pushed).
+If check-pr pushed any fix commits in Phase 2, CI needs to pass on the new HEAD before merge. Concurrency groups commonly cancel the in-progress run when fixes are pushed, leaving CI stale.
 
 1. Check if any commits were pushed in Phase 2 (check-pr fixes)
-2. If yes, run `/fix-ci` on the same PR (common outcome: retriggering a cancelled run)
-3. If no commits were pushed, check CI status anyway (`gh run list` for HEAD SHA) and report the current state (PASS / IN_PROGRESS / FAILED)
+2. If yes, run `/fix-ci` on the same PR
+3. Common outcome: retriggering a cancelled run after concurrency cancellation
+4. If no commits were pushed, skip this phase (CI is still valid from before)
 
-**Capture the results:** CI status, any action taken (retrigger/fix/escalate), or current state if no action needed.
+**Capture the results:** CI status, any action taken (retrigger/fix/escalate).
 
 ### Phase 3: Combined Summary
 
@@ -53,7 +55,7 @@ Output a **single combined summary table** covering both phases. This is the PRI
 **Column guide:**
 - **Review:** Verdict + finding counts from agent-review
 - **Check-PR:** `N comments → M fixed` (add `, X false pos` / `, Y deferred` if any)
-- **CI:** Always reported. `PASS` / `PASS (after retrigger)` / `PASS (after fix)` / `IN_PROGRESS` / `FAILED` / `ESCALATED`
+- **CI:** Status from Phase 2.5. `PASS` / `PASS (after retrigger)` / `PASS (after fix)` / `ESCALATED` / `—` (if Phase 2.5 was skipped because no commits were pushed)
 - **Changes:** Comma-separated brief descriptions of what changed (2-5 words each, from check-pr fixes)
 - **Issues:** Combined from both phases. `Created: #X` for new follow-ups. `Closed: #Y` for resolved issues. Deduplicate (agent-review may create issues that check-pr then closes).
 
@@ -68,5 +70,9 @@ Then below the table:
 - **Sequential, not parallel.** Agent-review MUST complete before check-pr starts. This is by design — the delay lets Copilot review arrive.
 - **Same branch.** Both skills operate on the same PR branch. Check-pr may commit fixes on top of the reviewed code.
 - **Deduplication.** If agent-review creates a follow-up issue and check-pr's fixes resolve it, close the issue in Phase 2 with a PR cross-reference.
+- **Threads resolved before declaring done.** Check-pr's step 6b runs the GraphQL `resolveReviewThread` mutation for every thread. Without it, branch protection blocks merge silently — the user has to click "Resolve conversation" once per thread. If you skip this, full-review is not done; you've handed the user manual cleanup.
 - **Attribution.** Follow Zero Attribution Policy throughout — no AI mentions in commits, replies, or issues.
-<!-- skill-templates: full-review 3768ea6 2026-03-01 -->
+
+## Customization Points
+
+This skill composes agent-review and check-pr. Customize those skills individually per the notes in each template. The only full-review-specific customization is the summary table format, which can be adapted per repo.
