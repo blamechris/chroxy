@@ -1430,7 +1430,7 @@ export function App() {
             aria-label="Skills"
             title="Skills"
           >
-            &#128190;
+            &#129513;
           </button>
           {viewMode === 'chat' && storeMessages.length > 0 && (
             <button
