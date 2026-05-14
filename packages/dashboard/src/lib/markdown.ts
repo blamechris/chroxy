@@ -57,6 +57,32 @@ export function renderMarkdown(text: string): string {
     return `<a href="${safeUrl}" target="_blank" rel="noopener">${linkText}</a>`
   })
 
+  // Autolink bare http(s) URLs (#3849) — run AFTER the markdown-link replace
+  // so `[text](url)` anchors above aren't touched. To avoid double-wrapping
+  // URLs that appear inside an existing <a>…</a> from the line above (e.g.
+  // `[https://x](https://x)` whose link text is itself a URL), stash any
+  // existing anchors behind placeholders, autolink the remaining text, then
+  // restore. Trailing punctuation (. , ; : ! ? ) ]) is excluded from the
+  // match so a sentence-ending URL doesn't drag the period into the href.
+  //
+  // Entity awareness (#3849 review): this pass runs AFTER HTML-escape, so
+  // `<` is already `&lt;`, `>` is `&gt;`, and `&` in query strings is
+  // `&amp;`. A naive `[^\s<]+` body would happily eat `&gt`/`&lt` into the
+  // URL match. Treat `&` as a terminator BUT special-case `&amp;` (the
+  // round-trip of literal `&` in query strings) so URLs like
+  // `?q=1&amp;y=2` still match in full.
+  const anchorPlaceholders: string[] = []
+  html = html.replace(/<a [^>]*>[\s\S]*?<\/a>/g, (m) => {
+    const ph = '\x00AN' + anchorPlaceholders.length + '\x00'
+    anchorPlaceholders.push(m)
+    return ph
+  })
+  html = html.replace(/\bhttps?:\/\/(?:[^\s<&]+|&amp;)*[^\s<&.,;:!?)\]]/g, (url: string) => {
+    const safeUrl = url.replace(/"/g, '&quot;')
+    return `<a href="${safeUrl}" target="_blank" rel="noopener">${url}</a>`
+  })
+  html = html.replace(/\x00AN(\d+)\x00/g, (_m, idx: string) => anchorPlaceholders[Number(idx)]!)
+
   // Blockquotes
   html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
 
