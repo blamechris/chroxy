@@ -218,8 +218,8 @@ describe('Provider Registry', () => {
 
     it('claude-sdk stays ready=false when ~/.claude.json has no claudeAiOauth block (#3674)', () => {
       clearKeys()
-      writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, JSON.stringify({ unrelated: 'config' }))
       try {
+        writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, JSON.stringify({ unrelated: 'config' }))
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, false)
@@ -235,8 +235,8 @@ describe('Provider Registry', () => {
     // call.
     it('claude-sdk stays ready=false when ~/.claude.json is malformed JSON (#3677 review)', () => {
       clearKeys()
-      writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, 'this is not { valid json')
       try {
+        writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, 'this is not { valid json')
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, false)
