@@ -461,12 +461,14 @@ export async function startCliServer(config) {
             const sessionName = sessionManager.getSession(sessionId)?.name
             // #3870: latch SYNCHRONOUSLY before send() returns its promise
             // so a second `result` arriving in the same tick can't double-
-            // fire (passes the !alreadyNotified gate twice). If the async
-            // send rejects (Expo 5xx after retries, network timeout,
-            // _sendToTokenSet throw), surface the failure at warn and
-            // RELEASE the latch so the next active→idle cycle gets a fresh
-            // chance — without this the user was silently dropped *and*
-            // permanently latched until the session went busy again.
+            // fire (passes the !alreadyNotified gate twice). `send()` now
+            // returns a Promise<boolean> — `false` means Expo hard-failed
+            // (non-2xx or network throw, both caught inside _sendToTokenSet
+            // and surfaced via this return value, NOT via rejection since
+            // _sendToTokenSet swallows the throw). On hard failure, log at
+            // warn and RELEASE the latch so the next active→idle cycle gets
+            // a fresh chance — without this the user was silently dropped
+            // *and* permanently latched until the session went busy again.
             _idleNotifiedSessions.add(sessionId)
             Promise.resolve(
               pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
@@ -475,7 +477,14 @@ export async function startCliServer(config) {
                 state: 'idle',
                 ...(data.duration != null && { elapsed: data.duration }),
               })
-            ).catch(err => {
+            ).then(ok => {
+              if (ok === false) {
+                log.warn(`Idle push send failed for ${sessionId} (Expo hard failure)`)
+                _idleNotifiedSessions.delete(sessionId)
+              }
+            }).catch(err => {
+              // Defensive — _sendToTokenSet should never throw, but if a
+              // future refactor lets one escape, treat it as hard failure.
               log.warn(`Idle push send failed for ${sessionId}: ${err?.message || err}`)
               _idleNotifiedSessions.delete(sessionId)
             })

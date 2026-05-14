@@ -243,6 +243,60 @@ describe('PushManager', () => {
       await assert.doesNotReject(() => manager.send('result', 'T', 'B'))
     })
 
+    // #3870 review (Copilot on PR #3881): send() must return a Promise<boolean>
+    // so callers can detect hard delivery failures. _sendToTokenSet catches
+    // all errors internally — the only way a hard failure reaches the caller
+    // is via this return value.
+    describe('return value contract (#3870)', () => {
+      it('returns true when Expo accepts the post', async () => {
+        manager.registerToken(VALID_TOKEN)
+        globalThis.fetch = mockFetchOk()
+        const ok = await manager.send('result', 'T', 'B')
+        assert.equal(ok, true)
+      })
+
+      it('returns false when Expo returns non-2xx (hard failure)', async () => {
+        manager.registerToken(VALID_TOKEN)
+        globalThis.fetch = mockFetchErr(500)
+        const ok = await manager.send('result', 'T', 'B')
+        assert.equal(ok, false)
+      })
+
+      it('returns false when fetch throws (network error)', async () => {
+        manager.registerToken(VALID_TOKEN)
+        globalThis.fetch = mock.fn(async () => { throw new Error('boom') })
+        const ok = await manager.send('result', 'T', 'B')
+        assert.equal(ok, false)
+      })
+
+      it('returns true when there are no registered tokens (nothing to fail)', async () => {
+        const ok = await manager.send('result', 'T', 'B')
+        assert.equal(ok, true)
+      })
+
+      it('returns true when rate-limited (no error, just skipped)', async () => {
+        manager.registerToken(VALID_TOKEN)
+        globalThis.fetch = mockFetchOk()
+        // First send sets _lastSent for the category
+        await manager.send('result', 'T', 'B')
+        // Second send within the rate-limit window — must report true (not a delivery failure)
+        const ok = await manager.send('result', 'T', 'B')
+        assert.equal(ok, true)
+      })
+
+      it('returns true even when individual tokens are pruned (post itself succeeded)', async () => {
+        manager.registerToken(VALID_TOKEN)
+        manager.registerToken(VALID_TOKEN_2)
+        globalThis.fetch = mockFetchOk([
+          { status: 'error', message: 'DeviceNotRegistered' },
+          { status: 'ok' },
+        ])
+        const ok = await manager.send('result', 'T', 'B')
+        // Per-message errors are handled by pruning, not by reporting hard failure.
+        assert.equal(ok, true)
+      })
+    })
+
     it('prunes tokens that return error status from Expo', async () => {
       manager.registerToken(VALID_TOKEN)
       manager.registerToken(VALID_TOKEN_2)
