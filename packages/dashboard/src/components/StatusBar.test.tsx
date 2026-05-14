@@ -107,4 +107,45 @@ describe('StatusBar', () => {
     expect(badge.getAttribute('data-provider')).toBe('other')
     expect(badge.getAttribute('title')).toContain('Google')
   })
+
+  // #3858 — explanatory tooltips on read-only status chips
+  describe('explanatory tooltips (#3858)', () => {
+    it('cost chip has a title attribute when cost is set', () => {
+      const { container } = render(<StatusBar cost={1.23} provider="claude-sdk" />)
+      const el = container.querySelector('.status-cost')
+      expect(el?.getAttribute('title')).toMatch(/total session cost/i)
+      expect(el?.getAttribute('title')).toContain('$1.2300')
+    })
+
+    it('cost tooltip notes client-side estimation for non-Claude providers', () => {
+      const { container } = render(<StatusBar cost={1.23} provider="codex" />)
+      const el = container.querySelector('.status-cost')
+      expect(el?.getAttribute('title')).toMatch(/estimated client-side/i)
+    })
+
+    it('cost tooltip omits client-side estimation note for Claude', () => {
+      const { container } = render(<StatusBar cost={1.23} provider="claude-sdk" />)
+      const el = container.querySelector('.status-cost')
+      expect(el?.getAttribute('title')).not.toMatch(/estimated client-side/i)
+    })
+
+    it('context chip tooltip clarifies per-turn (not cumulative)', () => {
+      const { container } = render(
+        <StatusBar
+          context="1.2k tokens"
+          contextUsage={{ inputTokens: 1000, outputTokens: 200 }}
+          contextWindow={200000}
+          contextPercent={0.6}
+        />
+      )
+      const el = container.querySelector('.status-context')
+      expect(el?.getAttribute('title')?.toLowerCase()).toContain('per-turn')
+    })
+
+    it('agent badge has tooltip with count', () => {
+      const { container } = render(<StatusBar agentCount={2} />)
+      const el = container.querySelector('.agent-badge')
+      expect(el?.getAttribute('title')).toContain('2 background agents')
+    })
+  })
 })

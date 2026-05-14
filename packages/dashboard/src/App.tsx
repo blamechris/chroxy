@@ -1459,6 +1459,9 @@ export function App() {
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+            contextUsage={contextUsage}
+            contextWindow={availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow ?? null}
+            contextPercent={contextPercent}
           />
         </div>
       </header>
@@ -1750,6 +1753,9 @@ export function App() {
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        contextUsage={contextUsage}
+        contextWindow={availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow ?? null}
       />
 
       {/* Settings panel */}

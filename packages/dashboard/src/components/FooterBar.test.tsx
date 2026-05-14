@@ -126,4 +126,46 @@ describe('FooterBar', () => {
     screen.getByLabelText('Show QR code').click()
     expect(onShowQr).toHaveBeenCalledOnce()
   })
+
+  // #3858 — explanatory tooltips on read-only status chips
+  describe('explanatory tooltips (#3858)', () => {
+    it('cost chip has a title attribute', () => {
+      const { container } = render(<FooterBar {...baseProps} cost={1.23} provider="claude-sdk" />)
+      const el = container.querySelector('.footer-cost')
+      expect(el?.getAttribute('title')).toMatch(/total session cost/i)
+    })
+
+    it('cost tooltip notes client-side estimation for non-Claude providers', () => {
+      const { container } = render(<FooterBar {...baseProps} cost={1.23} provider="codex" />)
+      const el = container.querySelector('.footer-cost')
+      expect(el?.getAttribute('title')).toMatch(/estimated client-side/i)
+    })
+
+    it('agent chip has a title attribute', () => {
+      const { container } = render(<FooterBar {...baseProps} agentCount={2} />)
+      const el = container.querySelector('.footer-agents')
+      expect(el?.getAttribute('title')).toContain('2 background agents')
+    })
+
+    it('model chip has a title attribute', () => {
+      const { container } = render(<FooterBar {...baseProps} model="claude-opus-4-7" contextWindow={200000} />)
+      const el = container.querySelector('.footer-model')
+      expect(el?.getAttribute('title')).toContain('claude-opus-4-7')
+      expect(el?.getAttribute('title')).toContain('200,000')
+    })
+
+    it('context chip tooltip clarifies per-turn (not cumulative)', () => {
+      const { container } = render(
+        <FooterBar
+          {...baseProps}
+          context="1.2k tokens"
+          contextPercent={0.6}
+          contextUsage={{ inputTokens: 1000, outputTokens: 200 }}
+          contextWindow={200000}
+        />
+      )
+      const el = container.querySelector('.footer-context')
+      expect(el?.getAttribute('title')?.toLowerCase()).toContain('per-turn')
+    })
+  })
 })

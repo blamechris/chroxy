@@ -6,6 +6,13 @@
  * Spans full width across sidebar + main content (grid-column: 1 / -1).
  */
 
+import {
+  costTooltip,
+  contextTooltip,
+  agentTooltip,
+  modelTooltip,
+} from '../lib/status-tooltips'
+
 declare const __APP_VERSION__: string
 
 export interface FooterBarProps {
@@ -24,6 +31,10 @@ export interface FooterBarProps {
   onShowQr?: () => void
   /** #3070: per-session "Share this session" QR. Undefined hides the button. */
   onShareSession?: () => void
+  /** #3858: provider + per-turn data so the chip tooltips can explain values. */
+  provider?: string
+  contextUsage?: { inputTokens: number; outputTokens: number } | null
+  contextWindow?: number | null
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -55,7 +66,19 @@ export function FooterBar({
   agentCount,
   onShowQr,
   onShareSession,
+  provider,
+  contextUsage,
+  contextWindow,
 }: FooterBarProps) {
+  const costTitle = costTooltip(cost ?? null, provider ?? null)
+  const contextTitle = contextTooltip({
+    inputTokens: contextUsage?.inputTokens ?? 0,
+    outputTokens: contextUsage?.outputTokens ?? 0,
+    contextWindow: contextWindow ?? null,
+    percent: contextPercent ?? null,
+  })
+  const modelTitle = modelTooltip(model ?? null, contextWindow ?? null)
+  const agentTitle = agentCount != null ? agentTooltip(agentCount) : undefined
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
   // Prefer WS-driven serverPhase over polling-based tunnelReady
@@ -104,16 +127,34 @@ export function FooterBar({
         )}
         {isBusy && <span className="footer-busy" />}
         {agentCount != null && agentCount > 0 && (
-          <span className="footer-agents">
+          <span
+            className="footer-agents"
+            title={agentTitle}
+            aria-label={agentTitle}
+          >
             {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
           </span>
         )}
-        {model && <span className="footer-model">{model}</span>}
+        {model && (
+          <span
+            className="footer-model"
+            title={modelTitle}
+            aria-label={modelTitle}
+          >
+            {model}
+          </span>
+        )}
         {cost != null && (
-          <span className="footer-cost">${cost.toFixed(4)}</span>
+          <span
+            className="footer-cost"
+            title={costTitle}
+            aria-label={costTitle}
+          >
+            ${cost.toFixed(4)}
+          </span>
         )}
         {context && (
-          <span className="footer-context" title={context}>
+          <span className="footer-context" title={contextTitle} aria-label={contextTitle}>
             {contextPercent != null ? (
               <>
                 <span
