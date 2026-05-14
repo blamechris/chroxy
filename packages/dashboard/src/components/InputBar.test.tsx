@@ -269,6 +269,88 @@ describe('InputBar', () => {
     expect(onInterrupt).toHaveBeenCalled()
   })
 
+  // #3850: pre-fix, the Send/Stop toggle was gated on `!value.trim()` —
+  // typing a follow-up while busy hid Stop and the only way to interrupt
+  // was Escape (undiscoverable). These tests pin the fix: while a turn is
+  // in flight AND the composer has draft text, BOTH buttons must be
+  // reachable so the user can either queue the follow-up (Send) or
+  // interrupt the current turn (Stop). When the composer is empty during
+  // busy state, only Stop is shown (preserves existing UX — no point
+  // showing a Send that has nothing to send).
+  describe('Stop button reachability with draft text (#3850)', () => {
+    it('shows BOTH Send and Stop when busy with draft text', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'follow-up draft' } })
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows BOTH Send and Stop when streaming with draft text', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isStreaming />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'queued message' } })
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('hides Send button when busy with empty composer (only Stop visible)', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      expect(screen.queryByTestId('send-button')).not.toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('hides Send button when busy and composer is whitespace-only', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: '   \n  \t  ' } })
+      expect(screen.queryByTestId('send-button')).not.toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('clicking Stop interrupts even when composer has draft text', () => {
+      const onInterrupt = vi.fn()
+      render(<InputBar onSend={vi.fn()} onInterrupt={onInterrupt} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'draft' } })
+      fireEvent.click(screen.getByTestId('interrupt-button'))
+      expect(onInterrupt).toHaveBeenCalled()
+    })
+
+    it('clicking Send while busy queues the follow-up (calls onSend with the draft)', () => {
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'queue this' } })
+      fireEvent.click(screen.getByTestId('send-button'))
+      expect(onSend).toHaveBeenCalledWith('queue this')
+    })
+
+    it('Send button while busy uses "Send follow-up" aria-label', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'x' } })
+      expect(screen.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send follow-up')
+    })
+
+    // Order matters: the PR's UX contract is "Stop keeps the rightmost
+    // position across all busy states" so users don't have to hunt when
+    // they start typing. Without this assertion, a future reorder
+    // (Stop-then-Send) would silently regress the layout — buttons
+    // would still both render, all other tests would still pass.
+    it('renders Send before Stop in DOM order (Stop stays rightmost)', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'draft' } })
+      const sendBtn = screen.getByTestId('send-button')
+      const stopBtn = screen.getByTestId('interrupt-button')
+      // DOCUMENT_POSITION_FOLLOWING (4) means stopBtn comes after sendBtn
+      // in document order — i.e., Send is earlier in the tree, Stop later.
+      const pos = sendBtn.compareDocumentPosition(stopBtn)
+      expect(pos & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+  })
+
   it('shows placeholder text', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} placeholder="Ask Claude..." />)
     expect(screen.getByPlaceholderText('Ask Claude...')).toBeInTheDocument()
