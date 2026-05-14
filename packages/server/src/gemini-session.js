@@ -188,8 +188,11 @@ export class GeminiSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId } = {}) {
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId })
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId } = {}) {
+    // #3899: hardTimeoutMs forwarded to BaseSession — same shape as
+    // CodexSession. When Gemini gets the soft/hard split as a follow-
+    // up, the operator config will already be flowing in.
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId })
   }
 
   setModel(model) {

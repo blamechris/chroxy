@@ -258,7 +258,12 @@ export const ServerClientFocusChangedSchema = z.object({
 export const ServerInactivityWarningSchema = z.object({
   type: z.literal('inactivity_warning'),
   messageId: z.string(),
-  idleMs: z.number(),
+  // `idleMs` matches the duration-field discipline in this file: integer,
+  // positive (zero is meaningless for an elapsed-silence value), finite,
+  // bounded by MAX_SANE_DURATION_MS (24h). The soft window defaults to
+  // 30 min and is operator-configurable down to 30s, so positive is the
+  // correct floor — never zero, never negative, never NaN/Infinity.
+  idleMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS),
   prefab: z.string(),
 })
 

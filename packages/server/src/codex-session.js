@@ -271,11 +271,15 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId })
+    // #3899: hardTimeoutMs forwarded to BaseSession even though Codex
+    // doesn't (yet) split its timer into soft/hard — the config flows
+    // through here so when Codex gets the #3899 treatment as a follow-
+    // up the plumbing is already in place.
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId })
   }
 
   // ------------------------------------------------------------------

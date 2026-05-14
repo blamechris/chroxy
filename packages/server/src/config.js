@@ -121,15 +121,24 @@ const CONFIG_SCHEMA = {
   // implicit.
   // Documented in CONFIG.md.
   trustMismatchMode: 'string',
-  // #3749 / #3884: max ms of inactivity (no SDK / CLI event) before the
-  // server force-clears busy state and emits a timeout error. Defaults to
-  // 1800000 (30 min). Was a hardcoded 5 min before — too aggressive for
-  // legitimate slow tools (large fetches, long Bash, extended thinking).
-  // Range: 30s minimum, 24h maximum — validateConfig logs a warning for
-  // out-of-range values (warn-only, not clamped); the runtime still
-  // applies whatever was set. Operators should fix the warning rather
-  // than rely on silent normalisation.
+  // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). When no
+  // SDK / CLI event fires within this window, the server emits an
+  // `inactivity_warning` event (and push notification) — the session
+  // stays alive. Defaults to 1800000 (30 min). Was a hardcoded 5 min
+  // before — too aggressive for legitimate slow tools (large fetches,
+  // long Bash, extended thinking). Range: 30s minimum, 24h maximum —
+  // validateConfig logs a warning for out-of-range values (warn-only,
+  // not clamped); the runtime still applies whatever was set.
+  // Operators should fix the warning rather than rely on silent
+  // normalisation.
   resultTimeoutMs: 'number',
+  // #3899: HARD-cap inactivity timeout (ms). When silence continues
+  // for this long with no user check-in, the session is force-cleared
+  // (the pre-#3899 kill path). Defaults to 7200000 (2h). Same range
+  // semantics as resultTimeoutMs — operators can set this shorter if
+  // they want tighter runaway-session protection, but it should always
+  // be >= resultTimeoutMs (the soft warning fires first).
+  hardTimeoutMs: 'number',
 }
 
 /**
@@ -217,6 +226,22 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'resultTimeoutMs': ${config.resultTimeoutMs} (minimum 30000 / 30s)`)
     } else if (config.resultTimeoutMs > 24 * 60 * 60 * 1000) {
       warnings.push(`Invalid value for 'resultTimeoutMs': ${config.resultTimeoutMs} (maximum 86400000 / 24h)`)
+    }
+  }
+
+  // #3899: hard-cap range. Same 30s / 24h bounds as resultTimeoutMs.
+  // Additionally: warn if hardTimeoutMs < resultTimeoutMs — the soft
+  // warning is supposed to fire first; an inverted config would fire
+  // the kill before the warning ever surfaces. Warn-only (not clamped)
+  // so operators can deliberately set them equal for tight kill
+  // semantics if they really want.
+  if (Number.isFinite(config.hardTimeoutMs)) {
+    if (config.hardTimeoutMs < 30_000) {
+      warnings.push(`Invalid value for 'hardTimeoutMs': ${config.hardTimeoutMs} (minimum 30000 / 30s)`)
+    } else if (config.hardTimeoutMs > 24 * 60 * 60 * 1000) {
+      warnings.push(`Invalid value for 'hardTimeoutMs': ${config.hardTimeoutMs} (maximum 86400000 / 24h)`)
+    } else if (Number.isFinite(config.resultTimeoutMs) && config.hardTimeoutMs < config.resultTimeoutMs) {
+      warnings.push(`'hardTimeoutMs' (${config.hardTimeoutMs}) is less than 'resultTimeoutMs' (${config.resultTimeoutMs}) — the soft warning will never fire before the hard kill`)
     }
   }
 
@@ -356,6 +381,7 @@ function envKeyForConfig(key) {
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
+    hardTimeoutMs: 'CHROXY_HARD_TIMEOUT_MS',
   }
   return envMap[key] || key.toUpperCase()
 }

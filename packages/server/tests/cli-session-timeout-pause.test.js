@@ -387,5 +387,34 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
         s.destroy()
       }
     })
+
+    // Edge case raised in PR #3901 review (Copilot): the soft timer is
+    // scheduled in `_armResultTimeout` and self-nulls its own field on
+    // fire, but the closure captures whatever `this._currentMessageId`
+    // is AT FIRE TIME. If `_clearMessageState` ran between scheduling
+    // and firing (unlikely in production — `_isBusy` would also be
+    // false and the handler early-returns — but possible if a future
+    // refactor decouples them), the handler should not crash and the
+    // emitted event should still be schema-valid.
+    it('handles _handleInactivityWarning gracefully when _currentMessageId is null', async () => {
+      const s = createReadySession({ resultTimeoutMs: SOFT, hardTimeoutMs: HARD })
+      const warnings = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      try {
+        await s.sendMessage('something')
+        // Force the no-message-id state while keeping busy true so the
+        // handler's `if (!this._isBusy) return` guard doesn't short-circuit.
+        s._currentMessageId = null
+        // Call the handler directly — same path the soft timer would
+        // take when it fires.
+        s._handleInactivityWarning()
+        assert.equal(warnings.length, 1, 'event still emitted')
+        assert.equal(warnings[0].messageId, null, 'messageId is null, not undefined or crashed')
+        assert.equal(warnings[0].prefab, 'Status update?')
+        assert.equal(warnings[0].idleMs, SOFT)
+      } finally {
+        s.destroy()
+      }
+    })
   })
 })
