@@ -20,7 +20,10 @@ import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { createEmptySessionState } from '../../store/utils';
 
 const SESSION_ID = 's-test';
-// Use a 20-min reference timeout for most cases (matches production default).
+// Use a 20-min reference timeout for most cases — a convenient round number
+// for color-escalation arithmetic. NOT coupled to BaseSession's production
+// default (30 min as of #3884); these tests pin local color logic, not
+// server policy.
 const TIMEOUT_20MIN = 20 * 60_000;
 
 function collectVisibleText(root: ReactTestInstance): string {

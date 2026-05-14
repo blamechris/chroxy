@@ -154,13 +154,13 @@ describe('sendPostAuthInfo — resultTimeoutMs (#3760)', () => {
     assert.equal(authOk.resultTimeoutMs, 45 * 60 * 1000)
   })
 
-  it('falls back to BaseSession default (20 min) when ctx.resultTimeoutMs is null', () => {
+  it('falls back to BaseSession default (30 min) when ctx.resultTimeoutMs is null', () => {
     const ctx = makeCtx({ resultTimeoutMs: null })
     const ws = makeFakeWs()
     registerClient(ctx, ws)
     sendPostAuthInfo(ctx, ws)
     const authOk = ctx._sends[0]
-    assert.equal(authOk.resultTimeoutMs, 20 * 60 * 1000)
+    assert.equal(authOk.resultTimeoutMs, 30 * 60 * 1000)
   })
 
   it('falls back to the default when ctx.resultTimeoutMs is non-positive or non-finite', () => {
@@ -170,7 +170,7 @@ describe('sendPostAuthInfo — resultTimeoutMs (#3760)', () => {
       registerClient(ctx, ws)
       sendPostAuthInfo(ctx, ws)
       const authOk = ctx._sends[0]
-      assert.equal(authOk.resultTimeoutMs, 20 * 60 * 1000, `bad input: ${bad}`)
+      assert.equal(authOk.resultTimeoutMs, 30 * 60 * 1000, `bad input: ${bad}`)
     }
   })
 })

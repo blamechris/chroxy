@@ -29,8 +29,8 @@ function createMockChild() {
 // Pin the inactivity-timer window to 5 minutes for these tests. They were
 // written before the timeout became configurable (#3749) and their tick
 // arithmetic assumes a 5-min window throughout. Overriding here keeps the
-// test semantics local instead of bleeding the prod default (20 min) into
-// every `mock.timers.tick(N * 60_000)` call.
+// test semantics local instead of bleeding the prod default (30 min as of
+// #3884) into every `mock.timers.tick(N * 60_000)` call.
 const TEST_RESULT_TIMEOUT_MS = 5 * 60_000
 
 function createReadySession(opts = {}) {
@@ -144,12 +144,12 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
 
   // #3757: resume path must re-arm with this._resultTimeoutMs (not a
   // hardcoded constant). Construct a session with a 90-second window
-  // (unusual, neither the legacy 5 min nor the new 20-min default) and
+  // (unusual, neither the legacy 5 min nor the current 30-min default) and
   // verify the re-armed timer honours that exact value.
   describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
     const NINETY_S = 90_000
 
-    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/20 min', async () => {
+    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/30 min', async () => {
       const s = createReadySession({ resultTimeoutMs: NINETY_S })
       const errors = []
       s.on('error', (d) => errors.push(d))
@@ -175,6 +175,78 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
       } finally {
         s.destroy()
       }
+    })
+  })
+
+  // #3884: pre-fix the timer was wall-clock from sendMessage() to result,
+  // so long-running CLI sessions emitting events the whole time still
+  // got force-cleared after the window. The fix routes every parsed
+  // stdout JSONL line through `_handleStdoutLine`, which calls
+  // `_armResultTimeout()` before `_handleEvent`. SdkSession already had
+  // this behaviour (sdk-session.js:554) — this test pins it for CLI.
+  describe('inactivity timer resets on every parsed stdout event (#3884)', () => {
+    it('does NOT fire timeout while stdout activity stays under the window', async () => {
+      const errors = []
+      session.on('error', (d) => errors.push(d))
+
+      await session.sendMessage('do something')
+      assert.ok(session._resultTimeout, 'timer armed by sendMessage')
+
+      // Simulate four window-spans of continuous activity. Each iteration
+      // ticks just under the window then feeds a parsed line through the
+      // real production handler — that handler MUST call
+      // _armResultTimeout(), or the cumulative tick (4× window) would have
+      // long since fired the timeout.
+      const ALMOST_WINDOW = TEST_RESULT_TIMEOUT_MS - 30_000
+      for (let i = 0; i < 4; i++) {
+        mock.timers.tick(ALMOST_WINDOW)
+        session._handleStdoutLine('{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"."}}}')
+        assert.equal(errors.length, 0, `no timeout fired after activity iteration ${i + 1} (cumulative ${(i + 1) * ALMOST_WINDOW / 60_000} min)`)
+      }
+
+      // After the last activity, one full window of true silence should
+      // fire the timeout. This validates we still catch genuine hangs.
+      mock.timers.tick(TEST_RESULT_TIMEOUT_MS + 100)
+      assert.equal(errors.length, 1, 'timer must fire after a full window of silence following last activity')
+      assert.match(errors[0].message, /timed out/)
+    })
+
+    it('skips reset on blank lines and JSON-parse failures', async () => {
+      const errors = []
+      session.on('error', (d) => errors.push(d))
+
+      await session.sendMessage('do something')
+
+      // Tick to 1ms before expiry — any reset would push the deadline out.
+      mock.timers.tick(TEST_RESULT_TIMEOUT_MS - 1)
+
+      // Blank line: no reset. Parse failure: no reset.
+      session._handleStdoutLine('')
+      session._handleStdoutLine('   ')
+      session._handleStdoutLine('not json at all { broken')
+
+      // 1ms more → timer fires exactly at the original deadline, proving
+      // none of those calls reset it.
+      mock.timers.tick(1)
+      assert.equal(errors.length, 1, 'timer must fire — blank/unparseable lines must not reset')
+    })
+
+    it('does NOT reset while the timer is paused for a pending permission', async () => {
+      const errors = []
+      session.on('error', (d) => errors.push(d))
+
+      await session.sendMessage('do something')
+      session.notifyPermissionPending('perm-xyz')
+      assert.equal(session._resultTimeout, null, 'timer cleared while paused')
+
+      // An activity event arriving while paused must not arm a fresh
+      // timer — that would defeat the pause (and re-fire after the
+      // permission resolves, potentially mid-tool-result).
+      session._handleStdoutLine('{"type":"stream_event"}')
+      assert.equal(session._resultTimeout, null, 'still null — _armResultTimeout no-op while paused')
+
+      mock.timers.tick(TEST_RESULT_TIMEOUT_MS + 10_000)
+      assert.equal(errors.length, 0, 'no timeout fires while paused, regardless of stdout activity')
     })
   })
 })

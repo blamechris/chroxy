@@ -1115,7 +1115,7 @@ export class SdkSession extends BaseSession {
 
   /**
    * Handle a true inactivity timeout — the configured result timer fired
-   * (default 20 min, see BaseSession.DEFAULT_RESULT_TIMEOUT_MS, override
+   * (default 30 min, see BaseSession.DEFAULT_RESULT_TIMEOUT_MS, override
    * via config.resultTimeoutMs / CHROXY_RESULT_TIMEOUT_MS) while the
    * session was still busy. Emits stream_end (if streaming), auto-denies
    * any pending permissions, emits `permission_expired` for each so the

@@ -121,9 +121,9 @@ const CONFIG_SCHEMA = {
   // implicit.
   // Documented in CONFIG.md.
   trustMismatchMode: 'string',
-  // #3749: max ms of inactivity (no SDK / CLI event) before the server
-  // force-clears busy state and emits a timeout error. Defaults to
-  // 1200000 (20 min). Was a hardcoded 5 min before — too aggressive for
+  // #3749 / #3884: max ms of inactivity (no SDK / CLI event) before the
+  // server force-clears busy state and emits a timeout error. Defaults to
+  // 1800000 (30 min). Was a hardcoded 5 min before — too aggressive for
   // legitimate slow tools (large fetches, long Bash, extended thinking).
   // Range: 30s minimum, 24h maximum — validateConfig logs a warning for
   // out-of-range values (warn-only, not clamped); the runtime still

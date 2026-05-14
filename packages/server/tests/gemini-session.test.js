@@ -75,9 +75,9 @@ describe('GeminiSession', () => {
     assert.equal(session._resultTimeoutMs, 600_000)
   })
 
-  it('defaults _resultTimeoutMs to 20 min when omitted (#3755)', () => {
+  it('defaults _resultTimeoutMs to 30 min when omitted (#3755 / #3884)', () => {
     const session = new GeminiSession({ cwd: '/tmp' })
-    assert.equal(session._resultTimeoutMs, 20 * 60 * 1000)
+    assert.equal(session._resultTimeoutMs, 30 * 60 * 1000)
   })
 
   // ---------------------------------------------------------------------

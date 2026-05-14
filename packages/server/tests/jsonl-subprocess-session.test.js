@@ -170,10 +170,10 @@ describe('JsonlSubprocessSession (base)', () => {
         'JsonlSubprocessSession must forward resultTimeoutMs so Codex/Gemini can honour operator config')
     })
 
-    it('defaults _resultTimeoutMs to 20 min when omitted (#3755)', () => {
+    it('defaults _resultTimeoutMs to 30 min when omitted (#3755 / #3884)', () => {
       const P = makeTestProviderClass()
       const s = new P({ cwd: '/tmp' })
-      assert.equal(s._resultTimeoutMs, 20 * 60 * 1000,
+      assert.equal(s._resultTimeoutMs, 30 * 60 * 1000,
         'inherits BaseSession default when resultTimeoutMs is not provided')
     })
 
@@ -186,9 +186,9 @@ describe('JsonlSubprocessSession (base)', () => {
       const s1 = new P({ cwd: '/tmp', resultTimeoutMs: 0 })
       const s2 = new P({ cwd: '/tmp', resultTimeoutMs: -1 })
       const s3 = new P({ cwd: '/tmp', resultTimeoutMs: 'oops' })
-      assert.equal(s1._resultTimeoutMs, 20 * 60 * 1000)
-      assert.equal(s2._resultTimeoutMs, 20 * 60 * 1000)
-      assert.equal(s3._resultTimeoutMs, 20 * 60 * 1000)
+      assert.equal(s1._resultTimeoutMs, 30 * 60 * 1000)
+      assert.equal(s2._resultTimeoutMs, 30 * 60 * 1000)
+      assert.equal(s3._resultTimeoutMs, 30 * 60 * 1000)
     })
   })
 

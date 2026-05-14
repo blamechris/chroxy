@@ -344,7 +344,7 @@ export async function startCliServer(config) {
     sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
-    // #3749: inactivity timeout (ms). null = BaseSession default (20 min).
+    // #3749 / #3884: inactivity timeout (ms). null = BaseSession default (30 min).
     resultTimeoutMs:
       Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
         ? config.resultTimeoutMs

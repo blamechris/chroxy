@@ -326,7 +326,7 @@ describe('auth_ok handler', () => {
 
     // #3760: server now broadcasts its effective inactivity timeout so the
     // ActivityIndicator can render its "approaching timeout" warning against
-    // the real configured value instead of a hardcoded 20-min reference.
+    // the real configured value instead of a hardcoded BaseSession default.
     it('stores server resultTimeoutMs when present', () => {
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
       handleMessage(createAuthOkMessage({ resultTimeoutMs: 45 * 60 * 1000 }), ctx as any);

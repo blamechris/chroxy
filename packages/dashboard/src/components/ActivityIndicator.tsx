@@ -19,13 +19,13 @@
  *
  * The reference timeout comes from `serverResultTimeoutMs` in the auth_ok
  * payload (#3760), falling back to BaseSession.DEFAULT_RESULT_TIMEOUT_MS
- * (20 min) when connected to an older server that doesn't broadcast it.
+ * (30 min) when connected to an older server that doesn't broadcast it.
  */
 import { useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 
-/** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754) */
-const FALLBACK_TIMEOUT_MS = 20 * 60 * 1000
+/** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754 / #3884) */
+const FALLBACK_TIMEOUT_MS = 30 * 60 * 1000
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return 'just now'
