@@ -100,15 +100,35 @@ fn main() {
             // without any Apple credentials.
             if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
                 if !identity.is_empty() && identity != "-" {
+                    // #3832 — explicit --keychain when the workflow exports
+                    // APPLE_KEYCHAIN_PATH. Today the GitHub Actions release
+                    // workflow puts a temp keychain on the user search list
+                    // (`security list-keychain -d user -s`), so codesign's
+                    // identity lookup finds the right cert implicitly. That
+                    // ordering is fragile — if anyone later adjusts the
+                    // keychain setup to leave the login keychain in the
+                    // search list, identity resolution becomes ambiguous and
+                    // codesign can pick the wrong cert. Threading the path
+                    // through an env var keeps build.rs portable (works
+                    // locally without the var set) and makes the workflow
+                    // self-documenting.
+                    let keychain = std::env::var("APPLE_KEYCHAIN_PATH").ok();
+                    let mut codesign_args: Vec<&str> = vec![
+                        "--force",
+                        "--options", "runtime",
+                        "--timestamp",
+                        "--sign", &identity,
+                    ];
+                    if let Some(ref kc) = keychain {
+                        if !kc.is_empty() {
+                            codesign_args.push("--keychain");
+                            codesign_args.push(kc);
+                        }
+                    }
+                    codesign_args.push(&swift_out);
                     run(
                         "codesign (speech-helper)",
-                        std::process::Command::new("codesign").args([
-                            "--force",
-                            "--options", "runtime",
-                            "--timestamp",
-                            "--sign", &identity,
-                            &swift_out,
-                        ]),
+                        std::process::Command::new("codesign").args(&codesign_args),
                     );
                     // Fail-fast verification: catches bad signatures here instead of
                     // letting them propagate to a ~15-minute Apple notarytool rejection.

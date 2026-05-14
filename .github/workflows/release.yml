@@ -215,6 +215,16 @@ jobs:
           # speech-helper for macOS and signs it with hardened runtime +
           # timestamp). When unset/'-', both paths fall through to adhoc.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          # #3832 — pin the keychain build.rs's codesign uses for the
+          # speech-helper to the temp keychain created by `Import signing
+          # certificate` above. Without this the signing relies on
+          # `security list-keychain -d user -s` having put the temp keychain
+          # on the search list earlier; if that ordering ever changes,
+          # codesign's identity lookup becomes ambiguous and may pick the
+          # wrong cert. Pinning the keychain explicitly makes the dependency
+          # documented and the lookup deterministic. build.rs falls back to
+          # the search list when this var is absent so local dev still works.
+          APPLE_KEYCHAIN_PATH: ${{ runner.temp }}/app-signing.keychain-db
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg -c "$TAURI_CONFIG_OVERRIDE"
 
