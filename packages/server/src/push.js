@@ -316,15 +316,22 @@ export class PushManager {
    * @param {string} body - Notification body text
    * @param {object} [data] - Extra data payload
    * @param {string} [categoryId] - iOS notification category for action buttons
+   * @returns {Promise<boolean>} `true` when no hard delivery failure occurred
+   *   (Expo accepted the post, or there was nothing to send / we were
+   *   rate-limited — both of which are "no error" from the caller's view).
+   *   `false` ONLY when the Expo API hard-failed (non-2xx, network throw).
+   *   Callers like the idle-push dedupe in server-cli.js (#3870) use this
+   *   to decide whether to release a latch so a transient failure doesn't
+   *   permanently suppress future notifications.
    */
   async send(category, title, body, data = {}, categoryId = undefined) {
-    if (this.tokens.size === 0) return
+    if (this.tokens.size === 0) return true
 
     // Rate limit check
     const limit = RATE_LIMITS[category] ?? 30_000
     const lastSent = this._lastSent.get(category) || 0
     if (Date.now() - lastSent < limit) {
-      return
+      return true
     }
     this._lastSent.set(category, Date.now())
 
@@ -337,7 +344,7 @@ export class PushManager {
       ...(categoryId && { categoryId }),
     }))
 
-    await this._sendToTokenSet(this.tokens, messages, category, 'notification')
+    return await this._sendToTokenSet(this.tokens, messages, category, 'notification')
   }
 
   /**
@@ -376,6 +383,12 @@ export class PushManager {
    * @param {object[]} messages - Pre-built Expo push message objects
    * @param {string} category - Category label used in log output
    * @param {string} logLabel - Human-readable label for log messages (e.g. 'notification', 'Live Activity update')
+   * @returns {Promise<boolean>} `true` if Expo accepted the post (even when
+   *   individual tokens came back with per-message errors — those are
+   *   handled by pruning, not by reporting hard failure). `false` when the
+   *   HTTPS POST itself failed (non-2xx, network/timeout caught here).
+   *   Surfacing this lets callers (#3870) release per-session dedupe
+   *   latches on real delivery failure so the next idle cycle can retry.
    */
   async _sendToTokenSet(tokenSet, messages, category, logLabel) {
     try {
@@ -388,7 +401,7 @@ export class PushManager {
       if (!res.ok) {
         metrics.inc('push.failures')
         log.error(`Expo Push API returned ${res.status}`)
-        return
+        return false
       }
 
       const result = await res.json()
@@ -410,9 +423,11 @@ export class PushManager {
 
       metrics.inc('push.sent')
       log.info(`Sent ${category} ${logLabel} to ${messages.length} device(s)`)
+      return true
     } catch (err) {
       metrics.inc('push.failures')
       log.error(`Failed to send ${logLabel}: ${err.message}`)
+      return false
     }
   }
 }
