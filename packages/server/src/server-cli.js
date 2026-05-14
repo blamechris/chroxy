@@ -495,6 +495,14 @@ export async function startCliServer(config) {
           } else if (alreadyNotified) {
             log.debug(`Idle push suppressed for ${sessionId}: already notified this turn`)
           }
+        } else {
+          // #3871: session_event listener is registered BEFORE wsServer is
+          // constructed, so a result event from a restoreState-resurrected
+          // session can fire while wsServer is still undefined. Surface that
+          // here at debug so it's not silently dropped — same diagnostic
+          // discipline as the no-tokens / active-viewers / already-notified
+          // branches above (#3866).
+          log.debug(`Idle push suppressed for ${sessionId}: wsServer not yet initialized`)
         }
       } else if (event === 'permission_request') {
         const sessionName = sessionManager.getSession(sessionId)?.name

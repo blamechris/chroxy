@@ -4038,11 +4038,13 @@
 }
 
 /* --- Header icon buttons ---
-   Glyph-only buttons (Skills 💾, copy ⎘, gear ⚙). flex-shrink: 0 keeps
+   Glyph-only buttons (Skills 🧩, copy ⎘, gear ⚙). flex-shrink: 0 keeps
    them from being squeezed when the right zone gets crowded. The
    previous .header-text-btn class (used by the in-header Skills text
    button) was removed when Skills moved to an icon — there's no other
-   text-labeled header button. */
+   text-labeled header button. Skills glyph was 💾 (floppy/save) until
+   #3804 swapped it for 🧩 (puzzle piece) to match the established
+   extensions/plugins convention (VS Code, Chrome). */
 .header-icon-btn {
   background: none;
   border: none;
