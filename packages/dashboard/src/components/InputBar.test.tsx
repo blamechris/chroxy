@@ -86,6 +86,143 @@ describe('InputBar', () => {
     expect(onInterrupt).toHaveBeenCalled()
   })
 
+  // #3853 — Cmd+L (mac) / Ctrl+L (linux/win) clears the composer text and any
+  // queued attachments/images/pasted blocks. No-op when everything is empty so
+  // the browser's native Ctrl+L (address-bar focus) still works in that case.
+  describe('Cmd+L / Ctrl+L clears the composer (#3853)', () => {
+    it('clears text on Cmd+L', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'half-written' } })
+      expect(textarea.value).toBe('half-written')
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(textarea.value).toBe('')
+    })
+
+    it('clears text on Ctrl+L', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'half-written' } })
+      fireEvent.keyDown(textarea, { key: 'l', ctrlKey: true })
+      expect(textarea.value).toBe('')
+    })
+
+    it('calls onRemoveAttachment for each queued file attachment', () => {
+      const onRemoveAttachment = vi.fn()
+      const attachments = [
+        { path: '/foo.txt', name: 'foo.txt' },
+        { path: '/bar.txt', name: 'bar.txt' },
+      ]
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          attachments={attachments}
+          onRemoveAttachment={onRemoveAttachment}
+        />,
+      )
+      const textarea = screen.getByRole('textbox')
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(onRemoveAttachment).toHaveBeenCalledTimes(2)
+      expect(onRemoveAttachment).toHaveBeenCalledWith('/foo.txt')
+      expect(onRemoveAttachment).toHaveBeenCalledWith('/bar.txt')
+    })
+
+    it('calls onRemoveImage for each queued image attachment', () => {
+      const onRemoveImage = vi.fn()
+      const imageAttachments = [
+        { data: 'imgA', mediaType: 'image/png', name: 'a.png' },
+        { data: 'imgB', mediaType: 'image/png', name: 'b.png' },
+      ]
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          imageAttachments={imageAttachments}
+          onRemoveImage={onRemoveImage}
+        />,
+      )
+      const textarea = screen.getByRole('textbox')
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(onRemoveImage).toHaveBeenCalledTimes(2)
+    })
+
+    it('calls onRemovePastedText for each queued pasted block', () => {
+      const onRemovePastedText = vi.fn()
+      const pastedTextBlocks = [
+        { id: 1, content: 'block one' },
+        { id: 2, content: 'block two' },
+      ]
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          pastedTextBlocks={pastedTextBlocks}
+          onRemovePastedText={onRemovePastedText}
+        />,
+      )
+      const textarea = screen.getByRole('textbox')
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(onRemovePastedText).toHaveBeenCalledTimes(2)
+      expect(onRemovePastedText).toHaveBeenCalledWith(1)
+      expect(onRemovePastedText).toHaveBeenCalledWith(2)
+    })
+
+    it('keeps focus on the textarea after clearing', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'x' } })
+      textarea.focus()
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(document.activeElement).toBe(textarea)
+    })
+
+    // Copilot review of #3853: handleChange's auto-resize sets an explicit
+    // height on the textarea. setValue('') alone doesn't re-run that path,
+    // so without this reset a cleared multi-line draft would leave the
+    // textarea visually tall.
+    it('resets the explicit height set by auto-resize', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      // Simulate a multi-line draft that's already been auto-resized
+      fireEvent.change(textarea, { target: { value: 'line1\nline2\nline3\nline4' } })
+      textarea.style.height = '120px'
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(textarea.style.height).toBe('auto')
+    })
+
+    it('is a no-op when the composer is empty', () => {
+      const onRemoveAttachment = vi.fn()
+      const onRemoveImage = vi.fn()
+      const onRemovePastedText = vi.fn()
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          onRemoveAttachment={onRemoveAttachment}
+          onRemoveImage={onRemoveImage}
+          onRemovePastedText={onRemovePastedText}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true })
+      expect(textarea.value).toBe('')
+      expect(onRemoveAttachment).not.toHaveBeenCalled()
+      expect(onRemoveImage).not.toHaveBeenCalled()
+      expect(onRemovePastedText).not.toHaveBeenCalled()
+    })
+
+    it('does not trigger on Alt+L or Shift+L (only plain Cmd/Ctrl+L)', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'x' } })
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true, altKey: true })
+      expect(textarea.value).toBe('x')
+      fireEvent.keyDown(textarea, { key: 'l', metaKey: true, shiftKey: true })
+      expect(textarea.value).toBe('x')
+    })
+  })
+
   it('disables input when disabled prop is true', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} disabled />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
