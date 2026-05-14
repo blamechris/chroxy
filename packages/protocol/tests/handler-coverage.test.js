@@ -92,7 +92,6 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_request': 'dashboard',  // community skill awaiting first-activation grant (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
-  'inactivity_warning': 'dashboard',   // soft check-in chip (#3899) — dashboard chip landed first in #3908; mobile React Native chip is a follow-up PR
 }
 
 // ---------------------------------------------------------------------------

@@ -395,12 +395,10 @@ export interface BaseSessionState {
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
   // #3899 — most recent soft inactivity warning for this session, or null
-  // when none is outstanding. The dashboard's `inactivity_warning` case
-  // populates this and clears it on any activity event (`isActivityEvent`)
-  // or via `sendInput` once the user sends a fresh message. The mobile
-  // app's store does NOT yet dispatch the handler — the slot is here so
-  // the follow-up React Native PR only needs to add the dispatch + UI,
-  // not re-shape the base type. Until that lands, this field remains
-  // perpetually null on mobile and consumers must self-gate accordingly.
+  // when none is outstanding. Both the dashboard and mobile app dispatch
+  // the shared `handleInactivityWarning` to populate this slot, and clear
+  // it on any activity event (`isActivityEvent`), on `sendInput` once the
+  // user replies, and on `socket.onclose` since the server does not
+  // replay `inactivity_warning` on reconnect.
   inactivityWarning: InactivityWarning | null;
 }
