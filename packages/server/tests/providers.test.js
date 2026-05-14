@@ -143,9 +143,9 @@ describe('Provider Registry', () => {
     }
 
     it('claude-sdk reports source=env and ready when ANTHROPIC_API_KEY is set', () => {
-      clearKeys()
-      process.env.ANTHROPIC_API_KEY = 'sk-test'
       try {
+        clearKeys()
+        process.env.ANTHROPIC_API_KEY = 'sk-test'
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.ok(sdk?.auth, 'claude-sdk should expose auth')
@@ -159,8 +159,8 @@ describe('Provider Registry', () => {
     })
 
     it('claude-sdk reports ready=false when no env var AND no claude login state on disk (#3674)', () => {
-      clearKeys()
       try {
+        clearKeys()
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         // No env var, empty CHROXY_CLAUDE_HOME → no OAuth probe hit → ready=false
@@ -174,8 +174,8 @@ describe('Provider Registry', () => {
     })
 
     it('claude-sdk reports ready=true source=oauth when ~/.claude/auth.json exists (#3674)', () => {
-      clearKeys()
       try {
+        clearKeys()
         writeFileSync(join(_tmpClaudeHome, 'auth.json'), '{}')
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
@@ -188,8 +188,8 @@ describe('Provider Registry', () => {
     })
 
     it('claude-sdk reports ready=true source=oauth when ~/.claude/.credentials.json exists (#3674)', () => {
-      clearKeys()
       try {
+        clearKeys()
         writeFileSync(join(_tmpClaudeHome, '.credentials.json'), '{}')
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
@@ -201,8 +201,8 @@ describe('Provider Registry', () => {
     })
 
     it('claude-sdk reports ready=true source=oauth when ~/.claude.json has claudeAiOauth block (#3674)', () => {
-      clearKeys()
       try {
+        clearKeys()
         writeFileSync(
           process.env.CHROXY_CLAUDE_CONFIG,
           JSON.stringify({ claudeAiOauth: { refreshToken: 'fake' }, otherStuff: true }),
@@ -217,9 +217,9 @@ describe('Provider Registry', () => {
     })
 
     it('claude-sdk stays ready=false when ~/.claude.json has no claudeAiOauth block (#3674)', () => {
-      clearKeys()
-      writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, JSON.stringify({ unrelated: 'config' }))
       try {
+        clearKeys()
+        writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, JSON.stringify({ unrelated: 'config' }))
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, false)
@@ -234,9 +234,9 @@ describe('Provider Registry', () => {
     // accidentally make a malformed config crash the server-wide listProviders
     // call.
     it('claude-sdk stays ready=false when ~/.claude.json is malformed JSON (#3677 review)', () => {
-      clearKeys()
-      writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, 'this is not { valid json')
       try {
+        clearKeys()
+        writeFileSync(process.env.CHROXY_CLAUDE_CONFIG, 'this is not { valid json')
         const list = listProviders()
         const sdk = list.find(p => p.name === 'claude-sdk')
         assert.equal(sdk.auth.ready, false)
@@ -247,9 +247,9 @@ describe('Provider Registry', () => {
     })
 
     it('claude-cli reports source=oauth regardless of env (subscription always)', () => {
-      clearKeys()
-      process.env.ANTHROPIC_API_KEY = 'sk-test'
       try {
+        clearKeys()
+        process.env.ANTHROPIC_API_KEY = 'sk-test'
         const list = listProviders()
         const cli = list.find(p => p.name === 'claude-cli')
         // CLI strips ANTHROPIC_API_KEY before spawn — billing is always subscription
@@ -262,8 +262,8 @@ describe('Provider Registry', () => {
     })
 
     it('codex reports ready=false and source=none when OPENAI_API_KEY is missing', () => {
-      clearKeys()
       try {
+        clearKeys()
         const list = listProviders()
         const codex = list.find(p => p.name === 'codex')
         if (!codex) return // codex registration may be conditional in test env
@@ -276,9 +276,9 @@ describe('Provider Registry', () => {
     })
 
     it('gemini reports ready when GEMINI_API_KEY is set', () => {
-      clearKeys()
-      process.env.GEMINI_API_KEY = 'test-key'
       try {
+        clearKeys()
+        process.env.GEMINI_API_KEY = 'test-key'
         const list = listProviders()
         const gemini = list.find(p => p.name === 'gemini')
         if (!gemini) return
@@ -291,9 +291,9 @@ describe('Provider Registry', () => {
     })
 
     it('gemini reports ready when GOOGLE_API_KEY is set (without GEMINI_API_KEY)', () => {
-      clearKeys()
-      process.env.GOOGLE_API_KEY = 'test-key'
       try {
+        clearKeys()
+        process.env.GOOGLE_API_KEY = 'test-key'
         const list = listProviders()
         const gemini = list.find(p => p.name === 'gemini')
         if (!gemini) return
@@ -339,9 +339,9 @@ describe('Provider Registry', () => {
     it('docker-cli reports ready=true source=env when ANTHROPIC_API_KEY is set', async () => {
       const { DockerSession } = await import('../src/docker-session.js')
       registerProvider('docker-cli', DockerSession)
-      clearKeys()
-      process.env.ANTHROPIC_API_KEY = 'sk-test'
       try {
+        clearKeys()
+        process.env.ANTHROPIC_API_KEY = 'sk-test'
         const list = listProviders()
         const dcli = list.find(p => p.name === 'docker-cli')
         assert.ok(dcli?.auth)
@@ -357,8 +357,8 @@ describe('Provider Registry', () => {
     it('docker-cli reports ready=false source=none when ANTHROPIC_API_KEY is missing', async () => {
       const { DockerSession } = await import('../src/docker-session.js')
       registerProvider('docker-cli', DockerSession)
-      clearKeys()
       try {
+        clearKeys()
         const list = listProviders()
         const dcli = list.find(p => p.name === 'docker-cli')
         assert.ok(dcli?.auth)
@@ -375,9 +375,9 @@ describe('Provider Registry', () => {
     it('docker-sdk reports ready=true source=env when ANTHROPIC_API_KEY is set', async () => {
       const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
       registerProvider('docker-sdk', DockerSdkSession)
-      clearKeys()
-      process.env.ANTHROPIC_API_KEY = 'sk-test'
       try {
+        clearKeys()
+        process.env.ANTHROPIC_API_KEY = 'sk-test'
         const list = listProviders()
         const dsdk = list.find(p => p.name === 'docker-sdk')
         assert.ok(dsdk?.auth)
@@ -392,8 +392,8 @@ describe('Provider Registry', () => {
     it('docker-sdk reports ready=false when ANTHROPIC_API_KEY is missing (no OAuth fallback in container)', async () => {
       const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
       registerProvider('docker-sdk', DockerSdkSession)
-      clearKeys()
       try {
+        clearKeys()
         const list = listProviders()
         const dsdk = list.find(p => p.name === 'docker-sdk')
         assert.ok(dsdk?.auth)
