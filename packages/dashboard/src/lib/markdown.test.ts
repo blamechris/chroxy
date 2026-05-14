@@ -116,6 +116,24 @@ describe('renderMarkdown', () => {
       expect(html).toContain('<a href="https://example.com/path?q=1&amp;y=2#frag"')
     })
 
+    // Copilot review of #3849: autolink runs after HTML-escape, so `<URL>`
+    // becomes `&lt;URL&gt;`. A naive `[^\s<]+` body would eat `&gt`/`&lt`
+    // into the URL match. The fix: terminate at `&`, but allow `&amp;`
+    // (the round-trip of `&` in query strings).
+    it('terminates at HTML-escaped angle-bracket delimiters', () => {
+      const html = renderMarkdown('see <https://example.com> next')
+      // The href must be the bare URL — not include the encoded `>`
+      expect(html).toContain('<a href="https://example.com"')
+      expect(html).not.toContain('href="https://example.com&gt"')
+      expect(html).not.toContain('href="https://example.com&gt;"')
+    })
+
+    it('still matches full URL when query string contains multiple `&` (escaped to `&amp;`)', () => {
+      const html = renderMarkdown('https://example.com/?a=1&b=2&c=3 done')
+      // The whole query string must round-trip
+      expect(html).toContain('<a href="https://example.com/?a=1&amp;b=2&amp;c=3"')
+    })
+
     it('does not autolink URLs inside fenced code blocks', () => {
       const html = renderMarkdown('```\nhttps://example.com\n```')
       // URL appears inside <code>, not wrapped in an anchor
