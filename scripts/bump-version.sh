@@ -219,12 +219,16 @@ awk -v new="$NEW_VERSION" '
     print
     next
   }
-  in_pkg && /^version = "/ {
+  in_pkg && /^version = "[^"]*"$/ {
     sub(/^version = "[^"]*"/, "version = \"" new "\"")
     in_pkg = 0
     print
     next
   }
+  # Defensive: a malformed chroxy-desktop stanza missing its version line
+  # would otherwise leave in_pkg=1 set into the next package and rewrite
+  # the wrong stanzas version. Resetting on every new package header
+  # bounds the in_pkg window strictly to the current stanza.
   /^\[\[package\]\]/ { in_pkg = 0 }
   { print }
 ' "$CARGO_LOCK" > "$CARGO_LOCK.tmp" && mv "$CARGO_LOCK.tmp" "$CARGO_LOCK"
