@@ -247,6 +247,35 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     setSelectedIndex(0)
   }, [])
 
+  // #3853: Cmd+L / Ctrl+L — clear the composer (text + all queued attachments,
+  // images, and pasted-text blocks). Returns true if something was cleared so
+  // the keydown handler only preventDefault()s when the shortcut actually did
+  // something (lets the browser's native Ctrl+L fall through for an empty
+  // composer in environments like Chrome/Edge where the user might want the
+  // address-bar focus).
+  const clearComposer = useCallback((): boolean => {
+    const hasText = (value ?? '').length > 0
+    const hasAtts = (attachments?.length ?? 0) > 0
+    const hasImgs = (imageAttachments?.length ?? 0) > 0
+    const hasPastes = (pastedTextBlocks?.length ?? 0) > 0
+    if (!hasText && !hasAtts && !hasImgs && !hasPastes) return false
+
+    setValue('')
+    if (attachments && onRemoveAttachment) {
+      for (const att of attachments) onRemoveAttachment(att.path)
+    }
+    if (imageAttachments && onRemoveImage) {
+      // Iterate from end so callers that splice on each call don't re-index
+      // pending items.
+      for (let i = imageAttachments.length - 1; i >= 0; i--) onRemoveImage(i)
+    }
+    if (pastedTextBlocks && onRemovePastedText) {
+      for (const blk of pastedTextBlocks) onRemovePastedText(blk.id)
+    }
+    textareaRef.current?.focus()
+    return true
+  }, [value, attachments, imageAttachments, pastedTextBlocks, onRemoveAttachment, onRemoveImage, onRemovePastedText, setValue])
+
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Slash command picker keyboard handling
     if (pickerOpen) {
@@ -313,8 +342,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     } else if (e.key === 'Escape') {
       e.preventDefault()
       onInterrupt()
+    } else if ((e.key === 'l' || e.key === 'L') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+      // #3853: Cmd+L (mac) / Ctrl+L (linux/win) clears the composer. Only
+      // preventDefault on a non-empty composer so the browser's native
+      // Ctrl+L (address-bar focus on Chrome/Edge) still works when there's
+      // nothing to clear.
+      if (clearComposer()) {
+        e.preventDefault()
+      }
     }
-  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter])
+  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
