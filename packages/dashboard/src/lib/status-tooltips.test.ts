@@ -44,6 +44,20 @@ describe('costTooltip', () => {
     expect(costTooltip(1.23, 'gemini')).toMatch(/estimated client-side/i)
   })
 
+  it('omits estimate disclaimer for Docker wrappers (they delegate to Claude)', () => {
+    // Docker images inherit Claude's billing — server-side
+    // _isClaudeFamilyProvider() classifies them as Claude family, so the
+    // client tooltip must agree.
+    expect(costTooltip(1.23, 'docker')).not.toMatch(/estimated client-side/i)
+    expect(costTooltip(1.23, 'docker-cli')).not.toMatch(/estimated client-side/i)
+    expect(costTooltip(1.23, 'docker-sdk')).not.toMatch(/estimated client-side/i)
+  })
+
+  it('is case-insensitive for provider names', () => {
+    expect(costTooltip(1.23, 'CLAUDE-SDK')).not.toMatch(/estimated client-side/i)
+    expect(costTooltip(1.23, 'Docker-CLI')).not.toMatch(/estimated client-side/i)
+  })
+
   it('handles null cost gracefully', () => {
     expect(costTooltip(null, 'claude-sdk')).toMatch(/total session cost/i)
   })
@@ -81,8 +95,9 @@ describe('agentTooltip', () => {
   })
 
   it('pluralizes correctly', () => {
-    expect(agentTooltip(1)).toContain('1 background agent ')
-    expect(agentTooltip(3)).toContain('3 background agents ')
+    expect(agentTooltip(1)).toMatch(/\b1 background agent\b/)
+    expect(agentTooltip(1)).not.toMatch(/\bbackground agents\b/)
+    expect(agentTooltip(3)).toMatch(/\b3 background agents\b/)
   })
 })
 

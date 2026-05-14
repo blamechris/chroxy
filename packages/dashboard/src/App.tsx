@@ -1292,15 +1292,23 @@ export function App() {
     return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
   }, [])
 
+  // Single lookup of the active model's metadata; reused for both context
+  // percent (existing) and status-chip tooltips (#3858) to avoid an O(N)
+  // scan-per-bar-render.
+  const activeModelInfo = useMemo(
+    () => availableModels.find(m => m.id === activeModel || m.fullId === activeModel) ?? null,
+    [availableModels, activeModel]
+  )
+  const activeModelContextWindow = activeModelInfo?.contextWindow ?? null
+
   // Compute context window usage percentage from active model metadata
   const contextPercent = useMemo(() => {
     if (!contextUsage) return null
     const total = contextUsage.inputTokens + contextUsage.outputTokens
     if (total === 0) return null
-    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
-    const contextWindow = modelInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+    const contextWindow = activeModelContextWindow ?? DEFAULT_CONTEXT_WINDOW
     return (total / contextWindow) * 100
-  }, [contextUsage, activeModel, availableModels])
+  }, [contextUsage, activeModelContextWindow])
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
@@ -1460,7 +1468,7 @@ export function App() {
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
             contextUsage={contextUsage}
-            contextWindow={availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow ?? null}
+            contextWindow={activeModelContextWindow}
             contextPercent={contextPercent}
           />
         </div>
@@ -1755,7 +1763,7 @@ export function App() {
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
         contextUsage={contextUsage}
-        contextWindow={availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow ?? null}
+        contextWindow={activeModelContextWindow}
       />
 
       {/* Settings panel */}

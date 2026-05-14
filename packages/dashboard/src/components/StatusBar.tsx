@@ -3,7 +3,6 @@
  */
 import { getProviderInfo } from '../lib/provider-labels'
 import {
-  tokenTooltip,
   costTooltip,
   contextTooltip,
   agentTooltip,
@@ -32,7 +31,6 @@ export function StatusBar({
   contextPercent,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
-  const tokenTitle = tokenTooltip(contextUsage ?? null)
   const costTitle = costTooltip(cost ?? null, provider ?? null)
   const contextTitle = contextTooltip({
     inputTokens: contextUsage?.inputTokens ?? 0,
@@ -40,6 +38,10 @@ export function StatusBar({
     contextWindow: contextWindow ?? null,
     percent: contextPercent ?? null,
   })
+  //   (non-breaking space) preserves the chip's layout width when empty
+  // — same trick already used pre-#3858 for the cost cell. Don't replace with
+  // a regular space; tests assert this exact codepoint.
+  const NBSP = ' '
   return (
     <div className="status-bar" data-testid="status-bar">
       {isBusy && (
@@ -60,14 +62,17 @@ export function StatusBar({
         title={costTitle}
         aria-label={costTitle}
       >
-        {cost != null ? `$${cost.toFixed(4)}` : ' '}
+        {cost != null ? `$${cost.toFixed(4)}` : NBSP}
       </span>
+      {/* Tooltip on the context chip is dropped when the placeholder is
+          showing — hovering an invisible cell to read an explanation is
+          confusing. The placeholder still occupies width to avoid layout
+          shift, but carries no a11y-visible content. */}
       <span
         className="status-context"
-        title={context ? contextTitle : tokenTitle}
-        aria-label={context ? contextTitle : tokenTitle}
+        {...(context ? { title: contextTitle, 'aria-label': contextTitle } : {})}
       >
-        {context || ' '}
+        {context || NBSP}
       </span>
       {agentCount != null && agentCount > 0 && (
         <span

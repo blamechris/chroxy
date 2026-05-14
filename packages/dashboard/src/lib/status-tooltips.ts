@@ -30,14 +30,31 @@ export function tokenTooltip(usage: { inputTokens: number; outputTokens: number 
 }
 
 /**
+ * True iff `provider` belongs to the Claude family — covers raw `claude-*`
+ * ids plus the Docker wrappers (`docker`, `docker-cli`, `docker-sdk`) that
+ * inherit Claude's billing model. Mirrors the server-side
+ * `_isClaudeFamilyProvider()` in `packages/server/src/skills-frontmatter.js`
+ * — keep the two rules in sync so the cost-estimation disclaimer cannot
+ * disagree between server billing and client tooltip. Exported for tests.
+ */
+export function isClaudeFamilyProvider(provider: string | null | undefined): boolean {
+  if (typeof provider !== 'string') return false
+  const norm = provider.trim().toLowerCase()
+  if (norm.length === 0) return false
+  if (norm === 'claude' || norm.startsWith('claude-')) return true
+  if (norm === 'docker' || norm.startsWith('docker-')) return true
+  return false
+}
+
+/**
  * Cost chip — total session cost so far. Notes when the value is
  * client-estimated from token usage (Codex/Gemini) rather than reported
- * authoritatively by the provider (Claude).
+ * authoritatively by the provider (Claude family — including Docker
+ * wrappers).
  */
 export function costTooltip(cost: number | null | undefined, provider: string | null | undefined): string {
-  if (cost == null) return 'Total session cost so far.'
-  const isClaude = typeof provider === 'string' && provider.startsWith('claude')
-  const suffix = isClaude
+  if (cost == null) return 'Total session cost so far. Updates after each response.'
+  const suffix = isClaudeFamilyProvider(provider)
     ? ''
     : ' Estimated client-side from token usage; actual provider billing may differ.'
   return `Total session cost so far: $${cost.toFixed(4)}.${suffix}`
@@ -64,8 +81,8 @@ export function contextTooltip(data: ContextTooltipData): string {
  */
 export function agentTooltip(count: number): string {
   if (count === 0) return 'No background agents currently active.'
-  if (count === 1) return '1 background agent currently active in this session.'
-  return `${count} background agents currently active in this session.`
+  const noun = count === 1 ? 'background agent' : 'background agents'
+  return `${count} ${noun} currently active in this session.`
 }
 
 /**
