@@ -21,11 +21,14 @@ import { SkillsTrustStore } from './skills-trust.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
-// #3749: default inactivity timeout (ms). Was a hardcoded 5 min — bumped
-// to 20 min so legitimate slow tools (long Bash, big web fetches, extended
-// thinking) don't get force-aborted. Operators can override per server
-// via config.resultTimeoutMs or CHROXY_RESULT_TIMEOUT_MS.
-export const DEFAULT_RESULT_TIMEOUT_MS = 20 * 60 * 1000
+// #3884 / #3749: default inactivity timeout (ms). Activity-based — every
+// provider event (SDK iterator message, CLI stdout JSONL line) resets the
+// timer; the window only bounds *silent stretches*, not wall-clock turn
+// duration. Was 5 min → 20 min (#3749); bumped to 30 min so long agent
+// loops (e.g. /batch-merge across many PRs, /tackle-issues marathons) have
+// headroom even when individual tool calls take minutes. Operators can
+// override per server via config.resultTimeoutMs or CHROXY_RESULT_TIMEOUT_MS.
+export const DEFAULT_RESULT_TIMEOUT_MS = 30 * 60 * 1000
 
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
@@ -90,12 +93,13 @@ export class BaseSession extends EventEmitter {
     trustMismatchMode,
     promptEvaluator,
     promptEvaluatorSkipPattern,
-    // #3749: configurable result-timeout (inactivity safety net). Subclasses
-    // arm this timer and force-clear busy state if no SDK/CLI event fires
-    // within the window. Default 20 min — wide enough to cover most slow
-    // tools (large fetches, long Bash, extended thinking) while still
-    // bounding a genuinely hung session. Override via
-    // ~/.chroxy/config.json#resultTimeoutMs or CHROXY_RESULT_TIMEOUT_MS.
+    // #3749 / #3884: configurable result-timeout (inactivity safety net).
+    // Subclasses arm this timer and force-clear busy state if no provider
+    // event (SDK iterator message, CLI stdout JSONL line) fires within
+    // the window. Default 30 min — wide enough to cover long agent loops
+    // (batch ops, big refactors) while still bounding a genuinely hung
+    // session. Override via ~/.chroxy/config.json#resultTimeoutMs or
+    // CHROXY_RESULT_TIMEOUT_MS.
     resultTimeoutMs,
   } = {}) {
     super()
@@ -148,9 +152,10 @@ export class BaseSession extends EventEmitter {
     this._destroying = false
     this._activeAgents = new Map()
     this._resultTimeout = null
-    // #3749: effective inactivity timeout in ms. Defaults to 20 minutes;
-    // overrides come from SessionManager(resultTimeoutMs:…) which itself
-    // reads ~/.chroxy/config.json#resultTimeoutMs or CHROXY_RESULT_TIMEOUT_MS.
+    // #3749 / #3884: effective inactivity timeout in ms. Defaults to 30
+    // minutes; overrides come from SessionManager(resultTimeoutMs:…) which
+    // itself reads ~/.chroxy/config.json#resultTimeoutMs or
+    // CHROXY_RESULT_TIMEOUT_MS.
     this._resultTimeoutMs =
       Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
         ? resultTimeoutMs

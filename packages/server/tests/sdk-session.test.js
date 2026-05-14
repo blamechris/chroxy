@@ -62,11 +62,12 @@ describe('SdkSession', () => {
       assert.equal(session._sandbox, null)
     })
 
-    // #3749: result-timeout window is configurable per server. Default
-    // is the BaseSession constant (20 min); explicit values flow from
-    // SessionManager → providerOpts.resultTimeoutMs → BaseSession.
-    it('defaults _resultTimeoutMs to 20 minutes (#3749)', () => {
-      assert.equal(session._resultTimeoutMs, 20 * 60 * 1000,
+    // #3749 / #3884: result-timeout window is configurable per server.
+    // Default is the BaseSession constant (30 min as of #3884); explicit
+    // values flow from SessionManager → providerOpts.resultTimeoutMs →
+    // BaseSession.
+    it('defaults _resultTimeoutMs to 30 minutes (#3749 / #3884)', () => {
+      assert.equal(session._resultTimeoutMs, 30 * 60 * 1000,
         'fresh sessions must adopt the BaseSession default so legitimate slow tools do not time out at 5 min')
     })
 
@@ -81,9 +82,9 @@ describe('SdkSession', () => {
       const s1 = createSession({ resultTimeoutMs: 0 })
       const s2 = createSession({ resultTimeoutMs: -1 })
       const s3 = createSession({ resultTimeoutMs: 'oops' })
-      assert.equal(s1._resultTimeoutMs, 20 * 60 * 1000)
-      assert.equal(s2._resultTimeoutMs, 20 * 60 * 1000)
-      assert.equal(s3._resultTimeoutMs, 20 * 60 * 1000)
+      assert.equal(s1._resultTimeoutMs, 30 * 60 * 1000)
+      assert.equal(s2._resultTimeoutMs, 30 * 60 * 1000)
+      assert.equal(s3._resultTimeoutMs, 30 * 60 * 1000)
       s1.destroy()
       s2.destroy()
       s3.destroy()

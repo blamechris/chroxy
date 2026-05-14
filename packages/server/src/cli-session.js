@@ -280,18 +280,7 @@ export class CliSession extends BaseSession {
     const rl = createInterface({ input: child.stdout })
     this._rl = rl
 
-    rl.on('line', (line) => {
-      if (!line.trim()) return
-
-      let data
-      try {
-        data = JSON.parse(line)
-      } catch {
-        return
-      }
-
-      this._handleEvent(data)
-    })
+    rl.on('line', (line) => this._handleStdoutLine(line))
 
     // Log stderr for debugging
     const stderrRL = createInterface({ input: child.stderr })
@@ -558,6 +547,34 @@ export class CliSession extends BaseSession {
         this._armResultTimeout()
       }
     }
+  }
+
+  /**
+   * Process one raw line from the CLI subprocess's stdout. Skips blanks
+   * and JSON-parse failures, then resets the inactivity timer (#3884 —
+   * every parsed event proves the subprocess is alive, so the timer was
+   * never meant to be wall-clock from send) before handing the parsed
+   * event off to `_handleEvent`. Extracted from the inline `rl.on('line')`
+   * handler so tests can drive the production path without standing up
+   * a real readline interface.
+   *
+   * @param {string} line
+   */
+  _handleStdoutLine(line) {
+    if (!line.trim()) return
+
+    let data
+    try {
+      data = JSON.parse(line)
+    } catch {
+      return
+    }
+
+    // _armResultTimeout is a no-op while paused for a pending permission,
+    // so this is safe to call unconditionally on every event.
+    this._armResultTimeout()
+
+    this._handleEvent(data)
   }
 
   /**
