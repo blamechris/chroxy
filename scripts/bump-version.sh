@@ -20,6 +20,7 @@ STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
+CARGO_LOCK="$ROOT/packages/desktop/src-tauri/Cargo.lock"
 ROOT_LOCK="$ROOT/package-lock.json"
 SERVER_LOCK="$ROOT/packages/server/package-lock.json"
 
@@ -198,8 +199,43 @@ if [ -f "$IOS_INFO_PLIST" ]; then
   fi
 fi
 
-# Regenerate Cargo.lock
-(cd "$ROOT/packages/desktop/src-tauri" && cargo generate-lockfile 2>/dev/null)
+# Update Cargo.lock to match the new chroxy-desktop version.
+#
+# Why patch directly instead of `cargo generate-lockfile`? (#3864)
+# The previous incantation `(cd … && cargo generate-lockfile 2>/dev/null)`
+# silently no-ops if cargo isn't on PATH on the bump-running machine — that's
+# how v0.8.3 shipped with Cargo.toml at 0.8.3 but Cargo.lock still at 0.8.2,
+# breaking `cargo test --locked` in CI until a hand-edit landed in 43889e55e.
+# Direct patching mirrors how this script already handles JSON lockfiles
+# (no toolchain dependency, minimal diff) and produces a hard error here if
+# the package stanza ever drifts.
+if [ ! -f "$CARGO_LOCK" ]; then
+  echo "Error: $CARGO_LOCK not found" >&2
+  exit 1
+fi
+awk -v new="$NEW_VERSION" '
+  /^name = "chroxy-desktop"$/ {
+    in_pkg = 1
+    print
+    next
+  }
+  in_pkg && /^version = "/ {
+    sub(/^version = "[^"]*"/, "version = \"" new "\"")
+    in_pkg = 0
+    print
+    next
+  }
+  /^\[\[package\]\]/ { in_pkg = 0 }
+  { print }
+' "$CARGO_LOCK" > "$CARGO_LOCK.tmp" && mv "$CARGO_LOCK.tmp" "$CARGO_LOCK"
+# Verify the chroxy-desktop stanza now carries $NEW_VERSION. awk -v RS keeps
+# the per-stanza check scoped so a transitive dependency that happens to
+# share the version string can't false-pass this gate.
+CARGO_LOCK_VERIFY=$(awk -v RS="\n\n" '/name = "chroxy-desktop"/ && /version = "'"$NEW_VERSION"'"/' "$CARGO_LOCK")
+if [ -z "$CARGO_LOCK_VERIFY" ]; then
+  echo "Error: Failed to update chroxy-desktop version in $CARGO_LOCK" >&2
+  exit 1
+fi
 
 echo "Updated:"
 echo "  $ROOT_PKG"
@@ -213,7 +249,7 @@ echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
 echo "  $ROOT_LOCK (top-level + all workspace entries)"
 echo "  $SERVER_LOCK (standalone server package lockfile — no workspace entries)"
-echo "  Cargo.lock"
+echo "  $CARGO_LOCK"
 echo "  $IOS_INFO_PLIST"
 echo ""
 echo "New version: $NEW_VERSION"
