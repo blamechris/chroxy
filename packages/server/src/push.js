@@ -87,6 +87,7 @@ const RATE_LIMITS = {
   activity_update: 0,       // Immediate: one push per unattended completion (noActiveViewers gate is the real dedupe)
   activity_waiting: 0,      // Immediate: permission/input waiting
   activity_error: 0,        // Immediate: session errors
+  inactivity_warning: 0,    // #3899: immediate — naturally rate-limited by the soft warning window (default 30 min between fires per session)
   live_activity: 5_000,     // Live Activity updates: 5s throttle
 }
 

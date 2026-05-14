@@ -17,12 +17,21 @@ import { armResultTimeoutForTest } from './test-helpers.js'
 // Pin the inactivity-timer window to 5 minutes for these tests. They were
 // written before the timeout became configurable (#3749) and their tick
 // arithmetic assumes a 5-min window throughout. Overriding here keeps the
-// test semantics local instead of bleeding the prod default (20 min) into
-// every `mock.timers.tick(N * 60_000)` call.
+// test semantics local instead of bleeding the prod default (30 min as of
+// #3884) into every `mock.timers.tick(N * 60_000)` call.
 const TEST_RESULT_TIMEOUT_MS = 5 * 60_000
 
+// #3899: pin the HARD-cap timeout to the same 5-min window so the kill
+// (which is what emits the error these existing tests assert) fires at
+// the same tick as the soft warning. New tests for the soft-vs-hard
+// distinction live in their own describe block at the end of the file.
 function createSession(opts = {}) {
-  return new SdkSession({ cwd: '/tmp', resultTimeoutMs: TEST_RESULT_TIMEOUT_MS, ...opts })
+  return new SdkSession({
+    cwd: '/tmp',
+    resultTimeoutMs: TEST_RESULT_TIMEOUT_MS,
+    hardTimeoutMs: TEST_RESULT_TIMEOUT_MS,
+    ...opts,
+  })
 }
 
 describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
@@ -214,8 +223,11 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
   describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
     const NINETY_S = 90_000
 
-    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/20 min', async () => {
-      const s = new SdkSession({ cwd: '/tmp', resultTimeoutMs: NINETY_S })
+    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/30 min', async () => {
+      // #3899: also pin hardTimeoutMs to the same window so the hard
+      // kill (which is what emits the error) fires at the same 90s mark
+      // as the soft warning.
+      const s = new SdkSession({ cwd: '/tmp', resultTimeoutMs: NINETY_S, hardTimeoutMs: NINETY_S })
       s._processReady = true
       const errors = []
       s.on('error', (d) => errors.push(d))

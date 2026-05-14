@@ -320,6 +320,15 @@ export function withEnv(overrides, fn) {
  * window for #3757 — any test that constructed a session with a
  * non-default window would still get a 5-min timer here.
  *
+ * #3899: SOFT + HARD timers are armed in parallel, mirroring the
+ * production `resetResultTimeout` closure in `sdk-session.js`. The soft
+ * timer fires `_handleInactivityWarning` (no state change); the hard
+ * timer fires `_handleHardTimeout` (the pre-#3899 kill path). Tests
+ * that constructed a session with both windows equal (the common case
+ * in pre-existing pause/resume tests) will see the error fire at the
+ * same tick as the soft warning — soft fires first, hard fires second,
+ * the existing assertions about `errors.length === 1` continue to hold.
+ *
  * @param {import('../src/sdk-session.js').SdkSession} session
  * @param {string} messageId
  * @param {boolean} [hasStreamStarted=false]
@@ -327,11 +336,18 @@ export function withEnv(overrides, fn) {
 export function armResultTimeoutForTest(session, messageId, hasStreamStarted = false) {
   const reset = () => {
     if (session._resultTimeout) clearTimeout(session._resultTimeout)
+    if (session._hardTimeout) clearTimeout(session._hardTimeout)
     session._resultTimeout = null
+    session._hardTimeout = null
     if (session._resultTimeoutPaused) return
     session._resultTimeout = setTimeout(() => {
-      session._handleResultTimeout(messageId, hasStreamStarted)
+      session._resultTimeout = null
+      session._handleInactivityWarning(messageId)
     }, session._resultTimeoutMs)
+    session._hardTimeout = setTimeout(() => {
+      session._hardTimeout = null
+      session._handleHardTimeout(messageId, hasStreamStarted)
+    }, session._hardTimeoutMs)
   }
   session._resetResultTimeout = reset
   reset()

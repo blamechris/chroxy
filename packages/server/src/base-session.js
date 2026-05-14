@@ -21,14 +21,36 @@ import { SkillsTrustStore } from './skills-trust.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
-// #3884 / #3749: default inactivity timeout (ms). Activity-based — every
-// provider event (SDK iterator message, CLI stdout JSONL line) resets the
-// timer; the window only bounds *silent stretches*, not wall-clock turn
-// duration. Was 5 min → 20 min (#3749); bumped to 30 min so long agent
-// loops (e.g. /batch-merge across many PRs, /tackle-issues marathons) have
-// headroom even when individual tool calls take minutes. Operators can
-// override per server via config.resultTimeoutMs or CHROXY_RESULT_TIMEOUT_MS.
+// #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
+// — every provider event (SDK iterator message, CLI stdout JSONL line)
+// resets the timer; the window only bounds *silent stretches*, not wall-
+// clock turn duration. Was 5 min → 20 min (#3749) → 30 min (#3884).
+//
+// Pre-#3899 this was the kill timer (when it fired, the session was
+// force-cleared). Post-#3899 it fires the `inactivity_warning` event
+// instead — the session stays alive and the client surfaces a check-in
+// affordance. The kill path now lives behind `_hardTimeoutMs` below.
+//
+// Operators can override per server via config.resultTimeoutMs or
+// CHROXY_RESULT_TIMEOUT_MS.
 export const DEFAULT_RESULT_TIMEOUT_MS = 30 * 60 * 1000
+
+// #3899: HARD-cap timeout (ms). When silence continues for this long
+// past `sendMessage` (with no activity to reset it AND no user check-in
+// after the soft warning), the session is force-cleared, pending
+// permissions are auto-denied, and an error is emitted — the pre-#3899
+// behaviour, preserved as the absolute backstop for genuinely stuck
+// sessions (dead SDK iterator, host suspended, network hang the OS
+// hasn't surfaced yet).
+//
+// Default 2h: wide enough to cover marathons users actually run
+// (/batch-merge over 20+ PRs, multi-hour /tackle-issues sessions);
+// tight enough to bound runaway sessions before they accumulate
+// real cost / memory.
+//
+// Operators can override per server via config.hardTimeoutMs or
+// CHROXY_HARD_TIMEOUT_MS.
+export const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000
 
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
@@ -93,14 +115,23 @@ export class BaseSession extends EventEmitter {
     trustMismatchMode,
     promptEvaluator,
     promptEvaluatorSkipPattern,
-    // #3749 / #3884: configurable result-timeout (inactivity safety net).
-    // Subclasses arm this timer and force-clear busy state if no provider
-    // event (SDK iterator message, CLI stdout JSONL line) fires within
-    // the window. Default 30 min — wide enough to cover long agent loops
-    // (batch ops, big refactors) while still bounding a genuinely hung
-    // session. Override via ~/.chroxy/config.json#resultTimeoutMs or
-    // CHROXY_RESULT_TIMEOUT_MS.
+    // #3749 / #3884 / #3899: configurable SOFT-warning timeout (the
+    // inactivity safety net). Subclasses arm this timer; when it fires
+    // they emit an `inactivity_warning` event so the client can render
+    // a check-in affordance ("Status update?"). The session stays alive
+    // — pre-#3899 this kill behavior moved to `hardTimeoutMs` below.
+    // Default 30 min — wide enough to cover long agent loops (batch
+    // ops, big refactors) before the user is prompted. Override via
+    // ~/.chroxy/config.json#resultTimeoutMs or CHROXY_RESULT_TIMEOUT_MS.
     resultTimeoutMs,
+    // #3899: configurable HARD-cap timeout (the kill-the-session
+    // backstop). Subclasses arm this in parallel with the soft timer;
+    // when it fires they force-clear busy state, auto-deny pending
+    // permissions, and emit an error — the pre-#3899 behavior, kept as
+    // the absolute safety valve for genuinely stuck sessions. Default
+    // 2h. Override via ~/.chroxy/config.json#hardTimeoutMs or
+    // CHROXY_HARD_TIMEOUT_MS.
+    hardTimeoutMs,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -152,14 +183,28 @@ export class BaseSession extends EventEmitter {
     this._destroying = false
     this._activeAgents = new Map()
     this._resultTimeout = null
-    // #3749 / #3884: effective inactivity timeout in ms. Defaults to 30
-    // minutes; overrides come from SessionManager(resultTimeoutMs:…) which
-    // itself reads ~/.chroxy/config.json#resultTimeoutMs or
+    // #3899: parallel hard-cap setTimeout handle. Armed alongside
+    // `_resultTimeout` on every activity reset, cleared in lockstep.
+    // Fires `_handleHardTimeout` when silence reaches `_hardTimeoutMs`
+    // even if the user never engages with the soft check-in prompt.
+    this._hardTimeout = null
+    // #3749 / #3884 / #3899: effective SOFT-warning timeout in ms.
+    // Defaults to 30 minutes; overrides come from
+    // SessionManager(resultTimeoutMs:…) which itself reads
+    // ~/.chroxy/config.json#resultTimeoutMs or
     // CHROXY_RESULT_TIMEOUT_MS.
     this._resultTimeoutMs =
       Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
         ? resultTimeoutMs
         : DEFAULT_RESULT_TIMEOUT_MS
+    // #3899: effective HARD-cap timeout in ms. Defaults to 2 hours.
+    // Overrides via SessionManager(hardTimeoutMs:…) ← config.hardTimeoutMs
+    // / CHROXY_HARD_TIMEOUT_MS. Operators wanting tight kill-on-stuck
+    // semantics can drop this; the soft warning fires first regardless.
+    this._hardTimeoutMs =
+      Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+        ? hardTimeoutMs
+        : DEFAULT_HARD_TIMEOUT_MS
 
     // Provider id (registry key from providers.js — `claude-sdk`, `codex`,
     // etc.). Stored so frontmatter `providers:` filtering (#3198) and
@@ -701,6 +746,14 @@ export class BaseSession extends EventEmitter {
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
+    }
+    // #3899: clear the hard-cap timer too. A successful turn end (or
+    // explicit cancellation) means there's nothing to backstop anymore;
+    // leaving the hard timer armed would fire `_handleHardTimeout` on
+    // a session that's already idle, which is harmless but noisy.
+    if (this._hardTimeout) {
+      clearTimeout(this._hardTimeout)
+      this._hardTimeout = null
     }
   }
 }

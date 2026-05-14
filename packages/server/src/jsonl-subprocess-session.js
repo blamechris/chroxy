@@ -101,6 +101,12 @@ export class JsonlSubprocessSession extends BaseSession {
     promptEvaluator,
     promptEvaluatorSkipPattern,
     resultTimeoutMs,
+    // #3899: hard-cap timeout (per-session backstop) flows through this
+    // middle layer to BaseSession exactly like resultTimeoutMs. Memory
+    // [[feedback_jsonl_subprocess_middle_layer]] — when adding a
+    // BaseSession option, plumb it through here too or Codex / Gemini
+    // silently fall back to the default.
+    hardTimeoutMs,
     resumeSessionId,
   } = {}) {
     super({
@@ -119,6 +125,7 @@ export class JsonlSubprocessSession extends BaseSession {
       promptEvaluator,
       promptEvaluatorSkipPattern,
       resultTimeoutMs,
+      hardTimeoutMs,
     })
     // #3865: accept resumeSessionId from constructor so SessionManager's
     // serializeState/restoreState path carries a captured Codex thread_id

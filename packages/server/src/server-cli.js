@@ -1,5 +1,5 @@
 import { SessionManager } from './session-manager.js'
-import { DEFAULT_RESULT_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from './base-session.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
@@ -344,23 +344,32 @@ export async function startCliServer(config) {
     sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
-    // #3749 / #3884: inactivity timeout (ms). null = BaseSession default (30 min).
+    // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). null = BaseSession default (30 min).
     resultTimeoutMs:
       Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
         ? config.resultTimeoutMs
+        : null,
+    // #3899: HARD-cap inactivity timeout (ms). null = BaseSession default (2h).
+    hardTimeoutMs:
+      Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
+        ? config.hardTimeoutMs
         : null,
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
     maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
   })
 
-  // #3749: surface the effective inactivity timeout at startup so operators
-  // can verify their config override took effect.
+  // #3749 / #3899: surface the effective inactivity timeouts at startup so
+  // operators can verify their config overrides took effect.
   const effectiveResultTimeoutMs =
     Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
       ? config.resultTimeoutMs
       : DEFAULT_RESULT_TIMEOUT_MS
-  log.info(`Inactivity timeout: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms)`)
+  const effectiveHardTimeoutMs =
+    Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
+      ? config.hardTimeoutMs
+      : DEFAULT_HARD_TIMEOUT_MS
+  log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms)`)
 
   // 2. Try restoring session state from a previous instance
   let defaultSessionId
@@ -518,6 +527,20 @@ export async function startCliServer(config) {
           sessionId,
           sessionName,
           state: 'waiting',
+        })
+      } else if (event === 'inactivity_warning') {
+        // #3899: soft inactivity warning replaces the pre-#3899 kill-on-
+        // timeout behaviour. Push regardless of active-viewer state — a
+        // viewer with the dashboard open but AFK still benefits from the
+        // device-level nudge. (The transient UI chip in the dashboard
+        // covers the actively-watching case.)
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('inactivity_warning', 'Agent quiet for a while', 'Tap to check in', {
+          sessionId,
+          sessionName,
+          state: 'idle_warning',
+          prefab: data.prefab,
+          idleMs: data.idleMs,
         })
       }
     }

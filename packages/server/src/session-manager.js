@@ -169,6 +169,9 @@ export class SessionManager extends EventEmitter {
     providerSkillAllowlist,
     trustMismatchMode,
     resultTimeoutMs,
+    // #3899: HARD-cap inactivity timeout (ms). Forwarded to providers via
+    // providerOpts. null = use BaseSession's DEFAULT_HARD_TIMEOUT_MS (2h).
+    hardTimeoutMs,
 
     // State persistence
     stateFilePath,
@@ -206,6 +209,13 @@ export class SessionManager extends EventEmitter {
     this._resultTimeoutMs =
       Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
         ? resultTimeoutMs
+        : null
+    // #3899: same shape as resultTimeoutMs — null means "let BaseSession
+    // use DEFAULT_HARD_TIMEOUT_MS (2h)"; a positive finite value flows
+    // through providerOpts to each session subclass.
+    this._hardTimeoutMs =
+      Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+        ? hardTimeoutMs
         : null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
@@ -505,6 +515,7 @@ export class SessionManager extends EventEmitter {
     }
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
+    if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs
     // Skills size budgets — pass through if configured. BaseSession forwards
     // these to loadActiveSkillsLayered. (#3202)
     if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes
@@ -1382,7 +1393,7 @@ export class SessionManager extends EventEmitter {
     // without the event being replayed on every reconnect (the loader re-checks
     // the hash every time skills are scanned, so the latest state is always
     // canonical).
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted']
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
