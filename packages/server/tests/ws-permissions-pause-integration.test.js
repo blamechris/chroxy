@@ -50,7 +50,16 @@ function createReadyCliSession(opts = {}) {
   // Setting `port` would wire a hookManager whose destroy() path reads
   // and potentially writes the real ~/.claude/settings.json (see Issue
   // #429 / P1 test-contamination lesson).
-  const session = new CliSession({ cwd: '/tmp', resultTimeoutMs: TEST_RESULT_TIMEOUT_MS, ...opts })
+  // #3899: also pin hardTimeoutMs to the same 5-min window — the kill
+  // (which is what emits the error this test asserts) fires at
+  // hardTimeoutMs post-#3899, not resultTimeoutMs (which now fires the
+  // soft warning event).
+  const session = new CliSession({
+    cwd: '/tmp',
+    resultTimeoutMs: TEST_RESULT_TIMEOUT_MS,
+    hardTimeoutMs: TEST_RESULT_TIMEOUT_MS,
+    ...opts,
+  })
   session._processReady = true
   session._child = createMockChild()
   return session

@@ -33,8 +33,20 @@ function createMockChild() {
 // #3884) into every `mock.timers.tick(N * 60_000)` call.
 const TEST_RESULT_TIMEOUT_MS = 5 * 60_000
 
+// #3899: pin the HARD-cap timeout to the same 5-min window. Pre-#3899
+// the kill-on-timeout fired at `resultTimeoutMs`; post-#3899 the kill
+// fires at `hardTimeoutMs` while `resultTimeoutMs` emits a soft warning.
+// Setting them equal here preserves the existing test arithmetic
+// (errors fire at the 5-min mark) and means the soft warning fires in
+// the same tick as the hard kill. Tests that don't subscribe to
+// `inactivity_warning` don't notice the extra event.
 function createReadySession(opts = {}) {
-  const session = new CliSession({ cwd: '/tmp', resultTimeoutMs: TEST_RESULT_TIMEOUT_MS, ...opts })
+  const session = new CliSession({
+    cwd: '/tmp',
+    resultTimeoutMs: TEST_RESULT_TIMEOUT_MS,
+    hardTimeoutMs: TEST_RESULT_TIMEOUT_MS,
+    ...opts,
+  })
   session._processReady = true
   session._child = createMockChild()
   return session
@@ -150,7 +162,12 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
     const NINETY_S = 90_000
 
     it('re-armed timer fires at exactly the configured window, not a hardcoded 5/30 min', async () => {
-      const s = createReadySession({ resultTimeoutMs: NINETY_S })
+      // #3899: also pin hardTimeoutMs to the same window so the hard
+      // kill (which is what emits the error) fires at the same 90s mark
+      // as the soft warning. Without this override, createReadySession
+      // would default hardTimeoutMs to TEST_RESULT_TIMEOUT_MS (5 min)
+      // and the error wouldn't fire at 90s.
+      const s = createReadySession({ resultTimeoutMs: NINETY_S, hardTimeoutMs: NINETY_S })
       const errors = []
       s.on('error', (d) => errors.push(d))
 
@@ -247,6 +264,128 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
 
       mock.timers.tick(TEST_RESULT_TIMEOUT_MS + 10_000)
       assert.equal(errors.length, 0, 'no timeout fires while paused, regardless of stdout activity')
+    })
+  })
+
+  // #3899: SOFT inactivity warning is the new pre-kill prompt — fires at
+  // `resultTimeoutMs` (default 30 min), emits an `inactivity_warning`
+  // event WITHOUT clearing busy state or pending permissions. The HARD
+  // cap (`hardTimeoutMs`, default 2h) is the existing kill path. The
+  // pause/resume tests above all set both timeouts to the same window
+  // (via createReadySession's helper) so the error fires at the same
+  // tick as the soft warning. These tests pin the soft-vs-hard
+  // distinction explicitly by using different windows.
+  describe('soft inactivity warning + hard cap (#3899)', () => {
+    // 1-min soft, 3-min hard. Soft must fire at 60s emitting
+    // inactivity_warning + leaving the session alive; hard must fire at
+    // 180s emitting the existing error + clearing state.
+    const SOFT = 60_000
+    const HARD = 3 * 60_000
+
+    it('soft warning fires at resultTimeoutMs WITHOUT clearing busy state', async () => {
+      const s = createReadySession({ resultTimeoutMs: SOFT, hardTimeoutMs: HARD })
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        await s.sendMessage('long running task')
+        assert.equal(s._isBusy, true)
+
+        mock.timers.tick(SOFT - 1)
+        assert.equal(warnings.length, 0, 'soft must not fire 1ms before window')
+
+        mock.timers.tick(1)
+        assert.equal(warnings.length, 1, 'soft fires at exactly resultTimeoutMs')
+        assert.equal(warnings[0].prefab, 'Status update?')
+        assert.equal(warnings[0].idleMs, SOFT)
+        assert.equal(s._isBusy, true, 'session stays busy after soft warning')
+        assert.equal(errors.length, 0, 'no error emitted on soft warning')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('hard cap fires at hardTimeoutMs and clears state (pre-#3899 behavior preserved)', async () => {
+      const s = createReadySession({ resultTimeoutMs: SOFT, hardTimeoutMs: HARD })
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        await s.sendMessage('totally stuck task')
+
+        // After the SOFT fires the session keeps going. The HARD fires
+        // HARD ms after sendMessage with no activity in between.
+        mock.timers.tick(HARD - 1)
+        assert.equal(warnings.length, 1, 'soft fired in the middle')
+        assert.equal(errors.length, 0, 'hard not yet')
+
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'hard fires at exactly hardTimeoutMs')
+        assert.match(errors[0].message, /timed out/)
+        assert.equal(s._isBusy, false, 'busy state cleared by hard')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('activity in the silent stretch resets BOTH soft and hard', async () => {
+      const s = createReadySession({ resultTimeoutMs: SOFT, hardTimeoutMs: HARD })
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        await s.sendMessage('chatty agent')
+
+        // Tick just before soft would fire, then activity → resets both
+        mock.timers.tick(SOFT - 1_000)
+        s._handleStdoutLine('{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"."}}}')
+
+        // Now full HARD - 1_000 has effectively passed in the original
+        // timer's eyes, but both timers were reset → starting fresh.
+        // Tick to the new SOFT window from the activity.
+        mock.timers.tick(SOFT - 1)
+        assert.equal(warnings.length, 0, 'soft must not fire — activity reset the timer')
+
+        mock.timers.tick(1)
+        assert.equal(warnings.length, 1, 'soft fires at SOFT ms after the activity, not original sendMessage')
+        assert.equal(errors.length, 0, 'still no error — hard hasnt fired yet')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('permission pause clears BOTH timers; resume re-arms both', async () => {
+      const s = createReadySession({ resultTimeoutMs: SOFT, hardTimeoutMs: HARD })
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        await s.sendMessage('asking for permission')
+        s.notifyPermissionPending('perm-cap')
+        assert.equal(s._resultTimeout, null, 'soft cleared on pause')
+        assert.equal(s._hardTimeout, null, 'hard cleared on pause')
+
+        // Long pause — neither fires
+        mock.timers.tick(HARD * 2)
+        assert.equal(warnings.length, 0)
+        assert.equal(errors.length, 0)
+
+        s.notifyPermissionResolved('perm-cap')
+        // After resume, soft fires at SOFT ms, hard at HARD ms — both
+        // re-armed fresh from the moment of resolution
+        mock.timers.tick(SOFT)
+        assert.equal(warnings.length, 1, 'soft re-armed and fired')
+        assert.equal(errors.length, 0)
+
+        mock.timers.tick(HARD - SOFT)
+        assert.equal(errors.length, 1, 'hard re-armed and fired')
+      } finally {
+        s.destroy()
+      }
     })
   })
 })

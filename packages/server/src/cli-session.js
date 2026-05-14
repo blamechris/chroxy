@@ -158,8 +158,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -464,37 +464,81 @@ export class CliSession extends BaseSession {
       this._skillsPrepended = true
     }
 
-    // Safety timeout: force-clear if result never arrives. Window is
-    // configurable per server via config.resultTimeoutMs (#3749) — see
-    // BaseSession.DEFAULT_RESULT_TIMEOUT_MS for the default.
-    // Paused while permission prompts are outstanding (#2831): awaiting
-    // user input on a permission is NOT "inactivity".
+    // Safety timeouts: soft warning + hard cap. Both armed on every
+    // activity; soft fires `inactivity_warning` (session stays alive),
+    // hard fires the existing kill path. Both paused while a permission
+    // prompt is outstanding (#2831) — waiting on user input is not
+    // inactivity. Defaults + overrides documented in BaseSession.
     this._armResultTimeout()
   }
 
   /**
-   * Arm the inactivity timer. No-op if paused because of a pending
-   * permission prompt (#2831). Window is configurable per server via
-   * config.resultTimeoutMs / CHROXY_RESULT_TIMEOUT_MS (#3749).
+   * Arm the SOFT-warning + HARD-cap timers in parallel. No-op when paused
+   * because of a pending permission prompt (#2831). Windows are
+   * configurable per server via config.resultTimeoutMs / hardTimeoutMs
+   * (#3749 / #3899).
+   *
+   * Both timers are cleared at the top of every call, so any activity-
+   * triggered reset (`_handleStdoutLine`) restarts the silence window
+   * from zero — including the hard cap. That's by design: the hard cap
+   * bounds *silent* stretches, not the wall-clock session duration.
    */
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)
+    if (this._hardTimeout) clearTimeout(this._hardTimeout)
     this._resultTimeout = null
+    this._hardTimeout = null
     if (this._resultTimeoutPaused) return
-    this._resultTimeout = setTimeout(() => this._handleResultTimeout(), this._resultTimeoutMs)
+    this._resultTimeout = setTimeout(() => {
+      this._resultTimeout = null
+      this._handleInactivityWarning()
+    }, this._resultTimeoutMs)
+    this._hardTimeout = setTimeout(() => {
+      this._hardTimeout = null
+      this._handleHardTimeout()
+    }, this._hardTimeoutMs)
   }
 
   /**
-   * Handle a true inactivity timeout. Before clearing state, emit
-   * permission_expired for any registered pending permissions so the
-   * client UI clears stale prompts (#2831). Without this, late user
-   * approvals would resolve into a dead message context and no
-   * response ever streams.
+   * Handle the SOFT inactivity warning (#3899). Fired after
+   * `_resultTimeoutMs` of silence with no activity to reset it.
+   *
+   * Unlike `_handleHardTimeout`, this does NOT clear busy state,
+   * does NOT auto-deny pending permissions, and does NOT emit `error`.
+   * It just emits a transient `inactivity_warning` event so the client
+   * can render a check-in affordance ("Status update?") and (if the
+   * server has push wired) deliver an Expo notification.
+   *
+   * The hard-cap timer keeps running — if the user never engages, the
+   * kill path eventually fires anyway. The soft timer is NOT re-armed
+   * here: each silent stretch produces exactly one warning (subsequent
+   * activity resets BOTH timers, so the next stretch fires a fresh
+   * warning).
    */
-  _handleResultTimeout() {
+  _handleInactivityWarning() {
     if (!this._isBusy) return
-    const friendly = formatIdleDuration(this._resultTimeoutMs)
-    log.warn(`Result timeout (${friendly}) — force-clearing busy state`)
+    const idleMs = this._resultTimeoutMs
+    const friendly = formatIdleDuration(idleMs)
+    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    this.emit('inactivity_warning', {
+      messageId: this._currentMessageId,
+      idleMs,
+      prefab: 'Status update?',
+    })
+  }
+
+  /**
+   * Handle the HARD-cap timeout (#3899; pre-#3899 this was the only
+   * handler — kept as the absolute backstop for genuinely stuck
+   * sessions). Before clearing state, emit `permission_expired` for
+   * any registered pending permissions so the client UI clears stale
+   * prompts (#2831). Without this, late user approvals would resolve
+   * into a dead message context and no response ever streams.
+   */
+  _handleHardTimeout() {
+    if (!this._isBusy) return
+    const friendly = formatIdleDuration(this._hardTimeoutMs)
+    log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
     const messageId = this._currentMessageId
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
@@ -524,9 +568,16 @@ export class CliSession extends BaseSession {
     this._pendingPermissionIds.add(requestId)
     if (this._pendingPermissionIds.size === 1) {
       this._resultTimeoutPaused = true
+      // #3899: clear BOTH the soft warning and hard cap. Awaiting user
+      // input is not inactivity; the timer trio re-arms together when
+      // the last pending permission resolves.
       if (this._resultTimeout) {
         clearTimeout(this._resultTimeout)
         this._resultTimeout = null
+      }
+      if (this._hardTimeout) {
+        clearTimeout(this._hardTimeout)
+        this._hardTimeout = null
       }
     }
   }
@@ -1043,6 +1094,10 @@ export class CliSession extends BaseSession {
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
+    }
+    if (this._hardTimeout) {
+      clearTimeout(this._hardTimeout)
+      this._hardTimeout = null
     }
 
     if (this._interruptTimer) {

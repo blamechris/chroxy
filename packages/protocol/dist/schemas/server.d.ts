@@ -193,6 +193,12 @@ export declare const ServerClientFocusChangedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     timestamp: z.ZodNumber;
 }, z.core.$strip>;
+export declare const ServerInactivityWarningSchema: z.ZodObject<{
+    type: z.ZodLiteral<"inactivity_warning">;
+    messageId: z.ZodString;
+    idleMs: z.ZodNumber;
+    prefab: z.ZodString;
+}, z.core.$strip>;
 export declare const ServerMcpServersSchema: z.ZodObject<{
     type: z.ZodLiteral<"mcp_servers">;
     servers: z.ZodArray<z.ZodObject<{

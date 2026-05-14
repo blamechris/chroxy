@@ -519,6 +519,20 @@ export async function startCliServer(config) {
           sessionName,
           state: 'waiting',
         })
+      } else if (event === 'inactivity_warning') {
+        // #3899: soft inactivity warning replaces the pre-#3899 kill-on-
+        // timeout behaviour. Push regardless of active-viewer state — a
+        // viewer with the dashboard open but AFK still benefits from the
+        // device-level nudge. (The transient UI chip in the dashboard
+        // covers the actively-watching case.)
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('inactivity_warning', 'Agent quiet for a while', 'Tap to check in', {
+          sessionId,
+          sessionName,
+          state: 'idle_warning',
+          prefab: data.prefab,
+          idleMs: data.idleMs,
+        })
       }
     }
   })

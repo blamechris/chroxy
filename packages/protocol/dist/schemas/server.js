@@ -216,6 +216,24 @@ export const ServerClientFocusChangedSchema = z.object({
     sessionId: z.string(),
     timestamp: z.number(),
 });
+// #3899: soft inactivity warning. Replaces the pre-#3899 kill-on-timeout
+// behaviour with a check-in flow — the server fires this event after
+// `resultTimeoutMs` of silence (default 30 min), the client renders a
+// transient chip with a one-click `prefab` follow-up message ("Status
+// update?"). The session stays alive (busy state preserved, pending
+// permissions left pending). If silence continues past `hardTimeoutMs`
+// (default 2h) with no user check-in, the existing kill path still fires
+// — that's the absolute backstop for genuinely stuck sessions.
+//
+// `idleMs` is the elapsed silence at the moment the soft timer fired —
+// equals `resultTimeoutMs` on the first warning but may differ on later
+// firings if the server has been adjusted at runtime.
+export const ServerInactivityWarningSchema = z.object({
+    type: z.literal('inactivity_warning'),
+    messageId: z.string(),
+    idleMs: z.number(),
+    prefab: z.string(),
+});
 export const ServerMcpServersSchema = z.object({
     type: z.literal('mcp_servers'),
     servers: z.array(z.object({

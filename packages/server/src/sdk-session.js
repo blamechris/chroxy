@@ -234,8 +234,8 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, resultTimeoutMs } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, resultTimeoutMs, hardTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -507,20 +507,29 @@ export class SdkSession extends BaseSession {
       options.resume = this._sdkSessionId
     }
 
-    // Safety timeout: force-clear if result never arrives.
-    // Resets on every SDK event (tool calls, streaming, etc.) so long-running
-    // agent tasks with many tool calls don't get falsely timed out.
-    // Paused while permission prompts are outstanding (#2831): awaiting
-    // user input on a permission is NOT "inactivity".
-    // Timeout is configurable per server (#3749) — see BaseSession.
-    const RESULT_TIMEOUT_MS = this._resultTimeoutMs
+    // Safety timeouts: SOFT warning + HARD cap, both armed on every SDK
+    // event. Soft fires `inactivity_warning` (session stays alive);
+    // hard fires the existing kill path (force-clear, auto-deny
+    // pending perms, emit error). Both paused while a permission
+    // prompt is outstanding (#2831) — awaiting user input is not
+    // inactivity. Both windows configurable per server (#3749 / #3899)
+    // — see BaseSession.
+    const SOFT_TIMEOUT_MS = this._resultTimeoutMs
+    const HARD_TIMEOUT_MS = this._hardTimeoutMs
     const resetResultTimeout = () => {
       if (this._resultTimeout) clearTimeout(this._resultTimeout)
+      if (this._hardTimeout) clearTimeout(this._hardTimeout)
       this._resultTimeout = null
+      this._hardTimeout = null
       if (this._resultTimeoutPaused) return
       this._resultTimeout = setTimeout(() => {
-        this._handleResultTimeout(messageId, streamState.hasStreamStarted)
-      }, RESULT_TIMEOUT_MS)
+        this._resultTimeout = null
+        this._handleInactivityWarning(messageId)
+      }, SOFT_TIMEOUT_MS)
+      this._hardTimeout = setTimeout(() => {
+        this._hardTimeout = null
+        this._handleHardTimeout(messageId, streamState.hasStreamStarted)
+      }, HARD_TIMEOUT_MS)
     }
     this._resetResultTimeout = resetResultTimeout
     resetResultTimeout()
@@ -1114,19 +1123,46 @@ export class SdkSession extends BaseSession {
   }
 
   /**
-   * Handle a true inactivity timeout — the configured result timer fired
-   * (default 30 min, see BaseSession.DEFAULT_RESULT_TIMEOUT_MS, override
-   * via config.resultTimeoutMs / CHROXY_RESULT_TIMEOUT_MS) while the
-   * session was still busy. Emits stream_end (if streaming), auto-denies
-   * any pending permissions, emits `permission_expired` for each so the
-   * client UI clears stale prompts, then clears state and emits an error.
-   * Issue #2831 added the permission cleanup so late user approvals
-   * don't resolve into an abandoned SDK turn.
+   * Handle the SOFT inactivity warning (#3899) — `_resultTimeoutMs` of
+   * silence with no SDK event to reset it (default 30 min). Unlike
+   * `_handleHardTimeout`, this does NOT clear busy state, does NOT
+   * auto-deny pending permissions, and does NOT emit `error`. It just
+   * emits a transient `inactivity_warning` event so the client can
+   * render a check-in chip ("Status update?") and (if push is wired)
+   * deliver an Expo notification.
+   *
+   * The hard-cap timer continues running in parallel — if the user
+   * never engages, the kill path eventually fires anyway. The soft
+   * timer is NOT re-armed here; each silent stretch fires exactly
+   * one warning (any subsequent activity resets both timers, so the
+   * next stretch fires a fresh warning).
    */
-  _handleResultTimeout(messageId, hasStreamStarted) {
+  _handleInactivityWarning(messageId) {
     if (!this._isBusy) return
-    const friendly = formatIdleDuration(this._resultTimeoutMs)
-    log.warn(`Result timeout (${friendly} inactivity) — force-clearing busy state`)
+    const idleMs = this._resultTimeoutMs
+    const friendly = formatIdleDuration(idleMs)
+    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    this.emit('inactivity_warning', {
+      messageId,
+      idleMs,
+      prefab: 'Status update?',
+    })
+  }
+
+  /**
+   * Handle the HARD-cap timeout (#3899; pre-#3899 this was the only
+   * handler, named `_handleResultTimeout` — kept as the absolute
+   * backstop for genuinely stuck sessions when the user never check-
+   * ins on the soft warning). Emits stream_end (if streaming), auto-
+   * denies any pending permissions, emits `permission_expired` for
+   * each so the client UI clears stale prompts, then clears state and
+   * emits an error. Issue #2831 added the permission cleanup so late
+   * user approvals don't resolve into an abandoned SDK turn.
+   */
+  _handleHardTimeout(messageId, hasStreamStarted) {
+    if (!this._isBusy) return
+    const friendly = formatIdleDuration(this._hardTimeoutMs)
+    log.warn(`Hard-cap timeout (${friendly} inactivity) — force-clearing busy state`)
     if (hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
@@ -1177,9 +1213,16 @@ export class SdkSession extends BaseSession {
     this._permissionPauseCount++
     if (this._permissionPauseCount === 1) {
       this._resultTimeoutPaused = true
+      // #3899: clear BOTH the soft warning and hard cap. Awaiting user
+      // input on a permission is not inactivity; both re-arm together
+      // via `_resetResultTimeout()` when the last prompt resolves.
       if (this._resultTimeout) {
         clearTimeout(this._resultTimeout)
         this._resultTimeout = null
+      }
+      if (this._hardTimeout) {
+        clearTimeout(this._hardTimeout)
+        this._hardTimeout = null
       }
     }
   }
@@ -1222,6 +1265,10 @@ export class SdkSession extends BaseSession {
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
+    }
+    if (this._hardTimeout) {
+      clearTimeout(this._hardTimeout)
+      this._hardTimeout = null
     }
 
     // Interrupt active query
