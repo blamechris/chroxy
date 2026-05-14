@@ -524,6 +524,18 @@ describe('handleInactivityWarning', () => {
     ).toBeNull()
   })
 
+  it('returns null when idleMs exceeds the 24h sane-duration ceiling', () => {
+    const ONE_DAY = 24 * 60 * 60 * 1000
+    // Boundary: exactly 24h is allowed (matches Zod's .max(...))
+    expect(
+      handleInactivityWarning({ idleMs: ONE_DAY, prefab: 'Status update?' }, 'active-1'),
+    ).not.toBeNull()
+    // 1ms over the ceiling: rejected — same as the wire schema would do
+    expect(
+      handleInactivityWarning({ idleMs: ONE_DAY + 1, prefab: 'Status update?' }, 'active-1'),
+    ).toBeNull()
+  })
+
   it('returns null when idleMs is non-finite', () => {
     expect(
       handleInactivityWarning({ idleMs: Number.POSITIVE_INFINITY, prefab: 'x' }, 'a'),

@@ -774,6 +774,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // contract: a reconnect drops any in-flight clarify question
         // rather than leaving it on screen with stale state.
         if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+        // #3899: same contract for the inactivity check-in chip — the
+        // server does NOT replay `inactivity_warning` on reconnect, so
+        // a chip left over from before the drop would point at stale
+        // state. Clear it; if the agent is still quiet post-reconnect,
+        // the next soft-timeout firing will re-emit the warning.
+        if (ss.inactivityWarning) patch.inactivityWarning = null;
         return Object.keys(patch).length > 0 ? patch : {};
       });
 

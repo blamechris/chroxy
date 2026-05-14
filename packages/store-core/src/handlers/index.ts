@@ -395,6 +395,19 @@ export function handlePlanReady(
 // can ignore them without crashing.
 // ---------------------------------------------------------------------------
 
+/**
+ * Upper bound for `idleMs` in the inactivity_warning handler.
+ *
+ * Mirrors the `MAX_SANE_DURATION_MS = 24h` ceiling that
+ * `ServerInactivityWarningSchema` enforces on the wire (see
+ * packages/protocol/src/schemas/server.ts). Duplicated as a literal
+ * here so store-core stays free of the @chroxy/protocol dependency for
+ * mobile build size — protocol is the source of truth, this is the
+ * defence-in-depth backstop the handler applies when dashboard /
+ * mobile dispatch a message without re-running Zod parse.
+ */
+const MAX_INACTIVITY_IDLE_MS = 24 * 60 * 60 * 1000
+
 export function handleInactivityWarning(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
@@ -409,7 +422,7 @@ export function handleInactivityWarning(
   // already requires `.int().positive()`, so this is a defence-in-depth
   // backstop against a malformed payload, not the primary gate.
   const idleMs = Math.floor(idleMsRaw)
-  if (idleMs <= 0) {
+  if (idleMs <= 0 || idleMs > MAX_INACTIVITY_IDLE_MS) {
     return null
   }
   if (typeof prefabRaw !== 'string' || !prefabRaw.trim()) {

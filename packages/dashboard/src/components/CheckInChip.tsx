@@ -62,10 +62,20 @@ export function CheckInChip() {
     sendInput(warning.prefab)
   }
 
+  // The chip's only stable announcement is its initial appearance:
+  // "Agent has gone quiet — Status update?". The elapsed text ticks
+  // every second, which would spam an `aria-live="polite"` region.
+  // Keep the live announcement on a fixed-text sibling (rendered once
+  // per warning, not once per tick) and mark the elapsed counter
+  // `aria-hidden` so it stays visual-only. Screen readers still hear
+  // the prompt + button, plus the button's stable aria-label.
   return (
-    <div className="check-in-chip" role="status" aria-live="polite">
+    <div className="check-in-chip">
+      <span className="check-in-chip__sr" role="status" aria-live="polite">
+        Agent has gone quiet. {warning.prefab}
+      </span>
       <span className="check-in-chip__dot" aria-hidden="true" />
-      <span className="check-in-chip__label">
+      <span className="check-in-chip__label" aria-hidden="true">
         Agent quiet for {formatElapsed(totalIdle)}
       </span>
       <button

@@ -104,7 +104,7 @@ describe('CheckInChip', () => {
     expect(sendInputMock).not.toHaveBeenCalled()
   })
 
-  it('has a role of "status" with polite live region for screen readers', () => {
+  it('exposes a fixed-text polite live region that excludes the ticking elapsed counter', () => {
     ;(storeState.sessionStates as any)['sess-1'].inactivityWarning = {
       idleMs: 30_000,
       prefab: 'Status update?',
@@ -114,5 +114,12 @@ describe('CheckInChip', () => {
     const region = container.querySelector('[role="status"]')
     expect(region).not.toBeNull()
     expect(region?.getAttribute('aria-live')).toBe('polite')
+    // The live text is stable per-warning ("Agent has gone quiet. <prefab>")
+    // — NOT the per-second ticking "Agent quiet for Ns" label, which would
+    // otherwise spam the polite queue once per render tick.
+    expect(region?.textContent).toBe('Agent has gone quiet. Status update?')
+    // Ticking elapsed counter is marked aria-hidden so SRs ignore it.
+    const elapsed = container.querySelector('.check-in-chip__label')
+    expect(elapsed?.getAttribute('aria-hidden')).toBe('true')
   })
 })

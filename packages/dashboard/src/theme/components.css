@@ -6193,3 +6193,19 @@
 
 .check-in-chip__action:hover { opacity: 0.85; }
 .check-in-chip__action:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Visually-hidden text node for the chip's live region. Lets screen
+   readers hear the initial "Agent has gone quiet" announcement once
+   per warning without forcing the ticking elapsed-time label through
+   `aria-live` (which would re-announce every second). */
+.check-in-chip__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
