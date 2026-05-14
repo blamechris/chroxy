@@ -332,6 +332,23 @@ describe('InputBar', () => {
       fireEvent.change(textarea, { target: { value: 'x' } })
       expect(screen.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send follow-up')
     })
+
+    // Order matters: the PR's UX contract is "Stop keeps the rightmost
+    // position across all busy states" so users don't have to hunt when
+    // they start typing. Without this assertion, a future reorder
+    // (Stop-then-Send) would silently regress the layout — buttons
+    // would still both render, all other tests would still pass.
+    it('renders Send before Stop in DOM order (Stop stays rightmost)', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      const textarea = screen.getByRole('textbox')
+      fireEvent.change(textarea, { target: { value: 'draft' } })
+      const sendBtn = screen.getByTestId('send-button')
+      const stopBtn = screen.getByTestId('interrupt-button')
+      // DOCUMENT_POSITION_FOLLOWING (4) means stopBtn comes after sendBtn
+      // in document order — i.e., Send is earlier in the tree, Stop later.
+      const pos = sendBtn.compareDocumentPosition(stopBtn)
+      expect(pos & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
   })
 
   it('shows placeholder text', () => {
