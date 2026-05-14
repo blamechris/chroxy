@@ -88,14 +88,39 @@ echo "[bundle-server] Pruning Bare-runtime prebuilds (unused under Node.js)..."
 PRUNED_COUNT=$(find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
 echo "[bundle-server] Pruned $PRUNED_COUNT bare-runtime prebuilds dir(s)"
 
-# Defensive: after the prune step, the bundle must not contain any unsigned
-# native binaries. The prune above targets a specific path pattern
-# (`*/bare-*/prebuilds`); if a future dep upgrade ships native code outside
-# that layout — e.g. a `.bare` under a non-`bare-*` package name, or a `.node`
-# / `.dylib` / `.so` addon without a Developer ID signature — Apple
+# Copy workspace packages AFTER npm install (npm wipes node_modules during install).
+# Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
+PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
+if [ -d "$PROTOCOL_DIR/dist" ]; then
+  mkdir -p "$STAGING/node_modules/@chroxy/protocol/dist"
+  cp "$PROTOCOL_DIR/package.json" "$STAGING/node_modules/@chroxy/protocol/"
+  cp -r "$PROTOCOL_DIR/dist/"* "$STAGING/node_modules/@chroxy/protocol/dist/"
+  echo "[bundle-server] Copied @chroxy/protocol workspace package"
+fi
+
+STORECORE_DIR="$REPO_ROOT/packages/store-core"
+if [ -d "$STORECORE_DIR/dist" ]; then
+  mkdir -p "$STAGING/node_modules/@chroxy/store-core/dist"
+  cp "$STORECORE_DIR/package.json" "$STAGING/node_modules/@chroxy/store-core/"
+  cp -r "$STORECORE_DIR/dist/crypto.js" "$STAGING/node_modules/@chroxy/store-core/dist/"
+  cp -r "$STORECORE_DIR/dist/crypto.d.ts" "$STAGING/node_modules/@chroxy/store-core/dist/"
+  echo "[bundle-server] Copied @chroxy/store-core workspace package (crypto)"
+fi
+
+# Defensive: after ALL node_modules mutations (npm install + bare-runtime
+# prune + workspace package copies), the bundle must not contain any
+# unsigned native binaries. The prune above only targets a specific path
+# pattern (`*/bare-*/prebuilds`); if a future dep upgrade ships native code
+# outside that layout — e.g. a `.bare` under a non-`bare-*` package name,
+# a `.node` Node addon, or a `.dylib`/`.so` from a transitive dep — Apple
 # notarization will silently fail weeks later when we cut a release. This
-# guard converts that 5-minute release-time feedback loop into a 30-second
+# guard converts that ~5-minute release-time feedback loop into a 30-second
 # build-time failure with the exact offending paths printed (#3825).
+#
+# IMPORTANT: this check runs AFTER the workspace package copies above, so
+# the workspace dist/ trees are also covered if anyone ever lands a native
+# binary inside `@chroxy/*`. Reordering the prune or workspace-copy blocks
+# above this guard is fine; moving the guard above either of them is NOT.
 echo "[bundle-server] Verifying no unsigned native binaries remain..."
 NATIVE_BINS=$(find "$STAGING/node_modules" -type f \( \
   -name "*.bare" -o \
@@ -117,25 +142,6 @@ if [ -n "$NATIVE_BINS" ]; then
   exit 1
 fi
 echo "[bundle-server] OK: no unsigned native binaries detected."
-
-# Copy workspace packages AFTER npm install (npm wipes node_modules during install).
-# Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
-PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
-if [ -d "$PROTOCOL_DIR/dist" ]; then
-  mkdir -p "$STAGING/node_modules/@chroxy/protocol/dist"
-  cp "$PROTOCOL_DIR/package.json" "$STAGING/node_modules/@chroxy/protocol/"
-  cp -r "$PROTOCOL_DIR/dist/"* "$STAGING/node_modules/@chroxy/protocol/dist/"
-  echo "[bundle-server] Copied @chroxy/protocol workspace package"
-fi
-
-STORECORE_DIR="$REPO_ROOT/packages/store-core"
-if [ -d "$STORECORE_DIR/dist" ]; then
-  mkdir -p "$STAGING/node_modules/@chroxy/store-core/dist"
-  cp "$STORECORE_DIR/package.json" "$STAGING/node_modules/@chroxy/store-core/"
-  cp -r "$STORECORE_DIR/dist/crypto.js" "$STAGING/node_modules/@chroxy/store-core/dist/"
-  cp -r "$STORECORE_DIR/dist/crypto.d.ts" "$STAGING/node_modules/@chroxy/store-core/dist/"
-  echo "[bundle-server] Copied @chroxy/store-core workspace package (crypto)"
-fi
 
 echo "[bundle-server] Bundle complete."
 du -sh "$STAGING" 2>/dev/null || true
