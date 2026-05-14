@@ -57,6 +57,25 @@ export function renderMarkdown(text: string): string {
     return `<a href="${safeUrl}" target="_blank" rel="noopener">${linkText}</a>`
   })
 
+  // Autolink bare http(s) URLs (#3849) — run AFTER the markdown-link replace
+  // so `[text](url)` anchors above aren't touched. To avoid double-wrapping
+  // URLs that appear inside an existing <a>…</a> from the line above (e.g.
+  // `[https://x](https://x)` whose link text is itself a URL), stash any
+  // existing anchors behind placeholders, autolink the remaining text, then
+  // restore. Trailing punctuation (. , ; : ! ? ) ]) is excluded from the
+  // match so a sentence-ending URL doesn't drag the period into the href.
+  const anchorPlaceholders: string[] = []
+  html = html.replace(/<a [^>]*>[\s\S]*?<\/a>/g, (m) => {
+    const ph = '\x00AN' + anchorPlaceholders.length + '\x00'
+    anchorPlaceholders.push(m)
+    return ph
+  })
+  html = html.replace(/\bhttps?:\/\/[^\s<]*[^\s<.,;:!?)\]]/g, (url: string) => {
+    const safeUrl = url.replace(/"/g, '&quot;')
+    return `<a href="${safeUrl}" target="_blank" rel="noopener">${url}</a>`
+  })
+  html = html.replace(/\x00AN(\d+)\x00/g, (_m, idx: string) => anchorPlaceholders[Number(idx)]!)
+
   // Blockquotes
   html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
 

@@ -67,6 +67,68 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('<a')
   })
 
+  // Bare-URL autolinking (#3849) — bare http(s) URLs in prose render as
+  // clickable anchors, not plain text. Without this, build artefact URLs
+  // (e.g. expo.dev links) emitted by the agent show up unclickable.
+  describe('bare URL autolinking (#3849)', () => {
+    it('autolinks bare https URLs in prose', () => {
+      const html = renderMarkdown('see https://example.com for more')
+      expect(html).toContain('<a href="https://example.com"')
+      expect(html).toContain('target="_blank"')
+      expect(html).toContain('rel="noopener"')
+      expect(html).toContain('>https://example.com</a>')
+    })
+
+    it('autolinks bare http URLs in prose', () => {
+      const html = renderMarkdown('see http://example.com please')
+      expect(html).toContain('<a href="http://example.com"')
+    })
+
+    it('does not autolink scheme-less or non-http URLs', () => {
+      const html = renderMarkdown('contact me at example.com or ftp://files.example.com')
+      expect(html).not.toContain('<a href="example.com"')
+      expect(html).not.toContain('<a href="ftp://')
+    })
+
+    it('does not double-wrap URLs already in markdown anchors', () => {
+      const html = renderMarkdown('[here](https://example.com/page)')
+      // Exactly one anchor, with `here` as the text, not the URL
+      expect((html.match(/<a /g) || []).length).toBe(1)
+      expect(html).toContain('>here</a>')
+    })
+
+    it('does not double-wrap when link text is itself a URL', () => {
+      // `[https://x](https://x)` is a common Slack-style paste — the renderer
+      // makes the URL the link text. Autolinker must not re-wrap that text.
+      const html = renderMarkdown('[https://example.com](https://example.com)')
+      expect((html.match(/<a /g) || []).length).toBe(1)
+    })
+
+    it('excludes trailing punctuation from the href', () => {
+      const html = renderMarkdown('go to https://example.com.')
+      // The period must NOT be part of the link
+      expect(html).toContain('<a href="https://example.com"')
+      expect(html).not.toContain('href="https://example.com."')
+    })
+
+    it('handles URLs with query strings and fragments', () => {
+      const html = renderMarkdown('see https://example.com/path?q=1&y=2#frag here')
+      expect(html).toContain('<a href="https://example.com/path?q=1&amp;y=2#frag"')
+    })
+
+    it('does not autolink URLs inside fenced code blocks', () => {
+      const html = renderMarkdown('```\nhttps://example.com\n```')
+      // URL appears inside <code>, not wrapped in an anchor
+      expect((html.match(/<a /g) || []).length).toBe(0)
+      expect(html).toContain('https://example.com')
+    })
+
+    it('does not autolink URLs inside inline code', () => {
+      const html = renderMarkdown('use `https://example.com` here')
+      expect((html.match(/<a /g) || []).length).toBe(0)
+    })
+  })
+
   it('renders blockquotes', () => {
     const html = renderMarkdown('> quoted text')
     expect(html).toContain('<blockquote>')
