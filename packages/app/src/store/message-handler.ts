@@ -41,6 +41,7 @@ import {
   handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
+  handleInactivityWarning as sharedInactivityWarning,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
@@ -889,10 +890,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // of threading it through every stream_*/tool_*/message handler below.
   // Resolves the target session the same way the case handlers do: explicit
   // msg.sessionId wins, otherwise activeSessionId.
+  //
+  // #3899 — same branch also dismisses an outstanding inactivity warning:
+  // by definition the silence has ended, so the chip should disappear
+  // without waiting for the user to dismiss it manually. Mirrors the
+  // equivalent clear in packages/dashboard/src/store/message-handler.ts.
   if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
     if (targetId && get().sessionStates[targetId]) {
-      updateSession(targetId, () => ({ lastClientActivityAt: Date.now() }));
+      updateSession(targetId, (ss) => {
+        const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
+        if (ss.inactivityWarning) patch.inactivityWarning = null;
+        return patch;
+      });
     }
   }
 
@@ -1727,6 +1737,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // call site so the shared handler stays free of platform concerns.
       if (planReady.sessionId) {
         pushSessionNotification(planReady.sessionId, 'plan', 'Plan ready for approval');
+      }
+      break;
+    }
+
+    case 'inactivity_warning': {
+      // #3899 — server fired the soft check-in prompt. Store on the
+      // targeted session so the CheckInChip can render the prefab
+      // button. The activity-event branch above clears this on the
+      // next stream_*/tool_*/result/message; sendInput clears it
+      // locally when the user actually sends a follow-up. Mirrors the
+      // dashboard handler shape; no push-notification side-effect here
+      // because server-cli sends the device-level push directly off
+      // the `inactivity_warning` event emit.
+      const warning = sharedInactivityWarning(msg, get().activeSessionId);
+      if (warning && warning.sessionId && get().sessionStates[warning.sessionId]) {
+        updateSession(warning.sessionId, () => warning.patch);
       }
       break;
     }

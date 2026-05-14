@@ -640,6 +640,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           patch.isPlanPending = false;
           patch.planAllowedPrompts = [];
         }
+        // #3899: server does NOT replay `inactivity_warning` on reconnect,
+        // so a chip from before the drop would point at stale state. Clear
+        // it; if the agent is still quiet post-reconnect, the next soft-
+        // timeout firing server-side will re-emit. Mirrors the dashboard's
+        // onclose cleanup.
+        if (ss.inactivityWarning) patch.inactivityWarning = null;
         return Object.keys(patch).length > 0 ? patch : {};
       });
 
@@ -894,12 +900,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (options?.clientMessageId) {
       payload.clientMessageId = options.clientMessageId;
     }
+    let result: 'sent' | 'queued' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticLight();
       wsSend(socket, payload);
-      return 'sent';
+      result = 'sent';
+    } else {
+      result = enqueueMessage('input', payload);
     }
-    return enqueueMessage('input', payload);
+    // #3899: dismiss any outstanding check-in chip for the active session
+    // once the user's input has gone over the wire (or been queued for a
+    // pending reconnect). Identical contract to the dashboard `sendInput`
+    // clear — if the user replies (with the prefab OR any other text),
+    // the chip's purpose is fulfilled.
+    if ((result === 'sent' || result === 'queued') && activeSessionId) {
+      const ss = get().sessionStates[activeSessionId];
+      if (ss?.inactivityWarning) {
+        updateSession(activeSessionId, () => ({ inactivityWarning: null }));
+      }
+    }
+    return result;
   },
 
   sendInterrupt: () => {

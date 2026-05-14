@@ -440,4 +440,69 @@ describe('message-handler', () => {
       expect(state.availableProviders).toEqual([]);
     });
   });
+
+  // ---- inactivity_warning (#3899) ----
+
+  describe('inactivity_warning', () => {
+    it('stores idleMs + prefab on the targeted session', () => {
+      handleMessage({
+        type: 'inactivity_warning',
+        sessionId: SESSION_ID,
+        messageId: 'm-1',
+        idleMs: 1_800_000,
+        prefab: 'Status update?',
+      });
+
+      const ss = (store.getState() as any).sessionStates[SESSION_ID];
+      expect(ss.inactivityWarning).not.toBeNull();
+      expect(ss.inactivityWarning.idleMs).toBe(1_800_000);
+      expect(ss.inactivityWarning.prefab).toBe('Status update?');
+      expect(typeof ss.inactivityWarning.receivedAt).toBe('number');
+    });
+
+    it('drops the warning when the targeted session is unknown', () => {
+      handleMessage({
+        type: 'inactivity_warning',
+        sessionId: 'unknown',
+        messageId: 'm-1',
+        idleMs: 1_800_000,
+        prefab: 'Status update?',
+      });
+
+      const ss = (store.getState() as any).sessionStates[SESSION_ID];
+      expect(ss.inactivityWarning).toBeNull();
+    });
+
+    it('ignores malformed payloads (idleMs <= 0)', () => {
+      handleMessage({
+        type: 'inactivity_warning',
+        sessionId: SESSION_ID,
+        messageId: 'm-1',
+        idleMs: 0,
+        prefab: 'Status update?',
+      });
+
+      const ss = (store.getState() as any).sessionStates[SESSION_ID];
+      expect(ss.inactivityWarning).toBeNull();
+    });
+
+    it('activity event clears an outstanding warning on the same session', () => {
+      // Pre-seed a warning, then send an ACTIVITY_EVENT_TYPES member.
+      store = createMockStore(createMockState({
+        inactivityWarning: { idleMs: 1_800_000, prefab: 'Status update?', receivedAt: 100 },
+      }));
+      setStore(store);
+
+      handleMessage({
+        type: 'result',
+        sessionId: SESSION_ID,
+        usage: {},
+        cost: 0,
+        duration: 0,
+      });
+
+      const ss = (store.getState() as any).sessionStates[SESSION_ID];
+      expect(ss.inactivityWarning).toBeNull();
+    });
+  });
 });
