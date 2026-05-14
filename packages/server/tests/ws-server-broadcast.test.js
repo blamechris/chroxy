@@ -1,6 +1,6 @@
-import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { once, EventEmitter } from 'node:events'
+import { EventEmitter } from 'node:events'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -121,11 +121,6 @@ async function waitForMessageMatch(messages, predicate, timeout = 2000, label = 
 
 describe('WsServer.broadcastError', () => {
   let server
-  let port
-
-  beforeEach(() => {
-    port = 30000 + Math.floor(Math.random() * 10000)
-  })
 
   afterEach(() => {
     if (server) {
@@ -137,13 +132,12 @@ describe('WsServer.broadcastError', () => {
   it('broadcasts server_error to authenticated clients', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-    await once(server.httpServer, 'listening')
+    const port = await startServerAndGetPort(server)
 
     // Connect and auto-authenticate
     const { ws, messages } = await createClient(port, true)
@@ -168,13 +162,12 @@ describe('WsServer.broadcastError', () => {
   it('broadcasts non-recoverable server_error', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, true)
     messages.length = 0
@@ -192,13 +185,12 @@ describe('WsServer.broadcastError', () => {
   it('does not send server_error to unauthenticated clients', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
-    await once(server.httpServer, 'listening')
+    const port = await startServerAndGetPort(server)
 
     // Connect WITHOUT authenticating
     const { ws, messages } = await createClient(port, false)
