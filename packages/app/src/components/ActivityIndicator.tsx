@@ -21,8 +21,8 @@ import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
 
-/** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754) */
-const FALLBACK_TIMEOUT_MS = 20 * 60 * 1000;
+/** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754 / #3884) */
+const FALLBACK_TIMEOUT_MS = 30 * 60 * 1000;
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return 'just now';

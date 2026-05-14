@@ -154,7 +154,7 @@ describe('sendPostAuthInfo — resultTimeoutMs (#3760)', () => {
     assert.equal(authOk.resultTimeoutMs, 45 * 60 * 1000)
   })
 
-  it('falls back to BaseSession default (20 min) when ctx.resultTimeoutMs is null', () => {
+  it('falls back to BaseSession default (30 min) when ctx.resultTimeoutMs is null', () => {
     const ctx = makeCtx({ resultTimeoutMs: null })
     const ws = makeFakeWs()
     registerClient(ctx, ws)

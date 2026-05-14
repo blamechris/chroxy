@@ -29,8 +29,8 @@ function createMockChild() {
 // Pin the inactivity-timer window to 5 minutes for these tests. They were
 // written before the timeout became configurable (#3749) and their tick
 // arithmetic assumes a 5-min window throughout. Overriding here keeps the
-// test semantics local instead of bleeding the prod default (20 min) into
-// every `mock.timers.tick(N * 60_000)` call.
+// test semantics local instead of bleeding the prod default (30 min as of
+// #3884) into every `mock.timers.tick(N * 60_000)` call.
 const TEST_RESULT_TIMEOUT_MS = 5 * 60_000
 
 function createReadySession(opts = {}) {
@@ -149,7 +149,7 @@ describe('CliSession — inactivity timer pause/resume (#2831)', () => {
   describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
     const NINETY_S = 90_000
 
-    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/20 min', async () => {
+    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/30 min', async () => {
       const s = createReadySession({ resultTimeoutMs: NINETY_S })
       const errors = []
       s.on('error', (d) => errors.push(d))

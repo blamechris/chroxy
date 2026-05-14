@@ -85,7 +85,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
   // #3760: surface the effective inactivity timeout so clients (e.g. the
   // ActivityIndicator's "approaching timeout" warning) can render against the
-  // real configured value instead of assuming the 20-min default. Older
+  // real configured value instead of assuming the BaseSession default. Older
   // clients ignore the field; new clients fall back to DEFAULT_RESULT_TIMEOUT_MS
   // when it's absent (older servers).
   const effectiveResultTimeoutMs =

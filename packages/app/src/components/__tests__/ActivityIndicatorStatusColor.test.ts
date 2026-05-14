@@ -10,8 +10,9 @@ import { statusColor } from '../ActivityIndicator';
 import { COLORS } from '../../constants/colors';
 
 describe('ActivityIndicator statusColor()', () => {
-  // Production default is 20 min; tests use it unless asserting the
-  // dynamic-timeout branch.
+  // 20 min is a convenient round number for color-escalation arithmetic —
+  // NOT the production default (30 min as of #3884). These tests pin local
+  // color logic, not server policy.
   const TIMEOUT_20MIN = 20 * 60_000;
 
   describe('green band (< 30 s elapsed)', () => {
@@ -62,7 +63,7 @@ describe('ActivityIndicator statusColor()', () => {
   describe('red threshold respects the dynamic timeout argument', () => {
     // Guard against regression where the red boundary becomes a hardcoded
     // value instead of `timeoutMs - 60_000`. A 2-min timeout means red
-    // should kick in at 60 s — earlier than the 20-min default's 19 min.
+    // should kick in at 60 s — earlier than the 20-min reference's 19 min.
     const TIMEOUT_2MIN = 2 * 60_000;
 
     it('uses the configured timeout for the red boundary, not a hardcoded constant', () => {
