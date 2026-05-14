@@ -666,16 +666,38 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             {evaluatorState.kind === 'pending' ? 'Evaluating…' : 'Evaluate'}
           </button>
         )}
-        {(isStreaming || isBusy) && !value.trim() ? (
-          <button
-            data-testid="interrupt-button"
-            className="btn-interrupt"
-            onClick={onInterrupt}
-            type="button"
-            aria-label="Stop generation"
-          >
-            Stop
-          </button>
+        {/* #3850: while a turn is in flight, Stop must stay reachable even
+            when the user has typed a follow-up. Pre-fix, the toggle was
+            gated on `!value.trim()` — typing anything hid Stop and forced
+            users to either clear the input or hit Escape (undiscoverable).
+            Now both buttons appear side-by-side when busy + draft, mirroring
+            Claude.ai / ChatGPT's queued-follow-up UX. Stop keeps the
+            rightmost position so its location is stable across all
+            busy states. */}
+        {(isStreaming || isBusy) ? (
+          <>
+            {value.trim() && (
+              <button
+                data-testid="send-button"
+                className="btn-send"
+                onClick={send}
+                disabled={disabled}
+                type="button"
+                aria-label="Send follow-up"
+              >
+                Send
+              </button>
+            )}
+            <button
+              data-testid="interrupt-button"
+              className="btn-interrupt"
+              onClick={onInterrupt}
+              type="button"
+              aria-label="Stop generation"
+            >
+              Stop
+            </button>
+          </>
         ) : (
           <button
             data-testid="send-button"
@@ -683,7 +705,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             onClick={send}
             disabled={disabled}
             type="button"
-            aria-label={isBusy ? 'Send follow-up' : 'Send message'}
+            aria-label="Send message"
           >
             Send
           </button>
