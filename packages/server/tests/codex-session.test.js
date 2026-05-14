@@ -780,9 +780,8 @@ describe('CodexSession', () => {
       cleanupShim()
     })
 
-    it('unknown JSONL types (thread.started, turn.started) are silently ignored', async () => {
+    it('unknown JSONL types (turn.started) are silently ignored', async () => {
       writeShim([
-        { type: 'thread.started', thread_id: 't1' },
         { type: 'turn.started' },
         { type: 'turn.completed', usage: {} },
       ])
@@ -897,6 +896,109 @@ describe('CodexSession', () => {
       assert.ok(idxModel >= 0, '--sandbox flag should be present with model')
       assert.ok(idxModel + 1 < withModel.length, '--sandbox should have a value')
       assert.equal(withModel[idxModel + 1], 'workspace-write')
+    })
+
+    // #3865: multi-turn context loss. Without a threadId, every sendMessage
+    // spawns `codex exec "<prompt>"` as a fresh thread and Codex has no
+    // memory of prior turns. When a threadId is supplied, argv switches to
+    // `codex exec resume <thread_id> <text>` so the CLI replays state.
+    describe('threadId resume (#3865)', () => {
+      it('emits the resume form when threadId is supplied', () => {
+        const args = buildCodexArgs('continue', null, 'thread-abc-123')
+        assert.equal(args[0], 'exec')
+        assert.equal(args[1], 'resume')
+        assert.equal(args[2], 'thread-abc-123')
+        assert.equal(args[3], 'continue')
+        assert.ok(args.includes('--json'))
+        assert.ok(args.includes('--skip-git-repo-check'))
+        const sandboxIdx = args.indexOf('--sandbox')
+        assert.equal(args[sandboxIdx + 1], 'workspace-write')
+      })
+
+      it('emits the resume form with model override', () => {
+        const args = buildCodexArgs('continue', 'o3', 'thread-abc')
+        assert.equal(args[1], 'resume')
+        assert.equal(args[2], 'thread-abc')
+        const cIdx = args.indexOf('-c')
+        assert.equal(args[cIdx + 1], 'model="o3"')
+      })
+
+      it('falls back to first-turn form when threadId is null', () => {
+        const args = buildCodexArgs('hi', null, null)
+        assert.equal(args[0], 'exec')
+        assert.equal(args[1], 'hi')
+        assert.ok(!args.includes('resume'))
+      })
+
+      it('falls back to first-turn form when threadId is omitted', () => {
+        const args = buildCodexArgs('hi', null)
+        assert.equal(args[0], 'exec')
+        assert.equal(args[1], 'hi')
+        assert.ok(!args.includes('resume'))
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------
+  // #3865 — thread.started capture and resume-form argv selection.
+  // Without this, every sendMessage on a Codex session spawns a fresh
+  // subprocess with no prior conversation context.
+  // -------------------------------------------------------------------
+  describe('thread.started capture (#3865)', () => {
+    it('captures thread_id from thread.started and stores it on resumeSessionId', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.equal(session.resumeSessionId, null)
+      session._processJsonlLine(
+        { type: 'thread.started', thread_id: 't-deadbeef' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+      assert.equal(session.resumeSessionId, 't-deadbeef')
+    })
+
+    it('ignores thread.started with missing thread_id', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      session._processJsonlLine(
+        { type: 'thread.started' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+      assert.equal(session.resumeSessionId, null)
+    })
+
+    it('_buildArgs switches to resume form after thread_id is captured', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const first = session._buildArgs('hi')
+      assert.equal(first[0], 'exec')
+      assert.equal(first[1], 'hi')
+      assert.ok(!first.includes('resume'))
+
+      session._processJsonlLine(
+        { type: 'thread.started', thread_id: 't-1234' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+
+      const second = session._buildArgs('continue')
+      assert.equal(second[0], 'exec')
+      assert.equal(second[1], 'resume')
+      assert.equal(second[2], 't-1234')
+      assert.equal(second[3], 'continue')
+    })
+
+    it('result event includes the captured sessionId (was null pre-#3865)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const results = []
+      session.on('result', (d) => results.push(d))
+
+      session._processJsonlLine(
+        { type: 'thread.started', thread_id: 't-99' },
+        { didStreamStart: false, didEmitResult: false },
+      )
+      session._processJsonlLine(
+        { type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 2 } },
+        { didStreamStart: false, didEmitResult: false },
+      )
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 't-99')
     })
   })
 

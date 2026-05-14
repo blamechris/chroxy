@@ -376,6 +376,15 @@ export async function startCliServer(config) {
 
   let wsServer
 
+  // #3866 — explicit per-session dedupe for the idle push. Each entry pins
+  // "we already sent an idle push for the current active→idle cycle of this
+  // session" so a duplicate `result` event (or a race where the gate flips
+  // mid-turn) can't produce two OS-level notifications. Cleared when the
+  // session next emits `stream_start` (next busy cycle) or is destroyed.
+  // Resurrects the 'idle' push category removed in the 2026-04-11 audit
+  // without recreating the duplicate-fire bug that prompted its removal.
+  const _idleNotifiedSessions = new Set()
+
   // Log events for debugging and forward critical errors
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'ready') {
@@ -414,22 +423,48 @@ export async function startCliServer(config) {
       log.warn(`Budget exceeded: ${data.message}`)
     }
 
+    // Reset the idle-push dedupe at the start of each busy cycle (#3866).
+    // stream_start fires per turn before any output is streamed; clearing
+    // here means the next active→idle transition is allowed to push again.
+    if (event === 'stream_start') {
+      _idleNotifiedSessions.delete(sessionId)
+    }
+
     // Push notifications for actionable events only (#2612)
     // Intermediate events (stream_start, tool_start) no longer trigger pushes.
+    if (!pushManager.hasTokens && (event === 'result' || event === 'permission_request' || event === 'user_question')) {
+      // #3866 diagnostic — silently dropping a push because no client ever
+      // registered a push token is the most common "I'm getting nothing on
+      // Android" failure mode. Surface it at debug so operators can confirm
+      // registration happened on their last connect.
+      log.debug(`Push suppressed for ${event} on ${sessionId}: no registered tokens`)
+    }
     if (pushManager.hasTokens) {
       if (event === 'result') {
-        // Activity update: idle — only when no one is actively watching
+        // Session idle push (#3866). Gate on noActiveViewers so the user
+        // isn't pinged while actively chatting with this session. The
+        // per-session dedupe Set prevents a duplicate `result` from
+        // firing twice for the same active→idle transition.
         if (wsServer) {
           const noClients = wsServer.authenticatedClientCount === 0
           const noActiveViewers = !noClients && !wsServer.hasActiveViewersForSession(sessionId)
-          if (noClients || noActiveViewers) {
+          const allowed = noClients || noActiveViewers
+          const alreadyNotified = _idleNotifiedSessions.has(sessionId)
+          if (allowed && !alreadyNotified) {
             const sessionName = sessionManager.getSession(sessionId)?.name
-            pushManager.send('activity_update', 'Claude finished', 'Response ready', {
+            pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
               sessionId,
               sessionName,
               state: 'idle',
               ...(data.duration != null && { elapsed: data.duration }),
             })
+            _idleNotifiedSessions.add(sessionId)
+          } else if (!allowed) {
+            // Diagnostic for #3866: surface why a push was suppressed so we
+            // can tell registration failures apart from "user is viewing".
+            log.debug(`Idle push suppressed for ${sessionId}: active viewers present`)
+          } else if (alreadyNotified) {
+            log.debug(`Idle push suppressed for ${sessionId}: already notified this turn`)
           }
         }
       } else if (event === 'permission_request') {
@@ -457,6 +492,7 @@ export async function startCliServer(config) {
 
   sessionManager.on('session_destroyed', ({ sessionId }) => {
     log.info(`Session destroyed: ${sessionId}`)
+    _idleNotifiedSessions.delete(sessionId)
   })
 
   sessionManager.on('session_warning', ({ sessionId, name, reason, message, remainingMs }) => {
