@@ -219,6 +219,21 @@ describe('CodexSession', () => {
       assert.equal(session.resumeSessionId, null)
     })
 
+    // #3865: SessionManager persists resumeSessionId via serializeState() and
+    // re-passes it through createSession() on restoreState(). Before this fix
+    // the value was silently dropped by the JsonlSubprocessSession middle
+    // layer, so a Codex thread captured before a server restart was lost
+    // even though every other persistence layer carried it.
+    it('accepts resumeSessionId from constructor so restoreState() can rehydrate the thread', () => {
+      const session = new CodexSession({ cwd: '/tmp', resumeSessionId: 't-restored' })
+      assert.equal(session.resumeSessionId, 't-restored')
+    })
+
+    it('treats resumeSessionId=null as no captured thread (back-compat)', () => {
+      const session = new CodexSession({ cwd: '/tmp', resumeSessionId: null })
+      assert.equal(session.resumeSessionId, null)
+    })
+
     it('initialises _process to null', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       assert.equal(session._process, null)
@@ -906,19 +921,40 @@ describe('CodexSession', () => {
       it('emits the resume form when threadId is supplied', () => {
         const args = buildCodexArgs('continue', null, 'thread-abc-123')
         assert.equal(args[0], 'exec')
-        assert.equal(args[1], 'resume')
-        assert.equal(args[2], 'thread-abc-123')
-        assert.equal(args[3], 'continue')
+        // SESSION_ID and PROMPT follow the `resume` subcommand
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(resumeIdx > 0, 'resume subcommand must be present')
+        assert.equal(args[resumeIdx + 1], 'thread-abc-123')
+        assert.equal(args[resumeIdx + 2], 'continue')
         assert.ok(args.includes('--json'))
         assert.ok(args.includes('--skip-git-repo-check'))
         const sandboxIdx = args.indexOf('--sandbox')
         assert.equal(args[sandboxIdx + 1], 'workspace-write')
       })
 
+      // codex-cli 0.128.0 — `codex exec resume --sandbox ...` errors with
+      // `unexpected argument '--sandbox' found`. The flag is only declared on
+      // the parent `exec` command, so argv must place --sandbox BEFORE the
+      // `resume` subcommand. This pins that contract so the bug can't slip
+      // back in via a future refactor.
+      it('places --sandbox BEFORE the resume subcommand (codex-cli requires this)', () => {
+        const args = buildCodexArgs('continue', null, 'thread-abc')
+        const sandboxIdx = args.indexOf('--sandbox')
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(sandboxIdx >= 0, '--sandbox must be present')
+        assert.ok(resumeIdx >= 0, 'resume subcommand must be present')
+        assert.ok(
+          sandboxIdx < resumeIdx,
+          `--sandbox (idx ${sandboxIdx}) must come before resume (idx ${resumeIdx}); ` +
+          'codex exec resume rejects --sandbox as a subcommand flag',
+        )
+      })
+
       it('emits the resume form with model override', () => {
         const args = buildCodexArgs('continue', 'o3', 'thread-abc')
-        assert.equal(args[1], 'resume')
-        assert.equal(args[2], 'thread-abc')
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(resumeIdx > 0)
+        assert.equal(args[resumeIdx + 1], 'thread-abc')
         const cIdx = args.indexOf('-c')
         assert.equal(args[cIdx + 1], 'model="o3"')
       })
@@ -978,9 +1014,10 @@ describe('CodexSession', () => {
 
       const second = session._buildArgs('continue')
       assert.equal(second[0], 'exec')
-      assert.equal(second[1], 'resume')
-      assert.equal(second[2], 't-1234')
-      assert.equal(second[3], 'continue')
+      const resumeIdx = second.indexOf('resume')
+      assert.ok(resumeIdx > 0, 'resume subcommand present on subsequent turns')
+      assert.equal(second[resumeIdx + 1], 't-1234')
+      assert.equal(second[resumeIdx + 2], 'continue')
     })
 
     it('result event includes the captured sessionId (was null pre-#3865)', () => {

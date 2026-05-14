@@ -96,8 +96,13 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * @returns {string[]}
  */
 export function buildCodexArgs(text, model, threadId = null) {
+  // INVARIANT: --sandbox must be passed to the parent `exec`, not to the
+  // `resume` subcommand. `codex exec resume --sandbox ...` errors out with
+  // `unexpected argument '--sandbox' found` (verified against codex-cli
+  // 0.128.0) because --sandbox is only declared on the parent `exec` command.
+  // Keep --sandbox BEFORE the `resume` subcommand on the resume path.
   const args = threadId
-    ? ['exec', 'resume', threadId, text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+    ? ['exec', '--sandbox', 'workspace-write', 'resume', threadId, text, '--json', '--skip-git-repo-check']
     : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
   if (model) {
     args.push('-c', `model="${model}"`)
@@ -254,11 +259,11 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs } = {}) {
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs })
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, resumeSessionId })
   }
 
   // ------------------------------------------------------------------
