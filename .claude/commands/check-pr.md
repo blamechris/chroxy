@@ -306,17 +306,29 @@ If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 
 GraphQL is required here — REST doesn't expose thread state. Threads are GraphQL-only objects (`PRRT_*` IDs); the `resolveReviewThread` mutation needs the GraphQL node ID, not the REST `databaseId`.
 
 ```bash
-# Fetch all review threads (GraphQL — REST API doesn't expose thread state)
-THREADS=$(gh api graphql -f query="
-  query {
-    repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
-      pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) {
-          nodes { id isResolved }
+# Fetch all review threads (GraphQL — REST API doesn't expose thread state).
+# Page through with a cursor so PRs with >100 threads aren't silently truncated.
+fetch_review_threads() {
+  local cursor="null" page
+  while :; do
+    page=$(gh api graphql -f query="
+      query {
+        repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
+          pullRequest(number: ${PR_NUM}) {
+            reviewThreads(first: 100, after: ${cursor}) {
+              pageInfo { hasNextPage endCursor }
+              nodes { id isResolved }
+            }
+          }
         }
-      }
-    }
-  }" --jq '.data.repository.pullRequest.reviewThreads.nodes')
+      }")
+    echo "$page" | jq -c '.data.repository.pullRequest.reviewThreads.nodes[]'
+    [ "$(echo "$page" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')" = "true" ] || break
+    cursor="\"$(echo "$page" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')\""
+  done
+}
+
+THREADS=$(fetch_review_threads | jq -s '.')
 
 # Resolve each unresolved thread; surface any single-thread failure
 # instead of swallowing it (a 401/403 on one thread shouldn't be silent).
@@ -330,17 +342,8 @@ echo "$THREADS" | jq -r '.[] | select(.isResolved == false) | .id' | while read 
     || echo "  FAILED to resolve: $tid"
 done
 
-# Verify zero unresolved threads remain
-UNRESOLVED=$(gh api graphql -f query="
-  query {
-    repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
-      pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) {
-          nodes { isResolved }
-        }
-      }
-    }
-  }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+# Verify zero unresolved threads remain (re-paginate; same reason as above)
+UNRESOLVED=$(fetch_review_threads | jq -s '[.[] | select(.isResolved == false)] | length')
 
 echo "Unresolved threads: ${UNRESOLVED}"
 [ "$UNRESOLVED" -eq 0 ] || { echo "FAIL: ${UNRESOLVED} threads still unresolved"; exit 1; }
