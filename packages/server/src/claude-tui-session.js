@@ -1,11 +1,19 @@
-import { randomUUID } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join, resolve } from 'path'
+import { fileURLToPath } from 'url'
 import { BaseSession } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger } from './logger.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
+// Permission hook script — same one CliSession uses. Lives at
+// packages/server/hooks/permission-hook.sh.
+const PERMISSION_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
 const log = createLogger('claude-tui-session')
 
@@ -60,16 +68,31 @@ function ensureCwdTrusted(cwd) {
 // session's poller scans the sink dir for new pre-/post- files in arrival
 // order so PreToolUse → tool_start and PostToolUse → tool_result events fire
 // in sequence.
-function writeHookSettings(sinkDir, stopPayloadPath) {
+function writeHookSettings(sinkDir, stopPayloadPath, { permissionsEnabled }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
+  // PreToolUse runs ALL registered hooks in order. We always capture the
+  // event for our own observability; when permissions are enabled the
+  // chroxy permission-hook.sh runs SECOND, gating the tool call via long-
+  // poll to /permission. Claude waits for every hook to exit non-zero
+  // before running the tool.
+  const preToolUseHooks = [
+    { type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/pre-XXXXXX.json)` },
+  ]
+  if (permissionsEnabled) {
+    preToolUseHooks.push({
+      type: 'command',
+      command: PERMISSION_HOOK_SCRIPT,
+      timeout: 300,
+    })
+  }
   const settings = {
     hooks: {
       Stop: [
         { hooks: [{ type: 'command', command: `cat > ${JSON.stringify(stopPayloadPath)}` }] },
       ],
       PreToolUse: [
-        { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/pre-XXXXXX.json)` }] },
+        { hooks: preToolUseHooks },
       ],
       PostToolUse: [
         { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/post-XXXXXX.json)` }] },
@@ -110,12 +133,11 @@ export class ClaudeTuiSession extends BaseSession {
 
   static get capabilities() {
     return {
-      // Tool events are surfaced via PreToolUse/PostToolUse hooks, but
-      // permissions are NOT prompted: this provider runs claude with
-      // --allow-dangerously-skip-permissions so the TUI doesn't block on
-      // an interactive prompt. Set false so the dashboard knows it can't
-      // expect permission_request events for this provider yet.
-      permissions: false,
+      // Permissions are gated via the chroxy permission-hook.sh script that
+      // posts to /permission on the chroxy HTTP server, same flow as
+      // CliSession. Requires a `port` arg at construction so the
+      // PreToolUse hook can phone home.
+      permissions: true,
       inProcessPermissions: false,
       modelSwitch: false,
       permissionModeSwitch: false,
@@ -166,9 +188,15 @@ export class ClaudeTuiSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs } = {}) {
+  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs })
 
+    this._port = port || null
+    // Per-session hook secret — picked up by WsServer's session_created handler
+    // (ws-server.js:_registerSessionHookSecretIfMissing reads
+    // `entry.session._hookSecret` duck-typed). Mirrors the same name CliSession
+    // uses so the existing permission HTTP route routes us with no changes.
+    this._hookSecret = this._port ? randomBytes(32).toString('hex') : null
     this._sessionId = null  // assigned on first sendMessage
     this._sinkDir = null    // created on start, removed on destroy
     this._activeTurn = null // { uuid, ptyTerm, payloadPath, abort }
@@ -215,7 +243,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._sessionId) this._sessionId = turnUuid
 
     const payloadPath = join(this._sinkDir, `stop-${turnUuid}-${this._messageCounter}.json`)
-    const settingsPath = writeHookSettings(this._sinkDir, payloadPath)
+    const permissionsEnabled = !!(this._port && this._hookSecret)
+    const settingsPath = writeHookSettings(this._sinkDir, payloadPath, { permissionsEnabled })
 
     let ptyMod
     try {
@@ -233,17 +262,21 @@ export class ClaudeTuiSession extends BaseSession {
     delete env.ANTHROPIC_API_KEY
     env.TERM = 'xterm-256color'
 
-    // --allow-dangerously-skip-permissions: tools execute without a permission
-    // prompt blocking the PTY. This is the MVP's tradeoff — Chroxy can't
-    // intercept permissions for this provider yet, but tool calls work.
-    // Capabilities.permissions=false signals this so the dashboard hides
-    // the "Allow / Deny" affordance.
+    // permission-hook.sh reads these to phone home to /permission on the
+    // chroxy HTTP server with the per-session secret. When permissions
+    // aren't enabled (no port given to the constructor) the hook still
+    // gets installed but exits silently because CHROXY_PORT is unset.
+    if (permissionsEnabled) {
+      env.CHROXY_PORT = String(this._port)
+      env.CHROXY_HOOK_SECRET = this._hookSecret
+      env.CHROXY_PERMISSION_MODE = this.permissionMode || 'approve'
+    }
+
     const args = [
       '--session-id', turnUuid,
       '--settings', settingsPath,
-      '--allow-dangerously-skip-permissions',
     ]
-    log.info(`spawn claude TUI (uuid=${turnUuid.slice(0, 8)} msg=${messageId})`)
+    log.info(`spawn claude TUI (uuid=${turnUuid.slice(0, 8)} msg=${messageId} perms=${permissionsEnabled})`)
 
     let term
     try {

@@ -29,7 +29,8 @@ describe('ClaudeTuiSession', () => {
 
     it('declares capabilities the dashboard reads', () => {
       const c = ClaudeTuiSession.capabilities
-      assert.equal(c.permissions, false, 'MVP does not handle permissions')
+      assert.equal(c.permissions, true, 'MVP gates tools via permission-hook.sh')
+      assert.equal(c.tools, true, 'MVP wires PreToolUse/PostToolUse hooks')
       assert.equal(c.modelSwitch, false, 'MVP does not support model switch')
       assert.equal(c.planMode, false, 'MVP does not support plan mode')
       assert.equal(c.streaming, false, 'MVP is deliver-on-complete, no incremental tokens')
@@ -58,6 +59,26 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._processReady, false)
       assert.equal(session._isBusy, false)
       assert.equal(session.sessionId, null)
+    })
+
+    it('generates a per-session hook secret when port is given', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(session._port, 12345)
+      assert.ok(session._hookSecret, 'hook secret generated')
+      assert.equal(typeof session._hookSecret, 'string')
+      assert.equal(session._hookSecret.length, 64, '32 bytes hex = 64 chars')
+    })
+
+    it('omits hook secret when no port is provided (permission-less mode)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(session._port, null)
+      assert.equal(session._hookSecret, null)
+    })
+
+    it('produces distinct hook secrets per session', () => {
+      const a = new ClaudeTuiSession({ cwd: '/tmp', port: 1, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const b = new ClaudeTuiSession({ cwd: '/tmp', port: 1, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.notEqual(a._hookSecret, b._hookSecret, 'each session has its own secret')
     })
   })
 
