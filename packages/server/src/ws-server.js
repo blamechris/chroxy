@@ -234,7 +234,7 @@ function _isSecureRequest(req) {
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs } — auth succeeded (encryption: 'required'|'disabled', resultTimeoutMs is the effective inactivity timeout in ms — #3760)
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms — #3760, #3905)
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
@@ -532,8 +532,9 @@ export class WsServer {
       // #3760: effective inactivity timeout, surfaced in auth_ok so clients
       // render their ActivityIndicator timeout warning against the real
       // configured value. Late-bound so test harnesses mutating this.config
-      // after construction are reflected.
+      // after construction are reflected. #3905 adds the parallel hard-cap.
       get resultTimeoutMs() { return self.config?.resultTimeoutMs ?? null },
+      get hardTimeoutMs() { return self.config?.hardTimeoutMs ?? null },
     }
     this._authCtx = {
       get clients() { return self.clients },

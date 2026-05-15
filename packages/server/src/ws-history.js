@@ -8,7 +8,7 @@ import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } 
 import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders } from './providers.js'
 import { createLogger } from './logger.js'
-import { DEFAULT_RESULT_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from './base-session.js'
 
 const log = createLogger('ws')
 
@@ -27,7 +27,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     encryptionEnabled, localhostBypass, keyExchangeTimeoutMs,
     protocolVersion, minProtocolVersion, webTaskManager,
     send, broadcast, getConnectedClientList, permissions,
-    resultTimeoutMs,
+    resultTimeoutMs, hardTimeoutMs,
   } = ctx
   const client = clients.get(ws)
 
@@ -83,15 +83,20 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     skillTrustGrant: true,
   }
 
-  // #3760: surface the effective inactivity timeout so clients (e.g. the
-  // ActivityIndicator's "approaching timeout" warning) can render against the
-  // real configured value instead of assuming the BaseSession default. Older
-  // clients ignore the field; new clients fall back to DEFAULT_RESULT_TIMEOUT_MS
-  // when it's absent (older servers).
+  // #3760, #3905: surface the effective inactivity timeouts so clients
+  // (e.g. the ActivityIndicator's "approaching timeout" warning + the check-in
+  // chip's countdown to hard kill) can render against the real configured
+  // values instead of assuming the BaseSession defaults. Older clients
+  // ignore the fields; new clients fall back to DEFAULT_*_TIMEOUT_MS when
+  // absent (older servers).
   const effectiveResultTimeoutMs =
     Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
       ? resultTimeoutMs
       : DEFAULT_RESULT_TIMEOUT_MS
+  const effectiveHardTimeoutMs =
+    Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+      ? hardTimeoutMs
+      : DEFAULT_HARD_TIMEOUT_MS
 
   send(ws, {
     type: 'auth_ok',
@@ -111,6 +116,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     features,
     capabilities,
     resultTimeoutMs: effectiveResultTimeoutMs,
+    hardTimeoutMs: effectiveHardTimeoutMs,
     ...extra,
   })
 

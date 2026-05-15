@@ -67,6 +67,13 @@ export const ServerAuthOkSchema = z.object({
   // to their hardcoded reference (DEFAULT_RESULT_TIMEOUT_MS = 20 min)
   // when absent.
   resultTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
+  // #3905: effective server hard-kill inactivity timeout in ms (the
+  // #3899 hard cap that follows the soft `resultTimeoutMs` warning).
+  // Surfaced so the check-in chip can render an accurate "kill in Xh"
+  // countdown instead of assuming the 2-hour default. Optional because
+  // servers from before #3905 don't emit it — clients fall back to
+  // their hardcoded DEFAULT_HARD_TIMEOUT_MS reference when absent.
+  hardTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({
