@@ -170,9 +170,11 @@ user when a turn is approaching the soft window. The matching
 `inactivity_warning` event payload is `{ messageId, idleMs, prefab }`,
 where `idleMs` is `resultTimeoutMs` and `prefab` is a suggested
 check-in string (`"Status update?"`). Consumed by the dashboard
-check-in chip in #3908 and the mobile chip in #3913. Note that
-`hardTimeoutMs` itself is not currently broadcast to clients (tracked
-in #3905).
+check-in chip in #3908 and the mobile chip in #3913. Both
+`resultTimeoutMs` and `hardTimeoutMs` are broadcast as fields on
+`auth_ok` so clients can render both the "approaching soft window"
+warning and a "kill in Xh" countdown against the real configured
+values rather than the BaseSession defaults (#3760, #3905).
 
 ### Provider selection
 

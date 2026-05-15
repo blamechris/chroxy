@@ -145,6 +145,75 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!ServerAuthOkSchema.safeParse({ ...base, resultTimeoutMs: 999_999_999_999_999 }).success, 'env-typo huge value should reject')
   })
 
+  // #3905: hardTimeoutMs broadcast on auth_ok so clients can render
+  // the check-in chip's "kill in Xh" countdown against the real
+  // configured value instead of assuming the 2h default.
+  it('validates auth_ok with hardTimeoutMs (#3905)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.8.0',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      resultTimeoutMs: 30 * 60 * 1000,
+      hardTimeoutMs: 2 * 60 * 60 * 1000,
+    })
+    assert.ok(result.success, 'Should validate auth_ok with hardTimeoutMs')
+    assert.equal(result.data.hardTimeoutMs, 7_200_000)
+  })
+
+  it('accepts auth_ok without hardTimeoutMs (older servers, pre-#3905)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.7.18',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      resultTimeoutMs: 30 * 60 * 1000,
+    })
+    assert.ok(result.success, 'Should accept auth_ok without hardTimeoutMs')
+    assert.equal(result.data.hardTimeoutMs, undefined)
+  })
+
+  it('rejects auth_ok with invalid hardTimeoutMs (#3905)', async () => {
+    const { ServerAuthOkSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')
+    const base = {
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.8.0',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+    }
+    for (const bad of [0, -1, 1.5, Infinity, NaN, '120', MAX + 1]) {
+      const result = ServerAuthOkSchema.safeParse({ ...base, hardTimeoutMs: bad })
+      assert.ok(!result.success, `Should reject bad hardTimeoutMs: ${String(bad)}`)
+    }
+    assert.ok(ServerAuthOkSchema.safeParse({ ...base, hardTimeoutMs: MAX }).success, 'exactly 24h should pass')
+  })
+
   // #3768: same ceiling applied to other ms-typed fields.
   it('rejects permission_request with remainingMs above 24h ceiling (#3768)', async () => {
     const { ServerPermissionRequestSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')

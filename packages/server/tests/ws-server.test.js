@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
-import { DEFAULT_RESULT_TIMEOUT_MS } from '../src/base-session.js'
+import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from '../src/base-session.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -4493,5 +4493,70 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
     })
     const authOk = captureAuthOk(server)
     assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
+    assert.equal(authOk.hardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
+  })
+
+  // #3905: hardTimeoutMs broadcast — mirrors the resultTimeoutMs tests
+  // above so the soft + hard windows are always wire-visible together.
+  it('uses the configured hardTimeoutMs in auth_ok (#3905)', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: {
+        resultTimeoutMs: 45 * 60 * 1000,
+        hardTimeoutMs: 4 * 60 * 60 * 1000,
+      },
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.resultTimeoutMs, 45 * 60 * 1000)
+    assert.equal(authOk.hardTimeoutMs, 4 * 60 * 60 * 1000)
+  })
+
+  it('falls back to BaseSession default when config omits hardTimeoutMs (#3905)', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: { resultTimeoutMs: 30 * 60 * 1000 },
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.hardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
+  })
+
+  it('reflects post-construction hardTimeoutMs mutations on the next auth_ok (#3905)', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: { hardTimeoutMs: 2 * 60 * 60 * 1000 },
+    })
+    const first = captureAuthOk(server)
+    assert.equal(first.hardTimeoutMs, 2 * 60 * 60 * 1000)
+
+    server.config.hardTimeoutMs = 6 * 60 * 60 * 1000
+    const second = captureAuthOk(server)
+    assert.equal(second.hardTimeoutMs, 6 * 60 * 60 * 1000, 'late-binding must surface the new value')
+  })
+
+  // The protocol schema rejects fractional ms values on auth_ok
+  // (#3768 `.int()` guard). A `parseFloat`-style env var typo
+  // (e.g. CHROXY_HARD_TIMEOUT_MS=7200000.5) must NOT escape the
+  // wire and trip client-side schema validation — fall back to
+  // the BaseSession default instead.
+  it('falls back to defaults when config carries fractional ms values (#3905)', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: { resultTimeoutMs: 1800000.5, hardTimeoutMs: 7200000.5 },
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
+    assert.equal(authOk.hardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
   })
 })
