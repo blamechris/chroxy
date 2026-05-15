@@ -20,7 +20,6 @@ STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
-CARGO_LOCK="$ROOT/packages/desktop/src-tauri/Cargo.lock"
 ROOT_LOCK="$ROOT/package-lock.json"
 SERVER_LOCK="$ROOT/packages/server/package-lock.json"
 IOS_INFO_PLIST="$ROOT/packages/app/ios/Chroxy/Info.plist"
@@ -29,10 +28,22 @@ IOS_INFO_PLIST="$ROOT/packages/app/ios/Chroxy/Info.plist"
 # below. With `set -euo pipefail` an awk failure (disk full, killed process,
 # permission flip) aborts before the `mv`, leaving a stale `.tmp` next to
 # the real file. The next bump run would silently ignore the orphan and
-# hide the previous partial failure (#3886). Scope is intentionally narrow:
-# only the exact `.tmp` siblings this script may create.
+# hide the previous partial failure (#3886).
+#
+# Scope is deliberately tight: each awk-into-place call registers its `.tmp`
+# path via `track_tmp` immediately before the write, and the EXIT trap only
+# removes paths that were registered in this run. Pre-existing `.tmp` files
+# from other tooling are never touched.
+TMP_FILES=()
+track_tmp() {
+  TMP_FILES+=("$1")
+}
 cleanup_tmp_files() {
-  rm -f "$CARGO_LOCK.tmp" "$IOS_INFO_PLIST.tmp" 2>/dev/null || true
+  local f
+  for f in "${TMP_FILES[@]:-}"; do
+    [ -n "$f" ] && rm -f "$f" 2>/dev/null
+  done
+  return 0
 }
 trap cleanup_tmp_files EXIT
 
@@ -187,6 +198,7 @@ if [ -f "$IOS_INFO_PLIST" ]; then
   # getline is guarded: if the key somehow lands on the last line (malformed
   # file, unexpected reformatting), we don't silently no-op — the script
   # fails loudly via the post-run verification grep below.
+  track_tmp "$IOS_INFO_PLIST.tmp"
   awk -v new="$NEW_VERSION" '
     /<key>CFBundleShortVersionString<\/key>/ {
       print
