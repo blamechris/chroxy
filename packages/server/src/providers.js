@@ -18,6 +18,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
+import { ClaudeTuiSession } from './claude-tui-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
@@ -25,6 +26,7 @@ import { registerProviderRegistry } from './models.js'
 const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
+  'claude-tui': ClaudeTuiSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
 }
