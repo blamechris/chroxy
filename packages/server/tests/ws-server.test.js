@@ -4541,4 +4541,22 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
     const second = captureAuthOk(server)
     assert.equal(second.hardTimeoutMs, 6 * 60 * 60 * 1000, 'late-binding must surface the new value')
   })
+
+  // The protocol schema rejects fractional ms values on auth_ok
+  // (#3768 `.int()` guard). A `parseFloat`-style env var typo
+  // (e.g. CHROXY_HARD_TIMEOUT_MS=7200000.5) must NOT escape the
+  // wire and trip client-side schema validation — fall back to
+  // the BaseSession default instead.
+  it('falls back to defaults when config carries fractional ms values (#3905)', () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok',
+      cliSession: createMockSession(),
+      authRequired: false,
+      config: { resultTimeoutMs: 1800000.5, hardTimeoutMs: 7200000.5 },
+    })
+    const authOk = captureAuthOk(server)
+    assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
+    assert.equal(authOk.hardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
+  })
 })

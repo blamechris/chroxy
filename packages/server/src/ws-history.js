@@ -87,14 +87,20 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // (e.g. the ActivityIndicator's "approaching timeout" warning + the check-in
   // chip's countdown to hard kill) can render against the real configured
   // values instead of assuming the BaseSession defaults. Older clients
-  // ignore the fields; new clients fall back to DEFAULT_*_TIMEOUT_MS when
-  // absent (older servers).
+  // ignore the fields; new clients fall back to a hardcoded 30-min / 2h
+  // default when the server omits them (older servers).
+  //
+  // Require Number.isSafeInteger here — the protocol schema enforces
+  // `int().positive().finite()` on both fields, so a fractional config
+  // value (e.g. `CHROXY_HARD_TIMEOUT_MS=7200000.5` via `parseFloat`)
+  // would silently fail client-side schema validation on the auth_ok
+  // payload. Falling back to the default lets the wire stay valid.
   const effectiveResultTimeoutMs =
-    Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
+    Number.isSafeInteger(resultTimeoutMs) && resultTimeoutMs > 0
       ? resultTimeoutMs
       : DEFAULT_RESULT_TIMEOUT_MS
   const effectiveHardTimeoutMs =
-    Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+    Number.isSafeInteger(hardTimeoutMs) && hardTimeoutMs > 0
       ? hardTimeoutMs
       : DEFAULT_HARD_TIMEOUT_MS
 

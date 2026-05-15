@@ -71,8 +71,10 @@ export const ServerAuthOkSchema = z.object({
   // #3899 hard cap that follows the soft `resultTimeoutMs` warning).
   // Surfaced so the check-in chip can render an accurate "kill in Xh"
   // countdown instead of assuming the 2-hour default. Optional because
-  // servers from before #3905 don't emit it — clients fall back to
-  // their hardcoded DEFAULT_HARD_TIMEOUT_MS reference when absent.
+  // servers from before #3905 don't emit it — clients fall back to a
+  // 2h default when absent. (The matching server-side constant is
+  // `DEFAULT_HARD_TIMEOUT_MS` exported from `base-session.js` but is
+  // not re-exported from this package.)
   hardTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
 }).passthrough()
 
