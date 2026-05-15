@@ -107,6 +107,65 @@ if [ -d "$STORECORE_DIR/dist" ]; then
   echo "[bundle-server] Copied @chroxy/store-core workspace package (crypto)"
 fi
 
+# Defensive: after ALL node_modules mutations (npm install + bare-runtime
+# prune + workspace package copies), the bundle must not contain any
+# unsigned native binaries in formats relevant to macOS Apple notarization.
+# The prune above only targets a specific path pattern (`*/bare-*/prebuilds`);
+# if a future dep upgrade ships native code outside that layout — e.g. a
+# `.bare` under a non-`bare-*` package name, a `.node` Node addon, or a
+# `.dylib` / versioned `.so` from a transitive dep, or a `.framework` /
+# `.bundle` directory — Apple notarization will silently fail weeks later
+# when we cut a release. This guard converts that ~5-minute release-time
+# feedback loop into a 30-second build-time failure with the exact offending
+# paths printed (#3825, scope expanded for versioned shared libs + bundle
+# directories in #3890).
+#
+# Scope: macOS notarization-relevant formats. `.so` / `.so.N` is included
+# defensively in case the bundle is ever staged on Linux; Apple itself only
+# cares about `.dylib` / `.node` / `.bare` and Mach-O directory bundles.
+# Extensionless Mach-O files (rare) are not covered — would require `file`
+# magic detection, which we'd add only if a real case surfaced.
+#
+# IMPORTANT: this check runs AFTER the workspace package copies above, so
+# the workspace dist/ trees are also covered if anyone ever lands a native
+# binary inside `@chroxy/*`. Reordering the prune or workspace-copy blocks
+# above this guard is fine; moving the guard above either of them is NOT.
+# node-pty (#3902): darwin pty.node + spawn-helper binaries are signed by
+# build.rs at Tauri bundle time. The guard would otherwise reject them.
+# spawn-helper is extensionless Mach-O (not matched by the suffix patterns
+# below anyway); pty.node IS matched and must be whitelisted explicitly.
+echo "[bundle-server] Verifying no unsigned native binaries remain..."
+NATIVE_BIN_FILES=$(find "$STAGING/node_modules" \
+  -path "*/node-pty/prebuilds/darwin-*" -prune -o \
+  -type f \( \
+    -name "*.bare" -o \
+    -name "*.node" -o \
+    -name "*.dylib" -o \
+    -name "*.so" -o \
+    -name "*.so.*" \
+  \) -print 2>/dev/null || true)
+NATIVE_BIN_DIRS=$(find "$STAGING/node_modules" \
+  -path "*/node-pty/prebuilds/darwin-*" -prune -o \
+  -type d \( \
+    -name "*.framework" -o \
+    -name "*.bundle" \
+  \) -print 2>/dev/null || true)
+NATIVE_BINS=$(printf '%s\n%s' "$NATIVE_BIN_FILES" "$NATIVE_BIN_DIRS" | sed '/^$/d')
+if [ -n "$NATIVE_BINS" ]; then
+  echo "[bundle-server] ERROR: server bundle contains unsigned native binaries" >&2
+  echo "[bundle-server] These will be rejected by Apple notarization (Tauri only" >&2
+  echo "[bundle-server] signs the main app binary; transitive native deps are not signed):" >&2
+  # shellcheck disable=SC2001 # parameter expansion can't insert a per-line prefix on multi-line strings
+  echo "$NATIVE_BINS" | sed 's/^/[bundle-server]   /' >&2
+  echo "[bundle-server] " >&2
+  echo "[bundle-server] To resolve: identify the dep that pulled this in (npm ls" >&2
+  echo "[bundle-server] <pkg>) and either remove it, replace it with a JS-only" >&2
+  echo "[bundle-server] alternative, or extend the prune block above to drop the" >&2
+  echo "[bundle-server] native binaries from the bundle." >&2
+  exit 1
+fi
+echo "[bundle-server] OK: no unsigned native binaries detected."
+
 echo "[bundle-server] Bundle complete."
 du -sh "$STAGING" 2>/dev/null || true
 du -sh "$STAGING/node_modules" 2>/dev/null || true
