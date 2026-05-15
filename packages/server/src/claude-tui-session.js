@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { BaseSession } from './base-session.js'
@@ -50,15 +50,29 @@ function ensureCwdTrusted(cwd) {
   renameSync(tmp, claudeConfig)
 }
 
-// Build a settings.json that registers a Stop hook writing the payload to disk.
-// Claude pipes the hook event JSON to the command's stdin, so `cat > <path>`
-// captures it verbatim.
-function writeHookSettings(sinkDir, payloadPath) {
+// Build a settings.json that registers Stop + tool hooks. Claude pipes the
+// hook event JSON to the command's stdin. Per-event:
+//   Stop         → single file at <sink>/stop-<turn>.json (final response)
+//   PreToolUse   → unique file matching <sink>/pre-XXXXXX.json (one per tool)
+//   PostToolUse  → unique file matching <sink>/post-XXXXXX.json (one per tool)
+//
+// `mktemp` gives us atomic unique names cross-platform (BSD + GNU). The
+// session's poller scans the sink dir for new pre-/post- files in arrival
+// order so PreToolUse → tool_start and PostToolUse → tool_result events fire
+// in sequence.
+function writeHookSettings(sinkDir, stopPayloadPath) {
   const settingsPath = join(sinkDir, 'settings.json')
+  const sinkDirEsc = JSON.stringify(sinkDir)
   const settings = {
     hooks: {
       Stop: [
-        { hooks: [{ type: 'command', command: `cat > ${JSON.stringify(payloadPath)}` }] },
+        { hooks: [{ type: 'command', command: `cat > ${JSON.stringify(stopPayloadPath)}` }] },
+      ],
+      PreToolUse: [
+        { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/pre-XXXXXX.json)` }] },
+      ],
+      PostToolUse: [
+        { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/post-XXXXXX.json)` }] },
       ],
     },
   }
@@ -96,6 +110,11 @@ export class ClaudeTuiSession extends BaseSession {
 
   static get capabilities() {
     return {
+      // Tool events are surfaced via PreToolUse/PostToolUse hooks, but
+      // permissions are NOT prompted: this provider runs claude with
+      // --allow-dangerously-skip-permissions so the TUI doesn't block on
+      // an interactive prompt. Set false so the dashboard knows it can't
+      // expect permission_request events for this provider yet.
       permissions: false,
       inProcessPermissions: false,
       modelSwitch: false,
@@ -105,6 +124,7 @@ export class ClaudeTuiSession extends BaseSession {
       terminal: false,
       thinkingLevel: false,
       streaming: false,
+      tools: true,
     }
   }
 
@@ -213,7 +233,16 @@ export class ClaudeTuiSession extends BaseSession {
     delete env.ANTHROPIC_API_KEY
     env.TERM = 'xterm-256color'
 
-    const args = ['--session-id', turnUuid, '--settings', settingsPath]
+    // --allow-dangerously-skip-permissions: tools execute without a permission
+    // prompt blocking the PTY. This is the MVP's tradeoff — Chroxy can't
+    // intercept permissions for this provider yet, but tool calls work.
+    // Capabilities.permissions=false signals this so the dashboard hides
+    // the "Allow / Deny" affordance.
+    const args = [
+      '--session-id', turnUuid,
+      '--settings', settingsPath,
+      '--allow-dangerously-skip-permissions',
+    ]
     log.info(`spawn claude TUI (uuid=${turnUuid.slice(0, 8)} msg=${messageId})`)
 
     let term
@@ -260,31 +289,65 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
 
-    // Poll for Stop hook payload.
+    // Poll for hook payloads. Three event streams flow through the sink dir:
+    //   stop-<turn>.json           → final response → break the loop
+    //   pre-XXXXXX.json (multiple) → tool_start events
+    //   post-XXXXXX.json (multiple) → tool_result events
+    //
+    // Each file is processed once (tracked in `consumed`) and left on disk —
+    // sink dir is per-session and cleaned up on destroy.
     const HOOK_TIMEOUT_MS = this._hardTimeoutMs
     const pollStart = Date.now()
+    const consumed = new Set()
     let payload = null
 
-    const poll = async () => {
-      while (Date.now() - pollStart < HOOK_TIMEOUT_MS) {
-        if (this._activeTurn?.aborted) return null
-        if (existsSync(payloadPath)) {
-          try {
-            const raw = readFileSync(payloadPath, 'utf8')
-            if (raw.length > 0) {
-              return JSON.parse(raw)
-            }
-          } catch { /* partial write, keep polling */ }
+    const processToolFiles = () => {
+      let entries
+      try { entries = readdirSync(this._sinkDir) } catch { return }
+      // Sort lexicographically — mktemp's XXXXXX suffix isn't sorted, but
+      // for a single turn, the file mtimes are close enough that any
+      // tool_start before tool_result on the same toolUseId still arrives
+      // in the order the hook fired.
+      entries.sort()
+      for (const name of entries) {
+        if (consumed.has(name)) continue
+        if (!name.startsWith('pre-') && !name.startsWith('post-')) continue
+        const full = join(this._sinkDir, name)
+        let parsed
+        try {
+          const raw = readFileSync(full, 'utf8')
+          if (raw.length === 0) continue  // partial write — poll again
+          parsed = JSON.parse(raw)
+        } catch { continue }
+        consumed.add(name)
+        try {
+          this._emitToolHookEvent(name.startsWith('pre-') ? 'PreToolUse' : 'PostToolUse', parsed, messageId)
+        } catch (err) {
+          log.warn(`tool hook emit failed: ${err.message}`)
         }
-        if (exited) {
-          return null
-        }
-        await new Promise((r) => setTimeout(r, 200))
       }
-      return null
     }
 
-    payload = await poll()
+    while (Date.now() - pollStart < HOOK_TIMEOUT_MS) {
+      if (this._activeTurn?.aborted) break
+
+      processToolFiles()
+
+      if (existsSync(payloadPath)) {
+        try {
+          const raw = readFileSync(payloadPath, 'utf8')
+          if (raw.length > 0) {
+            payload = JSON.parse(raw)
+            // Drain any remaining tool files before exiting (Post may land
+            // in the same tick as Stop on a fast turn).
+            processToolFiles()
+            break
+          }
+        } catch { /* partial write, keep polling */ }
+      }
+      if (exited) break
+      await new Promise((r) => setTimeout(r, 150))
+    }
 
     if (!payload) {
       this._finishTurnError(this._activeTurn?.aborted
@@ -310,6 +373,67 @@ export class ClaudeTuiSession extends BaseSession {
     })
 
     this._cleanupTurn()
+  }
+
+  /**
+   * Translate one PreToolUse / PostToolUse hook payload into BaseSession tool
+   * events. Hook payloads carry tool_use_id (when Claude Code provides it),
+   * tool_name, tool_input, and on Post a tool_response. The dashboard pairs
+   * `tool_start` with `tool_result` by toolUseId so each tool call renders as
+   * one collapsible bubble.
+   *
+   * tool_use_id is sometimes absent from hook payloads (older claude
+   * builds, certain MCP tools); when missing we synthesize a stable id
+   * from messageId + a per-turn sequence so the pair still matches.
+   *
+   * @param {'PreToolUse' | 'PostToolUse'} kind
+   * @param {object} payload — parsed hook JSON
+   * @param {string} messageId — the current turn's wire-level messageId
+   */
+  _emitToolHookEvent(kind, payload, messageId) {
+    if (!payload || typeof payload !== 'object') return
+    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'unknown'
+    let toolUseId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.length > 0
+      ? payload.tool_use_id
+      : null
+    if (!toolUseId) {
+      if (!this._activeTurn) return
+      this._activeTurn.synthSeq = (this._activeTurn.synthSeq || 0) + 1
+      toolUseId = `${messageId}-tool-${this._activeTurn.synthSeq}`
+    }
+
+    if (kind === 'PreToolUse') {
+      this.emit('tool_start', {
+        messageId: toolUseId,
+        toolUseId,
+        tool: toolName,
+        input: payload.tool_input ?? null,
+      })
+      return
+    }
+
+    // PostToolUse — extract a string-ish result for the dashboard.
+    let result = ''
+    let truncated = false
+    const resp = payload.tool_response
+    if (typeof resp === 'string') {
+      result = resp
+    } else if (resp && typeof resp === 'object') {
+      // Most Claude tools return { stdout, stderr } or { content: [...] }.
+      // Stringify and let the existing tool-result truncation handle size.
+      try { result = JSON.stringify(resp) } catch { result = String(resp) }
+    }
+    const MAX = 10240  // mirror tool-result.js MAX_TOOL_RESULT_SIZE
+    if (result.length > MAX) {
+      result = result.slice(0, MAX)
+      truncated = true
+    }
+
+    this.emit('tool_result', {
+      toolUseId,
+      result,
+      truncated,
+    })
   }
 
   _finishTurnError(message) {

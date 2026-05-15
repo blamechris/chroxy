@@ -191,4 +191,100 @@ describe('ClaudeTuiSession', () => {
       session.interrupt()
     })
   })
+
+  describe('_emitToolHookEvent()', () => {
+    beforeEach(() => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      // Simulate a turn in flight so synthetic-id fallback works.
+      session._activeTurn = { uuid: 'test', synthSeq: 0 }
+    })
+
+    it('emits tool_start with toolUseId, tool name, and input on PreToolUse', () => {
+      const events = []
+      session.on('tool_start', (e) => events.push(e))
+
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_123',
+        tool_name: 'Edit',
+        tool_input: { file_path: '/foo.js', new_string: 'x' },
+      }, 'msg-1')
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'toolu_123')
+      assert.equal(events[0].messageId, 'toolu_123')
+      assert.equal(events[0].tool, 'Edit')
+      assert.deepEqual(events[0].input, { file_path: '/foo.js', new_string: 'x' })
+    })
+
+    it('emits tool_result with toolUseId and result on PostToolUse', () => {
+      const events = []
+      session.on('tool_result', (e) => events.push(e))
+
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_123',
+        tool_name: 'Edit',
+        tool_response: 'File edited successfully',
+      }, 'msg-1')
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'toolu_123')
+      assert.equal(events[0].result, 'File edited successfully')
+      assert.equal(events[0].truncated, false)
+    })
+
+    it('stringifies object tool_response for the dashboard', () => {
+      const events = []
+      session.on('tool_result', (e) => events.push(e))
+
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_456',
+        tool_name: 'Bash',
+        tool_response: { stdout: 'hello\n', stderr: '', exitCode: 0 },
+      }, 'msg-1')
+
+      assert.equal(events.length, 1)
+      const parsed = JSON.parse(events[0].result)
+      assert.equal(parsed.stdout, 'hello\n')
+      assert.equal(parsed.exitCode, 0)
+    })
+
+    it('truncates tool_response over 10KB', () => {
+      const events = []
+      session.on('tool_result', (e) => events.push(e))
+      const huge = 'x'.repeat(15000)
+
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_999',
+        tool_name: 'Read',
+        tool_response: huge,
+      }, 'msg-1')
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].truncated, true)
+      assert.equal(events[0].result.length, 10240)
+    })
+
+    it('synthesizes a stable toolUseId when payload omits tool_use_id', () => {
+      const startEvents = []
+      const resultEvents = []
+      session.on('tool_start', (e) => startEvents.push(e))
+      session.on('tool_result', (e) => resultEvents.push(e))
+
+      // PreToolUse without tool_use_id, then PostToolUse without it.
+      session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash', tool_input: { cmd: 'ls' } }, 'msg-7')
+      session._emitToolHookEvent('PostToolUse', { tool_name: 'Bash', tool_response: 'foo bar' }, 'msg-7')
+
+      assert.equal(startEvents.length, 1)
+      assert.equal(resultEvents.length, 1)
+      // Same synthetic prefix; sequence increments.
+      assert.match(startEvents[0].toolUseId, /^msg-7-tool-1$/)
+      assert.match(resultEvents[0].toolUseId, /^msg-7-tool-2$/)
+    })
+
+    it('falls through silently when no active turn (defensive)', () => {
+      session._activeTurn = null
+      // Must not throw.
+      session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash' }, 'msg-1')
+    })
+  })
 })
