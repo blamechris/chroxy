@@ -246,7 +246,7 @@ describe('SettingsPanel', () => {
       expect(codexRow).toHaveTextContent('set OPENAI_API_KEY') // hint surfaced
     })
 
-    it('renders the color legend so the green/blue/red tones are self-explanatory', () => {
+    it('renders the color legend so the green/blue/red/grey tones are self-explanatory', () => {
       setMockState({
         availableProviders: [
           {
@@ -262,6 +262,39 @@ describe('SettingsPanel', () => {
       expect(legend).toHaveTextContent('Subscription / login')
       expect(legend).toHaveTextContent('API key')
       expect(legend).toHaveTextContent('Not configured')
+      // #3690: source='none' is a 4-valued protocol enum case (provider w/o
+      // preflight.credentials block), so the legend has a 4th row for it.
+      expect(legend).toHaveTextContent('Custom provider')
+
+      // #3690: assert swatch data-tone parity with the protocol enum so a
+      // future copy/paste swap of swatch attrs can't silently regress
+      // visual/legend alignment.
+      expect(legend.querySelector('[data-tone="oauth"]')).toBeInTheDocument()
+      expect(legend.querySelector('[data-tone="env"]')).toBeInTheDocument()
+      expect(legend.querySelector('[data-tone="missing"]')).toBeInTheDocument()
+      expect(legend.querySelector('[data-tone="none"]')).toBeInTheDocument()
+    })
+
+    it('hides the decorative legend swatches from screen readers', () => {
+      // #3690: swatches are pure colour chips with no text, so they must
+      // carry aria-hidden to avoid announcing four empty regions before
+      // each label (matches the .theme-card-check convention).
+      setMockState({
+        availableProviders: [
+          {
+            name: 'claude-cli',
+            capabilities: {},
+            auth: { ready: true, source: 'oauth', envVar: null, envVars: [], hint: '', detail: 'Claude subscription' },
+          },
+        ],
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const legend = screen.getByLabelText('Color legend')
+      const swatches = legend.querySelectorAll('.auth-status-swatch')
+      expect(swatches.length).toBe(4)
+      swatches.forEach(s => {
+        expect(s).toHaveAttribute('aria-hidden', 'true')
+      })
     })
 
     it('marks oauth-source rows with the oauth tone', () => {
@@ -277,6 +310,26 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const row = screen.getByTestId('auth-status-claude-cli')
       expect(row).toHaveAttribute('data-tone', 'oauth')
+    })
+
+    it('marks ready providers with source="none" as the "none" tone (#3690)', () => {
+      // Custom/external providers that don't declare a preflight.credentials
+      // block return ready:true + source:'none'. Before #3690 this rendered
+      // with data-tone="none" but the legend had no row for it, so users
+      // saw a 4th unexplained colour. Assert the row uses the legended tone.
+      setMockState({
+        availableProviders: [
+          {
+            name: 'custom-provider',
+            capabilities: {},
+            auth: { ready: true, source: 'none', envVar: null, envVars: [], hint: '', detail: 'No credential check declared by this provider' },
+          },
+        ],
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const row = screen.getByTestId('auth-status-custom-provider')
+      expect(row).toHaveAttribute('data-tone', 'none')
+      expect(row).toHaveTextContent('No credential check declared by this provider')
     })
   })
 
