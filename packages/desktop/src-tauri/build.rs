@@ -124,6 +124,77 @@ fn main() {
                 }
             }
         }
+
+        // node-pty native binaries shipped with the staged server bundle
+        // (#3902 claude-tui provider). npm prebuilds ship as adhoc-signed
+        // Mach-O — Apple notarytool rejects those, so we re-sign with the
+        // Developer ID cert before Tauri's bundler copies the
+        // server-bundle/ directory into Chroxy.app/Contents/Resources/.
+        //
+        // We also drop linux-* and win32-* prebuilds: the desktop bundle
+        // is darwin-only, and unsigned non-darwin .node files inside the
+        // bundle would also fail notarization.
+        let server_bundle = format!("{}/server-bundle/node_modules/node-pty/prebuilds", manifest_dir);
+        if std::path::Path::new(&server_bundle).exists() {
+            // Always prune non-darwin prebuilds (independent of signing config).
+            for entry in std::fs::read_dir(&server_bundle).unwrap_or_else(|e| {
+                panic!("Failed to read node-pty prebuilds dir {server_bundle}: {e}")
+            }) {
+                let entry = entry.unwrap_or_else(|e| panic!("read_dir entry failed: {e}"));
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("darwin-") { continue }
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+
+            // Sign the darwin prebuilds we kept. node-pty ships two binaries
+            // per arch — pty.node (the dlopen'd native addon) and
+            // spawn-helper (an executable invoked by pty.fork()). Both
+            // load at runtime and both must be signed.
+            //
+            // chmod +x on spawn-helper here too: npm 1.1.0 strips the
+            // exec bit (see scripts/fix-node-pty-helper.js). Tauri's
+            // resource copy preserves modes from staging, so fixing it
+            // here gets it into the final .app correctly.
+            for arch in ["darwin-arm64", "darwin-x64"] {
+                let arch_dir = format!("{}/{}", server_bundle, arch);
+                if !std::path::Path::new(&arch_dir).exists() { continue }
+                let spawn_helper = format!("{}/spawn-helper", arch_dir);
+                if std::path::Path::new(&spawn_helper).exists() {
+                    let _ = std::process::Command::new("chmod")
+                        .args(["+x", &spawn_helper])
+                        .status();
+                }
+
+                if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
+                    if !identity.is_empty() && identity != "-" {
+                        for bin in ["pty.node", "spawn-helper"] {
+                            let path = format!("{}/{}", arch_dir, bin);
+                            if !std::path::Path::new(&path).exists() { continue }
+                            run(
+                                &format!("codesign (node-pty {bin} {arch})"),
+                                std::process::Command::new("codesign").args([
+                                    "--force",
+                                    "--options", "runtime",
+                                    "--timestamp",
+                                    "--sign", &identity,
+                                    &path,
+                                ]),
+                            );
+                            run(
+                                &format!("codesign --verify (node-pty {bin} {arch})"),
+                                std::process::Command::new("codesign").args([
+                                    "--verify",
+                                    "--strict",
+                                    "--verbose=2",
+                                    &path,
+                                ]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let attrs = Attributes::new().app_manifest(AppManifest::new().commands(APP_COMMANDS));

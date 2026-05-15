@@ -18,6 +18,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
+import { ClaudeTuiSession } from './claude-tui-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
@@ -25,6 +26,7 @@ import { registerProviderRegistry } from './models.js'
 const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
+  'claude-tui': ClaudeTuiSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
 }
@@ -229,8 +231,12 @@ function getProviderAuthInfo(name, ProviderClass) {
   // Bare claude-cli on the host always bills subscription: spawn-env.js's
   // `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
   // and the CLI auths via the host's ~/.claude OAuth state.
+  // claude-tui follows the same pattern — it explicitly deletes
+  // ANTHROPIC_API_KEY from the spawn env and routes via OAuth/Keychain so
+  // the round-trip bills as a subscription. The OAuth-creds probe doesn't
+  // see Keychain credentials, so we mark these providers ready up-front.
   // Note: docker-cli is NOT in this set — see container-provider handling below.
-  const isHostClaudeCli = name === 'claude-cli'
+  const isHostClaudeCli = name === 'claude-cli' || name === 'claude-tui'
 
   // Container providers (docker-cli / docker-sdk) explicitly forward
   // process.env.ANTHROPIC_API_KEY to the container at `docker run` time
@@ -241,13 +247,16 @@ function getProviderAuthInfo(name, ProviderClass) {
   const isContainerProvider = name === 'docker-cli' || name === 'docker-sdk'
 
   if (isHostClaudeCli) {
+    const detail = name === 'claude-tui'
+      ? 'Claude subscription (interactive TUI under PTY — bypasses programmatic metering, #3902)'
+      : 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)'
     return {
       ready: true,
       source: 'oauth',
       envVar: null,
       envVars,
       hint: 'run `claude login` if not yet authed',
-      detail: 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
+      detail,
     }
   }
 
