@@ -70,6 +70,7 @@ const EMPTY_MODELS: ModelInfo[] = []
 const PROVIDER_BILLING: Record<string, string> = {
   'claude-sdk': 'Uses Anthropic API credits',
   'claude-cli': 'Uses your Claude subscription',
+  'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
   'docker-cli': 'Docker-isolated — uses your Claude subscription',
   'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
   'codex': 'Uses OpenAI API credits',

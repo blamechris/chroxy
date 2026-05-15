@@ -8,7 +8,7 @@ import {
 describe('PROVIDER_LABELS', () => {
   it('contains entries for all known providers', () => {
     const expectedKeys = [
-      'claude-sdk', 'claude-cli', 'docker-cli', 'docker-sdk', 'docker', 'gemini', 'codex',
+      'claude-sdk', 'claude-cli', 'claude-tui', 'docker-cli', 'docker-sdk', 'docker', 'gemini', 'codex',
     ]
     for (const key of expectedKeys) {
       expect(PROVIDER_LABELS).toHaveProperty(key)
@@ -34,6 +34,7 @@ describe('getProviderLabel', () => {
   it('returns human-readable label for known providers', () => {
     expect(getProviderLabel('claude-sdk')).toBe('Claude Code (SDK)')
     expect(getProviderLabel('claude-cli')).toBe('Claude Code (CLI)')
+    expect(getProviderLabel('claude-tui')).toBe('Claude Code (TUI)')
     expect(getProviderLabel('docker-cli')).toBe('Claude Code (Docker CLI)')
     expect(getProviderLabel('docker-sdk')).toBe('Claude Code (Docker SDK)')
     expect(getProviderLabel('docker')).toBe('Claude Code (Docker CLI)')

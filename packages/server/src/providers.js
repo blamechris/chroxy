@@ -248,7 +248,7 @@ function getProviderAuthInfo(name, ProviderClass) {
 
   if (isHostClaudeCli) {
     const detail = name === 'claude-tui'
-      ? 'Claude subscription (interactive TUI under PTY — bypasses programmatic metering, #3902)'
+      ? 'Claude subscription (interactive TUI under PTY — bypasses programmatic credit metering)'
       : 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)'
     return {
       ready: true,
