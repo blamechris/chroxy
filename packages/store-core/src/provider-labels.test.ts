@@ -8,7 +8,7 @@ import {
 describe('PROVIDER_LABELS', () => {
   it('contains entries for all known providers', () => {
     const expectedKeys = [
-      'claude-sdk', 'claude-cli', 'docker-cli', 'docker-sdk', 'docker', 'gemini', 'codex',
+      'claude-sdk', 'claude-cli', 'claude-tui', 'docker-cli', 'docker-sdk', 'docker', 'gemini', 'codex',
     ]
     for (const key of expectedKeys) {
       expect(PROVIDER_LABELS).toHaveProperty(key)
@@ -34,6 +34,7 @@ describe('getProviderLabel', () => {
   it('returns human-readable label for known providers', () => {
     expect(getProviderLabel('claude-sdk')).toBe('Claude Code (SDK)')
     expect(getProviderLabel('claude-cli')).toBe('Claude Code (CLI)')
+    expect(getProviderLabel('claude-tui')).toBe('Claude Code (TUI)')
     expect(getProviderLabel('docker-cli')).toBe('Claude Code (Docker CLI)')
     expect(getProviderLabel('docker-sdk')).toBe('Claude Code (Docker SDK)')
     expect(getProviderLabel('docker')).toBe('Claude Code (Docker CLI)')
@@ -59,6 +60,16 @@ describe('getProviderInfo', () => {
     expect(cliInfo.short).toBe('CLI')
     expect(cliInfo.type).toBe('cli')
     expect(cliInfo.tooltip).toContain('claude.ai')
+
+    // #3932: claude-tui must not regress to the generic external-provider
+    // fallback (short='CLAUDE-TUI', type='other'). Pin the canonical metadata.
+    const tuiInfo = getProviderInfo('claude-tui')
+    expect(tuiInfo.short).toBe('TUI')
+    expect(tuiInfo.label).toBe('Claude Code (TUI)')
+    expect(tuiInfo.type).toBe('cli')
+    expect(tuiInfo.tooltip).toContain('PTY')
+    expect(tuiInfo.tooltip).toContain('claude.ai')
+    expect(tuiInfo.tooltip).toContain('subscription')
 
     const geminiInfo = getProviderInfo('gemini')
     expect(geminiInfo.short).toBe('Gemini')

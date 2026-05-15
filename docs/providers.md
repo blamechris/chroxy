@@ -2,10 +2,11 @@
 
 Chroxy runs AI coding sessions through pluggable **providers**. Each provider wraps a different AI backend (Claude Code, OpenAI Codex, Google Gemini) behind the same WebSocket/event contract, so the mobile app and desktop dashboard work identically regardless of which one you pick.
 
-Four first-party providers ship built-in:
+Five first-party providers ship built-in:
 
 - `claude-sdk` — **default**. Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable or you need plan mode.
+- `claude-tui` — Interactive `claude` TUI driven under a PTY. Bills as your Claude subscription's interactive allowance and bypasses the programmatic credit pool. See [Billing & API usage](../README.md#billing--api-usage).
 - `gemini` — Google Gemini CLI (`gemini -p`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
@@ -19,6 +20,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 |----------|--------------|----------|---------------|------|-------|
 | `claude-sdk` *(default)* | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support |
 | `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | Deferred to `claude` CLI | Anthropic API key or subscription login | Subprocess, required for plan mode; permission hook via HTTP |
+| `claude-tui` | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
@@ -246,21 +248,22 @@ Older configs use `legacyCli: true` to force the `claude-cli` provider. This sti
 
 Rows marked **(capability)** come directly from each session class's `static get capabilities()` object — those are the keys the provider registry inspects at runtime. The remaining rows are **(behavioural)** — derived from reading the session class's implementation (attachment handling, agent-tracking events, cost parsing, continuity across `sendMessage` calls). Behavioural rows are not currently part of the `capabilities` contract and may change if the class is refactored.
 
-| Capability | `claude-sdk` | `claude-cli` | `codex` | `gemini` |
-|------------|:-:|:-:|:-:|:-:|
-| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | — | — |
-| **(capability)** In-process permissions | Yes | — | — | — |
-| **(capability)** Live model switch | Yes | Yes | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | — | — |
-| **(capability)** Plan mode | — | **Yes** | — | — |
-| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — |
-| **(capability)** Terminal (raw PTY) | — | — | — | — |
-| **(capability)** Thinking level control | Yes | — | — | — |
-| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — |
-| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — |
-| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — |
-| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes |
-| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | **No** | **No** |
+| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `codex` | `gemini` |
+|------------|:-:|:-:|:-:|:-:|:-:|
+| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | — | — |
+| **(capability)** In-process permissions | Yes | — | — | — | — |
+| **(capability)** Live model switch | Yes | Yes | — | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — |
+| **(capability)** Plan mode | — | **Yes** | — | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — |
+| **(capability)** Terminal (raw PTY) | — | — | — | — | — |
+| **(capability)** Thinking level control | Yes | — | — | — | — |
+| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | Yes | Yes |
+| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — |
+| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — |
+| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — |
+| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes |
+| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | **No** | **No** |
 
 For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
@@ -276,6 +279,15 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - **No resume** — each new session starts fresh; history replay is driven by Chroxy's own `session-manager.js`, not by `claude`.
 - **No thinking-level control** — SDK-only feature.
 - Requires the `claude` binary to be installed and executable.
+
+### `claude-tui`
+
+- **Subscription only** — `ANTHROPIC_API_KEY` is explicitly stripped from the spawn env. Auth via `claude login`; no API-key fallback.
+- **No live streaming** — the response is delivered as one `stream_start` → `stream_delta` → `stream_end` burst when Claude's `Stop` hook fires. No incremental token streaming inside a turn.
+- **No live model switch, no plan mode, no permission-mode switch, no resume, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
+- **One PTY per session** — pays a ~3.5s warmup cost on `start()`, then every `sendMessage` writes to the same PTY. Concurrent sessions in the same `cwd` are not protected against each other; treat as one session per repo.
+- **Tool events are reconstructed from `PreToolUse` / `PostToolUse` hooks** — `tool_use_id` is taken from the hook payload when present, otherwise synthesized per turn (`<messageId>-tool-N`). Pre/Post pairing breaks if tool calls overlap or a Pre fires without a matching Post.
+- **Hook payloads write to a per-session directory under `tmpdir()/chroxy-claude-tui/s-<uuid>/`**. Cleaned up on `destroy()`.
 
 ### `codex`
 

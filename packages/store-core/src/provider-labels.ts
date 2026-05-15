@@ -27,6 +27,12 @@ const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
     tooltip: 'Claude Code CLI — uses your claude.ai subscription',
     type: 'cli',
   },
+  'claude-tui': {
+    short: 'TUI',
+    label: 'Claude Code (TUI)',
+    tooltip: 'Interactive Claude Code TUI under PTY — uses your claude.ai subscription, bypasses programmatic credit metering',
+    type: 'cli',
+  },
   'docker-cli': {
     short: 'Docker CLI',
     label: 'Claude Code (Docker CLI)',
