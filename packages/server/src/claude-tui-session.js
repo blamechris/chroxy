@@ -301,7 +301,13 @@ export class ClaudeTuiSession extends BaseSession {
       '--session-id', this._sessionId,
       '--settings', this._settingsPath,
     ]
-    log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} perms=${permissionsEnabled})`)
+    if (this.model) {
+      // claude TUI accepts --model (verified against `claude --help`). Without
+      // this the requested model was silently dropped, leaving ready.model
+      // disagreeing with the actual model the TUI booted on (#3921).
+      args.push('--model', this.model)
+    }
+    log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled})`)
 
     try {
       this._term = ptyMod.spawn(CLAUDE, args, {
@@ -321,8 +327,20 @@ export class ClaudeTuiSession extends BaseSession {
       this._ptyExited = true
       this._ptyExitInfo = info
       this._processReady = false
-      if (!this._destroying) {
-        log.warn(`claude PTY exited unexpectedly (code=${info?.exitCode} signal=${info?.signal})`)
+      // Reset turn state so the next sendMessage() sees a clean idle
+      // (it'll still reject with "no longer alive", but won't be locked
+      // by stale _isBusy from a turn the PTY interrupted) (#3924).
+      const hadActiveTurn = this._activeTurn !== null
+      this._activeTurn = null
+      this._isBusy = false
+      this._currentMessageId = null
+      if (this._destroying) return
+      log.warn(`claude PTY exited unexpectedly (code=${info?.exitCode} signal=${info?.signal})`)
+      // Suppress the generic onExit error when a turn was in flight —
+      // sendMessage's poll loop emits a more specific "PTY exited
+      // mid-turn" error instead, so the dashboard sees one root cause
+      // not two.
+      if (!hadActiveTurn) {
         this.emit('error', { message: `Claude PTY exited (code=${info?.exitCode})` })
       }
     })
@@ -414,9 +432,17 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     if (!stopPayload) {
-      this._finishTurnError(this._activeTurn?.aborted
-        ? 'turn aborted'
-        : `Stop hook timeout after ${Math.round((Date.now() - pollStart) / 1000)}s`)
+      let reason
+      if (this._activeTurn?.aborted) {
+        reason = 'turn aborted'
+      } else if (this._ptyExited) {
+        const code = this._ptyExitInfo?.exitCode
+        const signal = this._ptyExitInfo?.signal
+        reason = `Claude PTY exited mid-turn (code=${code}${signal ? ` signal=${signal}` : ''})`
+      } else {
+        reason = `Stop hook timeout after ${Math.round((Date.now() - pollStart) / 1000)}s`
+      }
+      this._finishTurnError(reason)
       return
     }
 
@@ -463,9 +489,19 @@ export class ClaudeTuiSession extends BaseSession {
       ? payload.tool_use_id
       : null
     if (!toolUseId) {
+      // Synthesize a stable id when the hook payload omits tool_use_id
+      // (older claude builds, certain MCP tools). Increment ONLY on
+      // PreToolUse; reuse the current value on the matching PostToolUse
+      // so the dashboard can pair tool_start with tool_result by
+      // toolUseId (#3923). Breaks if tool calls overlap or Pre fires
+      // without a Post, but strictly better than the previous always-
+      // mismatch behaviour. The common path — payload carries
+      // tool_use_id from claude — is unaffected.
       if (!this._activeTurn) return
-      this._activeTurn.synthSeq = (this._activeTurn.synthSeq || 0) + 1
-      toolUseId = `${messageId}-tool-${this._activeTurn.synthSeq}`
+      if (kind === 'PreToolUse') {
+        this._activeTurn.synthSeq = (this._activeTurn.synthSeq || 0) + 1
+      }
+      toolUseId = `${messageId}-tool-${this._activeTurn.synthSeq || 1}`
     }
 
     if (kind === 'PreToolUse') {

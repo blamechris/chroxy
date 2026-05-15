@@ -326,21 +326,36 @@ describe('ClaudeTuiSession', () => {
       assert.equal(events[0].result.length, 10240)
     })
 
-    it('synthesizes a stable toolUseId when payload omits tool_use_id', () => {
+    it('synthesizes a STABLE toolUseId so Pre/Post pair correctly', () => {
       const startEvents = []
       const resultEvents = []
       session.on('tool_start', (e) => startEvents.push(e))
       session.on('tool_result', (e) => resultEvents.push(e))
 
-      // PreToolUse without tool_use_id, then PostToolUse without it.
+      // PreToolUse without tool_use_id, then PostToolUse without it —
+      // both must emit the SAME toolUseId so the dashboard can pair them.
       session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash', tool_input: { cmd: 'ls' } }, 'msg-7')
       session._emitToolHookEvent('PostToolUse', { tool_name: 'Bash', tool_response: 'foo bar' }, 'msg-7')
 
       assert.equal(startEvents.length, 1)
       assert.equal(resultEvents.length, 1)
-      // Same synthetic prefix; sequence increments.
-      assert.match(startEvents[0].toolUseId, /^msg-7-tool-1$/)
-      assert.match(resultEvents[0].toolUseId, /^msg-7-tool-2$/)
+      assert.equal(startEvents[0].toolUseId, resultEvents[0].toolUseId, 'Pre and Post pair on the same synth id')
+      assert.match(startEvents[0].toolUseId, /^msg-7-tool-1$/, 'synth id format: <messageId>-tool-<seq>')
+    })
+
+    it('synthesizes distinct ids across multiple tool calls in one turn', () => {
+      const startEvents = []
+      session.on('tool_start', (e) => startEvents.push(e))
+
+      // Two separate tool calls, neither with tool_use_id.
+      session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash', tool_input: { cmd: 'ls' } }, 'msg-8')
+      session._emitToolHookEvent('PostToolUse', { tool_name: 'Bash', tool_response: 'a' }, 'msg-8')
+      session._emitToolHookEvent('PreToolUse', { tool_name: 'Read', tool_input: { path: '/foo' } }, 'msg-8')
+      session._emitToolHookEvent('PostToolUse', { tool_name: 'Read', tool_response: 'b' }, 'msg-8')
+
+      assert.equal(startEvents.length, 2)
+      assert.match(startEvents[0].toolUseId, /^msg-8-tool-1$/)
+      assert.match(startEvents[1].toolUseId, /^msg-8-tool-2$/)
     })
 
     it('falls through silently when no active turn (defensive)', () => {
