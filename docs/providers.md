@@ -126,6 +126,31 @@ OPENAI_API_KEY=sk-... npx chroxy start --provider codex
 - **No conversation memory**: Codex sessions do not carry state between messages. Each `sendMessage` is a fresh `codex exec`. See "Known limits".
 - **Model flag format**: Chroxy passes `-c 'model="<id>"'` to Codex — changing `this.model` takes effect on the next message (no process to restart).
 
+### Sandbox & write surfaces
+
+Codex sessions default to `--sandbox workspace-write` (#3846). Per the
+Codex CLI's `[sandbox_workspace_write]` reference, that policy permits
+the model to write to **four** locations — not just the session cwd:
+
+1. **The session `cwd`** — the directory you picked when starting the
+   session. Bounded by Chroxy's `validateCwdAllowed` workspace
+   allowlist (see `CONFIG.md#workspaceRoots`).
+2. **`/private/tmp`** — macOS only; the system temp root.
+3. **`$TMPDIR`** — the per-process temp directory (resolved by the
+   spawned `codex` process, which may differ from Chroxy's
+   environment).
+4. **`$HOME/.codex/memories`** — Codex's persistent memory store,
+   shared across sessions.
+
+Items 2–4 mean "the workspace" is **broader than the chroxy session
+cwd**. Chroxy's session-trust gate only constrains item 1. If you need
+a hard read-only session, the per-session sandbox selector tracked in
+#3837 is the user-facing override — until that lands, set
+`CHROXY_CODEX_SANDBOX=read-only` server-wide (planned in #3847).
+
+Source: Codex CLI 0.128+ docs (`codex exec --help` and the
+`[sandbox_workspace_write]` section of the Codex config reference).
+
 ## Gemini
 
 Google Gemini CLI.
