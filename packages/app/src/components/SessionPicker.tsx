@@ -464,11 +464,15 @@ const styles = StyleSheet.create({
     maxWidth: 60,
   },
   providerBadgeText: {
+    // Render the canonical short label exactly as `getProviderInfo(...).short`
+    // returns it ("Codex", "Gemini", "Docker CLI", "TUI", "CLI"), matching
+    // the dashboard SessionBar chip text for cross-surface parity. No
+    // textTransform — uppercasing would mangle "Codex" -> "CODEX" and
+    // diverge from the shared label source.
     color: COLORS.textMuted,
     fontSize: 9,
     fontWeight: '700',
     lineHeight: 13,
-    textTransform: 'uppercase',
   },
   addButton: {
     width: 32,

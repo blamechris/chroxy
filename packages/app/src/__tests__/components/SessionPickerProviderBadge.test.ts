@@ -47,12 +47,17 @@ describe('SessionPicker pill chip — provider hint badge (#3940)', () => {
   it('keeps the pre-fix bare-name pill render gone (regression lock)', () => {
     // Before #3940 the pill text node was the only child between the
     // optional indicators and the optional worktreeBadge — i.e. the
-    // session.name Text was directly followed by the worktree-badge
+    // session.name `<Text>` was directly followed by the worktree-badge
     // conditional with no provider conditional in between. Lock that
-    // exact pre-fix pattern out so a future regression can't quietly
-    // drop the provider hint.
+    // exact pre-fix pattern out so a future regression that drops the
+    // provider hint cannot pass silently. The pre-fix JSX is
+    //   {session.name}</Text>
+    //   {session.worktree && (...)}
+    // with no `}` between `</Text>` and `{session.worktree`, so the
+    // regex must match those two tokens directly (only whitespace
+    // between).
     expect(pillSection).not.toMatch(
-      /\{session\.name\}\s*<\/Text>\s*\}\s*\{session\.worktree\s*&&/,
+      /\{session\.name\}\s*<\/Text>\s*\{session\.worktree\s*&&/,
     );
   });
 
