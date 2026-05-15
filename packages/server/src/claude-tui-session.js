@@ -60,14 +60,21 @@ function ensureCwdTrusted(cwd) {
 
 // Build a settings.json that registers Stop + tool hooks. Claude pipes the
 // hook event JSON to the command's stdin. Per-event filename pattern:
-//   Stop         → <sink>/stop-XXXXXX.json   (one per turn)
-//   PreToolUse   → <sink>/pre-XXXXXX.json    (one per tool call)
-//   PostToolUse  → <sink>/post-XXXXXX.json   (one per tool call)
+//   Stop         → <sink>/stop-<uuid>.json   (one per turn)
+//   PreToolUse   → <sink>/pre-<uuid>.json    (one per tool call)
+//   PostToolUse  → <sink>/post-<uuid>.json   (one per tool call)
 //
-// `mktemp` gives us atomic unique names cross-platform (BSD + GNU). Each
-// turn's poller scans the sink for files it hasn't yet consumed — so a
-// persistent PTY can fire 1..N Stop events across the session lifetime
-// and each turn picks up only its own.
+// `uuidgen` gives us atomic unique names cross-platform (macOS + Linux).
+// IMPORTANT: do not use `mktemp <sink>/foo-XXXXXX.json` — macOS BSD mktemp
+// does NOT expand the X-template when there's a `.json` suffix after it,
+// so the file ends up named literally "foo-XXXXXX.json" and every turn
+// overwrites the same file. Found the hard way during the #3902 smoke
+// test: turn-2 Stop hook was written but then skipped by the poller
+// because its filename was already in _consumedFiles from turn 1.
+//
+// Each turn's poller scans the sink for files it hasn't yet consumed —
+// so a persistent PTY can fire 1..N Stop events across the session
+// lifetime and each turn picks up only its own.
 //
 // This is written ONCE per session at start() — the same settings.json is
 // reused across every turn, so changing it mid-session has no effect
@@ -81,7 +88,7 @@ function writeHookSettings(sinkDir, { permissionsEnabled }) {
   // poll to /permission. Claude waits for every hook to exit non-zero
   // before running the tool.
   const preToolUseHooks = [
-    { type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/pre-XXXXXX.json)` },
+    { type: 'command', command: `cat > ${sinkDirEsc}/pre-$(uuidgen).json` },
   ]
   if (permissionsEnabled) {
     preToolUseHooks.push({
@@ -93,13 +100,13 @@ function writeHookSettings(sinkDir, { permissionsEnabled }) {
   const settings = {
     hooks: {
       Stop: [
-        { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/stop-XXXXXX.json)` }] },
+        { hooks: [{ type: 'command', command: `cat > ${sinkDirEsc}/stop-$(uuidgen).json` }] },
       ],
       PreToolUse: [
         { hooks: preToolUseHooks },
       ],
       PostToolUse: [
-        { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/post-XXXXXX.json)` }] },
+        { hooks: [{ type: 'command', command: `cat > ${sinkDirEsc}/post-$(uuidgen).json` }] },
       ],
     },
   }
@@ -357,10 +364,20 @@ export class ClaudeTuiSession extends BaseSession {
     const drainHookFiles = () => {
       let entries
       try { entries = readdirSync(this._sinkDir) } catch { return }
-      entries.sort()  // mtime-close on a single turn, lexical fallback
-      for (const name of entries) {
+      // Process prefixes in causal order: pre- (tool_start) MUST fire
+      // before post- (tool_result) so the dashboard can pair them via
+      // toolUseId. Naive lex sort puts "post-…" before "pre-…" because
+      // 'o' < 'r', which surfaced as tool_result-before-tool_start in
+      // the #3902 smoke test. stop- is processed last so we drain any
+      // late-arriving tool files before returning to the caller.
+      const ordered = []
+      for (const prefix of ['pre-', 'post-', 'stop-']) {
+        for (const name of entries.sort()) {
+          if (name.startsWith(prefix)) ordered.push(name)
+        }
+      }
+      for (const name of ordered) {
         if (this._consumedFiles.has(name)) continue
-        if (!name.startsWith('pre-') && !name.startsWith('post-') && !name.startsWith('stop-')) continue
         const full = join(this._sinkDir, name)
         let parsed
         try {

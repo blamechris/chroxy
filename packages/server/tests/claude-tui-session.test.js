@@ -169,7 +169,7 @@ describe('ClaudeTuiSession', () => {
       assert.ok(settings.hooks?.PreToolUse, 'PreToolUse hook present')
       assert.ok(settings.hooks?.PostToolUse, 'PostToolUse hook present')
       const stopCmd = settings.hooks.Stop[0].hooks[0].command
-      assert.match(stopCmd, /mktemp.*stop-XXXXXX\.json/, 'Stop uses mktemp for unique-per-turn names')
+      assert.match(stopCmd, /stop-\$\(uuidgen\)\.json/, 'Stop uses uuidgen for unique-per-turn names (mktemp + .json suffix breaks on BSD macOS)')
     })
 
     it('emits error if PTY exits during warmup', async () => {
