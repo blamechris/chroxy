@@ -445,3 +445,4 @@ Lines marked with `{{CUSTOMIZE}}` need repo-specific adaptation:
 - Issue labels (e.g., `complexity:low`, `testing:medium`, `smoke-test:low`)
 - Review persona references
 - Tech-stack-specific evidence patterns
+<!-- skill-templates: check-pr 1e5962e 2026-05-15 -->

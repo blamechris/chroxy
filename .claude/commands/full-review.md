@@ -76,3 +76,4 @@ Then below the table:
 ## Customization Points
 
 This skill composes agent-review and check-pr. Customize those skills individually per the notes in each template. The only full-review-specific customization is the summary table format, which can be adapted per repo.
+<!-- skill-templates: full-review 1e5962e 2026-05-15 -->
