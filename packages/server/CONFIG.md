@@ -31,7 +31,8 @@ Configuration values are resolved in the following order (highest priority first
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
 | `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
 | `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
-| `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session inactivity safety net in milliseconds. When no SDK / CLI event arrives within this window, the server force-clears busy state and emits a timeout error. See [Inactivity safety net](#inactivity-safety-net) below. Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
+| `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session **soft-warning** inactivity window in milliseconds. When no SDK / CLI event arrives within this window, the server emits an `inactivity_warning` event (#3899) so clients can render a check-in chip and surface a push notification — the session stays alive. The kill path is `hardTimeoutMs` (below). See [Inactivity safety net](#inactivity-safety-net). Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
+| `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server emits `permission_expired` for every outstanding permission prompt, force-clears busy state, and emits a generic `error` event with `"Response timed out after <duration> of inactivity"` (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
 
 ### Prompt evaluator skip heuristic
 
@@ -139,26 +140,39 @@ bad write can't lock every skill out of every session.
 
 ### Inactivity safety net
 
-`resultTimeoutMs` (env var `CHROXY_RESULT_TIMEOUT_MS`) caps how long a session
-may go without any SDK / CLI event before the server force-clears its busy
-state and emits a `result_timeout` error. Default `1800000` (30 min); valid
-range `30000`–`86400000` (30 s – 24 h).
+A session is protected by a two-stage timer pair (#3899, #3901): a soft
+**warning** window followed by a hard **kill** window. Both fire only when
+the server has heard nothing — no stream delta, no tool event, no result —
+from the SDK / CLI for the configured duration.
 
-The legacy value was 5 min (#3749), which proved too aggressive for
-legitimately slow tools (large fetches, long Bash commands, extended
-thinking). Lengthen this if long-running operations frequently hit the timeout;
-shorten it for faster recovery from genuinely stuck sessions.
+| Stage | Key | Env var | Default | Behavior |
+|-------|-----|---------|---------|----------|
+| Soft | `resultTimeoutMs` | `CHROXY_RESULT_TIMEOUT_MS` | `1800000` (30 min) | Emits `inactivity_warning` event + push notification. Session stays alive. Clients render a "check in" chip in the activity indicator. |
+| Hard | `hardTimeoutMs` | `CHROXY_HARD_TIMEOUT_MS` | `7200000` (2 h) | Emits `permission_expired` for every outstanding permission request, force-clears busy state, aborts any in-flight SDK query, and emits a generic `error` event (`"Response timed out after <duration> of inactivity"`). Session must be re-driven by the user. |
 
-Values outside the range emit a warn-only log line during validation — the
-runtime applies whatever was set. The matching WS protocol schema
-(`@chroxy/protocol`) rejects ms-typed fields above 24 h (#3768), so values
-above the ceiling never reach the dashboard / app.
+Both fields share the same range (`30000`–`86400000`, 30 s – 24 h) and the
+same WS schema cap (#3768). Values outside the range emit warn-only log
+lines during validation; the runtime applies whatever was set. The
+validator also warns if `hardTimeoutMs < resultTimeoutMs` — the soft
+warning would never fire before the kill.
 
-While a permission prompt is outstanding the inactivity timer is paused; on
-resolution it re-arms with this same window (#2831, #3757). The configured
-value is broadcast to clients as `resultTimeoutMs` on the `auth_ok` message
-(#3760), letting the dashboard / app `ActivityIndicator` warn the user when
-a turn is approaching the configured timeout.
+The legacy single-timer value was 5 min (#3749), which proved too aggressive
+for legitimately slow tools (large fetches, long Bash commands, extended
+thinking). The split lets operators keep the **warning** noisy (catch
+genuinely stuck sessions early) while leaving the **kill** generous (don't
+murder a 90-minute Bash build).
+
+While a permission prompt is outstanding both timers are paused; on
+resolution they re-arm with their respective windows (#2831, #3757). The
+configured `resultTimeoutMs` is broadcast to clients on the `auth_ok`
+message (#3760), letting the dashboard / app `ActivityIndicator` warn the
+user when a turn is approaching the soft window. The matching
+`inactivity_warning` event payload is `{ messageId, idleMs, prefab }`,
+where `idleMs` is `resultTimeoutMs` and `prefab` is a suggested
+check-in string (`"Status update?"`). Consumed by the dashboard
+check-in chip in #3908 and the mobile chip in #3913. Note that
+`hardTimeoutMs` itself is not currently broadcast to clients (tracked
+in #3905).
 
 ### Provider selection
 
