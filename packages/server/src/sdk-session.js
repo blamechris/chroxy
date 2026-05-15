@@ -105,6 +105,10 @@ export class SdkSession extends BaseSession {
       resume: true,
       terminal: false,
       thinkingLevel: true,
+      // #3932: explicit `streaming` so the capability matrix is uniform across
+      // providers — claude-tui sets this to false (deliver-on-complete), all
+      // others stream incremental deltas via stream_delta during a turn.
+      streaming: true,
       // #3209/#3246: SDK rebuilds systemPrompt.append on every turn
       // (see sdk-session.js#_callQuery), so a runtime toggle of
       // _activeManualSkills + _loadSkills() takes effect on the next
