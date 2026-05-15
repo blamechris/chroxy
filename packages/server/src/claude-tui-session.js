@@ -690,9 +690,11 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._activeTurn) return
     this._activeTurn.aborted = true
     if (this._term) {
-      // Write Ctrl-C as a byte to the PTY rather than killing the process —
-      // claude TUI intercepts it for in-session cancellation.
-      try { this._term.write('') } catch { /* ignore */ }
+      // Write Ctrl-C (0x03) to the PTY rather than killing the process.
+      // Claude TUI intercepts it as "cancel current request, return to
+      // input prompt", so the session stays alive and the next
+      // sendMessage() works normally. Matches _handleHardTimeout.
+      try { this._term.write('\x03') } catch { /* ignore */ }
     }
   }
 
