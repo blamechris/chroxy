@@ -14,6 +14,7 @@ import {
 import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
+import { getProviderInfo } from '../constants/providers';
 import { hapticMedium } from '../utils/haptics';
 
 /** Pulsing dot for busy sessions */
@@ -183,7 +184,13 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
       return;
     }
 
-    const providerLabel = session.provider === 'claude-cli' ? ' (CLI)' : '';
+    // Suffix the alert title with the provider's short label for any
+    // non-default provider (default is claude-sdk). Pre-#3937 this only
+    // covered claude-cli; now it covers claude-tui, codex, gemini, and
+    // any future provider getProviderInfo knows about.
+    const providerLabel = session.provider && session.provider !== 'claude-sdk'
+      ? ` (${getProviderInfo(session.provider).short})`
+      : '';
     Alert.alert(
       session.name + providerLabel,
       `CWD: ${session.cwd}`,
