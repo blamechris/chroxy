@@ -88,6 +88,18 @@ echo "[bundle-server] Pruning Bare-runtime prebuilds (unused under Node.js)..."
 PRUNED_COUNT=$(find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
 echo "[bundle-server] Pruned $PRUNED_COUNT bare-runtime prebuilds dir(s)"
 
+# Prune node-pty's non-darwin prebuilds.
+#
+# node-pty ships prebuilt `.node` binaries for darwin-arm64, darwin-x64,
+# win32-arm64, and win32-x64. The macOS bundle only needs the darwin pair
+# (those are signed by build.rs at Tauri bundle time — see #3902). The
+# win32 prebuilds are dead weight here AND fail the unsigned-native-binary
+# guard below because they're not Mach-O and can't be codesigned. Drop
+# them so the guard can stay tight.
+echo "[bundle-server] Pruning node-pty win32 prebuilds (unused on macOS)..."
+NODE_PTY_PRUNED=$(find "$STAGING/node_modules" -type d -path "*/node-pty/prebuilds/win32-*" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
+echo "[bundle-server] Pruned $NODE_PTY_PRUNED node-pty win32 prebuilds dir(s)"
+
 # Copy workspace packages AFTER npm install (npm wipes node_modules during install).
 # Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
 PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
