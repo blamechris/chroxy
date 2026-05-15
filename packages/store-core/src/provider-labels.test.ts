@@ -61,6 +61,16 @@ describe('getProviderInfo', () => {
     expect(cliInfo.type).toBe('cli')
     expect(cliInfo.tooltip).toContain('claude.ai')
 
+    // #3932: claude-tui must not regress to the generic external-provider
+    // fallback (short='CLAUDE-TUI', type='other'). Pin the canonical metadata.
+    const tuiInfo = getProviderInfo('claude-tui')
+    expect(tuiInfo.short).toBe('TUI')
+    expect(tuiInfo.label).toBe('Claude Code (TUI)')
+    expect(tuiInfo.type).toBe('cli')
+    expect(tuiInfo.tooltip).toContain('PTY')
+    expect(tuiInfo.tooltip).toContain('claude.ai')
+    expect(tuiInfo.tooltip).toContain('subscription')
+
     const geminiInfo = getProviderInfo('gemini')
     expect(geminiInfo.short).toBe('Gemini')
     expect(geminiInfo.type).toBe('other')
