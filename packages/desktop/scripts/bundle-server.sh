@@ -50,14 +50,18 @@ fi
 cp "$SERVER_DIR/hooks/permission-hook.sh" "$STAGING/hooks/permission-hook.sh"
 chmod +x "$STAGING/hooks/permission-hook.sh"
 
-# Remove workspace deps from package.json before npm install
-# (workspace packages are copied into node_modules AFTER npm install)
+# Remove workspace deps and postinstall script from package.json before
+# npm install. The postinstall (fix-node-pty-helper.js) lives under
+# packages/server/scripts/ which we don't stage — and we don't need it
+# anyway because build.rs handles node-pty chmod + codesign at Tauri
+# bundle time (#3902).
 cd "$STAGING"
 node -e "
 const pkg = require('./package.json');
 for (const key of Object.keys(pkg.dependencies || {})) {
   if (key.startsWith('@chroxy/')) delete pkg.dependencies[key];
 }
+if (pkg.scripts) delete pkg.scripts.postinstall;
 require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 
