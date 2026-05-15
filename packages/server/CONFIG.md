@@ -32,7 +32,7 @@ Configuration values are resolved in the following order (highest priority first
 | `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
 | `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
 | `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session **soft-warning** inactivity window in milliseconds. When no SDK / CLI event arrives within this window, the server emits an `inactivity_warning` event (#3899) so clients can render a check-in chip and surface a push notification — the session stays alive. The kill path is `hardTimeoutMs` (below). See [Inactivity safety net](#inactivity-safety-net). Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
-| `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server force-clears busy state, auto-denies any pending permission prompt, and emits a `result_timeout` error (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
+| `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server emits `permission_expired` for every outstanding permission prompt, force-clears busy state, and emits a generic `error` event with `"Response timed out after <duration> of inactivity"` (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
 
 ### Prompt evaluator skip heuristic
 
@@ -148,7 +148,7 @@ from the SDK / CLI for the configured duration.
 | Stage | Key | Env var | Default | Behavior |
 |-------|-----|---------|---------|----------|
 | Soft | `resultTimeoutMs` | `CHROXY_RESULT_TIMEOUT_MS` | `1800000` (30 min) | Emits `inactivity_warning` event + push notification. Session stays alive. Clients render a "check in" chip in the activity indicator. |
-| Hard | `hardTimeoutMs` | `CHROXY_HARD_TIMEOUT_MS` | `7200000` (2 h) | Force-clears busy state, auto-denies any pending permission prompt, emits `result_timeout` error. Session must be re-driven by the user. |
+| Hard | `hardTimeoutMs` | `CHROXY_HARD_TIMEOUT_MS` | `7200000` (2 h) | Emits `permission_expired` for every outstanding permission request, force-clears busy state, aborts any in-flight SDK query, and emits a generic `error` event (`"Response timed out after <duration> of inactivity"`). Session must be re-driven by the user. |
 
 Both fields share the same range (`30000`–`86400000`, 30 s – 24 h) and the
 same WS schema cap (#3768). Values outside the range emit warn-only log
@@ -167,9 +167,12 @@ resolution they re-arm with their respective windows (#2831, #3757). The
 configured `resultTimeoutMs` is broadcast to clients on the `auth_ok`
 message (#3760), letting the dashboard / app `ActivityIndicator` warn the
 user when a turn is approaching the soft window. The matching
-`inactivity_warning` event includes `expiresAt` so clients can render a
-countdown to the hard kill (consumed by the dashboard check-in chip in
-#3908 and the mobile chip in #3913).
+`inactivity_warning` event payload is `{ messageId, idleMs, prefab }`,
+where `idleMs` is `resultTimeoutMs` and `prefab` is a suggested
+check-in string (`"Status update?"`). Consumed by the dashboard
+check-in chip in #3908 and the mobile chip in #3913. Note that
+`hardTimeoutMs` itself is not currently broadcast to clients (tracked
+in #3905).
 
 ### Provider selection
 
