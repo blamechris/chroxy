@@ -232,6 +232,30 @@ cd packages/desktop
 cargo tauri dev
 ```
 
+The `cargo install` step assumes you already have a Rust toolchain. macOS users typically pick one up with Xcode CLI tools. On a clean Linux box you'll need `rustup` plus a few system libraries Tauri links against — see the next section.
+
+### Desktop App — Linux prerequisites
+
+A clean Debian / Ubuntu install is missing both Rust and Tauri's GTK/WebKit deps. Run this once before the `cargo install tauri-cli` step above:
+
+```bash
+# 1. Rust toolchain (installs cargo + rustc into ~/.cargo/bin)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# 2. Tauri's required system libraries
+# (Debian/Ubuntu — Fedora/Arch package names differ; see Tauri docs link below)
+sudo apt update
+sudo apt install -y \
+  build-essential curl wget file libssl-dev libxdo-dev \
+  libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+  libayatana-appindicator3-dev
+```
+
+Then continue with `cargo install tauri-cli --version "^2"` (or `cargo binstall` for prebuilts) and `cargo tauri dev` from the section above.
+
+For other distros (Fedora, Arch, NixOS) see Tauri's prerequisites guide: https://v2.tauri.app/start/prerequisites/
+
 ## Running on Windows
 
 The server runs on Windows natively — `platform.js`, `supervisor.js`, and `service.js` already handle Windows code paths. The Tauri desktop app ships as a pre-built MSI from the `desktop-windows` release job (attached to each GitHub Release); see the build-from-source instructions below if you want to compile locally.
