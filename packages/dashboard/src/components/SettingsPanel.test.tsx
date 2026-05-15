@@ -259,20 +259,27 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const legend = screen.getByLabelText('Color legend')
       expect(legend).toBeInTheDocument()
-      expect(legend).toHaveTextContent('Subscription / login')
-      expect(legend).toHaveTextContent('API key')
-      expect(legend).toHaveTextContent('Not configured')
-      // #3690: source='none' is a 4-valued protocol enum case (provider w/o
-      // preflight.credentials block), so the legend has a 4th row for it.
-      expect(legend).toHaveTextContent('Custom provider')
-
-      // #3690: assert swatch data-tone parity with the protocol enum so a
-      // future copy/paste swap of swatch attrs can't silently regress
-      // visual/legend alignment.
-      expect(legend.querySelector('[data-tone="oauth"]')).toBeInTheDocument()
-      expect(legend.querySelector('[data-tone="env"]')).toBeInTheDocument()
-      expect(legend.querySelector('[data-tone="missing"]')).toBeInTheDocument()
-      expect(legend.querySelector('[data-tone="none"]')).toBeInTheDocument()
+      // #3690: the legend has 4 rows — one per protocol auth.source value
+      // ('env' | 'oauth' | 'none') plus the derived UI-side 'missing' tone
+      // we paint when ready=false. Each row pairs a label with a swatch
+      // whose data-tone must match: assert per-row label-to-tone parity so
+      // a copy/paste swap between swatches can't silently regress legend
+      // alignment.
+      const expectedRows: Array<[string, string]> = [
+        ['Subscription / login', 'oauth'],
+        ['API key', 'env'],
+        ['Not configured', 'missing'],
+        ['Custom provider', 'none'],
+      ]
+      const items = Array.from(legend.querySelectorAll('li'))
+      expect(items.length).toBe(expectedRows.length)
+      for (const [label, tone] of expectedRows) {
+        const item = items.find(li => li.textContent?.includes(label))
+        expect(item, `legend row labelled "${label}" not found`).toBeDefined()
+        const swatch = item!.querySelector('.auth-status-swatch')
+        expect(swatch, `legend row "${label}" missing swatch`).toBeTruthy()
+        expect(swatch).toHaveAttribute('data-tone', tone)
+      }
     })
 
     it('hides the decorative legend swatches from screen readers', () => {
