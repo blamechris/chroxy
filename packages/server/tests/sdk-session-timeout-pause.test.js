@@ -262,4 +262,176 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       }
     })
   })
+
+  // #3899: SOFT inactivity warning is the new pre-kill prompt — fires at
+  // `resultTimeoutMs` (default 30 min), emits an `inactivity_warning`
+  // event WITHOUT clearing busy state or pending permissions. The HARD
+  // cap (`hardTimeoutMs`, default 2h) is the existing kill path. The
+  // pause/resume tests above all pin both timeouts to the same window
+  // (via createSession's default) so the error fires at the same tick
+  // as the soft warning — these tests pin the soft-vs-hard distinction
+  // explicitly by using different windows. Parity with the cli-session
+  // suite (#3906) — the SDK's two-timer closure in `_iterateSdkQuery`
+  // is structurally identical to CLI but functionally different
+  // (closure-captured messageId, explicit hasStreamStarted flag,
+  // ref-counted pause/resume), so coverage must live here too.
+  describe('soft inactivity warning + hard cap (#3899)', () => {
+    const SOFT = 60_000
+    const HARD = 3 * 60_000
+
+    function createReadySdkSession(opts = {}) {
+      const s = new SdkSession({ cwd: '/tmp', resultTimeoutMs: SOFT, hardTimeoutMs: HARD, ...opts })
+      s._processReady = true
+      s._isBusy = true
+      s._currentMessageId = 'msg-soft-hard'
+      return s
+    }
+
+    it('soft warning fires at resultTimeoutMs WITHOUT clearing busy state', () => {
+      const s = createReadySdkSession()
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-soft-hard', false)
+
+        mock.timers.tick(SOFT - 1)
+        assert.equal(warnings.length, 0, 'soft must not fire 1ms before window')
+
+        mock.timers.tick(1)
+        assert.equal(warnings.length, 1, 'soft fires at exactly resultTimeoutMs')
+        assert.equal(warnings[0].prefab, 'Status update?')
+        assert.equal(warnings[0].idleMs, SOFT)
+        assert.equal(warnings[0].messageId, 'msg-soft-hard')
+        assert.equal(s._isBusy, true, 'session stays busy after soft warning')
+        assert.equal(errors.length, 0, 'no error emitted on soft warning')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('hard cap fires at hardTimeoutMs and clears state (pre-#3899 behavior preserved)', () => {
+      const s = createReadySdkSession()
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-soft-hard', false)
+
+        // Soft fires at SOFT, then the hard fires at HARD with no
+        // activity in between. Verify the hard didn't fire early.
+        mock.timers.tick(HARD - 1)
+        assert.equal(warnings.length, 1, 'soft fired in the middle')
+        assert.equal(errors.length, 0, 'hard not yet')
+
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'hard fires at exactly hardTimeoutMs')
+        assert.match(errors[0].message, /timed out/)
+        assert.equal(s._isBusy, false, 'busy state cleared by hard')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('activity in the silent stretch resets BOTH soft and hard', () => {
+      const s = createReadySdkSession()
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        // Initial arm: soft@SOFT, hard@HARD. Re-arm at SOFT-1000 to
+        // mimic a mid-stream SDK event resetting both timers — new
+        // timers anchor at the re-arm moment, so the new hard is at
+        // SOFT-1000+HARD (well after the original hard@HARD).
+        armResultTimeoutForTest(s, 'msg-soft-hard', false)
+        mock.timers.tick(SOFT - 1_000)
+        armResultTimeoutForTest(s, 'msg-soft-hard', true)
+
+        // Re-arm anchor: t=SOFT-1000=59000.
+        // Tick to the new SOFT window → new soft at t=119000.
+        mock.timers.tick(SOFT - 1)
+        assert.equal(warnings.length, 0, 'soft must not fire — activity reset the timer')
+
+        mock.timers.tick(1)
+        assert.equal(warnings.length, 1, 'soft fires at SOFT ms after the activity, not original arm')
+        assert.equal(errors.length, 0, 'still no error — hard has not fired yet')
+
+        // Critical: prove the ORIGINAL hard was cleared. Original hard
+        // would have fired at t=HARD=180000 (60s past current t=119000).
+        // Tick to just before the NEW hard would fire (re-arm + HARD =
+        // t=239000) and assert no error has been emitted — that
+        // implies the original hard timer was cleared on re-arm. Without
+        // this, a regression where re-arm forgot to clear the hard
+        // timer would still pass this test.
+        mock.timers.tick(HARD - SOFT - 1)
+        assert.equal(errors.length, 0, 'original hard at t=180000 was cleared — only the re-armed hard at t=239000 is live')
+
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'new hard fires at re-arm+HARD, not original arm+HARD')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('permission pause clears BOTH timers; resume re-arms both', () => {
+      const s = createReadySdkSession()
+      const warnings = []
+      const errors = []
+      s.on('inactivity_warning', (d) => warnings.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-soft-hard', false)
+
+        // SDK's permission pause goes through the ref-counted
+        // `_pauseResultTimeoutForPermission` / `_resumeResultTimeoutForPermission`
+        // helpers (#2831, extended to clear both timers in #3899).
+        s._pauseResultTimeoutForPermission()
+        assert.equal(s._resultTimeout, null, 'soft cleared on pause')
+        assert.equal(s._hardTimeout, null, 'hard cleared on pause')
+
+        // Long pause — neither fires.
+        mock.timers.tick(HARD * 2)
+        assert.equal(warnings.length, 0)
+        assert.equal(errors.length, 0)
+
+        s._resumeResultTimeoutForPermission()
+        // After resume both timers are re-armed fresh from the moment
+        // of resolution: soft fires at SOFT, hard at HARD.
+        mock.timers.tick(SOFT)
+        assert.equal(warnings.length, 1, 'soft re-armed and fired')
+        assert.equal(errors.length, 0)
+
+        mock.timers.tick(HARD - SOFT)
+        assert.equal(errors.length, 1, 'hard re-armed and fired')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    // _handleHardTimeout's hasStreamStarted flag controls whether a
+    // `stream_end` event is emitted before the error — important so
+    // clients clean up streaming UI on timeout. The flag is SDK-specific
+    // (CLI uses a different stream lifecycle) so it must be covered
+    // here, not just on the cli-session side.
+    it('hard timeout with hasStreamStarted=true emits stream_end before error', () => {
+      const s = createReadySdkSession()
+      const streamEnds = []
+      const errors = []
+      s.on('stream_end', (d) => streamEnds.push(d))
+      s.on('error', (d) => errors.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-soft-hard', true)
+        mock.timers.tick(HARD)
+        assert.equal(streamEnds.length, 1, 'stream_end emitted because hasStreamStarted=true')
+        assert.equal(streamEnds[0].messageId, 'msg-soft-hard', 'stream_end carries the captured messageId')
+        assert.equal(errors.length, 1, 'error emitted after stream_end')
+        assert.match(errors[0].message, /timed out/)
+      } finally {
+        s.destroy()
+      }
+    })
+  })
 })
