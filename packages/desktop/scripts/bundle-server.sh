@@ -88,6 +88,25 @@ echo "[bundle-server] Pruning Bare-runtime prebuilds (unused under Node.js)..."
 PRUNED_COUNT=$(find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
 echo "[bundle-server] Pruned $PRUNED_COUNT bare-runtime prebuilds dir(s)"
 
+# Prune node-pty's foreign-platform prebuilds (macOS host only).
+#
+# node-pty ships prebuilt `.node` binaries for darwin-arm64, darwin-x64,
+# win32-arm64, and win32-x64. On a macOS host build only the darwin pair
+# is needed — they're signed by build.rs at Tauri bundle time (#3902).
+# The win32 prebuilds are dead weight here AND fail the unsigned-native-
+# binary guard below because they're PE binaries, not Mach-O, so they
+# can't be codesigned and the guard correctly rejects them.
+#
+# This prune MUST be macOS-only — the Windows release job runs the same
+# script via Git Bash (see desktop-windows in .github/workflows/release.yml
+# → tauri.conf.json `beforeBuildCommand` → before-build.sh → bundle-server.sh)
+# and needs the win32 prebuilds to actually ship inside the MSI bundle.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo "[bundle-server] Pruning node-pty win32 prebuilds (macOS host — unused)..."
+  NODE_PTY_PRUNED=$(find "$STAGING/node_modules" -type d -path "*/node-pty/prebuilds/win32-*" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
+  echo "[bundle-server] Pruned $NODE_PTY_PRUNED node-pty win32 prebuilds dir(s)"
+fi
+
 # Copy workspace packages AFTER npm install (npm wipes node_modules during install).
 # Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
 PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
@@ -134,6 +153,18 @@ fi
 # build.rs at Tauri bundle time. The guard would otherwise reject them.
 # spawn-helper is extensionless Mach-O (not matched by the suffix patterns
 # below anyway); pty.node IS matched and must be whitelisted explicitly.
+# macOS host only: Apple notarization is the only place this guard
+# matters. The Windows release job runs the same script via Git Bash
+# and would otherwise trip on node-pty's win32 .node prebuilds (which
+# are required for the MSI bundle, not unsigned-Mach-O).
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "[bundle-server] Skipping unsigned-native-binary guard (non-Darwin host)."
+  echo "[bundle-server] Bundle complete."
+  du -sh "$STAGING" 2>/dev/null || true
+  du -sh "$STAGING/node_modules" 2>/dev/null || true
+  exit 0
+fi
+
 echo "[bundle-server] Verifying no unsigned native binaries remain..."
 NATIVE_BIN_FILES=$(find "$STAGING/node_modules" \
   -path "*/node-pty/prebuilds/darwin-*" -prune -o \
