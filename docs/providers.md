@@ -126,6 +126,53 @@ OPENAI_API_KEY=sk-... npx chroxy start --provider codex
 - **No conversation memory**: Codex sessions do not carry state between messages. Each `sendMessage` is a fresh `codex exec`. See "Known limits".
 - **Model flag format**: Chroxy passes `-c 'model="<id>"'` to Codex — changing `this.model` takes effect on the next message (no process to restart).
 
+### Sandbox & write surfaces
+
+Codex sessions default to `--sandbox workspace-write` (#3846). Per the
+Codex source policy (`codex-rs/protocol/src/permissions.rs::workspace_write`
+in `openai/codex`), that policy permits the model to write to **four
+distinct surfaces** — not just the session cwd:
+
+1. **The session `cwd` / `project_roots`** — the directory you picked
+   when starting the session. Bounded by Chroxy's `validateCwdAllowed`
+   workspace allowlist (see
+   [`handler-utils.js:259-320`](../packages/server/src/handler-utils.js#L259-L320)).
+   The policy itself also appends read-only protections for `.git`,
+   `.agents`, and `.codex` under this root.
+2. **`/tmp`** — the system temp root. On macOS `/tmp` is a symlink to
+   `/private/tmp`, and the Seatbelt profile also grants `/var/tmp` and
+   `/private/var/tmp`. Override via `sandbox_workspace_write.exclude_slash_tmp`.
+3. **`$TMPDIR`** — the per-process temp directory, resolved by the
+   spawned `codex` process (may differ from Chroxy's environment).
+   Override via `sandbox_workspace_write.exclude_tmpdir_env_var`.
+4. **`writable_roots` / `--add-dir`** — user-supplied additional
+   writable roots, set in Codex's own config
+   (`~/.codex/config.toml`'s `[sandbox_workspace_write] writable_roots = [...]`)
+   or via the `--add-dir` CLI flag. The spawned `codex` process loads
+   its user config unless `--ignore-user-config` is passed — Chroxy
+   does **not** pass that flag today, so this surface can be silently
+   broadened by the operator's Codex config.
+
+Items 2–4 mean "the workspace" is **broader than the chroxy session
+cwd**. Chroxy's session-trust gate only constrains item 1. If you need
+a hard read-only session, the per-session sandbox selector tracked in
+#3837 is the user-facing override — until that lands, set
+`CHROXY_CODEX_SANDBOX=read-only` server-wide (planned in #3847).
+
+Separately, Codex maintains an internal memory store at
+`$HOME/.codex/memories`. This is written by Codex's own in-process
+memory tooling, **not** by the sandboxed shell/exec policy above —
+`--sandbox` does not constrain it, and Chroxy has no mechanism to gate
+it. If a Chroxy operator wants to disable persistent cross-session
+memory entirely, that has to happen in Codex's own config.
+
+Source: the `workspace_write` policy in `openai/codex`
+[`codex-rs/protocol/src/permissions.rs`](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/permissions.rs).
+The public Codex config reference at developers.openai.com/codex
+documents the override keys (`exclude_slash_tmp`, `exclude_tmpdir_env_var`,
+`writable_roots`) but not the full default policy — re-verify against
+the source if Codex versions change.
+
 ## Gemini
 
 Google Gemini CLI.
