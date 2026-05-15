@@ -229,7 +229,6 @@ describe('ClaudeTuiSession', () => {
   describe('destroy()', () => {
     it('kills the persistent PTY and clears state', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      // Simulate started state with a fake term.
       let killed = false
       session._processReady = true
       session._term = {
@@ -243,6 +242,85 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._destroying, true)
       assert.equal(session._processReady, false)
       assert.equal(session._isBusy, false)
+    })
+
+    it('removes the sink dir to avoid /tmp leak (#3918)', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-'))
+      writeFileSync(join(sinkDir, 'stop-abc.json'), '{}')
+
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sinkDir = sinkDir
+      session._processReady = true
+
+      await session.destroy()
+
+      assert.equal(existsSync(sinkDir), false, 'sink dir removed on destroy')
+      assert.equal(session._sinkDir, null, 'reference cleared')
+    })
+  })
+
+  describe('inactivity timer (#3920)', () => {
+    it('emits inactivity_warning after _resultTimeoutMs of silence', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 25, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-7'
+
+      let warning = null
+      session.on('inactivity_warning', (e) => { warning = e })
+
+      session._armResultTimeout()
+      await new Promise((r) => setTimeout(r, 60))
+
+      assert.ok(warning, 'warning fired')
+      assert.equal(warning.messageId, 'msg-7')
+      assert.equal(warning.idleMs, 25)
+      assert.equal(warning.prefab, 'Status update?')
+    })
+
+    it('hard timeout force-clears busy state + emits error', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-9'
+      session._term = { write: () => {}, kill: () => {} }
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      session._armResultTimeout()
+      await new Promise((r) => setTimeout(r, 60))
+
+      assert.equal(session._isBusy, false, 'force-cleared')
+      assert.equal(errors.length, 1)
+      assert.match(errors[0].message, /timed out/)
+    })
+  })
+
+  describe('PTY output ring buffer (#3919)', () => {
+    it('keeps a tail of recent output with ANSI stripped', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      // Simulate the onData handler by writing to _outputTail directly.
+      const stripped = 'plain text'.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      session._outputTail = (session._outputTail + '\x1b[31mplain text\x1b[0m').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      assert.equal(session._outputTail, stripped)
+    })
+
+    it('_outputTailDiagnostic returns empty when no output captured', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(session._outputTailDiagnostic(), '')
+    })
+
+    it('_outputTailDiagnostic collapses whitespace + returns last bytes', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = '   rate-limit exceeded  \n\n\nretry  in  60s   '
+      const tail = session._outputTailDiagnostic()
+      assert.match(tail, /rate-limit exceeded/)
+      assert.match(tail, /retry in 60s/, 'multi-space collapsed')
     })
   })
 

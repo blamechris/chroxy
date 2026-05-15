@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -7,6 +7,7 @@ import { BaseSession } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger } from './logger.js'
+import { formatIdleDuration } from './session-timeout-manager.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -224,7 +225,17 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null  // { messageId, startedAt, aborted, synthSeq }
     this._ptyExited = false
     this._ptyExitInfo = null
+    // Ring buffer of recent PTY output bytes — surfaces in error
+    // messages when the TUI renders a diagnostic (rate-limit, auth
+    // failure, "switch back to API mode") that would otherwise be
+    // silently dropped (#3919). Kept small (~4KB) so it doesn't eat
+    // memory on long sessions.
+    this._outputTail = ''
   }
+
+  // Tail length to keep + length to include in error diagnostics.
+  static get PTY_TAIL_BYTES() { return 4096 }
+  static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
 
   get sessionId() {
     return this._sessionId
@@ -307,7 +318,22 @@ export class ClaudeTuiSession extends BaseSession {
       // disagreeing with the actual model the TUI booted on (#3921).
       args.push('--model', this.model)
     }
-    log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled})`)
+    // Inject the append-bucket skills text via --append-system-prompt at
+    // spawn time so the TUI sees it as part of the system prompt — same
+    // channel CliSession uses (#3917). The prepend bucket would need to
+    // ride on the first user message instead, but writing multi-line text
+    // to a PTY input box prematurely-submits on every embedded \n, so
+    // we route the prepend bucket through the same system-prompt channel
+    // here. Semantically not identical to CliSession's split (prepend goes
+    // to user message there), but functionally correct for the MVP and
+    // avoids the PTY newline problem.
+    const skillsPrefix = (typeof this._buildCombinedSkillsPrefix === 'function')
+      ? this._buildCombinedSkillsPrefix()
+      : ''
+    if (skillsPrefix) {
+      args.push('--append-system-prompt', skillsPrefix)
+    }
+    log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled} skills=${skillsPrefix ? skillsPrefix.length + 'b' : 'none'})`)
 
     try {
       this._term = ptyMod.spawn(CLAUDE, args, {
@@ -322,7 +348,14 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
 
-    this._term.onData(() => { /* drain & discard */ })
+    this._term.onData((data) => {
+      // Keep a tail of recent output so we can surface diagnostics when
+      // the TUI renders an error inline (#3919). Strip ANSI escape
+      // sequences before storing so the saved tail is readable; we
+      // don't visual-render the PTY, so the colors aren't useful.
+      const stripped = String(data).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      this._outputTail = (this._outputTail + stripped).slice(-ClaudeTuiSession.PTY_TAIL_BYTES)
+    })
     this._term.onExit((info) => {
       this._ptyExited = true
       this._ptyExitInfo = info
@@ -341,7 +374,9 @@ export class ClaudeTuiSession extends BaseSession {
       // mid-turn" error instead, so the dashboard sees one root cause
       // not two.
       if (!hadActiveTurn) {
-        this.emit('error', { message: `Claude PTY exited (code=${info?.exitCode})` })
+        const tail = this._outputTailDiagnostic()
+        const base = `Claude PTY exited (code=${info?.exitCode})`
+        this.emit('error', { message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
       }
     })
 
@@ -377,6 +412,13 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
 
+    // Arm soft + hard inactivity timers (#3920). Each new hook file the
+    // poll loop drains re-arms both, so a long turn that's making
+    // progress (tool calls firing, intermediate hooks) never trips them.
+    // Soft fires once per silent stretch → inactivity_warning;
+    // hard fires after the full window of silence → force-clear + error.
+    this._armResultTimeout()
+
     // Poll the sink dir for new hook files. mktemp-named filenames make each
     // turn's Stop / Pre / Post events distinct from previous turns'; the
     // session-level _consumedFiles Set ensures we never re-process a file
@@ -388,6 +430,7 @@ export class ClaudeTuiSession extends BaseSession {
     const drainHookFiles = () => {
       let entries
       try { entries = readdirSync(this._sinkDir) } catch { return }
+      const sizeBefore = this._consumedFiles.size
       // Process prefixes in causal order: pre- (tool_start) MUST fire
       // before post- (tool_result) so the dashboard can pair them via
       // toolUseId. Naive lex sort puts "post-…" before "pre-…" because
@@ -421,11 +464,19 @@ export class ClaudeTuiSession extends BaseSession {
           log.warn(`tool hook emit failed: ${err.message}`)
         }
       }
+      // Any new hook file = progress evidence. Re-arm timers so a turn
+      // that's actively producing tool events doesn't trip the soft
+      // inactivity warning (#3920).
+      if (this._consumedFiles.size > sizeBefore && this._isBusy) {
+        this._armResultTimeout()
+      }
     }
 
     while (Date.now() - pollStart < HOOK_TIMEOUT_MS) {
       if (this._activeTurn?.aborted) break
       if (this._ptyExited) break
+      // _handleHardTimeout clears _isBusy; bail out cleanly if it fired.
+      if (!this._isBusy) break
       drainHookFiles()
       if (stopPayload) break
       await new Promise((r) => setTimeout(r, 150))
@@ -439,10 +490,15 @@ export class ClaudeTuiSession extends BaseSession {
         const code = this._ptyExitInfo?.exitCode
         const signal = this._ptyExitInfo?.signal
         reason = `Claude PTY exited mid-turn (code=${code}${signal ? ` signal=${signal}` : ''})`
+      } else if (!this._isBusy) {
+        // _handleHardTimeout already cleared state + emitted its own
+        // error. Just return without double-firing.
+        return
       } else {
         reason = `Stop hook timeout after ${Math.round((Date.now() - pollStart) / 1000)}s`
       }
-      this._finishTurnError(reason)
+      const tail = this._outputTailDiagnostic()
+      this._finishTurnError(tail ? `${reason}\nTUI output tail:\n${tail}` : reason)
       return
     }
 
@@ -462,6 +518,9 @@ export class ClaudeTuiSession extends BaseSession {
       sessionId: this._sessionId,
     })
 
+    // Clear inactivity timers — turn done, nothing to backstop (#3920).
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
@@ -539,10 +598,86 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   _finishTurnError(message) {
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     this.emit('error', { message })
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+  }
+
+  /**
+   * Return the tail of recent PTY output suitable for inclusion in an
+   * error message, or '' when there's nothing useful. Collapses
+   * whitespace runs so the diagnostic is compact (#3919).
+   */
+  _outputTailDiagnostic() {
+    if (!this._outputTail) return ''
+    const trimmed = this._outputTail
+      .slice(-ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
+      .replace(/[\r\n]+/g, '\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim()
+    return trimmed
+  }
+
+  /**
+   * Arm (or re-arm) the soft + hard inactivity timers (#3920).
+   *
+   * Soft: fires `inactivity_warning` after _resultTimeoutMs of silence.
+   * Session stays alive — the dashboard renders a check-in chip.
+   *
+   * Hard: force-clears busy state + emits `error` after _hardTimeoutMs.
+   * Last-resort kill path for sessions that are genuinely stuck.
+   *
+   * Both are cleared+re-armed on each call, so any progress signal
+   * (new hook file processed) resets both windows. Mirrors
+   * `CliSession._armResultTimeout()`.
+   */
+  _armResultTimeout() {
+    if (this._resultTimeout) clearTimeout(this._resultTimeout)
+    if (this._hardTimeout) clearTimeout(this._hardTimeout)
+    this._resultTimeout = null
+    this._hardTimeout = null
+    this._resultTimeout = setTimeout(() => {
+      this._resultTimeout = null
+      this._handleInactivityWarning()
+    }, this._resultTimeoutMs)
+    this._hardTimeout = setTimeout(() => {
+      this._hardTimeout = null
+      this._handleHardTimeout()
+    }, this._hardTimeoutMs)
+  }
+
+  _handleInactivityWarning() {
+    if (!this._isBusy) return
+    const idleMs = this._resultTimeoutMs
+    const friendly = formatIdleDuration(idleMs)
+    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    this.emit('inactivity_warning', {
+      messageId: this._currentMessageId,
+      idleMs,
+      prefab: 'Status update?',
+    })
+  }
+
+  _handleHardTimeout() {
+    if (!this._isBusy) return
+    const friendly = formatIdleDuration(this._hardTimeoutMs)
+    log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
+    const messageId = this._currentMessageId
+    // Best-effort interrupt the running TUI turn (Ctrl-C). Doesn't
+    // kill the PTY — claude TUI cancels the in-flight request and
+    // returns to the prompt. _isBusy=false below lets the next
+    // sendMessage proceed normally.
+    if (this._term) {
+      try { this._term.write('\x03') } catch { /* ignore */ }
+    }
+    this.emit('stream_end', { messageId })
+    this._activeTurn = null
+    this._isBusy = false
+    this._currentMessageId = null
+    this.emit('error', { message: `Response timed out after ${friendly}` })
   }
 
   /**
@@ -566,10 +701,21 @@ export class ClaudeTuiSession extends BaseSession {
     this._processReady = false
     this._isBusy = false
     this._activeTurn = null
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._term) {
       try { this._term.kill('SIGTERM') } catch { /* already dead */ }
       this._term = null
     }
+    // Clean up the per-session sink dir so we don't leak hook payload
+    // files under /tmp (#3918). One file per turn (stop) plus 2 per
+    // tool call (pre + post) accumulate fast on long-running sessions.
+    if (this._sinkDir) {
+      try { rmSync(this._sinkDir, { recursive: true, force: true }) }
+      catch (err) { log.warn(`sink dir cleanup failed: ${err.message}`) }
+      this._sinkDir = null
+    }
+    this._consumedFiles.clear()
     this._clearMessageState()
   }
 }
