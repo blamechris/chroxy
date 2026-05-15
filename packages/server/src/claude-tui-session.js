@@ -59,16 +59,20 @@ function ensureCwdTrusted(cwd) {
 }
 
 // Build a settings.json that registers Stop + tool hooks. Claude pipes the
-// hook event JSON to the command's stdin. Per-event:
-//   Stop         → single file at <sink>/stop-<turn>.json (final response)
-//   PreToolUse   → unique file matching <sink>/pre-XXXXXX.json (one per tool)
-//   PostToolUse  → unique file matching <sink>/post-XXXXXX.json (one per tool)
+// hook event JSON to the command's stdin. Per-event filename pattern:
+//   Stop         → <sink>/stop-XXXXXX.json   (one per turn)
+//   PreToolUse   → <sink>/pre-XXXXXX.json    (one per tool call)
+//   PostToolUse  → <sink>/post-XXXXXX.json   (one per tool call)
 //
-// `mktemp` gives us atomic unique names cross-platform (BSD + GNU). The
-// session's poller scans the sink dir for new pre-/post- files in arrival
-// order so PreToolUse → tool_start and PostToolUse → tool_result events fire
-// in sequence.
-function writeHookSettings(sinkDir, stopPayloadPath, { permissionsEnabled }) {
+// `mktemp` gives us atomic unique names cross-platform (BSD + GNU). Each
+// turn's poller scans the sink for files it hasn't yet consumed — so a
+// persistent PTY can fire 1..N Stop events across the session lifetime
+// and each turn picks up only its own.
+//
+// This is written ONCE per session at start() — the same settings.json is
+// reused across every turn, so changing it mid-session has no effect
+// (claude reads it at spawn time).
+function writeHookSettings(sinkDir, { permissionsEnabled }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // PreToolUse runs ALL registered hooks in order. We always capture the
@@ -89,7 +93,7 @@ function writeHookSettings(sinkDir, stopPayloadPath, { permissionsEnabled }) {
   const settings = {
     hooks: {
       Stop: [
-        { hooks: [{ type: 'command', command: `cat > ${JSON.stringify(stopPayloadPath)}` }] },
+        { hooks: [{ type: 'command', command: `cat > $(mktemp ${sinkDirEsc}/stop-XXXXXX.json)` }] },
       ],
       PreToolUse: [
         { hooks: preToolUseHooks },
@@ -109,10 +113,10 @@ function writeHookSettings(sinkDir, stopPayloadPath, { permissionsEnabled }) {
  * the Agent SDK are meter-shifted to programmatic pricing starting 2026-06-15;
  * the TUI path is untouched). #3902.
  *
- * MVP shape — one PTY spawn per turn, deliver-on-complete (no streaming).
- * The Stop hook payload includes `last_assistant_message`; the dashboard
- * receives stream_start + stream_delta(full text) + stream_end + result in a
- * single tick after the Stop hook fires.
+ * Persistent-process shape — start() spawns ONE PTY (paying ~3.5s warmup
+ * once), then every sendMessage() writes the next prompt to the same PTY
+ * and reads its Stop hook payload. destroy() kills the PTY.
+ * Deliver-on-complete only (no incremental streaming).
  *
  * Events emitted:
  *   ready         { sessionId, model, tools }
@@ -120,6 +124,8 @@ function writeHookSettings(sinkDir, stopPayloadPath, { permissionsEnabled }) {
  *   stream_delta  { messageId, delta }
  *   stream_end    { messageId }
  *   result        { cost, duration, usage, sessionId }
+ *   tool_start    { messageId, toolUseId, tool, input }
+ *   tool_result   { toolUseId, result, truncated }
  *   error         { message }
  */
 export class ClaudeTuiSession extends BaseSession {
@@ -197,9 +203,14 @@ export class ClaudeTuiSession extends BaseSession {
     // `entry.session._hookSecret` duck-typed). Mirrors the same name CliSession
     // uses so the existing permission HTTP route routes us with no changes.
     this._hookSecret = this._port ? randomBytes(32).toString('hex') : null
-    this._sessionId = null  // assigned on first sendMessage
-    this._sinkDir = null    // created on start, removed on destroy
-    this._activeTurn = null // { uuid, ptyTerm, payloadPath, abort }
+    this._sessionId = null   // upstream claude conversation uuid, assigned at start()
+    this._sinkDir = null     // created on start, removed on destroy
+    this._term = null        // persistent PTY for the session's lifetime
+    this._settingsPath = null
+    this._consumedFiles = new Set()  // hook payload filenames already processed
+    this._activeTurn = null  // { messageId, startedAt, aborted, synthSeq }
+    this._ptyExited = false
+    this._ptyExitInfo = null
   }
 
   get sessionId() {
@@ -220,37 +231,40 @@ export class ClaudeTuiSession extends BaseSession {
     this._sinkDir = join(base, `s-${randomUUID()}`)
     mkdirSync(this._sinkDir, { recursive: true })
 
+    // Generate the upstream session uuid here so the JSONL path is
+    // predictable + so claude resumes the same conversation across turns.
+    this._sessionId = randomUUID()
+
+    const permissionsEnabled = !!(this._port && this._hookSecret)
+    this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled })
+
+    // Spawn node-pty + wait for TUI warmup. Extracted so tests can stub
+    // the prototype method instead of mocking node-pty at the module level.
+    await this._spawnPty(permissionsEnabled)
+
+    if (this._ptyExited) {
+      this.emit('error', { message: `claude PTY exited during warmup (code=${this._ptyExitInfo?.exitCode})` })
+      return
+    }
+
     this._processReady = true
-    this.emit('ready', { sessionId: null, model: this.model, tools: [] })
+    this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
   }
 
-  async sendMessage(prompt, _attachments, _options = {}) {
-    if (this._isBusy) {
-      this.emit('error', { message: 'Already processing a message' })
-      return
-    }
-    if (!this._processReady) {
-      this.emit('error', { message: 'Session not started' })
-      return
-    }
-
-    this._isBusy = true
-    this._messageCounter += 1
-    const messageId = `${this._messageIdPrefix}-${this._messageCounter}`
-    this._currentMessageId = messageId
-
-    const turnUuid = this._sessionId || randomUUID()
-    if (!this._sessionId) this._sessionId = turnUuid
-
-    const payloadPath = join(this._sinkDir, `stop-${turnUuid}-${this._messageCounter}.json`)
-    const permissionsEnabled = !!(this._port && this._hookSecret)
-    const settingsPath = writeHookSettings(this._sinkDir, payloadPath, { permissionsEnabled })
-
+  /**
+   * Spawn the persistent PTY under node-pty + wait for the TUI to render.
+   * Sets `this._term`, wires onData/onExit handlers, then sleeps for
+   * WARMUP_MS so the TUI's input prompt is ready before the first
+   * sendMessage() writes. Tests stub this method on the prototype to
+   * skip the real spawn.
+   *
+   * @param {boolean} permissionsEnabled
+   */
+  async _spawnPty(permissionsEnabled) {
     let ptyMod
     try {
       ptyMod = await import('node-pty')
     } catch (err) {
-      this._isBusy = false
       this.emit('error', { message: `node-pty unavailable: ${err.message}` })
       return
     }
@@ -263,9 +277,7 @@ export class ClaudeTuiSession extends BaseSession {
     env.TERM = 'xterm-256color'
 
     // permission-hook.sh reads these to phone home to /permission on the
-    // chroxy HTTP server with the per-session secret. When permissions
-    // aren't enabled (no port given to the constructor) the hook still
-    // gets installed but exits silently because CHROXY_PORT is unset.
+    // chroxy HTTP server with the per-session secret.
     if (permissionsEnabled) {
       env.CHROXY_PORT = String(this._port)
       env.CHROXY_HOOK_SECRET = this._hookSecret
@@ -273,14 +285,13 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     const args = [
-      '--session-id', turnUuid,
-      '--settings', settingsPath,
+      '--session-id', this._sessionId,
+      '--settings', this._settingsPath,
     ]
-    log.info(`spawn claude TUI (uuid=${turnUuid.slice(0, 8)} msg=${messageId} perms=${permissionsEnabled})`)
+    log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} perms=${permissionsEnabled})`)
 
-    let term
     try {
-      term = ptyMod.spawn(CLAUDE, args, {
+      this._term = ptyMod.spawn(CLAUDE, args, {
         name: 'xterm-256color',
         cols: 120,
         rows: 30,
@@ -288,63 +299,68 @@ export class ClaudeTuiSession extends BaseSession {
         env,
       })
     } catch (err) {
-      this._isBusy = false
       this.emit('error', { message: `Failed to spawn claude under PTY: ${err.message}` })
       return
     }
 
-    this._activeTurn = { uuid: turnUuid, term, payloadPath, messageId, aborted: false }
+    this._term.onData(() => { /* drain & discard */ })
+    this._term.onExit((info) => {
+      this._ptyExited = true
+      this._ptyExitInfo = info
+      this._processReady = false
+      if (!this._destroying) {
+        log.warn(`claude PTY exited unexpectedly (code=${info?.exitCode} signal=${info?.signal})`)
+        this.emit('error', { message: `Claude PTY exited (code=${info?.exitCode})` })
+      }
+    })
 
-    const startedAt = Date.now()
+    // Wait for TUI to render + accept input. One-time warmup cost; the
+    // whole point of the persistent-PTY refactor is to pay this once at
+    // session start instead of on every sendMessage().
+    // TODO(post-MVP): detect readiness by watching for "❯ " in pty output.
+    const WARMUP_MS = 3500
+    await new Promise((r) => setTimeout(r, WARMUP_MS))
+  }
 
-    // Drain pty output (discard — visual parsing is out of scope for MVP).
-    term.onData(() => { /* discard */ })
-
-    let exited = false
-    let exitInfo = null
-    term.onExit((info) => { exited = true; exitInfo = info })
-
-    // Wait for TUI to be ready to accept input, then write prompt.
-    // TODO(post-MVP): detect readiness by watching for "❯ " in pty output
-    // instead of a fixed delay.
-    const PROMPT_DELAY_MS = 3500
-    await new Promise((r) => setTimeout(r, PROMPT_DELAY_MS))
-
-    if (exited || this._activeTurn?.aborted) {
-      this._finishTurnError(`pty exited before prompt could be sent (code=${exitInfo?.exitCode})`)
+  async sendMessage(prompt, _attachments, _options = {}) {
+    if (this._isBusy) {
+      this.emit('error', { message: 'Already processing a message' })
+      return
+    }
+    if (!this._processReady || !this._term || this._ptyExited) {
+      this.emit('error', { message: 'Session not started or PTY no longer alive' })
       return
     }
 
+    this._isBusy = true
+    this._messageCounter += 1
+    const messageId = `${this._messageIdPrefix}-${this._messageCounter}`
+    this._currentMessageId = messageId
+    const startedAt = Date.now()
+    this._activeTurn = { messageId, startedAt, aborted: false, synthSeq: 0 }
+
     try {
-      term.write(prompt + '\r')
+      this._term.write(prompt + '\r')
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`)
       return
     }
 
-    // Poll for hook payloads. Three event streams flow through the sink dir:
-    //   stop-<turn>.json           → final response → break the loop
-    //   pre-XXXXXX.json (multiple) → tool_start events
-    //   post-XXXXXX.json (multiple) → tool_result events
-    //
-    // Each file is processed once (tracked in `consumed`) and left on disk —
-    // sink dir is per-session and cleaned up on destroy.
+    // Poll the sink dir for new hook files. mktemp-named filenames make each
+    // turn's Stop / Pre / Post events distinct from previous turns'; the
+    // session-level _consumedFiles Set ensures we never re-process a file
+    // that an earlier turn already handled.
     const HOOK_TIMEOUT_MS = this._hardTimeoutMs
     const pollStart = Date.now()
-    const consumed = new Set()
-    let payload = null
+    let stopPayload = null
 
-    const processToolFiles = () => {
+    const drainHookFiles = () => {
       let entries
       try { entries = readdirSync(this._sinkDir) } catch { return }
-      // Sort lexicographically — mktemp's XXXXXX suffix isn't sorted, but
-      // for a single turn, the file mtimes are close enough that any
-      // tool_start before tool_result on the same toolUseId still arrives
-      // in the order the hook fired.
-      entries.sort()
+      entries.sort()  // mtime-close on a single turn, lexical fallback
       for (const name of entries) {
-        if (consumed.has(name)) continue
-        if (!name.startsWith('pre-') && !name.startsWith('post-')) continue
+        if (this._consumedFiles.has(name)) continue
+        if (!name.startsWith('pre-') && !name.startsWith('post-') && !name.startsWith('stop-')) continue
         const full = join(this._sinkDir, name)
         let parsed
         try {
@@ -352,7 +368,12 @@ export class ClaudeTuiSession extends BaseSession {
           if (raw.length === 0) continue  // partial write — poll again
           parsed = JSON.parse(raw)
         } catch { continue }
-        consumed.add(name)
+        this._consumedFiles.add(name)
+
+        if (name.startsWith('stop-')) {
+          stopPayload = parsed
+          continue
+        }
         try {
           this._emitToolHookEvent(name.startsWith('pre-') ? 'PreToolUse' : 'PostToolUse', parsed, messageId)
         } catch (err) {
@@ -363,26 +384,13 @@ export class ClaudeTuiSession extends BaseSession {
 
     while (Date.now() - pollStart < HOOK_TIMEOUT_MS) {
       if (this._activeTurn?.aborted) break
-
-      processToolFiles()
-
-      if (existsSync(payloadPath)) {
-        try {
-          const raw = readFileSync(payloadPath, 'utf8')
-          if (raw.length > 0) {
-            payload = JSON.parse(raw)
-            // Drain any remaining tool files before exiting (Post may land
-            // in the same tick as Stop on a fast turn).
-            processToolFiles()
-            break
-          }
-        } catch { /* partial write, keep polling */ }
-      }
-      if (exited) break
+      if (this._ptyExited) break
+      drainHookFiles()
+      if (stopPayload) break
       await new Promise((r) => setTimeout(r, 150))
     }
 
-    if (!payload) {
+    if (!stopPayload) {
       this._finishTurnError(this._activeTurn?.aborted
         ? 'turn aborted'
         : `Stop hook timeout after ${Math.round((Date.now() - pollStart) / 1000)}s`)
@@ -390,7 +398,7 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     const duration = Date.now() - startedAt
-    const text = typeof payload.last_assistant_message === 'string' ? payload.last_assistant_message : ''
+    const text = typeof stopPayload.last_assistant_message === 'string' ? stopPayload.last_assistant_message : ''
 
     // Deliver the response as a single stream burst so the dashboard renders
     // one assistant bubble (matches CliSession's event shape on Claude's side).
@@ -399,13 +407,15 @@ export class ClaudeTuiSession extends BaseSession {
     this.emit('stream_end', { messageId })
 
     this.emit('result', {
-      cost: 0,                     // not exposed by Stop hook in MVP
+      cost: 0,                       // not exposed by Stop hook in MVP
       duration,
-      usage: null,                 // not exposed by Stop hook in MVP
-      sessionId: turnUuid,
+      usage: null,                   // not exposed by Stop hook in MVP
+      sessionId: this._sessionId,
     })
 
-    this._cleanupTurn()
+    this._activeTurn = null
+    this._isBusy = false
+    this._currentMessageId = null
   }
 
   /**
@@ -471,33 +481,36 @@ export class ClaudeTuiSession extends BaseSession {
 
   _finishTurnError(message) {
     this.emit('error', { message })
-    this._cleanupTurn()
-  }
-
-  _cleanupTurn() {
-    const turn = this._activeTurn
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
-    if (turn?.term) {
-      try { turn.term.kill('SIGTERM') } catch { /* already dead */ }
-    }
   }
 
+  /**
+   * Abort the current turn. Sends SIGINT to the persistent PTY — claude's
+   * TUI treats Ctrl-C as "cancel current request, return to input prompt"
+   * (NOT as a process kill), so the session stays alive and the next
+   * sendMessage() works normally.
+   */
   interrupt() {
     if (!this._activeTurn) return
     this._activeTurn.aborted = true
-    try { this._activeTurn.term.kill('SIGINT') } catch { /* ignore */ }
+    if (this._term) {
+      // Write Ctrl-C as a byte to the PTY rather than killing the process —
+      // claude TUI intercepts it for in-session cancellation.
+      try { this._term.write('') } catch { /* ignore */ }
+    }
   }
 
   async destroy() {
     this._destroying = true
-    if (this._activeTurn) {
-      try { this._activeTurn.term.kill('SIGTERM') } catch { /* ignore */ }
-      this._activeTurn = null
-    }
-    this._isBusy = false
     this._processReady = false
+    this._isBusy = false
+    this._activeTurn = null
+    if (this._term) {
+      try { this._term.kill('SIGTERM') } catch { /* already dead */ }
+      this._term = null
+    }
     this._clearMessageState()
   }
 }
