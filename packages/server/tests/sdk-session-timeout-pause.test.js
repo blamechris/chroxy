@@ -220,6 +220,49 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
   // re-arm time — not a hardcoded constant. Pin that contract: a session
   // constructed with an unusual 90-second window must re-arm to 90 s after
   // permission resolution, not the default 20 min and not the legacy 5 min.
+  describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
+    const NINETY_S = 90_000
+
+    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/30 min', async () => {
+      // #3899: also pin hardTimeoutMs to the same window so the hard
+      // kill (which is what emits the error) fires at the same 90s mark
+      // as the soft warning.
+      const s = new SdkSession({ cwd: '/tmp', resultTimeoutMs: NINETY_S, hardTimeoutMs: NINETY_S })
+      s._processReady = true
+      const errors = []
+      s.on('error', (d) => errors.push(d))
+
+      try {
+        s._isBusy = true
+        s._currentMessageId = 'msg-cfg'
+        armResultTimeoutForTest(s, 'msg-cfg', false)
+
+        // Bump PermissionManager auto-deny so it doesn't resolve early.
+        s._permissions._timeoutMs = 60 * 60_000
+
+        const p = s._handlePermission('Bash', { command: 'ls' }, null)
+        mock.timers.tick(10_000) // 10s while paused
+        assert.equal(errors.length, 0, 'no fire while paused')
+
+        // Resolve — re-arms a fresh 90-second window
+        const reqId = Array.from(s._pendingPermissions.keys())[0]
+        s.respondToPermission(reqId, 'allow')
+        await p
+
+        // 89.999s elapsed since resume → must NOT fire
+        mock.timers.tick(NINETY_S - 1)
+        assert.equal(errors.length, 0, 'timer must not fire 1ms before configured window')
+
+        // 1ms more → must fire
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'timer must fire at exactly the configured 90s window')
+        assert.match(errors[0].message, /timed out/)
+      } finally {
+        s.destroy()
+      }
+    })
+  })
+
   // #3899: SOFT inactivity warning is the new pre-kill prompt — fires at
   // `resultTimeoutMs` (default 30 min), emits an `inactivity_warning`
   // event WITHOUT clearing busy state or pending permissions. The HARD
@@ -299,20 +342,35 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       s.on('inactivity_warning', (d) => warnings.push(d))
       s.on('error', (d) => errors.push(d))
       try {
+        // Initial arm: soft@SOFT, hard@HARD. Re-arm at SOFT-1000 to
+        // mimic a mid-stream SDK event resetting both timers — new
+        // timers anchor at the re-arm moment, so the new hard is at
+        // SOFT-1000+HARD (well after the original hard@HARD).
         armResultTimeoutForTest(s, 'msg-soft-hard', false)
-
-        // Tick just before soft would fire, then re-arm via the same
-        // helper to mimic an SDK stream-event resetting both timers.
         mock.timers.tick(SOFT - 1_000)
         armResultTimeoutForTest(s, 'msg-soft-hard', true)
 
-        // Tick to the new SOFT window from the re-arm.
+        // Re-arm anchor: t=SOFT-1000=59000.
+        // Tick to the new SOFT window → new soft at t=119000.
         mock.timers.tick(SOFT - 1)
         assert.equal(warnings.length, 0, 'soft must not fire — activity reset the timer')
 
         mock.timers.tick(1)
         assert.equal(warnings.length, 1, 'soft fires at SOFT ms after the activity, not original arm')
-        assert.equal(errors.length, 0, 'still no error — hard hasnt fired yet')
+        assert.equal(errors.length, 0, 'still no error — hard has not fired yet')
+
+        // Critical: prove the ORIGINAL hard was cleared. Original hard
+        // would have fired at t=HARD=180000 (60s past current t=119000).
+        // Tick to just before the NEW hard would fire (re-arm + HARD =
+        // t=239000) and assert no error has been emitted — that
+        // implies the original hard timer was cleared on re-arm. Without
+        // this, a regression where re-arm forgot to clear the hard
+        // timer would still pass this test.
+        mock.timers.tick(HARD - SOFT - 1)
+        assert.equal(errors.length, 0, 'original hard at t=180000 was cleared — only the re-armed hard at t=239000 is live')
+
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'new hard fires at re-arm+HARD, not original arm+HARD')
       } finally {
         s.destroy()
       }
@@ -352,44 +410,24 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
         s.destroy()
       }
     })
-  })
 
-  describe('resume re-arms using configured resultTimeoutMs (#3757)', () => {
-    const NINETY_S = 90_000
-
-    it('re-armed timer fires at exactly the configured window, not a hardcoded 5/30 min', async () => {
-      // #3899: also pin hardTimeoutMs to the same window so the hard
-      // kill (which is what emits the error) fires at the same 90s mark
-      // as the soft warning.
-      const s = new SdkSession({ cwd: '/tmp', resultTimeoutMs: NINETY_S, hardTimeoutMs: NINETY_S })
-      s._processReady = true
+    // _handleHardTimeout's hasStreamStarted flag controls whether a
+    // `stream_end` event is emitted before the error — important so
+    // clients clean up streaming UI on timeout. The flag is SDK-specific
+    // (CLI uses a different stream lifecycle) so it must be covered
+    // here, not just on the cli-session side.
+    it('hard timeout with hasStreamStarted=true emits stream_end before error', () => {
+      const s = createReadySdkSession()
+      const streamEnds = []
       const errors = []
+      s.on('stream_end', (d) => streamEnds.push(d))
       s.on('error', (d) => errors.push(d))
-
       try {
-        s._isBusy = true
-        s._currentMessageId = 'msg-cfg'
-        armResultTimeoutForTest(s, 'msg-cfg', false)
-
-        // Bump PermissionManager auto-deny so it doesn't resolve early.
-        s._permissions._timeoutMs = 60 * 60_000
-
-        const p = s._handlePermission('Bash', { command: 'ls' }, null)
-        mock.timers.tick(10_000) // 10s while paused
-        assert.equal(errors.length, 0, 'no fire while paused')
-
-        // Resolve — re-arms a fresh 90-second window
-        const reqId = Array.from(s._pendingPermissions.keys())[0]
-        s.respondToPermission(reqId, 'allow')
-        await p
-
-        // 89.999s elapsed since resume → must NOT fire
-        mock.timers.tick(NINETY_S - 1)
-        assert.equal(errors.length, 0, 'timer must not fire 1ms before configured window')
-
-        // 1ms more → must fire
-        mock.timers.tick(1)
-        assert.equal(errors.length, 1, 'timer must fire at exactly the configured 90s window')
+        armResultTimeoutForTest(s, 'msg-soft-hard', true)
+        mock.timers.tick(HARD)
+        assert.equal(streamEnds.length, 1, 'stream_end emitted because hasStreamStarted=true')
+        assert.equal(streamEnds[0].messageId, 'msg-soft-hard', 'stream_end carries the captured messageId')
+        assert.equal(errors.length, 1, 'error emitted after stream_end')
         assert.match(errors[0].message, /timed out/)
       } finally {
         s.destroy()
