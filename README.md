@@ -48,6 +48,8 @@ Chroxy uses the Claude Agent SDK (or `claude -p`), which Anthropic classifies as
 | Team Standard | $20 / seat |
 | Team Premium | $100 / seat |
 
+> Figures as of 2026-05 from Anthropic's published plan details — see [anthropic.com/pricing](https://www.anthropic.com/pricing) for the authoritative source. Anthropic may adjust the cutover date or amounts; trust the link above over this table if they ever disagree.
+
 Credits reset each billing cycle and don't roll over. When the credit is exhausted, you can either enable paid usage credits (billed at API rates) or have programmatic usage pause until reset.
 
 **For heavy users:** set `ANTHROPIC_API_KEY` to bypass the subscription credit pool entirely and bill the raw Anthropic API account directly. Same SDK, predictable per-token pricing.
