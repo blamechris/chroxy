@@ -52,8 +52,14 @@ function ensureCwdTrusted(cwd) {
     hasTrustDialogAccepted: true,
     projectOnboardingSeenCount: existing?.projectOnboardingSeenCount ?? 0,
   }
-  // Atomic write via temp + rename to avoid concurrent corruption.
-  const tmp = `${claudeConfig}.chroxy.${process.pid}.tmp`
+  // Atomic write via temp + rename. Use a per-call random suffix rather
+  // than process.pid — concurrent ClaudeTuiSessions in the same chroxy
+  // server share the pid, so two start()s racing for a different cwd
+  // would clobber each other's temp file (#3922). The realpathSync()
+  // earlier in this function still means each session writes a
+  // different *target* path, but the temp file is global and needs to
+  // be unique per write.
+  const tmp = `${claudeConfig}.chroxy.${randomUUID()}.tmp`
   writeFileSync(tmp, JSON.stringify(config, null, 2))
   renameSync(tmp, claudeConfig)
 }
