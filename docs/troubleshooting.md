@@ -2,6 +2,108 @@
 
 Common issues and solutions for Chroxy server, app, and tunnel connectivity. For provider-specific setup (installation, model lists, env vars) see [docs/providers.md](providers.md); the Gemini and Codex sections below cover only runtime errors.
 
+> **Triaging a stuck session?** Jump straight to [the `/diagnostics` endpoint](#0-diagnostics-endpoint-triaging-stuck-sessions) — it dumps live per-session state (busy flags, paused timers, pending permissions) plus a tail of the on-disk log in one request.
+
+## 0. `/diagnostics` endpoint (triaging stuck sessions)
+
+When a session hangs — most often surfaced to the user as **"Response timed out after 5 minutes"** — `GET /diagnostics` is the first thing to call. It returns a runtime snapshot of the server: per-session `isBusy` / `permissionMode` / `resultTimeoutPaused` / pending-permission queue, plus a tail of `~/.chroxy/logs/chroxy.log`. Available since v0.6.0 (PR [#3734](https://github.com/blamechris/chroxy/pull/3734), issue [#3732](https://github.com/blamechris/chroxy/issues/3732)).
+
+### How to call it
+
+The endpoint is bearer-auth gated using the same API token as every other authenticated route. The token lives in `~/.chroxy/config.json` (`apiToken` field) and is also exported into the Claude Code session environment as `CHROXY_TOKEN`.
+
+```bash
+TOKEN=$(jq -r .apiToken ~/.chroxy/config.json)
+
+# JSON (default) — full structured snapshot
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8765/diagnostics | jq
+
+# text/plain — human-readable, copy-pasteable for bug reports
+curl -s -H "Authorization: Bearer $TOKEN" \
+     -H "Accept: text/plain" \
+     http://localhost:8765/diagnostics
+```
+
+If you set a non-default port, substitute it. The endpoint is also reachable through the Cloudflare tunnel URL (same auth header), but for local triage `localhost` skips the tunnel layer and is faster.
+
+A `403 {"error":"unauthorized"}` response means your token is wrong or stale — re-read `~/.chroxy/config.json` and retry.
+
+### What the JSON snapshot looks like
+
+```jsonc
+{
+  "server": {
+    "version": "0.6.0",
+    "mode": "cli",
+    "uptime": 1842,         // seconds
+    "pid": 12345,
+    "nodeVersion": "v22.11.0",
+    "memory": { "rss": 187904000, "heapUsed": 96534528, "heapTotal": 134217728 }
+  },
+  "clients": { "connected": 2, "authenticated": 2 },
+  "counters": { /* metrics.snapshot() */ },
+  "sessions": [
+    {
+      "id": "sess-42",
+      "name": "main",
+      "provider": "claude",
+      "cwd": "/Users/you/projects/foo",
+      "isBusy": true,                    // <-- a turn is in flight
+      "permissionMode": "default",
+      "currentMessageId": "msg_018A...",
+      "resultTimeoutPaused": true,       // <-- the 5-min RESULT_TIMEOUT is paused
+      "permissionPauseCount": 1,         // <-- and one permission caused the pause
+      "pendingPermissions": [
+        {
+          "requestId": "req_abc123",
+          "tool": "Bash",
+          "description": "rm -rf node_modules && npm install",
+          "createdAt": 1715000000000,
+          "ageMs": 184000              // <-- 3m 4s waiting for user approval
+        }
+      ],
+      "lastActivityAt": 1714999800000
+    }
+  ],
+  "logs": {
+    "source": "file",
+    "path": "/Users/you/.chroxy/logs/chroxy.log",
+    "lines": [ /* last ~8KB of log lines */ ]
+  }
+}
+```
+
+### Interpreting the fields when triaging a hang
+
+| Field | What it tells you |
+| --- | --- |
+| `sessions[].isBusy` | A turn is in flight. If `true` for many minutes with no `pendingPermissions`, the upstream provider (Anthropic / OpenAI / Gemini) is wedged — check network and `logs.lines` for retry/backoff messages. |
+| `sessions[].resultTimeoutPaused` | The 5-minute `RESULT_TIMEOUT` watchdog (introduced for #2831) is paused. It pauses while the session waits on a permission prompt, then resumes when permissions clear. |
+| `sessions[].permissionPauseCount` | How many outstanding pauses there are. **Should equal `pendingPermissions.length`.** If `permissionPauseCount > 0` but `pendingPermissions` is empty, the timer has leaked — capture this snapshot and file a bug. |
+| `sessions[].pendingPermissions[].ageMs` | How long the prompt has been waiting. A multi-minute age usually means the prompt never reached the app (see [§4](#4-permission-requests-not-reaching-the-app)) or the user backgrounded the app and the prompt is sitting unseen. |
+| `sessions[].pendingPermissions[].tool` / `.description` | What the session is asking permission for. Tool *inputs* are intentionally redacted from `/diagnostics` — the full input lives in `logs.lines` (and the on-disk log). |
+| `sessions[].lastActivityAt` | Wall-clock of the last persisted activity. Compared against `Date.now()` it tells you how stale the session is even when `isBusy` is true. |
+| `logs.lines` | Last ~8KB of `chroxy.log`. Look for `[ws]`, `[session-binding-*]`, or provider-error stack traces near the failure window. |
+| `logs.source: "disabled"` | File logging is off. Restart with `CHROXY_LOG_LEVEL=debug` (or set `logLevel`/`logDir` in config) to enable, then re-trigger the failure. |
+
+### Common patterns
+
+- **Session frozen, `isBusy: true`, `resultTimeoutPaused: false`, no pending permissions** → the upstream provider call is in flight and unresponsive. Check `logs.lines` for the last outbound request and any retry messages; restart the session if needed.
+- **Session frozen, `pendingPermissions[].ageMs` is large** → the prompt was issued but the app never responded. Verify the app is connected (check `clients.connected`), then re-foreground it. See [§4](#4-permission-requests-not-reaching-the-app).
+- **`resultTimeoutPaused: true`, `permissionPauseCount > 0`, `pendingPermissions` empty** → timer leak. Restart resolves it; please attach the `/diagnostics` JSON to a bug report.
+- **`SESSION_TOKEN_MISMATCH` errors after reconnect** → see the dedicated [`SESSION_TOKEN_MISMATCH` runbook](troubleshooting/session-token-mismatch.md), which uses `/diagnostics` alongside the `[session-binding-*]` debug logs.
+
+### When to capture a snapshot
+
+Always grab a `text/plain` snapshot **at the moment of failure** before restarting the server — restart resets every flag. Paste it into the bug report:
+
+```bash
+TOKEN=$(jq -r .apiToken ~/.chroxy/config.json)
+curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: text/plain" \
+     http://localhost:8765/diagnostics > /tmp/chroxy-diag-$(date +%s).txt
+```
+
 ## 1. "No API token configured" on server start
 
 **Symptom:** Server exits immediately with `No API token configured`.
@@ -52,9 +154,10 @@ curl -s https://your-tunnel-url.trycloudflare.com
 **Symptom:** Claude Code hangs waiting for permission, but no prompt appears in the app.
 
 **Diagnostic steps:**
-1. Check server logs for `[ws] Permission request` lines
-2. Verify the permission hook is registered: check `~/.claude/settings.json` for `PreToolUse` hook
-3. Ensure `CHROXY_PORT` and `CHROXY_TOKEN` are set in the Claude Code session environment
+1. Hit [`/diagnostics`](#0-diagnostics-endpoint-triaging-stuck-sessions) — if `pendingPermissions` is non-empty with a multi-second `ageMs`, the server registered the prompt but no client picked it up
+2. Check server logs for `[ws] Permission request` lines
+3. Verify the permission hook is registered: check `~/.claude/settings.json` for `PreToolUse` hook
+4. Ensure `CHROXY_PORT` and `CHROXY_TOKEN` are set in the Claude Code session environment
 
 **Fixes:**
 - Restart the server — the hook is re-registered on startup
@@ -108,14 +211,13 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 ## 9. Session timeout / "session destroyed"
 
-**Symptom:** Session disappears after being idle.
+**Symptom:** Session disappears after being idle, or you see "Response timed out after 5 minutes" mid-turn.
 
-**Cause:** Session timeout is configured and the session was idle too long.
+**Cause:** Either the session-idle timeout fired, or the per-turn `RESULT_TIMEOUT` watchdog (5 min by default) fired.
 
 **Fixes:**
-- Increase timeout: `npx chroxy start --session-timeout 4h`
-- Disable timeout: don't set `--session-timeout` or `CHROXY_SESSION_TIMEOUT`
-- The app sends keep-alive pings, but only while it's in the foreground
+- For the idle timeout: increase it with `npx chroxy start --session-timeout 4h`, or disable it by not setting `--session-timeout` / `CHROXY_SESSION_TIMEOUT`. The app sends keep-alive pings, but only while it's in the foreground.
+- For the per-turn `RESULT_TIMEOUT`: capture a [`/diagnostics`](#0-diagnostics-endpoint-triaging-stuck-sessions) snapshot **before restarting** so you can see whether the session was wedged on a pending permission, an upstream provider call, or a leaked timer. Restarting wipes every flag.
 
 ## 10. Gemini provider errors (`--provider gemini`)
 
