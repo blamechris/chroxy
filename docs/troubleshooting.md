@@ -29,6 +29,26 @@ If you set a non-default port, substitute it. The endpoint is also reachable thr
 
 A `403 {"error":"unauthorized"}` response means your token is wrong or stale — re-read `~/.chroxy/config.json` and retry.
 
+#### Tuning the log window with `?logTailBytes=N` (#3739)
+
+By default the snapshot includes the last ~8KB of `chroxy.log`. For a long-running stall where the relevant event is further back, pass `?logTailBytes=N` to widen the window; for a tight repro where you want a fast response, shrink it.
+
+```bash
+# Widen to 32KB for a long stall
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8765/diagnostics?logTailBytes=32768" | jq '.logs.lines | length'
+
+# Shrink to 1KB for a tight repro loop
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8765/diagnostics?logTailBytes=1024"
+```
+
+Rules:
+
+- Must be a positive integer. `NaN`, `0`, negatives, and missing values fall back to the 8KB default.
+- Hard-capped at **65536 bytes** (8× the default). Larger requests are silently clamped, not rejected — an operator who asks for 1MB still gets a useful 64KB response.
+- Fractional values (e.g. `1024.9`) are truncated to integers.
+
 ### What the JSON snapshot looks like
 
 ```jsonc

@@ -1,8 +1,11 @@
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession } from './test-helpers.js'
-import { setLogListener } from '../src/logger.js'
+import { setLogListener, initFileLogging, closeFileLogging, createLogger } from '../src/logger.js'
 
 // Same wrapper pattern as ws-server-auth.test.js — disable encryption for
 // fast tests, mute the log listener WsServer.start() registers.
@@ -150,5 +153,121 @@ describe('GET /diagnostics (#3732)', () => {
       headers: { 'Authorization': 'Bearer tok-diag' },
     })
     assert.equal(res.status, 200, 'query-string variant of /diagnostics still serves')
+  })
+})
+
+/**
+ * Issue #3739 — `?logTailBytes=N` query param on /diagnostics.
+ *
+ * Operators triaging a long-running stall want a wider log window than the
+ * 8KB default; during a tight repro they want a smaller, faster response.
+ * The handler must parse + validate + clamp the param so a stolen token
+ * can't slurp megabytes of log into memory per request.
+ */
+describe('GET /diagnostics?logTailBytes=N (#3739)', () => {
+  let server
+  let logDir
+
+  beforeEach(() => {
+    logDir = mkdtempSync(join(tmpdir(), 'chroxy-diag-logtail-'))
+    initFileLogging({ logDir })
+    // Generate ~20KB of log content so the byte-cap is observable. Each
+    // line is ~95 bytes after the JSON wrapper logger writes.
+    const log = createLogger('diag-test')
+    for (let i = 0; i < 220; i++) {
+      log.info(`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-${i}`)
+    }
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    closeFileLogging()
+    if (logDir) {
+      rmSync(logDir, { recursive: true, force: true })
+      logDir = null
+    }
+  })
+
+  async function startAuthed() {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-diag',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    return startServerAndGetPort(server)
+  }
+
+  async function fetchDiag(port, query = '') {
+    const res = await fetch(`http://127.0.0.1:${port}/diagnostics${query}`, {
+      headers: { 'Authorization': 'Bearer tok-diag' },
+    })
+    assert.equal(res.status, 200)
+    return res.json()
+  }
+
+  function tailBytes(body) {
+    return (body.logs?.lines || []).reduce((acc, l) => acc + l.length + 1, 0)
+  }
+
+  it('honours an explicit ?logTailBytes=1024 by trimming the tail', async () => {
+    const port = await startAuthed()
+    const small = await fetchDiag(port, '?logTailBytes=1024')
+    const def = await fetchDiag(port)
+    assert.ok(tailBytes(small) <= 1024 + 200, `1024-byte cap respected (got ${tailBytes(small)})`)
+    assert.ok(tailBytes(small) < tailBytes(def),
+      `explicit smaller window (${tailBytes(small)}) must be smaller than default (${tailBytes(def)})`)
+  })
+
+  it('uses the default window when ?logTailBytes is absent', async () => {
+    const port = await startAuthed()
+    const body = await fetchDiag(port)
+    // Default in buildDiagnosticsSnapshot is 8192. Allow some slack for
+    // line-boundary trimming.
+    assert.ok(tailBytes(body) <= 8192 + 200, `default 8KB cap holds (got ${tailBytes(body)})`)
+    assert.ok(body.logs.lines.length > 0, 'default still returns some log lines')
+  })
+
+  it('clamps oversized ?logTailBytes=999999999 to the hard cap (65536)', async () => {
+    const port = await startAuthed()
+    const body = await fetchDiag(port, '?logTailBytes=999999999')
+    // Total log content is well under 64KB in this test, so we can't
+    // assert exactly 65536 bytes — but we CAN assert the response isn't
+    // unbounded by checking it's no larger than the cap.
+    assert.ok(tailBytes(body) <= 65536, `hard cap enforced (got ${tailBytes(body)})`)
+  })
+
+  it('falls back to default for NaN ?logTailBytes=garbage', async () => {
+    const port = await startAuthed()
+    const body = await fetchDiag(port, '?logTailBytes=garbage')
+    const def = await fetchDiag(port)
+    // Garbage param should behave identically to no param.
+    assert.equal(tailBytes(body), tailBytes(def),
+      'invalid param falls through to default behavior')
+  })
+
+  it('falls back to default for negative ?logTailBytes=-1', async () => {
+    const port = await startAuthed()
+    const body = await fetchDiag(port, '?logTailBytes=-1')
+    const def = await fetchDiag(port)
+    assert.equal(tailBytes(body), tailBytes(def),
+      'negative param falls through to default behavior')
+  })
+
+  it('falls back to default for zero ?logTailBytes=0', async () => {
+    const port = await startAuthed()
+    const body = await fetchDiag(port, '?logTailBytes=0')
+    const def = await fetchDiag(port)
+    assert.equal(tailBytes(body), tailBytes(def),
+      'zero param falls through to default behavior')
+  })
+
+  it('truncates a fractional ?logTailBytes=1024.9 to an integer', async () => {
+    const port = await startAuthed()
+    const body = await fetchDiag(port, '?logTailBytes=1024.9')
+    assert.ok(tailBytes(body) <= 1024 + 200, `fractional value truncated and clamped (got ${tailBytes(body)})`)
   })
 })

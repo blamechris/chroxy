@@ -59,6 +59,39 @@ function formatBytes(n) {
 }
 
 /**
+ * Hard ceiling on `?logTailBytes=N` for `GET /diagnostics` (#3739).
+ * 8x the default (8192) — large enough for a wide stall window, small
+ * enough that a stolen token can't pull megabytes per request.
+ */
+const LOG_TAIL_BYTES_MAX = 65536
+
+/**
+ * Parse and validate `?logTailBytes=N` from a `/diagnostics` request URL.
+ * Returns the clamped positive integer, or `null` if the param is absent
+ * or invalid (NaN, non-finite, zero, or negative). Callers fall back to
+ * `buildDiagnosticsSnapshot`'s own default when `null` is returned, so
+ * "no param" and "garbage param" behave identically — preserving the
+ * pre-#3739 default behavior described in docs/troubleshooting.md.
+ *
+ * Values above the hard cap are clamped to `LOG_TAIL_BYTES_MAX` rather
+ * than rejected, so an operator who asks for 1MB still gets a useful
+ * 64KB response instead of an error.
+ */
+function parseLogTailBytes(url) {
+  if (!url) return null
+  const qIdx = url.indexOf('?')
+  if (qIdx === -1) return null
+  const params = new URLSearchParams(url.slice(qIdx + 1))
+  const raw = params.get('logTailBytes')
+  if (raw == null || raw === '') return null
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return null
+  const int = Math.trunc(n)
+  if (int <= 0) return null
+  return Math.min(int, LOG_TAIL_BYTES_MAX)
+}
+
+/**
  * Check if an Origin header matches the allowed list.
  * Localhost origins with any port are allowed for dev.
  */
@@ -179,7 +212,15 @@ export function createHttpHandler(server) {
     const diagPathname = (req.url ?? '').split('?')[0]
     if (req.method === 'GET' && diagPathname === '/diagnostics') {
       if (!server._validateBearerAuth(req, res)) return
-      const snapshot = buildDiagnosticsSnapshot({ server, serverVersion: SERVER_VERSION })
+      // #3739: optional `?logTailBytes=N` lets operators widen the log
+      // window (e.g. to 32KB for a slow stall) or shrink it for a tight
+      // repro. Default falls through to buildDiagnosticsSnapshot's own
+      // default (8192). Hard-clamp at LOG_TAIL_BYTES_MAX so a stolen
+      // token can't slurp megabytes of log into memory per request.
+      const diagOpts = { server, serverVersion: SERVER_VERSION }
+      const logTailBytes = parseLogTailBytes(req.url)
+      if (logTailBytes !== null) diagOpts.logTailBytes = logTailBytes
+      const snapshot = buildDiagnosticsSnapshot(diagOpts)
       const accept = req.headers['accept'] || ''
       if (accept.includes('text/plain')) {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
