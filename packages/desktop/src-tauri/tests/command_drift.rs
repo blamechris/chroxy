@@ -154,22 +154,55 @@ fn parse_capabilities_allow(json: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Extract every `"..."` literal inside `body`. Naive but adequate — the
-/// snippets we feed it never contain escape sequences or comments with `"`.
+/// Extract every `"..."` literal inside `body`, skipping `//` line comments
+/// and `/* ... */` block comments so a quoted string inside a comment is not
+/// misread as a real entry. Doesn't handle escape sequences — the snippets
+/// we feed it (slice initialisers like `&["foo", "bar"]`) never contain `\"`.
 fn extract_string_literals(body: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    let mut chars = body.chars();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            let mut buf = String::new();
-            for c2 in chars.by_ref() {
-                if c2 == '"' {
-                    break;
-                }
-                buf.push(c2);
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip `// ...` line comments.
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
             }
-            out.insert(buf);
+            continue;
         }
+        // Skip `/* ... */` block comments.
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            // Consume the closing `*/` if present.
+            if i + 1 < bytes.len() {
+                i += 2;
+            } else {
+                i = bytes.len();
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            // Safe slice: we only matched on the ASCII `"` byte, which never
+            // appears inside a UTF-8 multi-byte continuation, so `start..i`
+            // always lies on char boundaries.
+            let lit = std::str::from_utf8(&bytes[start..i])
+                .expect("non-UTF-8 between ASCII quotes — body is not valid UTF-8");
+            out.insert(lit.to_string());
+            if i < bytes.len() {
+                i += 1; // consume closing quote
+            }
+            continue;
+        }
+        i += 1;
     }
     out
 }
@@ -271,16 +304,23 @@ fn parsers_self_check() {
         const APP_COMMANDS: &[&str] = &[
             "foo",
             "bar_baz",
-            // a comment with a "string" should be tolerated by extract_string_literals
+            // a comment with a "string" must NOT be captured by extract_string_literals
+            /* and a /* block comment with "another" */ also must not leak */
             "qux",
         ];
     "#;
     let cmds = parse_app_commands(sample_build);
-    // The comment-embedded "string" gets captured too — accepted, the real
-    // build.rs has no such comments inside the slice.
-    assert!(cmds.contains("foo"));
-    assert!(cmds.contains("bar_baz"));
-    assert!(cmds.contains("qux"));
+    // Exact match — `assert!(contains)` previously masked the parser
+    // capturing comment-embedded `"string"` and `"another"` as phantom
+    // entries (issue #3993).
+    let expected_cmds: BTreeSet<String> = ["foo", "bar_baz", "qux"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        cmds, expected_cmds,
+        "parse_app_commands leaked comment-embedded literals or dropped real ones"
+    );
 
     let sample_lib = r#"
         .invoke_handler(tauri::generate_handler![
@@ -313,4 +353,29 @@ fn parsers_self_check() {
         .map(|s| s.to_string())
         .collect();
     assert_eq!(allow, expected);
+}
+
+#[test]
+fn extract_string_literals_skips_comment_embedded_quotes() {
+    // Regression for #3993: a string literal that appears inside a `//` line
+    // comment or a `/* ... */` block comment must not be captured. Before
+    // the fix, `extract_string_literals` was a naive `"`-toggle that
+    // happily slurped any quoted text — including the contents of comments
+    // that mentioned a fake command like `// allowed_commands = "fake_cmd"`.
+    let body = r#"
+        "real_one",
+        // allowed_commands = "fake_from_line_comment"
+        "real_two",
+        /* and "fake_from_block_comment" should also be ignored */
+        "real_three",
+    "#;
+    let lits = extract_string_literals(body);
+    let expected: BTreeSet<String> = ["real_one", "real_two", "real_three"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        lits, expected,
+        "extract_string_literals must skip quoted text inside `//` and `/* */` comments"
+    );
 }
