@@ -93,10 +93,19 @@ fn main() {
             //
             // Cache file lives next to swift_out in the source tree so both
             // cargo invocations (which have different OUT_DIR) see the same
-            // file. To force a rebuild manually: `rm packages/desktop/src-tauri/swift/speech-helper.cache`.
+            // file. To force a rebuild manually: `rm packages/desktop/src-tauri/swift/speech-helper.cache`
+            // — combined with the `rerun-if-changed` directive on the cache
+            // file below, this is enough to make cargo re-run this build
+            // script even when nothing else has changed.
             // The `v<N>` prefix is bumped whenever this key's schema changes so
             // existing on-disk caches auto-invalidate on rollout.
             let swift_cache = format!("{}.cache", swift_out);
+            // Track the cache marker so `rm <swift_cache>` reliably forces a
+            // rebuild: without this, cargo only re-runs the build script when
+            // a tracked input changes (currently `swift_src` and
+            // `APPLE_SIGNING_IDENTITY`), so deleting the cache marker alone
+            // would be silently ignored on the next `cargo build`.
+            println!("cargo:rerun-if-changed={}", swift_cache);
             let identity_for_cache = std::env::var("APPLE_SIGNING_IDENTITY").unwrap_or_default();
             let src_mtime_secs = std::fs::metadata(&swift_src)
                 .ok()
