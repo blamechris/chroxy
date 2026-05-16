@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { CodexSession, buildCodexArgs } from '../src/codex-session.js'
+import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX } from '../src/codex-session.js'
 import { SkillsTrustStore } from '../src/skills-trust.js'
 import { waitFor } from './test-helpers.js'
 
@@ -971,6 +971,158 @@ describe('CodexSession', () => {
         assert.equal(args[0], 'exec')
         assert.equal(args[1], 'hi')
         assert.ok(!args.includes('resume'))
+      })
+    })
+
+    // #3847: CHROXY_CODEX_SANDBOX env var lets operators override the default
+    // sandbox mode without source edits. The per-session selector under #3837
+    // remains the proper fix; this is a stopgap for multi-tenant / shared-dev
+    // hosts where the operator wants Codex to start more restrictive.
+    describe('CHROXY_CODEX_SANDBOX env override (#3847)', () => {
+      let savedEnv
+      beforeEach(() => { savedEnv = process.env.CHROXY_CODEX_SANDBOX })
+      afterEach(() => {
+        if (savedEnv === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+        else process.env.CHROXY_CODEX_SANDBOX = savedEnv
+      })
+
+      it('exports the canonical sandbox mode list', () => {
+        // Source of truth for what we accept — keeps tests honest if a mode is
+        // added or removed without re-validating the env contract.
+        assert.ok(Array.isArray(CODEX_SANDBOX_MODES))
+        assert.ok(CODEX_SANDBOX_MODES.includes('read-only'))
+        assert.ok(CODEX_SANDBOX_MODES.includes('workspace-write'))
+        assert.ok(CODEX_SANDBOX_MODES.includes('danger-full-access'))
+      })
+
+      it('exports the documented default (workspace-write)', () => {
+        assert.equal(CODEX_DEFAULT_SANDBOX, 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() falls back to workspace-write when env is unset', () => {
+        delete process.env.CHROXY_CODEX_SANDBOX
+        assert.equal(resolveCodexSandbox(), 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() falls back to workspace-write when env is empty', () => {
+        process.env.CHROXY_CODEX_SANDBOX = ''
+        assert.equal(resolveCodexSandbox(), 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() honours read-only', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        assert.equal(resolveCodexSandbox(), 'read-only')
+      })
+
+      it('resolveCodexSandbox() honours workspace-write', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'workspace-write'
+        assert.equal(resolveCodexSandbox(), 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() honours danger-full-access', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+        assert.equal(resolveCodexSandbox(), 'danger-full-access')
+      })
+
+      it('resolveCodexSandbox() trims surrounding whitespace', () => {
+        // Common foot-gun when copy-pasting from shell exports / docker-compose.
+        process.env.CHROXY_CODEX_SANDBOX = '  read-only  '
+        assert.equal(resolveCodexSandbox(), 'read-only')
+      })
+
+      it('resolveCodexSandbox() rejects unknown values and falls back to default', () => {
+        // Per the proposal in #3847 — log a warning and fall back, do not throw.
+        // Throwing would refuse to start the whole server, which is the wrong
+        // failure mode for a stopgap env knob.
+        process.env.CHROXY_CODEX_SANDBOX = 'gimme-root'
+        const warnings = []
+        const origWarn = console.warn
+        console.warn = (msg) => warnings.push(String(msg))
+        try {
+          assert.equal(resolveCodexSandbox(), 'workspace-write')
+        } finally {
+          console.warn = origWarn
+        }
+        assert.ok(
+          warnings.some((m) => m.includes('CHROXY_CODEX_SANDBOX')),
+          `expected a warning mentioning CHROXY_CODEX_SANDBOX, got: ${JSON.stringify(warnings)}`,
+        )
+      })
+
+      it('resolveCodexSandbox() is case-sensitive (refuses Read-Only)', () => {
+        // Codex CLI itself is case-sensitive on these flag values; do not
+        // silently coerce or we mask a typo that would have failed loudly.
+        process.env.CHROXY_CODEX_SANDBOX = 'Read-Only'
+        const origWarn = console.warn
+        console.warn = () => {}
+        try {
+          assert.equal(resolveCodexSandbox(), 'workspace-write')
+        } finally {
+          console.warn = origWarn
+        }
+      })
+
+      it('buildCodexArgs() emits --sandbox read-only when env is set (first-turn form)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        const args = buildCodexArgs('hi', null)
+        const idx = args.indexOf('--sandbox')
+        assert.ok(idx >= 0, '--sandbox flag must be present')
+        assert.equal(args[idx + 1], 'read-only')
+      })
+
+      it('buildCodexArgs() emits --sandbox read-only when env is set (resume form)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        const args = buildCodexArgs('continue', null, 'thread-abc')
+        const idx = args.indexOf('--sandbox')
+        assert.ok(idx >= 0, '--sandbox flag must be present on resume too')
+        assert.equal(args[idx + 1], 'read-only')
+        // Invariant from #3865/#3837: --sandbox must still come BEFORE resume.
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(idx < resumeIdx, '--sandbox must precede resume subcommand')
+      })
+
+      it('buildCodexArgs() emits --sandbox danger-full-access when env requests it', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+        const args = buildCodexArgs('hi', null)
+        const idx = args.indexOf('--sandbox')
+        assert.equal(args[idx + 1], 'danger-full-access')
+      })
+
+      it('buildCodexArgs() still defaults to workspace-write when env is unset', () => {
+        // Back-compat: the #3846 stopgap must keep working for operators who
+        // do not set the env var.
+        delete process.env.CHROXY_CODEX_SANDBOX
+        const args = buildCodexArgs('hi', null)
+        const idx = args.indexOf('--sandbox')
+        assert.equal(args[idx + 1], 'workspace-write')
+      })
+
+      it('buildCodexArgs() falls back to workspace-write on an invalid env value', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'no-such-mode'
+        const origWarn = console.warn
+        console.warn = () => {}
+        try {
+          const args = buildCodexArgs('hi', null)
+          const idx = args.indexOf('--sandbox')
+          assert.equal(args[idx + 1], 'workspace-write')
+        } finally {
+          console.warn = origWarn
+        }
+      })
+
+      it('buildCodexArgs() reads the env var at call time, not module-load time', () => {
+        // Critical for tests, hot-reload, and the rare operator who changes the
+        // env in-process. If we cached at module init, this test would fail
+        // because the env wasn't set when the module first loaded.
+        delete process.env.CHROXY_CODEX_SANDBOX
+        const before = buildCodexArgs('hi', null)
+        const beforeIdx = before.indexOf('--sandbox')
+        assert.equal(before[beforeIdx + 1], 'workspace-write')
+
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        const after = buildCodexArgs('hi', null)
+        const afterIdx = after.indexOf('--sandbox')
+        assert.equal(after[afterIdx + 1], 'read-only')
       })
     })
   })

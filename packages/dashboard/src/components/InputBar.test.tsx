@@ -351,6 +351,109 @@ describe('InputBar', () => {
     })
   })
 
+  // #3903 — symmetric edge case of the #3850 fix. send() will dispatch on
+  // attachments-only (no text), and the non-busy path already pins this
+  // (see "allows sending with attachments and empty text"). But the busy-
+  // state Send-visibility gate was still `value.trim()` only, so users
+  // who dragged a file in while a turn was in flight saw only Stop —
+  // there was no way to queue the attachment-only follow-up without
+  // typing a character first, or waiting for the current turn to end.
+  // The fix is to use a `canSubmit` predicate that matches what send()
+  // actually does: text OR file attachments OR images OR pasted-text
+  // blocks. (Images/pasted-text are dispatched by App.tsx's handleSend
+  // which reads them from outside InputBar — see App.tsx:1008.)
+  describe('attachment-only follow-up while busy (#3903)', () => {
+    it('shows Send when busy with file attachments and empty text', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          attachments={[{ path: 'src/App.tsx', name: 'App.tsx' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when streaming with file attachments and empty text', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isStreaming
+          attachments={[{ path: 'src/index.ts', name: 'index.ts' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('clicking Send while busy with attachment-only queues the follow-up', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          isBusy
+          attachments={[{ path: 'src/App.tsx', name: 'App.tsx' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('send-button'))
+      expect(onSend).toHaveBeenCalledWith('', [{ path: 'src/App.tsx', name: 'App.tsx' }])
+    })
+
+    it('shows Send when busy with only image attachments', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          imageAttachments={[{ data: 'abc', mediaType: 'image/png', name: 'a.png' }]}
+          onRemoveImage={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when busy with only pasted-text blocks', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          pastedTextBlocks={[{ id: 1, content: 'big paste' }]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('still hides Send when busy and composer is completely empty (no text, no attachments)', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      expect(screen.queryByTestId('send-button')).not.toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('Send button while busy with attachment-only uses "Send follow-up" aria-label', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          attachments={[{ path: 'src/App.tsx', name: 'App.tsx' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send follow-up')
+    })
+  })
+
   it('shows placeholder text', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} placeholder="Ask Claude..." />)
     expect(screen.getByPlaceholderText('Ask Claude...')).toBeInTheDocument()

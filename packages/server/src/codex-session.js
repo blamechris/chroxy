@@ -55,6 +55,55 @@ const BINARY_CANDIDATES = [
 const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
 
 /**
+ * Codex CLI sandbox modes. Source: `codex exec --sandbox <MODE>` accepts
+ * exactly these three values (verified against codex-cli 0.128.0). Exported
+ * so tests and consumers can pin the canonical list without re-declaring it.
+ */
+export const CODEX_SANDBOX_MODES = Object.freeze([
+  'read-only',
+  'workspace-write',
+  'danger-full-access',
+])
+
+/**
+ * Default sandbox mode when nothing overrides it. Matches the #3846 stopgap
+ * — Codex would otherwise fall back to read-only in any non-trusted dir and
+ * be unable to edit files in fresh chroxy sessions.
+ */
+export const CODEX_DEFAULT_SANDBOX = 'workspace-write'
+
+/**
+ * Resolve the Codex sandbox mode from the environment (#3847).
+ *
+ * Operators may pin a non-default sandbox without source edits by setting
+ * `CHROXY_CODEX_SANDBOX` to one of {@link CODEX_SANDBOX_MODES}. Unknown values
+ * log a warning and fall back to {@link CODEX_DEFAULT_SANDBOX} — refusing
+ * to start the whole server would be the wrong failure mode for a stopgap
+ * env knob, and a silent fall-through would hide typos.
+ *
+ * Read at call time (not module-load time) so the override responds to test
+ * harnesses, hot reload, and in-process env changes.
+ *
+ * @returns {'read-only'|'workspace-write'|'danger-full-access'}
+ */
+export function resolveCodexSandbox() {
+  const raw = process.env.CHROXY_CODEX_SANDBOX
+  if (typeof raw !== 'string' || raw.length === 0) return CODEX_DEFAULT_SANDBOX
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return CODEX_DEFAULT_SANDBOX
+  if (CODEX_SANDBOX_MODES.includes(trimmed)) return trimmed
+  // Case-sensitive match — Codex CLI is case-sensitive on these values, so
+  // silently coercing `Read-Only` would mask a typo that would have failed
+  // loudly downstream.
+  console.warn(
+    `[codex] CHROXY_CODEX_SANDBOX="${trimmed}" is not a valid sandbox mode `
+    + `(expected one of: ${CODEX_SANDBOX_MODES.join(', ')}); `
+    + `falling back to ${CODEX_DEFAULT_SANDBOX}`,
+  )
+  return CODEX_DEFAULT_SANDBOX
+}
+
+/**
  * Build the argv passed to `codex exec`. Exported for unit testing.
  *
  * `--skip-git-repo-check` is always passed: chroxy owns its own session-trust
@@ -62,14 +111,24 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * with a bare `exit 1`, which surfaced as an undiagnosable error in the UI
  * (#3834).
  *
- * `--sandbox workspace-write` is always passed (#3837 stopgap): without it
- * Codex falls back to `read-only` in any directory that isn't explicitly
- * listed under `[projects."…"]` with `trust_level = "trusted"` in
+ * REVISIT (#3840): if chroxy ever grows a directory-trust prompt (i.e. a
+ * per-cwd "you've never opened this directory before, allow?" confirmation
+ * driven by chroxy's UX, distinct from the skills-content `trustStore` in
+ * `base-session.js`), gate this flag on that confirmation — pass it for
+ * trusted cwds, omit it for untrusted ones so Codex's own git-repo heuristic
+ * adds a second line of defence. Until that UX lands, always-on is correct
+ * because the user picking a cwd in chroxy IS today's trust signal.
+ *
+ * `--sandbox <mode>` is always passed (#3837 stopgap): without it Codex
+ * falls back to `read-only` in any directory that isn't explicitly listed
+ * under `[projects."…"]` with `trust_level = "trusted"` in
  * `~/.codex/config.toml`, which makes Codex unable to write files in
  * fresh chroxy sessions and looks like a chroxy bug. The user picking
- * a directory in chroxy IS the trust signal, so workspace-write is the
- * right default. A per-session sandbox selector (read-only / workspace-write
- * / danger-full-access) is tracked separately under #3837.
+ * a directory in chroxy IS the trust signal, so `workspace-write` is the
+ * right default. Operators may override the default via the
+ * `CHROXY_CODEX_SANDBOX` env var (#3847) — e.g. on a multi-tenant host
+ * where Codex should start `read-only` until the user opts in. A
+ * per-session sandbox selector is tracked separately under #3837.
  *
  * SECURITY INVARIANT (#3843, #3869): `text`, `model`, and `threadId` are
  * interpolated into argv passed directly to `spawn()` — no shell, so shell
@@ -113,9 +172,10 @@ export function buildCodexArgs(text, model, threadId = null) {
   // `unexpected argument '--sandbox' found` (verified against codex-cli
   // 0.128.0) because --sandbox is only declared on the parent `exec` command.
   // Keep --sandbox BEFORE the `resume` subcommand on the resume path.
+  const sandbox = resolveCodexSandbox()
   const args = threadId
-    ? ['exec', '--sandbox', 'workspace-write', 'resume', threadId, text, '--json', '--skip-git-repo-check']
-    : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+    ? ['exec', '--sandbox', sandbox, 'resume', threadId, text, '--json', '--skip-git-repo-check']
+    : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', sandbox]
   if (model) {
     args.push('-c', `model="${model}"`)
   }
