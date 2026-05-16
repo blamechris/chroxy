@@ -64,6 +64,10 @@ export function getRateLimitKey(socketIp, req) {
 const DEFAULT_WINDOW_MS = 60_000   // 1 minute window
 const DEFAULT_MAX_MESSAGES = 100   // max messages per window
 const DEFAULT_BURST = 20           // burst allowance above max
+// #3979: cap the per-client map size to prevent unbounded growth from
+// source-IP rotation against HTTP limiters (no disconnect hook). 10k entries
+// is well above realistic concurrent-client counts but still cheap to hold.
+const DEFAULT_MAX_ENTRIES = 10_000
 
 export class RateLimiter {
   /**
@@ -71,12 +75,16 @@ export class RateLimiter {
    * @param {number} opts.windowMs - Sliding window duration in ms
    * @param {number} opts.maxMessages - Max messages per window
    * @param {number} opts.burst - Burst allowance above maxMessages
+   * @param {number} [opts.maxEntries] - Cap on the per-client map size.
+   *   When exceeded, the oldest entries (by insertion order) are evicted
+   *   lazily on `check()`. Defaults to 10000. See #3979.
    */
-  constructor({ windowMs, maxMessages, burst } = {}) {
+  constructor({ windowMs, maxMessages, burst, maxEntries } = {}) {
     this._windowMs = windowMs || DEFAULT_WINDOW_MS
     this._maxMessages = maxMessages || DEFAULT_MAX_MESSAGES
     this._burst = burst ?? DEFAULT_BURST
     this._limit = this._maxMessages + this._burst
+    this._maxEntries = maxEntries || DEFAULT_MAX_ENTRIES
     this._clients = new Map() // clientId -> [timestamp, ...]
   }
 
@@ -91,6 +99,14 @@ export class RateLimiter {
 
     let timestamps = this._clients.get(clientId)
     if (!timestamps) {
+      // #3979: evict oldest entries (insertion order — a Map guarantee)
+      // before inserting a new one, so map.size never exceeds maxEntries.
+      // Lazy: only runs on inserts that would push us over the cap.
+      while (this._clients.size >= this._maxEntries) {
+        const oldestKey = this._clients.keys().next().value
+        if (oldestKey === undefined) break
+        this._clients.delete(oldestKey)
+      }
       timestamps = []
       this._clients.set(clientId, timestamps)
     }
