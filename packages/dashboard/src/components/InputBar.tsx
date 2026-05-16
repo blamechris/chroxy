@@ -213,10 +213,26 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     })
   }, [attachments])
 
+  // #3903 — `canSubmit` mirrors every input mode that send() (or the parent's
+  // handleSend) would actually dispatch: text, file attachments, image
+  // attachments, or collapsed-paste blocks. Used both as the busy-state Send-
+  // visibility gate (replaces the old `value.trim()`-only check, which hid
+  // Send for attachment-only follow-ups while a turn was in flight) and as
+  // a defensive guard inside send() itself. Images and pasted-text live in
+  // App-state, not in InputBar's send() body, but they ride along on the
+  // wire (App.tsx:1008) — so the button must light up for them too.
+  const canSubmit = useMemo(() => {
+    const hasText = value.trim().length > 0
+    const hasAtts = (dedupedAttachments?.length ?? 0) > 0
+    const hasImgs = (imageAttachments?.length ?? 0) > 0
+    const hasPastes = (pastedTextBlocks?.length ?? 0) > 0
+    return hasText || hasAtts || hasImgs || hasPastes
+  }, [value, dedupedAttachments, imageAttachments, pastedTextBlocks])
+
   const send = useCallback(() => {
     const trimmed = value.trim()
     const hasAtts = dedupedAttachments && dedupedAttachments.length > 0
-    if (!trimmed && !hasAtts) return
+    if (!canSubmit) return
     if (hasAtts) {
       onSend(trimmed, dedupedAttachments)
     } else {
@@ -233,7 +249,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend, dedupedAttachments])
+  }, [value, onSend, dedupedAttachments, canSubmit])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
@@ -676,7 +692,13 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             busy states. */}
         {(isStreaming || isBusy) ? (
           <>
-            {value.trim() && (
+            {/* #3903 — gate on `canSubmit` (mirrors send()) so the Send
+                button surfaces for attachment-only follow-ups (file picks,
+                images, collapsed pastes) — not just typed text. Pre-fix,
+                dragging a file in while a turn was in flight showed only
+                Stop; the queue affordance was unreachable until the user
+                typed a character or waited for the turn to end. */}
+            {canSubmit && (
               <button
                 data-testid="send-button"
                 className="btn-send"
