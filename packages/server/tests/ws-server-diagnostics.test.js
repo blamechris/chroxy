@@ -171,10 +171,16 @@ describe('GET /diagnostics?logTailBytes=N (#3739)', () => {
   beforeEach(() => {
     logDir = mkdtempSync(join(tmpdir(), 'chroxy-diag-logtail-'))
     initFileLogging({ logDir })
-    // Generate ~20KB of log content so the byte-cap is observable. Each
-    // line is ~95 bytes after the JSON wrapper logger writes.
+    // Generate ~90KB of log content so that:
+    //   - the default 8KB window has plenty to trim,
+    //   - the explicit 1024-byte window is well below file size,
+    //   - and the 64KB hard cap (LOG_TAIL_BYTES_MAX in http-routes.js) is
+    //     actually exercised by the oversized-?logTailBytes test below
+    //     (would otherwise pass even if clamping were broken).
+    // Each line ends up ~120 bytes (timestamp + level + component +
+    // payload + newline) under the logger's plaintext format.
     const log = createLogger('diag-test')
-    for (let i = 0; i < 220; i++) {
+    for (let i = 0; i < 800; i++) {
       log.info(`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-${i}`)
     }
   })
@@ -234,10 +240,14 @@ describe('GET /diagnostics?logTailBytes=N (#3739)', () => {
   it('clamps oversized ?logTailBytes=999999999 to the hard cap (65536)', async () => {
     const port = await startAuthed()
     const body = await fetchDiag(port, '?logTailBytes=999999999')
-    // Total log content is well under 64KB in this test, so we can't
-    // assert exactly 65536 bytes — but we CAN assert the response isn't
-    // unbounded by checking it's no larger than the cap.
-    assert.ok(tailBytes(body) <= 65536, `hard cap enforced (got ${tailBytes(body)})`)
+    // The log file is ~90KB (see beforeEach), so an unclamped pass-through
+    // would return >64KB. Asserting the response is *at* the cap proves
+    // the clamp ran; asserting it's *close* to the cap (>50KB) proves we
+    // actually exercised it rather than returning a tiny tail by accident.
+    const bytes = tailBytes(body)
+    assert.ok(bytes <= 65536, `hard cap enforced (got ${bytes})`)
+    assert.ok(bytes >= 50000,
+      `cap actually exercised — must be near 64KB to prove clamp ran (got ${bytes})`)
   })
 
   it('falls back to default for NaN ?logTailBytes=garbage', async () => {
@@ -269,7 +279,17 @@ describe('GET /diagnostics?logTailBytes=N (#3739)', () => {
 
   it('truncates a fractional ?logTailBytes=1024.9 to an integer', async () => {
     const port = await startAuthed()
-    const body = await fetchDiag(port, '?logTailBytes=1024.9')
-    assert.ok(tailBytes(body) <= 1024 + 200, `fractional value truncated and clamped (got ${tailBytes(body)})`)
+    const frac = await fetchDiag(port, '?logTailBytes=1024.9')
+    const intg = await fetchDiag(port, '?logTailBytes=1024')
+    // If `1024.9` were passed through to buildDiagnosticsSnapshot unchanged,
+    // collectLogTail's readSync(... length=1024.9) would hit its error
+    // path and return zero lines + a `logs.error`. Assert positively that
+    // we got file-backed lines AND that the byte count matches the
+    // integer-1024 response within a few log lines of drift.
+    assert.equal(frac.logs?.source, 'file', 'fractional request must succeed against the log file')
+    assert.equal(frac.logs?.error, undefined, 'no readSync error from a fractional length')
+    assert.ok(frac.logs?.lines?.length > 0, 'fractional request returns log lines')
+    assert.ok(Math.abs(tailBytes(frac) - tailBytes(intg)) < 500,
+      `fractional behaves like integer 1024 (got ${tailBytes(frac)} vs ${tailBytes(intg)})`)
   })
 })
