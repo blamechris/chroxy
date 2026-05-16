@@ -62,6 +62,14 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * with a bare `exit 1`, which surfaced as an undiagnosable error in the UI
  * (#3834).
  *
+ * REVISIT (#3840): if chroxy ever grows a directory-trust prompt (i.e. a
+ * per-cwd "you've never opened this directory before, allow?" confirmation
+ * driven by chroxy's UX, distinct from the skills-content `trustStore` in
+ * `base-session.js`), gate this flag on that confirmation — pass it for
+ * trusted cwds, omit it for untrusted ones so Codex's own git-repo heuristic
+ * adds a second line of defence. Until that UX lands, always-on is correct
+ * because the user picking a cwd in chroxy IS today's trust signal.
+ *
  * `--sandbox workspace-write` is always passed (#3837 stopgap): without it
  * Codex falls back to `read-only` in any directory that isn't explicitly
  * listed under `[projects."…"]` with `trust_level = "trusted"` in
