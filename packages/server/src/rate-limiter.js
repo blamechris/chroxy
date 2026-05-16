@@ -73,8 +73,11 @@ const DEFAULT_MAX_ENTRIES = 10_000
 // drop any whose newest timestamp is older than windowMs. Bounded scan
 // keeps per-call cost O(1) so the map converges to the active-IP count
 // under sweep workloads instead of waiting for the FIFO cap. 8 keeps the
-// per-call overhead negligible while letting a steady trickle of calls
-// catch up to a large stale residue within a few hundred calls.
+// per-call overhead negligible; the cursor needs map.size / 8 calls to
+// touch every entry (≈1250 calls at the default 10000-entry cap, fewer
+// for smaller deployments). On a busy limiter that's seconds-to-minutes;
+// on a quiet one stale entries will simply wait their turn — they're
+// bounded by FIFO either way.
 const STALE_SCAN_BUDGET = 8
 
 export class RateLimiter {
