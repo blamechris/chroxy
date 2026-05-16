@@ -73,13 +73,30 @@ export const CODEX_SANDBOX_MODES = Object.freeze([
 export const CODEX_DEFAULT_SANDBOX = 'workspace-write'
 
 /**
+ * Module-level cache of invalid `CHROXY_CODEX_SANDBOX` values we have
+ * already warned about (#3981). Because `resolveCodexSandbox()` runs on
+ * every `sendMessage()`, a single typo in an operator's environment would
+ * otherwise spam `console.warn` for every turn of every session for the
+ * lifetime of the server. We still want loud-on-first-call so the typo is
+ * discoverable, but bounded volume after that — one log line per distinct
+ * bad value per process.
+ *
+ * Keyed by the trimmed raw string so a later typo-correction to a *different*
+ * invalid value still surfaces. Never cleared; the set is bounded by the
+ * number of distinct invalid values an operator types, which in practice is
+ * 1 or 2.
+ */
+const _warnedSandboxValues = new Set()
+
+/**
  * Resolve the Codex sandbox mode from the environment (#3847).
  *
  * Operators may pin a non-default sandbox without source edits by setting
  * `CHROXY_CODEX_SANDBOX` to one of {@link CODEX_SANDBOX_MODES}. Unknown values
- * log a warning and fall back to {@link CODEX_DEFAULT_SANDBOX} — refusing
- * to start the whole server would be the wrong failure mode for a stopgap
- * env knob, and a silent fall-through would hide typos.
+ * log a warning (once per distinct value per process — see #3981) and fall
+ * back to {@link CODEX_DEFAULT_SANDBOX} — refusing to start the whole server
+ * would be the wrong failure mode for a stopgap env knob, and a silent
+ * fall-through would hide typos.
  *
  * Read at call time (not module-load time) so the override responds to test
  * harnesses, hot reload, and in-process env changes.
@@ -95,11 +112,14 @@ export function resolveCodexSandbox() {
   // Case-sensitive match — Codex CLI is case-sensitive on these values, so
   // silently coercing `Read-Only` would mask a typo that would have failed
   // loudly downstream.
-  console.warn(
-    `[codex] CHROXY_CODEX_SANDBOX="${trimmed}" is not a valid sandbox mode `
-    + `(expected one of: ${CODEX_SANDBOX_MODES.join(', ')}); `
-    + `falling back to ${CODEX_DEFAULT_SANDBOX}`,
-  )
+  if (!_warnedSandboxValues.has(trimmed)) {
+    _warnedSandboxValues.add(trimmed)
+    console.warn(
+      `[codex] CHROXY_CODEX_SANDBOX="${trimmed}" is not a valid sandbox mode `
+      + `(expected one of: ${CODEX_SANDBOX_MODES.join(', ')}); `
+      + `falling back to ${CODEX_DEFAULT_SANDBOX}`,
+    )
+  }
   return CODEX_DEFAULT_SANDBOX
 }
 

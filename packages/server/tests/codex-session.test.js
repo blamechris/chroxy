@@ -1062,6 +1062,53 @@ describe('CodexSession', () => {
         }
       })
 
+      // #3981: resolveCodexSandbox() runs on every sendMessage(). Without
+      // a per-value warn cache, a single typo in an operator's environment
+      // would spam console.warn for every turn for the lifetime of the
+      // server. Pin the once-per-distinct-value behavior so log volume is
+      // bounded but typo discoverability is preserved.
+      describe('warn-once on invalid values (#3981)', () => {
+        it('warns exactly once when the same invalid value is resolved repeatedly', () => {
+          process.env.CHROXY_CODEX_SANDBOX = 'bogus-once'
+          const warnings = []
+          const origWarn = console.warn
+          console.warn = (msg) => warnings.push(String(msg))
+          try {
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+          } finally {
+            console.warn = origWarn
+          }
+          const matched = warnings.filter((m) => m.includes('bogus-once'))
+          assert.equal(
+            matched.length,
+            1,
+            `expected exactly one warning for 'bogus-once', got ${matched.length}: ${JSON.stringify(warnings)}`,
+          )
+        })
+
+        it('warns again when a different invalid value is supplied (typo correction)', () => {
+          const warnings = []
+          const origWarn = console.warn
+          console.warn = (msg) => warnings.push(String(msg))
+          try {
+            process.env.CHROXY_CODEX_SANDBOX = 'bogus-typo-a'
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            process.env.CHROXY_CODEX_SANDBOX = 'bogus-typo-b'
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+          } finally {
+            console.warn = origWarn
+          }
+          const a = warnings.filter((m) => m.includes('bogus-typo-a'))
+          const b = warnings.filter((m) => m.includes('bogus-typo-b'))
+          assert.equal(a.length, 1, `expected one warn for typo-a, got: ${JSON.stringify(warnings)}`)
+          assert.equal(b.length, 1, `expected one warn for typo-b, got: ${JSON.stringify(warnings)}`)
+        })
+      })
+
       it('buildCodexArgs() emits --sandbox read-only when env is set (first-turn form)', () => {
         process.env.CHROXY_CODEX_SANDBOX = 'read-only'
         const args = buildCodexArgs('hi', null)
