@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
+import { PermissionManager } from '../src/permission-manager.js'
 
 /**
  * #3736: permissionSessionMap must not leak entries on internal resolution
@@ -238,5 +239,66 @@ describe('questionSessionMap cleanup on internal resolution paths (#3736)', () =
     // But cleanup MUST still fire.
     assert.equal(ctx.questionSessionMap.has('tool-q-cleared'), false,
       'cleanup must still fire for the question variant')
+  })
+
+  // #3975: PR #3971 fixed every internal-resolution path EXCEPT the
+  // PermissionManager.clearAll() emit, which dropped `toolUseId` on the
+  // question variant. The sdk-session re-emit gates on
+  // `data.requestId || data.toolUseId` — without `toolUseId` the event was
+  // silently dropped and questionSessionMap leaked one entry per
+  // message-completion-while-question-pending event (bounded only by
+  // session_destroyed cleanup).
+  it('prunes questionSessionMap end-to-end when PermissionManager.clearAll() resolves a pending question (#3975)', async () => {
+    const ctx = makeMultiCtx()
+    setupForwarding(ctx)
+
+    const pm = new PermissionManager({ log: { info() {}, warn() {} } })
+
+    // Bridge PermissionManager → sessionManager session_event stream just
+    // like sdk-session.js does in production. The re-emit gate matches the
+    // production code at sdk-session.js:281.
+    const sessionId = 'sess-3975'
+    pm.on('user_question', (data) => {
+      ctx.sessionManager.emit('session_event', {
+        sessionId,
+        event: 'user_question',
+        data,
+      })
+    })
+    pm.on('permission_resolved', (data) => {
+      if (data && (data.requestId || data.toolUseId)) {
+        ctx.sessionManager.emit('session_event', {
+          sessionId,
+          event: 'permission_resolved',
+          data,
+        })
+      }
+    })
+
+    // Trigger an AskUserQuestion to seed questionSessionMap via the normal
+    // flow (user_question handler in ws-forwarding registers the entry).
+    const askPromise = pm.handlePermission(
+      'AskUserQuestion',
+      { questions: [{ question: 'go?' }] },
+      null,
+      'approve',
+    )
+    // questionSessionMap is keyed by toolUseId — read it from the map.
+    assert.equal(ctx.questionSessionMap.size, 1,
+      'precondition: user_question must seed questionSessionMap')
+    const [seededToolUseId] = ctx.questionSessionMap.keys()
+
+    // Now call clearAll — the leak window. With the fix the toolUseId
+    // makes it through the unified pipeline and questionSessionMap is
+    // pruned. Without the fix the map still holds the stale entry.
+    pm.clearAll()
+    await askPromise
+
+    assert.equal(ctx.questionSessionMap.has(seededToolUseId), false,
+      'clearAll must prune questionSessionMap via the unified pipeline')
+    assert.equal(ctx.questionSessionMap.size, 0,
+      'no stale entries after clearAll')
+
+    pm.destroy()
   })
 })
