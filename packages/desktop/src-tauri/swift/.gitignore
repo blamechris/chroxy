@@ -1,0 +1,4 @@
+# Build cache marker for the speech-helper compile step in build.rs (#3833).
+# Used to skip the redundant swiftc+lipo+codesign on the second cargo pass
+# of a universal-apple-darwin build.
+speech-helper.cache
