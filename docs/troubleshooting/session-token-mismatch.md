@@ -56,6 +56,13 @@ The three `[session-binding-*]` diagnostic logs used for triage are:
 logs clean during auto-accept sessions with heavy permission traffic.
 `reject` stays at `warn` so it is always visible.
 
+> **Tip:** before (or instead of) grepping logs, hit
+> [`GET /diagnostics`](../troubleshooting.md#0-diagnostics-endpoint-triaging-stuck-sessions) —
+> it returns the live per-session `boundSessionId` / `currentMessageId`
+> / `pendingPermissions` queue plus a tail of `chroxy.log` in one
+> request. Often that is enough to classify the failure mode below
+> without enabling debug logging at all.
+
 To enable the full correlation trail, restart the server with
 `LOG_LEVEL=debug`:
 
