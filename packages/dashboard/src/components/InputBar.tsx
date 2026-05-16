@@ -12,7 +12,7 @@ import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand, EvaluatorResultPayload } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
-import { shouldCollapsePaste } from '@chroxy/store-core'
+import { shouldCollapsePaste, findActiveMarkerIds } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
 
 /**
@@ -221,13 +221,29 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   // a defensive guard inside send() itself. Images and pasted-text live in
   // App-state, not in InputBar's send() body, but they ride along on the
   // wire (App.tsx:1008) — so the button must light up for them too.
+  //
+  // #3984 — pasted blocks are *only* dispatched when their `[Pasted text #N]`
+  // marker appears in `value` (App.tsx calls expandPasteMarkers(text, blocks),
+  // which is a regex sweep over `text`). If the user deletes the marker but
+  // the chip persists, treating `pastedTextBlocks.length > 0` as dispatchable
+  // makes Send fire `onSend('')` and silently drop the paste. Gate paste
+  // contribution to canSubmit on whether at least one block id is actually
+  // referenced by an in-text marker.
+  const hasReferencedPaste = useMemo(() => {
+    if (!pastedTextBlocks || pastedTextBlocks.length === 0) return false
+    const active = findActiveMarkerIds(value)
+    if (active.size === 0) return false
+    for (const blk of pastedTextBlocks) {
+      if (active.has(blk.id)) return true
+    }
+    return false
+  }, [value, pastedTextBlocks])
   const canSubmit = useMemo(() => {
     const hasText = value.trim().length > 0
     const hasAtts = (dedupedAttachments?.length ?? 0) > 0
     const hasImgs = (imageAttachments?.length ?? 0) > 0
-    const hasPastes = (pastedTextBlocks?.length ?? 0) > 0
-    return hasText || hasAtts || hasImgs || hasPastes
-  }, [value, dedupedAttachments, imageAttachments, pastedTextBlocks])
+    return hasText || hasAtts || hasImgs || hasReferencedPaste
+  }, [value, dedupedAttachments, imageAttachments, hasReferencedPaste])
 
   const send = useCallback(() => {
     const trimmed = value.trim()
