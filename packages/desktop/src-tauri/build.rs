@@ -72,55 +72,96 @@ fn main() {
         }
 
         if std::path::Path::new(&swift_src).exists() {
-            for (arch, out) in [("arm64", &swift_arm64), ("x86_64", &swift_x86_64)] {
-                let target = format!("{}-apple-macos11", arch);
+            // Cache key for skipping redundant compile+lipo+sign on the second
+            // cargo invocation of a universal-apple-darwin build (#3833). Tauri
+            // runs `cargo build` once per arch (arm64 then x86_64); each
+            // invocation re-runs this build.rs and used to redo the full
+            // ~10s swiftc+lipo+codesign cycle even though the output is
+            // identical.
+            //
+            // Inputs that must invalidate the cache:
+            //   - swift source mtime (also tracked by rerun-if-changed above,
+            //     but cargo's tracker is per-target_dir; the universal build
+            //     uses two target dirs so we re-check explicitly here)
+            //   - APPLE_SIGNING_IDENTITY (signature changes when identity does)
+            //   - The output binary itself must still exist + be non-empty
+            //
+            // Cache file lives next to swift_out in the source tree so both
+            // cargo invocations (which have different OUT_DIR) see the same
+            // file. To force a rebuild manually: `rm packages/desktop/src-tauri/swift/speech-helper.cache`.
+            let swift_cache = format!("{}.cache", swift_out);
+            let identity_for_cache = std::env::var("APPLE_SIGNING_IDENTITY").unwrap_or_default();
+            let src_mtime_secs = std::fs::metadata(&swift_src)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let cache_key = format!("v1\nsrc_mtime={}\nidentity={}\n", src_mtime_secs, identity_for_cache);
+
+            let cached = std::path::Path::new(&swift_out).exists()
+                && std::fs::metadata(&swift_out).map(|m| m.len() > 0).unwrap_or(false)
+                && std::fs::read_to_string(&swift_cache).map(|s| s == cache_key).unwrap_or(false);
+
+            if cached {
+                println!("cargo:warning=speech-helper: cache hit, skipping swiftc+lipo+codesign (cache key matches {swift_cache})");
+            } else {
+                for (arch, out) in [("arm64", &swift_arm64), ("x86_64", &swift_x86_64)] {
+                    let target = format!("{}-apple-macos11", arch);
+                    run(
+                        &format!("swiftc ({arch})"),
+                        std::process::Command::new("swiftc").args([
+                            "-O",
+                            "-target", &target,
+                            &swift_src,
+                            "-o", out,
+                            "-framework", "Speech",
+                            "-framework", "AVFoundation",
+                        ]),
+                    );
+                }
+
                 run(
-                    &format!("swiftc ({arch})"),
-                    std::process::Command::new("swiftc").args([
-                        "-O",
-                        "-target", &target,
-                        &swift_src,
-                        "-o", out,
-                        "-framework", "Speech",
-                        "-framework", "AVFoundation",
+                    "lipo (universal speech-helper)",
+                    std::process::Command::new("lipo").args([
+                        "-create", &swift_arm64, &swift_x86_64,
+                        "-output", &swift_out,
                     ]),
                 );
-            }
 
-            run(
-                "lipo (universal speech-helper)",
-                std::process::Command::new("lipo").args([
-                    "-create", &swift_arm64, &swift_x86_64,
-                    "-output", &swift_out,
-                ]),
-            );
+                // Codesign the universal binary with the Developer ID cert when one
+                // is configured. Skipping when adhoc ("-") keeps local dev working
+                // without any Apple credentials.
+                if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
+                    if !identity.is_empty() && identity != "-" {
+                        run(
+                            "codesign (speech-helper)",
+                            std::process::Command::new("codesign").args([
+                                "--force",
+                                "--options", "runtime",
+                                "--timestamp",
+                                "--sign", &identity,
+                                &swift_out,
+                            ]),
+                        );
+                        // Fail-fast verification: catches bad signatures here instead of
+                        // letting them propagate to a ~15-minute Apple notarytool rejection.
+                        run(
+                            "codesign --verify (speech-helper)",
+                            std::process::Command::new("codesign").args([
+                                "--verify",
+                                "--strict",
+                                "--verbose=2",
+                                &swift_out,
+                            ]),
+                        );
+                    }
+                }
 
-            // Codesign the universal binary with the Developer ID cert when one
-            // is configured. Skipping when adhoc ("-") keeps local dev working
-            // without any Apple credentials.
-            if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
-                if !identity.is_empty() && identity != "-" {
-                    run(
-                        "codesign (speech-helper)",
-                        std::process::Command::new("codesign").args([
-                            "--force",
-                            "--options", "runtime",
-                            "--timestamp",
-                            "--sign", &identity,
-                            &swift_out,
-                        ]),
-                    );
-                    // Fail-fast verification: catches bad signatures here instead of
-                    // letting them propagate to a ~15-minute Apple notarytool rejection.
-                    run(
-                        "codesign --verify (speech-helper)",
-                        std::process::Command::new("codesign").args([
-                            "--verify",
-                            "--strict",
-                            "--verbose=2",
-                            &swift_out,
-                        ]),
-                    );
+                // Write the cache marker last, so a failed compile/sign leaves
+                // the cache invalid and forces a rebuild on the next pass.
+                if let Err(e) = std::fs::write(&swift_cache, &cache_key) {
+                    println!("cargo:warning=speech-helper: failed to write cache marker {swift_cache}: {e}");
                 }
             }
         }

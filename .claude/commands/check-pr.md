@@ -306,17 +306,53 @@ If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 
 GraphQL is required here — REST doesn't expose thread state. Threads are GraphQL-only objects (`PRRT_*` IDs); the `resolveReviewThread` mutation needs the GraphQL node ID, not the REST `databaseId`.
 
 ```bash
-# Fetch all review threads (GraphQL — REST API doesn't expose thread state)
-THREADS=$(gh api graphql -f query="
-  query {
-    repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
-      pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) {
-          nodes { id isResolved }
+# pipefail: required so `fetch_review_threads | jq -s ...` propagates a fetch
+# failure (otherwise the pipe's exit status is jq's, and a transient error
+# silently produces UNRESOLVED=0 — the very failure mode this section guards).
+set -o pipefail
+
+# Fetch all review threads (GraphQL — REST API doesn't expose thread state).
+# Page through with a cursor so PRs with >100 threads aren't silently truncated.
+# Hard-fails on transient errors and bounds the loop, so a misbehaving API
+# response can't silently truncate (re-introducing the bug this fixes) or
+# spin forever.
+fetch_review_threads() {
+  local cursor="null" page has_next next_cursor
+  local pages=0 max_pages=100   # 100 pages * 100 threads = 10000-thread ceiling
+  while [ $pages -lt $max_pages ]; do
+    page=$(gh api graphql -f query="
+      query {
+        repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
+          pullRequest(number: ${PR_NUM}) {
+            reviewThreads(first: 100, after: ${cursor}) {
+              pageInfo { hasNextPage endCursor }
+              nodes { id isResolved }
+            }
+          }
         }
-      }
-    }
-  }" --jq '.data.repository.pullRequest.reviewThreads.nodes')
+      }") || { echo "FAIL: graphql page fetch failed (cursor=${cursor})" >&2; return 1; }
+    # Reject error responses or missing data so we don't silently emit nothing.
+    if ! echo "$page" | jq -e '.data.repository.pullRequest.reviewThreads' >/dev/null; then
+      echo "FAIL: graphql returned no reviewThreads (cursor=${cursor}): $page" >&2
+      return 1
+    fi
+    echo "$page" | jq -c '.data.repository.pullRequest.reviewThreads.nodes[]'
+    has_next=$(echo "$page" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+    [ "$has_next" = "true" ] || return 0
+    next_cursor=$(echo "$page" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
+    # Defend against an API quirk where the cursor doesn't advance (would loop forever).
+    if [ "\"$next_cursor\"" = "$cursor" ]; then
+      echo "FAIL: endCursor did not advance (${cursor}); aborting to avoid infinite loop" >&2
+      return 1
+    fi
+    cursor="\"$next_cursor\""
+    pages=$((pages + 1))
+  done
+  echo "FAIL: review-thread pagination hit ${max_pages}-page cap; PR has >$((max_pages * 100)) threads or API is misbehaving" >&2
+  return 1
+}
+
+THREADS=$(fetch_review_threads | jq -s '.') || { echo "FAIL: review-thread fetch failed; refusing to proceed"; exit 1; }
 
 # Resolve each unresolved thread; surface any single-thread failure
 # instead of swallowing it (a 401/403 on one thread shouldn't be silent).
@@ -330,17 +366,9 @@ echo "$THREADS" | jq -r '.[] | select(.isResolved == false) | .id' | while read 
     || echo "  FAILED to resolve: $tid"
 done
 
-# Verify zero unresolved threads remain
-UNRESOLVED=$(gh api graphql -f query="
-  query {
-    repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
-      pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) {
-          nodes { isResolved }
-        }
-      }
-    }
-  }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+# Verify zero unresolved threads remain (re-paginate; same reason as above)
+UNRESOLVED=$(fetch_review_threads | jq -s '[.[] | select(.isResolved == false)] | length') \
+  || { echo "FAIL: verification fetch failed; refusing to claim success"; exit 1; }
 
 echo "Unresolved threads: ${UNRESOLVED}"
 [ "$UNRESOLVED" -eq 0 ] || { echo "FAIL: ${UNRESOLVED} threads still unresolved"; exit 1; }
