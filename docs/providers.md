@@ -167,7 +167,27 @@ Items 2–4 mean "the workspace" is **broader than the chroxy session
 cwd**. Chroxy's session-trust gate only constrains item 1. If you need
 a hard read-only session, the per-session sandbox selector tracked in
 #3837 is the user-facing override — until that lands, set
-`CHROXY_CODEX_SANDBOX=read-only` server-wide (planned in #3847).
+`CHROXY_CODEX_SANDBOX=read-only` server-wide (#3847).
+
+### `CHROXY_CODEX_SANDBOX` env override (#3847)
+
+Operators on multi-tenant or shared-dev hosts may want Codex to start
+more restrictive than the `workspace-write` default. Set
+`CHROXY_CODEX_SANDBOX` on the server process to one of:
+
+| Value | `--sandbox` passed to `codex exec` | Effect |
+|---|---|---|
+| _unset_ | `workspace-write` | Default. Codex may write to the four surfaces described above. |
+| `read-only` | `read-only` | Codex may read but not write or execute side-effectful commands. |
+| `workspace-write` | `workspace-write` | Same as the default — useful for making the policy explicit in a process manager unit file. |
+| `danger-full-access` | `danger-full-access` | Codex has no sandbox at all. Only set on a host you fully trust. |
+
+Unknown values (e.g. a typo like `readonly`) log a warning to stderr and
+fall back to `workspace-write` rather than refusing to start the server.
+The override is read on each turn, so changing the env applies on the
+*next* message — but already-running `codex exec` subprocesses are
+unaffected. This is a stopgap until the per-session sandbox selector
+(#3837) lands.
 
 Chroxy also unconditionally passes `--skip-git-repo-check` so Codex
 will accept non-git cwds (#3834). This is correct today because
