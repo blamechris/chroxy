@@ -59,6 +59,15 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
   const hasNotification = notificationCount > 0 && !isActive;
   const showBusy = !isCrashed && session.isBusy;
   const hasIndicators = isCrashed || showBusy || hasNotification;
+  // Mobile parity with dashboard SessionBar chips (#3940): surface the
+  // provider's short label as a small badge on the pill so claude-tui,
+  // codex, gemini, docker-cli, etc. are distinguishable at-a-glance
+  // without long-pressing. Same gate as the long-press alert title from
+  // #3937 — skip the claude-sdk default and any session with no provider.
+  const providerInfo =
+    session.provider && session.provider !== 'claude-sdk'
+      ? getProviderInfo(session.provider)
+      : null;
   return (
     <TouchableOpacity
       style={[
@@ -72,7 +81,7 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${session.worktree ? ', isolated worktree' : ''}`}
+      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}`}
       accessibilityState={{ selected: isActive }}
       accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : undefined}
     >
@@ -86,6 +95,17 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       <Text style={[styles.pillText, isActive && styles.pillTextActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
       </Text>
+      {providerInfo && (
+        <View
+          style={styles.providerBadge}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          <Text style={styles.providerBadgeText} numberOfLines={1} accessibilityLabel="">
+            {providerInfo.short}
+          </Text>
+        </View>
+      )}
       {session.worktree && (
         <View style={styles.worktreeBadge} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
           <Text style={styles.worktreeBadgeText} accessibilityLabel="">W</Text>
@@ -431,6 +451,25 @@ const styles = StyleSheet.create({
   },
   worktreeBadgeText: {
     color: COLORS.accentGreen,
+    fontSize: 9,
+    fontWeight: '700',
+    lineHeight: 13,
+  },
+  providerBadge: {
+    marginLeft: 4,
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    maxWidth: 60,
+  },
+  providerBadgeText: {
+    // Render the canonical short label exactly as `getProviderInfo(...).short`
+    // returns it ("Codex", "Gemini", "Docker CLI", "TUI", "CLI"), matching
+    // the dashboard SessionBar chip text for cross-surface parity. No
+    // textTransform — uppercasing would mangle "Codex" -> "CODEX" and
+    // diverge from the shared label source.
+    color: COLORS.textMuted,
     fontSize: 9,
     fontWeight: '700',
     lineHeight: 13,
