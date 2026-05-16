@@ -84,11 +84,18 @@ fn main() {
             //     but cargo's tracker is per-target_dir; the universal build
             //     uses two target dirs so we re-check explicitly here)
             //   - APPLE_SIGNING_IDENTITY (signature changes when identity does)
+            //   - swiftc toolchain version (#3950: Xcode/Swift updates produce
+            //     binaries with different runtime requirements; without this,
+            //     a stale cache would silently ship a binary compiled against
+            //     the prior toolchain). Captured via `swiftc --version` so any
+            //     change (Swift release, Xcode build id) invalidates the cache.
             //   - The output binary itself must still exist + be non-empty
             //
             // Cache file lives next to swift_out in the source tree so both
             // cargo invocations (which have different OUT_DIR) see the same
             // file. To force a rebuild manually: `rm packages/desktop/src-tauri/swift/speech-helper.cache`.
+            // The `v<N>` prefix is bumped whenever this key's schema changes so
+            // existing on-disk caches auto-invalidate on rollout.
             let swift_cache = format!("{}.cache", swift_out);
             let identity_for_cache = std::env::var("APPLE_SIGNING_IDENTITY").unwrap_or_default();
             let src_mtime_secs = std::fs::metadata(&swift_src)
@@ -97,7 +104,25 @@ fn main() {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let cache_key = format!("v1\nsrc_mtime={}\nidentity={}\n", src_mtime_secs, identity_for_cache);
+            // `swiftc --version` writes the full toolchain banner (Swift release
+            // + Xcode build id on Apple toolchains) to stdout. If swiftc is
+            // missing or the call fails, fall back to "unknown" so we still
+            // produce a deterministic cache key — the compile step below will
+            // then fail loudly with the real error.
+            let swiftc_version = std::process::Command::new("swiftc")
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let cache_key = format!(
+                "v2\nsrc_mtime={}\nidentity={}\nswiftc={}\n",
+                src_mtime_secs, identity_for_cache, swiftc_version,
+            );
 
             let cached = std::path::Path::new(&swift_out).exists()
                 && std::fs::metadata(&swift_out).map(|m| m.len() > 0).unwrap_or(false)
