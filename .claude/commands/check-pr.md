@@ -356,17 +356,42 @@ THREADS=$(fetch_review_threads | jq -s '.') || { echo "FAIL: review-thread fetch
 
 # Resolve each unresolved thread; surface any single-thread failure
 # instead of swallowing it (a 401/403 on one thread shouldn't be silent).
+#
+# The loop runs in a subshell because of the pipe, so a plain variable
+# (FAILED_IDS=...) wouldn't survive past `done`. Track failures in a temp
+# file instead and read them back after the loop. The mutation also needs
+# to confirm `isResolved: true` — a 200 response that returns `false`
+# (e.g., archived repo, permission silently downgraded) is still a failure.
+FAILED_FILE=$(mktemp)
+trap 'rm -f "$FAILED_FILE"' EXIT
+
 echo "$THREADS" | jq -r '.[] | select(.isResolved == false) | .id' | while read -r tid; do
-  gh api graphql -f query="
+  RESULT=$(gh api graphql -f query="
     mutation {
       resolveReviewThread(input: {threadId: \"$tid\"}) {
         thread { isResolved }
       }
-    }" --jq '.data.resolveReviewThread.thread | "  resolved: \(.isResolved)"' \
-    || echo "  FAILED to resolve: $tid"
+    }" --jq '.data.resolveReviewThread.thread.isResolved' 2>&1)
+  if [ "$RESULT" = "true" ]; then
+    echo "  resolved: $tid"
+  else
+    echo "  FAILED to resolve: $tid ($RESULT)" >&2
+    echo "$tid" >> "$FAILED_FILE"
+  fi
 done
 
-# Verify zero unresolved threads remain (re-paginate; same reason as above)
+FAILED_COUNT=$(wc -l < "$FAILED_FILE" | tr -d ' ')
+if [ "$FAILED_COUNT" -gt 0 ]; then
+  echo "FAIL: ${FAILED_COUNT} thread(s) could not be resolved:" >&2
+  sed 's/^/  - /' "$FAILED_FILE" >&2
+  echo "Refusing to claim success while resolveReviewThread mutations are failing." >&2
+  exit 1
+fi
+
+# Verify zero unresolved threads remain (re-paginate; same reason as above).
+# This is a belt-and-suspenders check against the mutation lying — e.g.,
+# returning isResolved: true while the thread is still open server-side, or
+# a thread re-opening between mutation and verification.
 UNRESOLVED=$(fetch_review_threads | jq -s '[.[] | select(.isResolved == false)] | length') \
   || { echo "FAIL: verification fetch failed; refusing to claim success"; exit 1; }
 
