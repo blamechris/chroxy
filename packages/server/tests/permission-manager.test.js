@@ -477,6 +477,35 @@ describe('PermissionManager', () => {
       pm.clearAll()
       assert.equal(pm._questionTimer, null)
     })
+
+    // #3975: clearAll must include `toolUseId` on the question-variant
+    // permission_resolved emit so the unified pipeline (EventNormalizer)
+    // can prune the questionSessionMap entry. Pre-fix the emit was
+    // `{ reason: 'cleared' }` with no `toolUseId`, the sdk-session re-emit
+    // gate dropped it, and the routing map leaked one entry per
+    // message-completion-while-question-pending event.
+    it('emits permission_resolved with toolUseId + reason:cleared for the pending question (#3975)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      // Spin up an AskUserQuestion so PermissionManager captures a toolUseId.
+      const userQuestionEvents = []
+      pm.on('user_question', (data) => userQuestionEvents.push(data))
+      const promise = pm._handleAskUserQuestion({ questions: [{ question: 'go?' }] }, null)
+      assert.equal(userQuestionEvents.length, 1)
+      const toolUseId = userQuestionEvents[0].toolUseId
+      assert.ok(toolUseId, 'precondition: user_question must carry toolUseId')
+
+      pm.clearAll()
+      await promise
+
+      const questionEmits = events.filter(e => !e.requestId)
+      assert.equal(questionEmits.length, 1,
+        'clearAll must emit exactly one question-variant permission_resolved')
+      assert.equal(questionEmits[0].toolUseId, toolUseId,
+        'toolUseId must be propagated so questionSessionMap can be pruned')
+      assert.equal(questionEmits[0].reason, 'cleared')
+    })
   })
 
   // -- destroy --

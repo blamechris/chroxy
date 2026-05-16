@@ -871,4 +871,140 @@ describe('App', () => {
       expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
     })
   })
+
+  describe('Composer ref reconciliation against session_list (#3977)', () => {
+    // #3977: the server can remove a session from `sessions[]` without the
+    // dashboard having called `handleCloseSession` locally — another client
+    // closes the session, the supervisor culls it, the server cold-restarts
+    // and rebuilds session_list from disk without the dead entries, or the
+    // user switches servers. In every one of those paths the per-session
+    // composer refs (`inputDraftsRef`, `pastedTextBlocksRef`,
+    // `pastedTextNextIdRef`) would leak the dead sessionId's entries for the
+    // lifetime of <App />. The fix subscribes to `sessions[]` and reconciles
+    // the refs whenever an entry disappears from the list. These tests prove
+    // the eviction is observable: a session whose composer had a paste chip,
+    // once removed from `sessions[]` by anything other than the local close
+    // handler, must not "remember" it when its sessionId reappears.
+    function bigText(lines: number, charsPerLine = 100): string {
+      const line = 'x'.repeat(charsPerLine)
+      return Array(lines).fill(line).join('\n')
+    }
+
+    const twoSessions = [
+      {
+        sessionId: 's1', name: 'One', cwd: '/tmp', type: 'cli' as const,
+        hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+        createdAt: 1, conversationId: null, provider: 'claude-sdk', worktree: false,
+      },
+      {
+        sessionId: 's2', name: 'Two', cwd: '/tmp', type: 'cli' as const,
+        hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+        createdAt: 2, conversationId: null, provider: 'claude-sdk', worktree: false,
+      },
+    ]
+
+    it('evicts paste blocks when a session vanishes from session_list (server-driven removal)', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: twoSessions,
+        activeSessionId: 's1',
+      }
+      const { rerender } = render(<App />)
+
+      // Stage a collapsed paste on s1.
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          files: [],
+          items: [],
+          getData: (type: string) => (type === 'text/plain' ? bigText(30) : ''),
+        },
+      })
+      expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
+
+      // Simulate a server-driven `session_list` broadcast that drops s1 —
+      // NOT the local close handler. Active id moves to s2.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions.filter(s => s.sessionId !== 's1'),
+        activeSessionId: 's2',
+      }
+      rerender(<App />)
+      expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
+
+      // Re-present a session with id s1 (the dashboard rebinds to the same
+      // id, or a new session happens to reuse it). If the ref entry leaked,
+      // the stale paste chip would resurrect here — the failure mode #3977
+      // describes for the broadcast-driven removal path.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions,
+        activeSessionId: 's1',
+      }
+      rerender(<App />)
+      expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
+    })
+
+    it('evicts the typed draft when a session vanishes from session_list', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: twoSessions,
+        activeSessionId: 's1',
+      }
+      const { rerender } = render(<App />)
+
+      // Type a draft into s1.
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.change(textarea, { target: { value: 'draft for s1' } })
+      expect((textarea as HTMLTextAreaElement).value).toBe('draft for s1')
+
+      // Server-driven removal of s1 (broadcast, not local close).
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions.filter(s => s.sessionId !== 's1'),
+        activeSessionId: 's2',
+      }
+      rerender(<App />)
+
+      // Re-present s1 — the draft must not resurrect from `inputDraftsRef`.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions,
+        activeSessionId: 's1',
+      }
+      rerender(<App />)
+      const restored = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      expect(restored.value).toBe('')
+    })
+
+    it('preserves composer state for sessions that remain in session_list', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: twoSessions,
+        activeSessionId: 's1',
+      }
+      const { rerender } = render(<App />)
+
+      // Paste in s1.
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          files: [],
+          items: [],
+          getData: (type: string) => (type === 'text/plain' ? bigText(30) : ''),
+        },
+      })
+      expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
+
+      // Server-driven removal of s2 — s1 stays in the list, so its paste
+      // chip must survive the reconciliation pass.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions.filter(s => s.sessionId !== 's2'),
+        activeSessionId: 's1',
+      }
+      rerender(<App />)
+      expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
+    })
+  })
 })

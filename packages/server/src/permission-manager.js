@@ -45,7 +45,7 @@ export class PermissionManager extends EventEmitter {
     this._sessionRules = [] // [{ tool, decision }]
 
     // AskUserQuestion handling
-    this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
+    this._pendingUserAnswer = null // { resolve, input, toolUseId } when waiting for user answer
     this._questionTimer = null
     this._waitingForAnswer = false
   }
@@ -229,9 +229,15 @@ export class PermissionManager extends EventEmitter {
     return new Promise((resolve) => {
       const questionInput = input || {}
       this._waitingForAnswer = true
-      this._pendingUserAnswer = { resolve, input: questionInput }
-
       const toolUseId = `ask-${++this._permissionCounter}-${Date.now()}`
+      // #3975: stash toolUseId on the pending entry so clearAll() can
+      // emit it on the cleared-variant permission_resolved. Without
+      // toolUseId the sdk-session re-emit gate at sdk-session.js:281
+      // drops the event and the unified pipeline never prunes the
+      // questionSessionMap entry — small leak (~80 bytes) per
+      // message-completion-while-question-pending event, bounded only by
+      // session_destroyed cleanup.
+      this._pendingUserAnswer = { resolve, input: questionInput, toolUseId }
       this._logInfo(`AskUserQuestion detected (${toolUseId})`)
 
       this.emit('user_question', {
@@ -421,7 +427,12 @@ export class PermissionManager extends EventEmitter {
     // the maps are cleared — the SdkSession timeout-pause listener decrements
     // its counter on each event and should see a consistent final state.
     const pendingIds = Array.from(this._pendingPermissions.keys())
-    const hadUserAnswer = !!this._pendingUserAnswer
+    // #3975: capture the pending-answer entry (not just a boolean) so we
+    // can include its toolUseId on the cleared emit. Without toolUseId the
+    // sdk-session re-emit gate drops the event and questionSessionMap
+    // leaks. Reading toolUseId BEFORE the null-out below avoids races
+    // with any synchronous listeners on the resolve.
+    const clearedUserAnswer = this._pendingUserAnswer
 
     // Auto-deny pending permissions and clear timers
     for (const [requestId, pending] of this._pendingPermissions) {
@@ -443,8 +454,12 @@ export class PermissionManager extends EventEmitter {
     for (const requestId of pendingIds) {
       this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'cleared' })
     }
-    if (hadUserAnswer) {
-      this.emit('permission_resolved', { reason: 'cleared' })
+    if (clearedUserAnswer) {
+      // #3975: toolUseId is required for the EventNormalizer to prune
+      // questionSessionMap on the cleared path. The SdkSession
+      // timeout-pause listener (#2831) ignores fields it doesn't know
+      // about, so the extra toolUseId is harmless there.
+      this.emit('permission_resolved', { toolUseId: clearedUserAnswer.toolUseId, reason: 'cleared' })
     }
   }
 

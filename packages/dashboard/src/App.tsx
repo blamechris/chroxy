@@ -461,11 +461,10 @@ export function App() {
     // blocks + next-id counter) so the refs further down don't leak the
     // pasted-text content for the lifetime of <App />. `handleSend` already
     // evicts on send; this closes the parallel path on session teardown.
-    // The refs themselves are declared in the render body below — they are
-    // stable across renders so they're omitted from the dep array.
-    inputDraftsRef.current.delete(sessionId)
-    pastedTextBlocksRef.current.delete(sessionId)
-    pastedTextNextIdRef.current.delete(sessionId)
+    // The sessions-list reconciliation effect (#3977) is the belt-and-braces
+    // backstop for server-driven removals, but evicting synchronously here
+    // keeps the cleanup tied to the click.
+    evictSessionComposerState(sessionId)
     destroySession(sessionId)
   }, [destroySession])
 
@@ -496,10 +495,10 @@ export function App() {
     // #3800: same per-session composer eviction as handleCloseSession. The
     // restart path also tears down the old session via destroySession, so
     // its draft / collapsed-paste entries would otherwise linger keyed by
-    // the now-defunct sessionId.
-    inputDraftsRef.current.delete(sessionId)
-    pastedTextBlocksRef.current.delete(sessionId)
-    pastedTextNextIdRef.current.delete(sessionId)
+    // the now-defunct sessionId. The #3977 reconciliation effect would
+    // also catch this once `sessions[]` rebroadcasts without the old id,
+    // but evicting here keeps the cleanup tied to the click.
+    evictSessionComposerState(sessionId)
     destroySession(sessionId)
   }, [sessions, destroySession, createSession])
 
@@ -961,7 +960,13 @@ export function App() {
     [serverErrors, infoNotifications, activeSessionId, isSocketConnected],
   )
 
-  // Per-session input draft persistence
+  // Per-session input draft persistence.
+  //
+  // Reconciliation invariant (#3977): every key in `inputDraftsRef`,
+  // `pastedTextBlocksRef`, and `pastedTextNextIdRef` MUST correspond to a
+  // sessionId present in `sessions[]`. Any per-session ref added below must
+  // be added to `evictSessionComposerState()` so the `sessions[]`
+  // reconciliation effect can clean it up on server-driven removal.
   const inputDraftsRef = useRef<Map<string, string>>(new Map())
   const [inputDraftValue, setInputDraftValue] = useState('')
   const handleDraftChange = useCallback((text: string) => {
@@ -979,6 +984,57 @@ export function App() {
   const pastedTextNextIdRef = useRef<Map<string, number>>(new Map())
   const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([])
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null)
+
+  // #3800 / #3977: single eviction point for the three per-session composer
+  // refs above. Called from `handleCloseSession` / `handleRestartSession` /
+  // `handleSend` (synchronous user actions) AND from the sessions-list
+  // reconciliation effect below (server-driven removals such as another
+  // client closing the session, supervisor culling, cold restart, or
+  // multi-server switching). Defined as a non-memoised closure because the
+  // refs themselves are stable and the helper has no other deps — adding
+  // useCallback here would only buy a stable identity that no consumer
+  // currently requires.
+  const evictSessionComposerState = (sessionId: string) => {
+    inputDraftsRef.current.delete(sessionId)
+    pastedTextBlocksRef.current.delete(sessionId)
+    pastedTextNextIdRef.current.delete(sessionId)
+  }
+
+  // #3977: reconcile per-session composer refs against the live `sessions[]`
+  // list. PR #3973 closed the two user-initiated removal paths
+  // (`handleCloseSession`, `handleRestartSession`); this effect closes the
+  // larger surface where the server (or another client) removes a session
+  // from `session_list` without <App /> having any local hook to react —
+  // see store/message-handler.ts `case 'session_list'`. Any ref entry whose
+  // sessionId is no longer present in `sessions` was destroyed by that
+  // path; evict it so the maps don't grow unbounded over a long-lived
+  // dashboard process. The user-initiated handlers still call
+  // `evictSessionComposerState` directly so the cleanup is synchronous with
+  // the click — this effect is the belt-and-braces backstop, not the
+  // primary path.
+  //
+  // Deps: only `sessions` — `evictSessionComposerState` reads stable refs
+  // and is intentionally not memoised. Building the Set inside the effect
+  // (not in a useMemo) keeps the diff cheap; the loop runs once per
+  // sessions-array change, which is O(refs) and dominated by O(sessions)
+  // on a single Set build.
+  useEffect(() => {
+    const liveIds = new Set(sessions.map(s => s.sessionId))
+    for (const id of inputDraftsRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+    // pastedTextBlocksRef / pastedTextNextIdRef may hold ids without a
+    // matching draft entry (paste-without-typing), so they need their own
+    // pass. The helper is idempotent so re-evicting an id that was already
+    // removed above is a no-op.
+    for (const id of pastedTextBlocksRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+    for (const id of pastedTextNextIdRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+  }, [sessions])
+
   // Restore draft + paste blocks when switching sessions
   useEffect(() => {
     if (activeSessionId) {
@@ -1038,11 +1094,12 @@ export function App() {
     sendInput(expanded, wire.length > 0 ? wire : undefined)
     setFileAttachments([])
     setImageAttachments([])
-    // Clear draft + pasted-text blocks for the session that sent the message
+    // Clear draft + pasted-text blocks for the session that sent the message.
+    // Unlike the close / restart paths, the session itself is still alive —
+    // we're just resetting the composer after a successful send. The next
+    // paste or draft change for this sid will repopulate the maps.
     if (sid) {
-      inputDraftsRef.current.delete(sid)
-      pastedTextBlocksRef.current.delete(sid)
-      pastedTextNextIdRef.current.delete(sid)
+      evictSessionComposerState(sid)
     }
     setInputDraftValue('')
     setPastedTextBlocks([])
