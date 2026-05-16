@@ -1540,6 +1540,33 @@ mod tests {
         assert_eq!(mgr.status(), ServerStatus::Stopped);
     }
 
+    // -- exit handler safety: double-stop must not panic (#3696) --
+    //
+    // The Tauri RunEvent::ExitRequested handler in lib.rs calls
+    // ServerManager::stop() to make sure the spawned Node server child
+    // is SIGTERM'd before the process tears down. Several user-driven
+    // quit paths already call stop() first (tray "Quit" menu item,
+    // WindowEvent::CloseRequested), so ExitRequested will routinely
+    // invoke stop() a second time on an already-stopped manager. This
+    // test pins the contract — back-to-back stops must remain a no-op
+    // without panicking or leaving state inconsistent.
+    #[test]
+    fn double_stop_is_safe_for_exit_handler() {
+        let mut mgr = ServerManager::new();
+
+        // First stop: from tray "Quit" or window close handler.
+        mgr.stop();
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+        assert!(mgr.child.is_none());
+
+        // Second stop: from the new RunEvent::ExitRequested handler.
+        // Must not panic, must leave manager in a Stopped state.
+        mgr.stop();
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+        assert!(mgr.child.is_none());
+        assert!(mgr.user_stopped.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn max_restart_attempts_is_three() {
         assert_eq!(ServerManager::MAX_RESTART_ATTEMPTS, 3);
