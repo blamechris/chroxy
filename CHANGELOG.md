@@ -178,26 +178,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Push notifications gated on client foreground state so backgrounded clients don't miss completion pings (#3404, #3669).
 
 **Sidecar / Pod-Agent (Kubernetes Backend)**
-- `K8sBackend` skeleton with pod create/destroy, streaming exec via sidecar WS bridge, workspace mount, resource limits, and `imagePullPolicy` (#3191, #3315, #3316, #3320, #3331, #3343, #3367, #3370).
-- `chroxy-pod-agent` sidecar — WS protocol, Dockerfile, stdin support, per-spawn sentinel stderr line, sessions TTL + size cap, NDJSON line buffer cap, and resume after restart (#3319, #3321, #3323, #3327, #3329, #3344, #3345, #3349, #3364, #3373, #3382, #3389).
-- `K8sBackend.agentToken` survives server restart via Secret lookup (#3339, #3363).
-- Nightly CI workflow for K8s sidecar integration tests, pinned to `ubuntu-24.04` with a concurrency group (#3341, #3355, #3356, #3359, #3416, #3422).
-- `Backend` interface extracted from `EnvironmentManager` with a `DockerBackend` implementation; `DockerBackend.execInEnvironment` now honors `env` and `cwd` opts (#3190, #3311, #3312, #3357).
+- `SidecarProcess` consumer signal when stdin forwarding is disabled, with `SdkSession` handling of the `stdin_disabled` signal (#3467, #3498).
+- `SidecarProcess` emits `stdin_dropped` on pre-dial buffer cap; detects wedged children via a stdin drain timeout in pod-agent (#3504, #3508).
+- `K8sBackend.createEnvironment` workspace mount + resource limits; native `imagePullPolicy` option; RFC 1123 namespace validation (#3316, #3343, #3367, #3370, #3591).
+- `CHROXY_AGENT_STDIN_CLOSE_GRACE_MS` env override; `SidecarProcess.stdin` wired to sidecar stdin frames (#3336, #3409, #3490).
+- `DockerBackend.execInEnvironment` honors `env` and `cwd` opts (#3312, #3357).
 
 **Stdin Forwarding Signals**
-- Server emits `stdin_dropped` cumulative totals and a `stdin_disabled` signal over WS; `SessionInfo` carries a new `stdinForwardingDisabled` flag (#3504, #3536, #3537, #3560, #3572, #3582, #3585, #3589, #3594).
+- Server emits `stdin_dropped` cumulative totals and a `stdin_disabled` signal over WS; `SessionInfo` carries a new `stdinForwardingDisabled` flag, hydrated on reconnect via `auth_ok`/`session_list` (#3537, #3560, #3564, #3572, #3582, #3594).
 - Mobile and dashboard render a `stdinForwardingDisabled` banner on the session row / session screen (#3593, #3598).
-- `SidecarProcess` caps the pre-dial stdin buffer and detects wedged children via a stdin drain timeout (#3472, #3504, #3508, #3549).
-- `CHROXY_AGENT_STDIN_CLOSE_GRACE_MS` env override (#3490).
+- Session emits an error on `stdin_disabled` signal; cumulative dropped-bytes counter + louder log severity (#3536, #3537).
 
 **Skills**
-- `skill_trust_grant` handler with trust-store schema migration, community-namespace gate, SHA hashing, per-provider allowlist, explicit mode in payload, and atomic writes (#3204, #3207, #3228, #3231, #3232, #3233, #3234, #3237, #3238, #3239, #3240, #3241, #3242, #3297, #3303).
-- SkillsPanel pending-review section with description/source/path, "Accept new content" button, and cross-author collision detection (#3270, #3271, #3298, #3308, #3309, #3310, #3351, #3365).
-- Per-tier global budget guardrail in skills-loader with priority-aware two-pass budgeting (#3222, #3274, #3279, #3285).
-- Skills metadata UI — version, hash, last-activated, mismatch indicator — and runtime activate/deactivate WS for manual skills (#3205, #3209, #3245, #3249).
-- Skills loader hardening — symlink defense, markdown-only, content-sniff fix, log sanitization, size budgets, frontmatter, TOCTOU close between `realpath` and `readFileSync`, mtime-keyed parse cache (#3197, #3201, #3202, #3203, #3211, #3215, #3216, #3218, #3219, #3220, #3248, #3260, #3266).
-- Skills v2 frontmatter consumers — provider gating, manual activation, injection (#3198, #3199, #3200, #3224).
-- Evaluator skip heuristic for trivial messages (#3187, #3210).
+- SkillsPanel pending-review section gains richer rendering — description/source/path — and dashboard cross-author collision tests for `skill_trust_granted` (#3309, #3310, #3351, #3365).
+- `skill_trust_grant` returns `INVALID_AUTHOR` when the author namespace mismatches, with `actualAuthor` surfaced in the error; toast retries the grant on dismiss (#3497, #3568, #3584, #3601).
+- Server scans `community/*` for cross-author skill name detection in `skill_trust_grant` (#3535).
+- `_scanCommunityForSkillName` `readdir` sorted for deterministic order (#3566).
 
 **Dashboard Polish**
 - Toast auto-dismiss pauses on hover and respects intra-toast focus moves; uses `performance.now()` for elapsed-time math (#3607, #3610, #3617, #3618).
@@ -238,7 +234,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refactored auto-evaluator polish — render-path cleanups and the `pendingEvaluatorClarify` default to `null` with tighter typing (#3637, #3640, #3641, #3642, #3658, #3664).
 - `connectionPhase` is now the single dedupe source for reconnect on the dashboard (#3631).
 - App `createSession` switched to an options object and extended with `model`/`permissionMode` for restart preservation (#3609, #3620).
-- `protocol.isRateLimitMessage` lowercases content internally; `store-core.validateGitElements` aggregates its drop log (#3183, #3184, #3264, #3265).
 - Rate-limited the `refused-sendMessage` warn log and formatted `stdin_dropped` cumulative bytes as KiB/MiB (#3559, #3586).
 - Renovate schedule + stability rule, plus a regex manager for the `claude-code` Dockerfile pin (#3354, #3410, #3447).
 - Pinned `@anthropic-ai/claude-code` in the sidecar Dockerfile via `ARG` (#3330, #3352).
