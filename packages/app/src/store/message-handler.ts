@@ -9,7 +9,7 @@
  * Depends on the Zustand store via a late-bound reference (setStore) to
  * avoid circular imports.
  */
-import { Alert, AppState } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 import {
   createKeyPair,
   deriveSharedKey,
@@ -286,6 +286,20 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
   } else {
     socket.send(JSON.stringify(payload));
   }
+}
+
+// #3672: treat iOS `inactive` as visible. `inactive` is a transient state for
+// app-switcher gesture, control-center pulldown, biometric prompt, incoming
+// call, and the brief moment between unlock and foreground promotion — the
+// user is still right there with the phone. Treating it as not-visible flips
+// the server to visible=false and arms a completion push notification, so
+// the user gets a phantom buzz for a session they were just watching.
+// Android never emits `inactive` (only `active` / `background`), so the
+// platform check is belt-and-braces rather than load-bearing.
+export function isVisibleAppState(state: string): boolean {
+  if (state === 'active') return true;
+  if (state === 'inactive' && Platform.OS === 'ios') return true;
+  return false;
 }
 
 // #3404: edge-trigger memoisation for client_visible. Initialised to true to
@@ -1029,7 +1043,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // #3404: server defaults visible=true on fresh connect; sync if we
         // reconnected while backgrounded so completion pushes still fire.
         resetClientVisibleMemo();
-        sendClientVisible(ctx.socket, AppState.currentState === 'active');
+        sendClientVisible(ctx.socket, isVisibleAppState(AppState.currentState));
       }
       // Save for quick reconnect (use effectiveToken for pairing flow)
       saveConnection(ctx.url, effectiveToken);
@@ -1066,7 +1080,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // #3404: sync visibility once encryption is established (mirrors the
         // unencrypted auth_ok path above).
         resetClientVisibleMemo();
-        sendClientVisible(ctx.socket, AppState.currentState === 'active');
+        sendClientVisible(ctx.socket, isVisibleAppState(AppState.currentState));
       }
       break;
     }

@@ -116,6 +116,7 @@ import {
   registerPendingPermissionModeRequest,
   clearPendingPermissionModeRequestsForSession,
   CLIENT_PROTOCOL_VERSION,
+  isVisibleAppState,
 } from './message-handler';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
@@ -1567,10 +1568,6 @@ if (global.__chroxy_appStateSub) {
 // toggles (e.g., switching apps quickly) don't spam connect(). Fixes #2813.
 const RESUME_RECONNECT_COOLDOWN_MS = 5000;
 let _lastResumeReconnectAt = 0;
-
-function isVisibleAppState(state: string): boolean {
-  return state === 'active';
-}
 
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   // #3404: keep the server in sync with foreground/background state so it
