@@ -84,10 +84,10 @@ function baseState(
   }
   if (opts.withInactivityWarning) {
     primary.inactivityWarning = {
-      lastActivityAt: 1_000,
-      thresholdMs: 60_000,
-      raisedAt: 2_000,
-    } as SessionState['inactivityWarning']
+      idleMs: 60_000,
+      prefab: "Are you there? Tap to send a quick check-in.",
+      receivedAt: 2_000,
+    }
   }
   const sessionStates: Record<string, SessionState> = { [SESSION_ID]: primary }
   const sessions: any[] = [{ sessionId: SESSION_ID, name: 'A', provider: 'claude-sdk' }]
@@ -165,7 +165,7 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
         { type: 'stream_delta', messageId: 'd1', sessionId: SESSION_ID, delta: 'hi' },
         ctx() as any,
       )
-      const ss = store.getState().sessionStates[SESSION_ID]
+      const ss = store.getState().sessionStates[SESSION_ID]!
       expect(ss.lastClientActivityAt).toBe(10_000)
     })
 
@@ -174,7 +174,7 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
         { type: 'stream_delta', messageId: 'd2', delta: 'hello' },
         ctx() as any,
       )
-      const ss = store.getState().sessionStates[SESSION_ID]
+      const ss = store.getState().sessionStates[SESSION_ID]!
       expect(ss.lastClientActivityAt).toBe(10_000)
     })
 
@@ -190,7 +190,7 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
       for (let i = 0; i < cases.length; i++) {
         nowSpy.mockReturnValue(20_000 + i)
         handleMessage(cases[i], ctx() as any)
-        const ss = store.getState().sessionStates[SESSION_ID]
+        const ss = store.getState().sessionStates[SESSION_ID]!
         expect(ss.lastClientActivityAt).toBe(20_000 + i)
       }
     })
@@ -205,8 +205,8 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
         ctx() as any,
       )
 
-      const target = store.getState().sessionStates[OTHER_SESSION_ID]
-      const active = store.getState().sessionStates[SESSION_ID]
+      const target = store.getState().sessionStates[OTHER_SESSION_ID]!
+      const active = store.getState().sessionStates[SESSION_ID]!
       expect(target.lastClientActivityAt).toBe(30_000)
       // The active session's timestamp must not be touched when sessionId
       // is explicit — the dispatch entry must route to the right slot.
@@ -222,7 +222,7 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
         ctx() as any,
       )
 
-      const ss = store.getState().sessionStates[SESSION_ID]
+      const ss = store.getState().sessionStates[SESSION_ID]!
       expect(ss.lastClientActivityAt).toBe(10_000)
       expect(ss.inactivityWarning).toBeNull()
     })
@@ -234,13 +234,13 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
         { type: 'server_status', sessionId: SESSION_ID, status: 'idle' },
         ctx() as any,
       )
-      const ss = store.getState().sessionStates[SESSION_ID]
+      const ss = store.getState().sessionStates[SESSION_ID]!
       expect(ss.lastClientActivityAt).toBe(100)
     })
 
     it('pong leaves lastClientActivityAt unchanged', () => {
       handleMessage({ type: 'pong' }, ctx() as any)
-      const ss = store.getState().sessionStates[SESSION_ID]
+      const ss = store.getState().sessionStates[SESSION_ID]!
       expect(ss.lastClientActivityAt).toBe(100)
     })
 
@@ -253,7 +253,7 @@ describe('dashboard message-handler dispatch — lastClientActivityAt (#3762)', 
         { type: 'totally_unknown_type_for_3762', sessionId: SESSION_ID },
         ctx() as any,
       )
-      const ss = store.getState().sessionStates[SESSION_ID]
+      const ss = store.getState().sessionStates[SESSION_ID]!
       expect(ss.lastClientActivityAt).toBe(100)
     })
   })

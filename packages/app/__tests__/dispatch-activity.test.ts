@@ -116,10 +116,10 @@ function createMockState(
   };
   if (opts.withInactivityWarning) {
     primary.inactivityWarning = {
-      lastActivityAt: 1_000,
-      thresholdMs: 60_000,
-      raisedAt: 2_000,
-    } as SessionState['inactivityWarning'];
+      idleMs: 60_000,
+      prefab: "Are you there? Tap to send a quick check-in.",
+      receivedAt: 2_000,
+    };
   }
 
   const sessionStates: Record<string, SessionState> = { [SESSION_ID]: primary };
@@ -197,7 +197,7 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
         delta: 'hi',
       });
 
-      const ss = store.getState().sessionStates[SESSION_ID];
+      const ss = store.getState().sessionStates[SESSION_ID]!;
       expect(ss.lastClientActivityAt).toBe(10_000);
     });
 
@@ -208,7 +208,7 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
         delta: 'hello',
       });
 
-      const ss = store.getState().sessionStates[SESSION_ID];
+      const ss = store.getState().sessionStates[SESSION_ID]!;
       expect(ss.lastClientActivityAt).toBe(10_000);
     });
 
@@ -224,7 +224,7 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
       for (let i = 0; i < cases.length; i++) {
         nowSpy.mockReturnValue(20_000 + i);
         handleMessage(cases[i]);
-        const ss = store.getState().sessionStates[SESSION_ID];
+        const ss = store.getState().sessionStates[SESSION_ID]!;
         expect(ss.lastClientActivityAt).toBe(20_000 + i);
       }
     });
@@ -241,8 +241,8 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
         delta: 'data',
       });
 
-      const target = store.getState().sessionStates[OTHER_SESSION_ID];
-      const active = store.getState().sessionStates[SESSION_ID];
+      const target = store.getState().sessionStates[OTHER_SESSION_ID]!;
+      const active = store.getState().sessionStates[SESSION_ID]!;
       expect(target.lastClientActivityAt).toBe(30_000);
       // Active session must remain at its previous value — the dispatch
       // entry must not bump the wrong slot when sessionId is explicit.
@@ -260,7 +260,7 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
         delta: 'x',
       });
 
-      const ss = store.getState().sessionStates[SESSION_ID];
+      const ss = store.getState().sessionStates[SESSION_ID]!;
       expect(ss.lastClientActivityAt).toBe(10_000);
       expect(ss.inactivityWarning).toBeNull();
     });
@@ -274,13 +274,13 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
         status: 'idle',
       });
 
-      const ss = store.getState().sessionStates[SESSION_ID];
+      const ss = store.getState().sessionStates[SESSION_ID]!;
       expect(ss.lastClientActivityAt).toBe(100);
     });
 
     it('pong leaves lastClientActivityAt unchanged', () => {
       handleMessage({ type: 'pong' });
-      const ss = store.getState().sessionStates[SESSION_ID];
+      const ss = store.getState().sessionStates[SESSION_ID]!;
       expect(ss.lastClientActivityAt).toBe(100);
     });
 
@@ -293,7 +293,7 @@ describe('message-handler dispatch — lastClientActivityAt (#3762)', () => {
         type: 'totally_unknown_type_for_3762',
         sessionId: SESSION_ID,
       });
-      const ss = store.getState().sessionStates[SESSION_ID];
+      const ss = store.getState().sessionStates[SESSION_ID]!;
       expect(ss.lastClientActivityAt).toBe(100);
     });
   });
