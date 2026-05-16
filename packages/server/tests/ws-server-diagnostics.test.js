@@ -293,3 +293,91 @@ describe('GET /diagnostics?logTailBytes=N (#3739)', () => {
       `fractional behaves like integer 1024 (got ${tailBytes(frac)} vs ${tailBytes(intg)})`)
   })
 })
+
+/**
+ * Issue #3737 — per-source-IP rate limit on /diagnostics.
+ *
+ * The endpoint reads the filesystem (log tail) and iterates every session
+ * per call. Without a limiter, an attacker with a stolen token can DoS the
+ * server with a tight loop. Match the /permission pattern: 429 + Retry-After.
+ */
+describe('GET /diagnostics rate limit (#3737)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  async function startWithLimit(limitConfig) {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-diag',
+      cliSession: createMockSession(),
+      authRequired: true,
+      diagnosticsRateLimit: limitConfig,
+    })
+    return startServerAndGetPort(server)
+  }
+
+  function diagFetch(port, { ip } = {}) {
+    const headers = { 'Authorization': 'Bearer tok-diag' }
+    // The test client connects over loopback, so cf-connecting-ip is trusted
+    // by getRateLimitKey — varying it simulates different source IPs.
+    if (ip) headers['CF-Connecting-IP'] = ip
+    return fetch(`http://127.0.0.1:${port}/diagnostics`, { headers })
+  }
+
+  it('returns 429 after exceeding the per-IP limit', async () => {
+    // 3 requests allowed (maxMessages=2 + burst=1), 4th is blocked
+    const port = await startWithLimit({ windowMs: 60_000, maxMessages: 2, burst: 1 })
+    for (let i = 0; i < 3; i++) {
+      const res = await diagFetch(port, { ip: '203.0.113.7' })
+      assert.equal(res.status, 200, `request ${i + 1} should be allowed`)
+      await res.text()
+    }
+    const blocked = await diagFetch(port, { ip: '203.0.113.7' })
+    assert.equal(blocked.status, 429, '4th request from same IP must be rate-limited')
+    assert.ok(blocked.headers.get('retry-after'), 'response must include Retry-After header')
+    const retryAfter = Number(blocked.headers.get('retry-after'))
+    assert.ok(retryAfter >= 1, `Retry-After should be a positive integer (got ${retryAfter})`)
+    const body = await blocked.json()
+    assert.equal(body.error, 'rate limited')
+    assert.ok(typeof body.retryAfterMs === 'number' && body.retryAfterMs > 0,
+      'body should expose retryAfterMs')
+  })
+
+  it('does not block a different source IP after the first IP is rate-limited', async () => {
+    const port = await startWithLimit({ windowMs: 60_000, maxMessages: 1, burst: 0 })
+    // Exhaust the bucket for IP A
+    const first = await diagFetch(port, { ip: '203.0.113.7' })
+    assert.equal(first.status, 200)
+    await first.text()
+    const blocked = await diagFetch(port, { ip: '203.0.113.7' })
+    assert.equal(blocked.status, 429, 'IP A is now rate-limited')
+    await blocked.text()
+    // IP B should still pass — buckets are per-IP
+    const otherIp = await diagFetch(port, { ip: '198.51.100.42' })
+    assert.equal(otherIp.status, 200, 'different IP must not share the bucket')
+    await otherIp.text()
+  })
+
+  it('allows the IP again after the sliding window expires', async () => {
+    // Very short window so the test runs fast; sliding window prunes
+    // expired timestamps on next check.
+    const port = await startWithLimit({ windowMs: 80, maxMessages: 1, burst: 0 })
+    const first = await diagFetch(port, { ip: '203.0.113.7' })
+    assert.equal(first.status, 200)
+    await first.text()
+    const blocked = await diagFetch(port, { ip: '203.0.113.7' })
+    assert.equal(blocked.status, 429)
+    await blocked.text()
+    // Wait past the window
+    await new Promise(resolve => setTimeout(resolve, 120))
+    const replayed = await diagFetch(port, { ip: '203.0.113.7' })
+    assert.equal(replayed.status, 200, 'request should succeed after window resets')
+    await replayed.text()
+  })
+})
