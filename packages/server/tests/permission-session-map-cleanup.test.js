@@ -303,7 +303,7 @@ describe('questionSessionMap cleanup on internal resolution paths (#3736)', () =
   })
 
   // #3988: symmetry follow-up to #3975. The user-response handler at
-  // input-handlers.js:451 already prunes questionSessionMap eagerly before
+  // handlers/input-handlers.js:451 already prunes questionSessionMap eagerly before
   // calling respondToQuestion, so end-to-end the entry is gone either way
   // — this regression locks the contract: respondToQuestion's emit MUST
   // carry toolUseId so any future internal path (or refactor that drops

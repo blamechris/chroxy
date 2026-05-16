@@ -399,7 +399,7 @@ describe('PermissionManager', () => {
     })
 
     // #3988: symmetry follow-up to #3975. The user-response handler at
-    // input-handlers.js:451 already deletes from questionSessionMap before
+    // handlers/input-handlers.js:451 already deletes from questionSessionMap before
     // calling respondToQuestion, so the unified-pipeline cleanup is
     // redundant on this path — but every other question-variant emit
     // (aborted/timeout/cleared) carries toolUseId, and future internal
