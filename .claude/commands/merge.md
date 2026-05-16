@@ -261,3 +261,4 @@ grep 'src=' /Applications/Chroxy.app/Contents/Resources/server/src/dashboard-nex
 7. **GraphQL resolveReviewThread must use Python** — bash corrupts Base64 thread IDs
 8. **No attribution** — Zero Attribution Policy applies to all commits
 9. **Node 22 required** — always prefix npm commands with Node 22 PATH
+<!-- skill-templates: merge 0000000 2026-05-15 -->

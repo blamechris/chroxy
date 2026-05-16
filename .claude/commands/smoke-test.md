@@ -164,4 +164,4 @@ Prefer stable selectors: `aria-label` > `role` > class names > text content.
 4. **Server lifecycle** — The test auto-starts a server if none is running, and stops it when done. If one is already running, it reuses it.
 5. **Visual review is mandatory** — Read every screenshot. The automated checks are necessary but not sufficient.
 6. **Idempotent** — Safe to run repeatedly. Don't create sessions or send messages.
-<!-- skill-templates: smoke-test -->
+<!-- skill-templates: smoke-test 0000000 2026-05-15 -->

@@ -310,3 +310,4 @@ After all PRs processed:
 9. **Compose with `/fix-ci`** — Don't reinvent CI diagnosis.
 10. **No attribution** — Follow Zero Attribution Policy in any fix commits.
 11. **Rebase before skip** — When update-branch fails with conflicts, attempt manual rebase (Step 2e-alt) before marking as Blocked. This is common when PRs touch shared files.
+<!-- skill-templates: batch-merge 0000000 2026-05-15 -->

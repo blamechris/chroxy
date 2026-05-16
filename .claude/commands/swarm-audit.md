@@ -198,3 +198,4 @@ Output a concise summary:
 /swarm-audit docs/rfc-push-notifications.md
 /swarm-audit "session management across server restart" 6
 ```
+<!-- skill-templates: swarm-audit 0000000 2026-05-15 -->

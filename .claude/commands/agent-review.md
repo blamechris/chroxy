@@ -219,3 +219,4 @@ You review with the mindset of:
 3. **Mobile-first** - Always consider connectivity, battery, keyboard
 4. **Resilience** - Handle disconnects, process crashes, stale state
 5. **Keep it simple** - No over-engineering, no premature abstractions
+<!-- skill-templates: agent-review 0000000 2026-05-15 -->
