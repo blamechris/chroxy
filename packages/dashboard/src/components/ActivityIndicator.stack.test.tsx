@@ -1,14 +1,18 @@
 /**
  * ActivityIndicator + CheckInChip stacked-layout snapshot (#3912).
  *
- * App.tsx:1703-1711 mounts these two chips as consecutive siblings
- * immediately above the InputBar. Both are inline-flex chips that are
- * expected to stack vertically — there is no dedicated wrapper div, so
- * the "stack" is load-bearing on:
+ * App.tsx mounts these two chips as consecutive siblings immediately
+ * above the InputBar (search App.tsx for `<ActivityIndicator` to
+ * locate the mount site). Both are inline-flex chips that are expected
+ * to stack vertically — there is no dedicated wrapper div, so the
+ * "stack" is load-bearing on:
  *   1. DOM order (ActivityIndicator BEFORE CheckInChip)
- *   2. Each chip being a separate block-in-flow boundary (block-level
- *      sibling node, not a fragment that would let them flow inline)
- *   3. The `inline-flex` + `align-self: flex-start` chip CSS, which
+ *   2. Each chip being rendered as a separate sibling element (so the
+ *      parent column layout treats them as independent flex items —
+ *      a Fragment-wrapped chip would still render as a div, but a
+ *      future refactor that hoists chip contents into a single div
+ *      or rewrites the chips as text nodes would collapse the stack)
+ *   3. The chip-level CSS (`inline-flex` + `align-self: flex-start`)
  *      keeps each chip a fixed-shape pill that does not collapse into
  *      its neighbour even on narrow viewports
  *
