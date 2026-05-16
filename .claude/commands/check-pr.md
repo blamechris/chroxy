@@ -312,8 +312,8 @@ GraphQL is required here — REST doesn't expose thread state. Threads are Graph
 set -o pipefail
 
 # Workflow user login — used to filter out threads where the most recent
-# comment is from a human reviewer who posted after step 6's verification.
-# We must NEVER silently resolve a human's unreplied question.
+# comment is from a non-workflow user (human or bot) who posted after step
+# 6's verification. We must NEVER silently resolve an unreplied comment.
 ME=$(gh api user --jq .login) || { echo "FAIL: could not resolve workflow user"; exit 1; }
 
 # Fetch all review threads (GraphQL — REST API doesn't expose thread state).
@@ -367,9 +367,11 @@ fetch_review_threads() {
 THREADS=$(fetch_review_threads | jq -s '.') || { echo "FAIL: review-thread fetch failed; refusing to proceed"; exit 1; }
 
 # Resolve ONLY threads where the most recent comment was authored by the
-# workflow user. A human reviewer who posted a brand-new question between
-# step 6 and step 6b would otherwise be silently dismissed (#3896).
-# Threads with no last-comment author (deleted/ghost) are also skipped.
+# workflow user. A non-workflow user (human or bot) who posted a brand-new
+# comment between step 6 and step 6b would otherwise be silently dismissed
+# (#3896). Threads with no last-comment author (deleted/ghost) are also
+# skipped — we report them separately below so the SKIPPED message is
+# honest (#3967).
 #
 # Surface any single-thread failure instead of swallowing it (a 401/403 on
 # one thread shouldn't be silent — #3898). The loop runs in a subshell
@@ -409,23 +411,60 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
   exit 1
 fi
 
-# Report any threads we deliberately did NOT resolve (human's last word).
-# These block merge — but resolving them would silently dismiss the human.
-# Surface them so the operator can answer instead of pretending success.
-SKIPPED=$(echo "$THREADS" | jq -r --arg me "$ME" '
+# Report any threads we deliberately did NOT resolve. Split into two buckets
+# so the message is accurate (#3967): a deleted/ghost author shows up as a
+# missing `author.login`, which is NOT a non-workflow user with an open
+# question. Lumping them together produces the misleading line "X thread(s)
+# ... from a non-workflow user" even when no real author exists.
+#
+# Note on naming: SKIPPED_OTHER (not SKIPPED_HUMAN) because the predicate
+# only checks "author.login is non-null and not $ME", which matches bots
+# (dependabot, github-actions, copilot) just as much as humans. Treating
+# them as a single "non-workflow user" bucket is intentional — the operator
+# response is the same in either case (reply or resolve manually), and
+# fetching `__typename` per thread to distinguish Bot vs User would add N
+# extra round-trips for no behavior change.
+#
+# Both buckets block merge, but the operator response differs:
+#   - OTHER (human or bot): reply before merging, or resolve manually if
+#     the comment doesn't need an answer.
+#   - GHOST: safe to resolve manually; the author is gone.
+#
+# TOCTOU caveat: these counts use the THREADS snapshot fetched above. If
+# someone (human or bot) posts a brand-new comment AFTER the fetch but
+# BEFORE the resolve loop iterates past their thread, the snapshot still
+# shows the OLD last-comment (workflow-authored), so the thread will be
+# silently resolved — dismissing the new reply. The verification fetch
+# below CANNOT catch this: it re-paginates and counts threads whose last
+# author is $ME, so a now-non-workflow-last thread is excluded from
+# UNRESOLVED either way, and the resolve mutation has already fired. The
+# only mitigation is per-thread refetch before resolve (N extra GraphQL
+# calls); deferred until the race is observed in practice.
+SKIPPED_OTHER=$(echo "$THREADS" | jq -r --arg me "$ME" '
   [.[]
    | select(.isResolved == false)
-   | select((.comments.nodes[-1].author.login // "") != $me)
+   | select(.comments.nodes[-1].author.login != null)
+   | select(.comments.nodes[-1].author.login != $me)
   ] | length
 ')
-if [ "$SKIPPED" -gt 0 ]; then
-  echo "Skipped ${SKIPPED} unresolved thread(s) whose last comment is from a human reviewer; reply before merging."
+SKIPPED_GHOST=$(echo "$THREADS" | jq -r '
+  [.[]
+   | select(.isResolved == false)
+   | select(.comments.nodes[-1].author.login == null)
+  ] | length
+')
+if [ "$SKIPPED_OTHER" -gt 0 ]; then
+  echo "Skipped ${SKIPPED_OTHER} unresolved thread(s) whose last comment is from a non-workflow user (human or bot); reply or resolve manually before merging."
+fi
+if [ "$SKIPPED_GHOST" -gt 0 ]; then
+  echo "Skipped ${SKIPPED_GHOST} unresolved thread(s) whose last-comment author is deleted/unknown; resolve manually if appropriate."
 fi
 
 # Verify no agent-authored unresolved threads remain (re-paginate; same reason as above).
-# Threads where a human had the last word are excluded from this gate —
-# they're surfaced above but don't fail the workflow, since the agent
-# can't resolve them without dismissing the human's question.
+# Threads where a non-workflow user (human, bot, or ghost) had the last word
+# are excluded from this gate — they're surfaced above but don't fail the
+# workflow, since the agent can't resolve them without dismissing the
+# non-workflow comment.
 UNRESOLVED=$(fetch_review_threads | jq -s --arg me "$ME" '
   [.[]
    | select(.isResolved == false)
@@ -504,7 +543,7 @@ Then below the table, list:
 6. **FOLLOW-UP requires issue URL** — Never say "good idea" without creating an issue
 7. **Summary table has no empty cells** — Every row has a reference
 8. **Verify before summarizing** — Run the verification step (step 6) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
-9. **Resolve every thread (step 6b)** — Posting a reply does NOT mark the thread resolved on GitHub. After replying to every thread, call the GraphQL `resolveReviewThread` mutation for each. Branch protection that requires conversation resolution will block merge otherwise — silently, from the user's perspective. Skip this only with explicit per-repo evidence that unresolved threads are acceptable.
+9. **Resolve every workflow-authored thread (step 6b)** — Posting a reply does NOT mark the thread resolved on GitHub. After replying to every thread, call the GraphQL `resolveReviewThread` mutation for each thread where the workflow user had the last word. Threads whose last comment is from a non-workflow user (human, bot, or deleted/ghost author) are surfaced but NOT auto-resolved — resolving them would silently dismiss the open comment. Branch protection that requires conversation resolution will block merge otherwise — silently, from the user's perspective. Skip this only with explicit per-repo evidence that unresolved threads are acceptable.
 10. **Idempotent** — Safe to re-run; already-replied comments are skipped (author-filtered). Already-resolved threads are also skipped in step 6b.
 11. **No attribution** — Follow Zero Attribution Policy (no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere)
 
@@ -525,7 +564,7 @@ Then below the table, list:
    → Create issue #99 with labels, reply with **FOLLOW-UP ISSUE** + URL
 7. Push fixes
 8. Verify all threads have replies (step 6)
-9. Resolve all conversation threads via GraphQL (step 6b)
+9. Resolve workflow-authored conversation threads via GraphQL (step 6b); surface non-workflow/ghost threads for manual handling
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
