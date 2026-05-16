@@ -3,12 +3,43 @@
 # bump-version.sh — Bump the patch version across all package files.
 #
 # Usage:
-#   ./scripts/bump-version.sh          # auto-bump patch (0.3.2 → 0.3.3)
-#   ./scripts/bump-version.sh 0.4.0    # set explicit version
+#   ./scripts/bump-version.sh                 # auto-bump patch (0.3.2 → 0.3.3)
+#   ./scripts/bump-version.sh 0.4.0           # set explicit version
+#   ./scripts/bump-version.sh --no-changelog  # skip CHANGELOG.md scaffold
+#
+# CHANGELOG scaffolding:
+#   This script prepends a placeholder section to CHANGELOG.md for the new
+#   version. The placeholder contains a `- TODO:` marker the author is expected
+#   to replace. If the most recent CHANGELOG section still contains a `TODO`
+#   marker from a prior bump, the script aborts — this is the mechanical guard
+#   that prevents the v0.7.0–v0.7.17 backfill problem (#3803, #3974) from
+#   recurring. Pass --no-changelog to override (e.g. for hotfix bumps where
+#   the changelog will land in a separate PR).
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+SKIP_CHANGELOG=0
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-changelog)
+      SKIP_CHANGELOG=1
+      ;;
+    -h|--help)
+      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    --*)
+      echo "Error: Unknown flag '$arg'" >&2
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$arg")
+      ;;
+  esac
+done
 
 SERVER_PKG="$ROOT/packages/server/package.json"
 APP_PKG="$ROOT/packages/app/package.json"
@@ -23,6 +54,7 @@ CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 ROOT_LOCK="$ROOT/package-lock.json"
 SERVER_LOCK="$ROOT/packages/server/package-lock.json"
 IOS_INFO_PLIST="$ROOT/packages/app/ios/Chroxy/Info.plist"
+CHANGELOG="$ROOT/CHANGELOG.md"
 
 # Clean up any orphan .tmp siblings created by the awk-into-place pattern
 # below. With `set -euo pipefail` an awk failure (disk full, killed process,
@@ -50,8 +82,13 @@ trap cleanup_tmp_files EXIT
 # Read current version from server package.json (single source of truth)
 CURRENT=$(node -e "console.log(require('$SERVER_PKG').version)")
 
-if [ -n "${1:-}" ]; then
-  NEW_VERSION="$1"
+if [ "${#POSITIONAL[@]}" -gt 1 ]; then
+  echo "Error: Too many positional arguments. Expected at most one version." >&2
+  exit 1
+fi
+
+if [ "${#POSITIONAL[@]}" -eq 1 ]; then
+  NEW_VERSION="${POSITIONAL[0]}"
 else
   # Auto-bump patch: 0.3.2 → 0.3.3
   IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
@@ -222,6 +259,85 @@ if [ -f "$IOS_INFO_PLIST" ]; then
   fi
 fi
 
+# Scaffold a CHANGELOG.md section for the new version.
+#
+# Idempotency: skip if a section for $NEW_VERSION already exists (the author
+# may have prepared it ahead of the bump).
+#
+# Drift guard: if the most-recent prior section still contains the literal
+# `- TODO:` marker emitted by a previous bump, abort. This is the mechanical
+# barrier against the v0.7.x backfill scenario (#3803, #3974) — devs must
+# replace the placeholder before bumping again. Pass --no-changelog to
+# override.
+CHANGELOG_UPDATED=0
+if [ "$SKIP_CHANGELOG" -eq 0 ] && [ -f "$CHANGELOG" ]; then
+  if grep -qE "^## \[$NEW_VERSION\]" "$CHANGELOG"; then
+    echo "Note: CHANGELOG.md already has a section for $NEW_VERSION — leaving it untouched."
+  else
+    # Extract just the most-recent prior section (between the first `## [` line
+    # and the next one) to scope the TODO check. Without this scoping a stale
+    # TODO from any historical version would block every future bump.
+    PRIOR_SECTION=$(awk '
+      /^## \[/ {
+        if (seen) exit
+        seen = 1
+        next
+      }
+      seen { print }
+    ' "$CHANGELOG")
+    if echo "$PRIOR_SECTION" | grep -qE "^- TODO:"; then
+      echo "Error: Previous CHANGELOG.md section still contains a '- TODO:' placeholder." >&2
+      echo "       Fill it in before bumping again, or re-run with --no-changelog to override." >&2
+      exit 1
+    fi
+
+    TODAY=$(date +%Y-%m-%d)
+
+    # Build the new entry in its own tempfile so we can splice it in without
+    # passing a multi-line string through `awk -v`. macOS BSD awk rejects
+    # newlines inside -v strings ("newline in string"), so we feed the entry
+    # via getline from a side file instead.
+    track_tmp "$CHANGELOG.entry.tmp"
+    cat > "$CHANGELOG.entry.tmp" <<EOF
+## [$NEW_VERSION] - $TODAY
+
+### Added
+
+- TODO: describe additions for this release (or delete this section)
+
+### Changed
+
+- TODO: describe changes for this release (or delete this section)
+
+### Fixed
+
+- TODO: describe fixes for this release (or delete this section)
+
+EOF
+
+    # Insert the new section before the first `## [` line. The header (title +
+    # "Keep a Changelog" preamble) sits above that line and must be preserved.
+    track_tmp "$CHANGELOG.tmp"
+    awk -v entry_file="$CHANGELOG.entry.tmp" '
+      !inserted && /^## \[/ {
+        while ((getline line < entry_file) > 0) print line
+        close(entry_file)
+        inserted = 1
+      }
+      { print }
+    ' "$CHANGELOG" > "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
+    rm -f "$CHANGELOG.entry.tmp"
+
+    # Verify the new section actually landed — guards against an empty
+    # CHANGELOG, missing prior `## [` lines, or other awk no-ops.
+    if ! grep -qE "^## \[$NEW_VERSION\] - " "$CHANGELOG"; then
+      echo "Error: Failed to scaffold CHANGELOG.md section for $NEW_VERSION" >&2
+      exit 1
+    fi
+    CHANGELOG_UPDATED=1
+  fi
+fi
+
 # Regenerate Cargo.lock
 (cd "$ROOT/packages/desktop/src-tauri" && cargo generate-lockfile 2>/dev/null)
 
@@ -239,5 +355,13 @@ echo "  $ROOT_LOCK (top-level + all workspace entries)"
 echo "  $SERVER_LOCK (standalone server package lockfile — no workspace entries)"
 echo "  Cargo.lock"
 echo "  $IOS_INFO_PLIST"
+if [ "$CHANGELOG_UPDATED" -eq 1 ]; then
+  echo "  $CHANGELOG (scaffolded section for $NEW_VERSION — replace the TODO lines before commit)"
+fi
 echo ""
 echo "New version: $NEW_VERSION"
+if [ "$CHANGELOG_UPDATED" -eq 1 ]; then
+  echo ""
+  echo "Next step: edit CHANGELOG.md and replace the '- TODO:' placeholders"
+  echo "           under [$NEW_VERSION] with the actual changes for this release."
+fi
