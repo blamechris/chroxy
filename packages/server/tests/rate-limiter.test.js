@@ -354,6 +354,222 @@ describe('RateLimiter lazy stale-reap (#3997)', () => {
   })
 })
 
+describe('RateLimiter cursor stability (#4003)', () => {
+  // #4003: regression guard for the persistent _scanCursor (a live
+  // Map.keys() iterator) introduced in #4002/#3997. The implementation
+  // relies on Map iterator spec guarantees:
+  //   - Deleting an already-yielded key has no effect on the cursor
+  //   - Deleting a not-yet-yielded key silently skips it on the next .next()
+  //   - Calling .next() on an iterator whose Map has been cleared returns
+  //     { done: true }
+  // These tests lock that contract in so a future refactor (e.g. swapping
+  // Map.keys() for a [...map.keys()] snapshot) can't silently regress it.
+  //
+  // Cursors only advance via _reapStaleEntries inside check(), so each
+  // scenario alternates external mutation with check() calls and asserts
+  // the limiter neither throws nor double-visits a key.
+
+  it('survives remove() of an already-yielded key between check() calls', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      // STALE_SCAN_BUDGET is 8; seed enough stale entries that a single
+      // check() advances the cursor partway through the map without
+      // exhausting it.
+      const limiter = new RateLimiter({
+        maxMessages: 5, burst: 0, windowMs: 1_000, maxEntries: 100,
+      })
+      for (let i = 0; i < 20; i++) {
+        limiter.check(`seed-${i}`)
+      }
+      // Expire all seeds so the reap loop will actually delete them as it
+      // walks the cursor.
+      mock.timers.tick(5_000)
+
+      // First check() advances the cursor across some keys (the exact
+      // count depends on the scan-budget knob, which is intentionally not
+      // pinned here — a refactor that tunes that knob shouldn't break a
+      // cursor-stability regression test). Just call check() once to give
+      // the cursor a chance to be primed.
+      limiter.check('fresh-a')
+
+      // Externally remove one of the seeds. We don't know whether it was
+      // already yielded by the cursor or not — both branches must work
+      // (Map spec). Use limiter.remove() (the public API, which delegates
+      // to _clients.delete()) to mimic a disconnect handler firing
+      // between check()s.
+      limiter.remove('seed-0')
+      limiter.remove('seed-19')
+
+      // Continue calling check() — must not throw, must keep walking the
+      // cursor and reaping the remaining stale entries until convergence.
+      assert.doesNotThrow(() => {
+        for (let i = 0; i < 50; i++) {
+          limiter.check(`fresh-${i}`)
+        }
+      })
+
+      // Sanity: the bounded scan + repeated calls should have reaped the
+      // surviving stale entries; only fresh-* and the last fresh caller
+      // should remain.
+      for (let i = 0; i < 20; i++) {
+        assert.equal(
+          limiter._clients.has(`seed-${i}`),
+          false,
+          `seed-${i} should be reaped by now`,
+        )
+      }
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('survives _clients.clear() mid-scan (cursor rebuilds on next pull)', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        maxMessages: 5, burst: 0, windowMs: 1_000, maxEntries: 100,
+      })
+      for (let i = 0; i < 20; i++) {
+        limiter.check(`seed-${i}`)
+      }
+      mock.timers.tick(5_000)
+
+      // Prime the cursor so it's pointing into the map.
+      limiter.check('fresh-a')
+      assert.ok(limiter._scanCursor, 'cursor should be live after first reap pass')
+
+      // Simulate an external mutation that bypasses limiter.clear() — e.g.
+      // a test fixture or future code path that touches _clients directly.
+      // Capture the cursor before clear() so we can prove it was actually
+      // replaced (not the same object reused).
+      const cursorBeforeClear = limiter._scanCursor
+
+      // Per Map spec, the existing iterator now returns { done: true } on
+      // its next .next() call. The reap loop must detect this, null the
+      // cursor, and rebuild on the subsequent call rather than throw.
+      limiter._clients.clear()
+
+      assert.doesNotThrow(() => {
+        const result = limiter.check('after-clear')
+        assert.equal(result.allowed, true)
+      })
+      assert.equal(limiter._clients.has('after-clear'), true)
+
+      // After enough check()s, the cursor should have been re-created over
+      // the new map contents (rather than stuck on the dead iterator).
+      for (let i = 0; i < 5; i++) {
+        limiter.check(`post-${i}`)
+      }
+      // Every post-* key must be present — none silently skipped or lost.
+      for (let i = 0; i < 5; i++) {
+        assert.equal(limiter._clients.has(`post-${i}`), true)
+      }
+      // CORE REGRESSION ASSERTION: the cursor MUST have been detected as
+      // done and replaced — a stale iterator over a cleared Map would
+      // yield done=true on every call, making the round-robin scan a
+      // permanent no-op for the rest of the limiter's life. Pre-fix
+      // (snapshot iterator over old keys) would re-use the same object
+      // indefinitely; the fix must observably replace it. Object identity
+      // is the tightest check that distinguishes the two implementations.
+      assert.notStrictEqual(
+        limiter._scanCursor, cursorBeforeClear,
+        'cursor must be detected as done over the cleared map and replaced — a stuck iterator would silently break future stale-reaps'
+      )
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('survives entries added to _clients between check() calls (cursor sees them on rebuild)', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        maxMessages: 5, burst: 0, windowMs: 1_000, maxEntries: 100,
+      })
+      // Seed a few entries that are already stale.
+      for (let i = 0; i < 5; i++) {
+        limiter.check(`seed-${i}`)
+      }
+      mock.timers.tick(5_000)
+
+      // Prime the cursor.
+      limiter.check('fresh-a')
+
+      // Inject a new key directly into _clients with a stale timestamp —
+      // simulates any future code path that pre-populates buckets outside
+      // the check() flow. Cursor either visits it on a future round-robin
+      // or skips this round and picks it up after rebuild — both are spec.
+      limiter._clients.set('injected-stale', [0])
+
+      // Drive the cursor through several full rotations.
+      assert.doesNotThrow(() => {
+        for (let i = 0; i < 100; i++) {
+          limiter.check(`fresh-${i}`)
+        }
+      })
+
+      // injected-stale should have been reaped by one of the subsequent
+      // bounded scans — the cursor rebuilds when exhausted, so it will
+      // eventually see and drop the stale injection.
+      assert.equal(
+        limiter._clients.has('injected-stale'),
+        false,
+        'cursor should eventually visit and reap a key injected mid-iteration',
+      )
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('survives interleaved remove() + check() with no map corruption (oracle compare)', () => {
+    // Stress: random sequence of insert (check) and remove operations.
+    // Track an oracle (Set of currently-removed clients) and assert the
+    // limiter's _clients map never holds a key the oracle has explicitly
+    // removed (and that has not been re-checked since). We don't compare
+    // sizes — the bounded-scan reap is allowed to lag — only that remove()
+    // always wins against the cursor.
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        maxMessages: 100, burst: 0, windowMs: 60_000, maxEntries: 1_000,
+      })
+      const removed = new Set()
+      // Deterministic LCG so the sequence is reproducible across runs.
+      let seed = 1
+      const rand = () => {
+        seed = (seed * 1664525 + 1013904223) >>> 0
+        return seed / 0x100000000
+      }
+
+      assert.doesNotThrow(() => {
+        for (let i = 0; i < 500; i++) {
+          const key = `client-${Math.floor(rand() * 50)}`
+          if (rand() < 0.3 && limiter._clients.has(key)) {
+            limiter.remove(key)
+            removed.add(key)
+          } else {
+            limiter.check(key)
+            removed.delete(key) // re-inserted
+          }
+        }
+      })
+
+      // Any key still in `removed` (i.e. not later re-checked) must be
+      // absent from the limiter — remove() is the contract; the cursor
+      // must never re-introduce a key it's iterating over.
+      for (const key of removed) {
+        assert.equal(
+          limiter._clients.has(key),
+          false,
+          `${key} was removed and never re-checked; limiter must not hold it`,
+        )
+      }
+    } finally {
+      mock.timers.reset()
+    }
+  })
+})
+
 describe('RateLimiter eviction metering (#3996)', () => {
   // Capture rate-limit log lines emitted via createLogger('rate-limit'). The
   // global addLogListener bus is shared across tests, so each test installs
