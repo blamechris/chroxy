@@ -3,6 +3,8 @@
  * Tracks per-client message timestamps to enforce rate limits.
  */
 
+import { createLogger } from './logger.js'
+
 // Loopback addresses used by cloudflared and local dev connections
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 
@@ -79,6 +81,13 @@ const DEFAULT_MAX_ENTRIES = 10_000
 // on a quiet one stale entries will simply wait their turn — they're
 // bounded by FIFO either way.
 const STALE_SCAN_BUDGET = 8
+// #3996: throttle eviction WARN logs so an attacker rotating IPs at line rate
+// can't fill disk via a log line per evict. One line per minute per limiter
+// is enough to give an operator the signal without a flood. The cumulative
+// counter (_evictionCount) captures the full magnitude either way.
+const DEFAULT_EVICTION_LOG_THROTTLE_MS = 60_000
+
+const _evictionLog = createLogger('rate-limit')
 
 export class RateLimiter {
   /**
@@ -91,8 +100,15 @@ export class RateLimiter {
    *   not last-access) are evicted lazily on `check()`. Must be a positive
    *   integer; invalid values fall back to the default. Defaults to 10000.
    *   See #3979.
+   * @param {string} [opts.name] - Optional identifier used in eviction log
+   *   lines and getEvictionStats() so operators can tell which limiter is
+   *   shedding entries (ws / permission / diagnostics / http-permission).
+   *   See #3996.
+   * @param {number} [opts.evictionLogThrottleMs] - Min ms between eviction
+   *   WARN log lines. The cumulative counter is unaffected — only the log
+   *   is throttled. Defaults to 60000. See #3996.
    */
-  constructor({ windowMs, maxMessages, burst, maxEntries } = {}) {
+  constructor({ windowMs, maxMessages, burst, maxEntries, name, evictionLogThrottleMs } = {}) {
     this._windowMs = windowMs || DEFAULT_WINDOW_MS
     this._maxMessages = maxMessages || DEFAULT_MAX_MESSAGES
     this._burst = burst ?? DEFAULT_BURST
@@ -111,6 +127,17 @@ export class RateLimiter {
     // revisited); newly-added keys appended after the cursor will be visited
     // in a future call, which is exactly what we want.
     this._scanCursor = null
+    // #3996: eviction observability. Counter is monotonic since instantiation
+    // (resets on process restart, like all in-process metrics). Log throttle
+    // suppresses lines but does NOT suppress the counter — operators get the
+    // full magnitude via /diagnostics regardless of log volume.
+    this._name = typeof name === 'string' && name.length > 0 ? name : 'unnamed'
+    this._evictionCount = 0
+    this._lastEvictionAt = null
+    this._lastEvictionLogAt = 0
+    this._evictionLogThrottleMs = Number.isInteger(evictionLogThrottleMs) && evictionLogThrottleMs >= 0
+      ? evictionLogThrottleMs
+      : DEFAULT_EVICTION_LOG_THROTTLE_MS
   }
 
   /**
@@ -136,10 +163,21 @@ export class RateLimiter {
       // a Map guarantee — NOT last-access; entries are not re-inserted on
       // check). Runs before inserting a new key so map.size never exceeds
       // maxEntries. Lazy: only runs on inserts that would push us over.
+      let evictedThisCheck = 0
       while (this._clients.size >= this._maxEntries) {
         const oldestKey = this._clients.keys().next().value
         if (oldestKey === undefined) break
         this._clients.delete(oldestKey)
+        evictedThisCheck++
+      }
+      // #3996: meter eviction events for operator visibility. Counter is
+      // unconditional (so /diagnostics sees every evict even under log
+      // throttle); log line is throttled to avoid disk fill under
+      // sustained source-IP rotation.
+      if (evictedThisCheck > 0) {
+        this._evictionCount += evictedThisCheck
+        this._lastEvictionAt = now
+        this._maybeLogEviction(now, evictedThisCheck)
       }
       timestamps = []
       this._clients.set(clientId, timestamps)
@@ -219,5 +257,56 @@ export class RateLimiter {
     // Cursor points into the now-empty map; drop it so the next reap
     // starts a fresh iterator over whatever the map holds at that point.
     this._scanCursor = null
+  }
+
+  /**
+   * Snapshot of eviction observability state for /diagnostics (#3996).
+   *
+   * - `evictionCount` — cumulative entries evicted since instantiation.
+   *   Monotonic; resets only on process restart. Non-zero is the signal
+   *   that the limiter is shedding entries (likely source-IP rotation).
+   * - `lastEvictionAt` — wall-clock ms of the most recent eviction, or
+   *   null if none has occurred. Lets ops correlate against incident
+   *   timestamps in the log tail.
+   * - `mapSize` / `maxEntries` — current vs. cap. Steady-state at the cap
+   *   with a non-zero `evictionCount` is the textbook attack signature.
+   * - `name` — identifier passed to the constructor (ws / permission /
+   *   diagnostics / http-permission); makes the snapshot self-describing
+   *   when callers serialise multiple limiters into one payload.
+   *
+   * @returns {{ name: string, evictionCount: number, lastEvictionAt: number|null, mapSize: number, maxEntries: number }}
+   */
+  getEvictionStats() {
+    return {
+      name: this._name,
+      evictionCount: this._evictionCount,
+      lastEvictionAt: this._lastEvictionAt,
+      mapSize: this._clients.size,
+      maxEntries: this._maxEntries,
+    }
+  }
+
+  /**
+   * Emit a throttled WARN log on eviction. Throttle is per-limiter — each
+   * limiter instance gets at most one line per `_evictionLogThrottleMs`
+   * regardless of how many entries are dropped in that window. The
+   * cumulative counter (_evictionCount) is the source of truth for total
+   * volume; the log line is just for operator visibility / alerting.
+   *
+   * @param {number} now - Current Date.now() value (passed in to avoid a
+   *   second clock read on the hot path).
+   * @param {number} count - Number of entries evicted in the triggering
+   *   check() call. Reported in the log line so a single line can convey
+   *   "burst of 137 evictions" rather than just "an eviction happened."
+   * @private
+   */
+  _maybeLogEviction(now, count) {
+    if (now - this._lastEvictionLogAt < this._evictionLogThrottleMs) return
+    this._lastEvictionLogAt = now
+    _evictionLog.warn(
+      `evicted ${count} oldest entr${count === 1 ? 'y' : 'ies'} from limiter ` +
+      `name=${this._name} (cumulative=${this._evictionCount}, mapSize=${this._clients.size}/${this._maxEntries}). ` +
+      'Likely source-IP rotation — see #3979/#3996.'
+    )
   }
 }

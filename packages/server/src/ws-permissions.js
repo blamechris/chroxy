@@ -60,7 +60,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
-  const _httpPermissionLimiter = new RateLimiter(rateLimit || { windowMs: 60_000, maxMessages: 30, burst: 10 })
+  // #3996: name='http-permission' so eviction logs and /diagnostics can
+  // identify this limiter distinctly from the WS-side _permissionRateLimiter.
+  // name comes AFTER the spread so a stray `name` in the override (e.g.
+  // from a test fixture) can't displace the canonical 'http-permission'
+  // tag that operators rely on in eviction logs and /diagnostics.
+  const _httpPermissionLimiter = new RateLimiter({ ...(rateLimit || { windowMs: 60_000, maxMessages: 30, burst: 10 }), name: 'http-permission' })
 
   // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
   const _validateHookAuth = validateHookAuth || validateBearerAuth
@@ -484,6 +489,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     resendPendingPermissions,
     resolvePermission,
     destroy,
+    // #3996: expose the HTTP-permission limiter so /diagnostics can include
+    // its eviction stats alongside the three WsServer-owned limiters.
+    // Read-only handle — callers must only invoke getEvictionStats() on it.
+    _httpPermissionLimiter,
   }
 }
 
