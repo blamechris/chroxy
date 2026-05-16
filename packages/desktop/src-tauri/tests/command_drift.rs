@@ -154,22 +154,66 @@ fn parse_capabilities_allow(json: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Extract every `"..."` literal inside `body`. Naive but adequate — the
-/// snippets we feed it never contain escape sequences or comments with `"`.
+/// Extract every `"..."` literal inside `body`, skipping `//` line comments
+/// and `/* ... */` block comments so a quoted string inside a comment is not
+/// misread as a real entry. Doesn't handle escape sequences — the snippets
+/// we feed it (slice initialisers like `&["foo", "bar"]`) never contain `\"`.
 fn extract_string_literals(body: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    let mut chars = body.chars();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            let mut buf = String::new();
-            for c2 in chars.by_ref() {
-                if c2 == '"' {
-                    break;
-                }
-                buf.push(c2);
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip `// ...` line comments.
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
             }
-            out.insert(buf);
+            continue;
         }
+        // Skip `/* ... */` block comments, tracking nesting depth so a
+        // valid Rust nested comment like `/* outer /* inner */ "fake" */`
+        // doesn't exit at the first `*/` and re-expose `"fake"` as a
+        // captured literal — Rust's lexer treats block comments as
+        // nestable, so this parser must too.
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            let mut depth: u32 = 1;
+            while i + 1 < bytes.len() && depth > 0 {
+                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            // Unterminated comment: scan to EOF.
+            if depth > 0 {
+                i = bytes.len();
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            // Safe slice: we only matched on the ASCII `"` byte, which never
+            // appears inside a UTF-8 multi-byte continuation, so `start..i`
+            // always lies on char boundaries.
+            let lit = std::str::from_utf8(&bytes[start..i])
+                .expect("non-UTF-8 between ASCII quotes — body is not valid UTF-8");
+            out.insert(lit.to_string());
+            if i < bytes.len() {
+                i += 1; // consume closing quote
+            }
+            continue;
+        }
+        i += 1;
     }
     out
 }
@@ -271,16 +315,23 @@ fn parsers_self_check() {
         const APP_COMMANDS: &[&str] = &[
             "foo",
             "bar_baz",
-            // a comment with a "string" should be tolerated by extract_string_literals
+            // a comment with a "string" must NOT be captured by extract_string_literals
+            /* and a /* block comment with "another" */ also must not leak */
             "qux",
         ];
     "#;
     let cmds = parse_app_commands(sample_build);
-    // The comment-embedded "string" gets captured too — accepted, the real
-    // build.rs has no such comments inside the slice.
-    assert!(cmds.contains("foo"));
-    assert!(cmds.contains("bar_baz"));
-    assert!(cmds.contains("qux"));
+    // Exact match — `assert!(contains)` previously masked the parser
+    // capturing comment-embedded `"string"` and `"another"` as phantom
+    // entries (issue #3993).
+    let expected_cmds: BTreeSet<String> = ["foo", "bar_baz", "qux"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        cmds, expected_cmds,
+        "parse_app_commands leaked comment-embedded literals or dropped real ones"
+    );
 
     let sample_lib = r#"
         .invoke_handler(tauri::generate_handler![
@@ -313,4 +364,71 @@ fn parsers_self_check() {
         .map(|s| s.to_string())
         .collect();
     assert_eq!(allow, expected);
+}
+
+#[test]
+fn extract_string_literals_skips_comment_embedded_quotes() {
+    // Regression for #3993: a string literal that appears inside a `//` line
+    // comment or a `/* ... */` block comment must not be captured. Before
+    // the fix, `extract_string_literals` was a naive `"`-toggle that
+    // happily slurped any quoted text — including the contents of comments
+    // that mentioned a fake command like `// allowed_commands = "fake_cmd"`.
+    let body = r#"
+        "real_one",
+        // allowed_commands = "fake_from_line_comment"
+        "real_two",
+        /* and "fake_from_block_comment" should also be ignored */
+        "real_three",
+    "#;
+    let lits = extract_string_literals(body);
+    let expected: BTreeSet<String> = ["real_one", "real_two", "real_three"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        lits, expected,
+        "extract_string_literals must skip quoted text inside `//` and `/* */` comments"
+    );
+}
+
+#[test]
+fn extract_string_literals_handles_nested_block_comments() {
+    // Regression for the Copilot-flagged hazard on PR #4000: Rust block
+    // comments are nestable, so a fixture like `/* outer /* inner */ "fake" */`
+    // would, with depth-1 scanning, exit at the first `*/` and capture
+    // `"fake"` as a phantom command. The parser must track nesting depth.
+    let body = r#"
+        "real_a",
+        /* outer /* inner with "should_not_leak" */ "fake_in_outer_tail" */
+        "real_b",
+        /* triply /* nested /* "deep_fake" */ "mid_fake" */ "outer_fake" */
+        "real_c",
+    "#;
+    let lits = extract_string_literals(body);
+    let expected: BTreeSet<String> = ["real_a", "real_b", "real_c"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        lits, expected,
+        "nested block comments leaked literals — parser is not depth-tracking"
+    );
+}
+
+#[test]
+fn extract_string_literals_handles_unterminated_block_comment() {
+    // An unterminated `/* ...` should consume to EOF rather than leaking
+    // any quoted text inside. Defensive — real source files won't have
+    // this, but we don't want a malformed fixture to silently inject
+    // phantom entries on a future regression.
+    let body = r#"
+        "real_one",
+        /* unterminated comment with "should_not_leak" and no closer
+    "#;
+    let lits = extract_string_literals(body);
+    let expected: BTreeSet<String> = ["real_one"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        lits, expected,
+        "unterminated block comment leaked literals — should consume to EOF"
+    );
 }
