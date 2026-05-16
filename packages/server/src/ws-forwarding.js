@@ -263,18 +263,34 @@ function executeRegistrations(registrations, sessionId, ctx) {
   if (!registrations) return
   const { permissionSessionMap, questionSessionMap } = ctx
   for (const reg of registrations) {
+    // #3736: registrations support an explicit action ('set' | 'delete'),
+    // defaulting to 'set' for backwards compatibility. The delete action is
+    // emitted by EVENT_MAP.permission_resolved so the routing map is pruned
+    // on every resolution path (including internal auto-resolves: timeout,
+    // aborted, auto_mode, cleared) where no user response ever arrives to
+    // trigger the message-handler-level delete. Without this the map grows
+    // unbounded until session destroy.
+    const action = reg.action ?? 'set'
     if (reg.map === 'permission') {
-      const mappedSessionId = reg.value ?? sessionId
-      permissionSessionMap.set(reg.key, mappedSessionId)
-      // Diagnostic correlation log for #2832 — paired with
-      // [session-binding-resend] and [session-binding-reject]. Allows
-      // grepping the origin session for any requestId that later gets
-      // rejected as SESSION_TOKEN_MISMATCH. Gated at debug level (#2854)
-      // to avoid spamming prod logs for sessions with heavy permission
-      // traffic (auto/accept-all). Enable with `LOG_LEVEL=debug`.
-      log.debug(`[session-binding-create] permission ${reg.key} created (sessionId=${mappedSessionId})`)
+      if (action === 'delete') {
+        permissionSessionMap.delete(reg.key)
+      } else {
+        const mappedSessionId = reg.value ?? sessionId
+        permissionSessionMap.set(reg.key, mappedSessionId)
+        // Diagnostic correlation log for #2832 — paired with
+        // [session-binding-resend] and [session-binding-reject]. Allows
+        // grepping the origin session for any requestId that later gets
+        // rejected as SESSION_TOKEN_MISMATCH. Gated at debug level (#2854)
+        // to avoid spamming prod logs for sessions with heavy permission
+        // traffic (auto/accept-all). Enable with `LOG_LEVEL=debug`.
+        log.debug(`[session-binding-create] permission ${reg.key} created (sessionId=${mappedSessionId})`)
+      }
     } else if (reg.map === 'question') {
-      questionSessionMap.set(reg.key, reg.value ?? sessionId)
+      if (action === 'delete') {
+        questionSessionMap.delete(reg.key)
+      } else {
+        questionSessionMap.set(reg.key, reg.value ?? sessionId)
+      }
     }
   }
 }

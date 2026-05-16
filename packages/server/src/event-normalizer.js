@@ -281,16 +281,33 @@ Object.assign(EVENT_MAP, {
   // The SDK paths in settings-handlers.js (WS) and ws-permissions.js (HTTP)
   // were de-inlined to use this mapping, but the legacy non-SDK branches in
   // those files (no PermissionManager available) still broadcast inline.
-  permission_resolved: (data, ctx) => ({
-    messages: [{
-      msg: {
-        type: 'permission_resolved',
-        requestId: data.requestId,
-        decision: data.decision,
-        sessionId: ctx.sessionId,
-      },
-    }],
-  }),
+  //
+  // #3736: also emit a delete registration so the WsServer routing map
+  // (permissionSessionMap or questionSessionMap) is pruned on every
+  // resolution path — including the internal auto-resolve paths (timeout,
+  // aborted, auto_mode, cleared) where no user response ever arrives to
+  // trigger the message-handler-level delete. Without this, long-running
+  // sessions accumulate stale entries (small leak, unbounded growth until
+  // session destroy). The AskUserQuestion variant carries `toolUseId`
+  // instead of `requestId` and uses a separate map.
+  permission_resolved: (data, ctx) => {
+    const out = {
+      messages: [{
+        msg: {
+          type: 'permission_resolved',
+          requestId: data.requestId,
+          decision: data.decision,
+          sessionId: ctx.sessionId,
+        },
+      }],
+    }
+    if (data.requestId) {
+      out.registrations = [{ map: 'permission', key: data.requestId, action: 'delete' }]
+    } else if (data.toolUseId) {
+      out.registrations = [{ map: 'question', key: data.toolUseId, action: 'delete' }]
+    }
+    return out
+  },
 
   error: (data) => {
     const msg = {
