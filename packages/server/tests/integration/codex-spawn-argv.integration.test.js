@@ -40,7 +40,7 @@
 
 import { describe, it, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { existsSync } from 'node:fs'
 import { CodexSession, buildCodexArgs } from '../../src/codex-session.js'
@@ -50,19 +50,45 @@ import { CodexSession, buildCodexArgs } from '../../src/codex-session.js'
 const FORCE = process.env.RUN_CODEX_INTEGRATION === '1'
 
 /**
- * Probe BINARY_CANDIDATES for a usable codex binary. Mirrors the resolver in
- * codex-session.js without re-running it (CodexSession.resolvedBinary is
- * evaluated at module-load time and may be `null` if the resolver ran in a
- * GUI-style minimal-PATH context — we still want to find a binary at test time).
+ * Probe for a usable codex binary at test time.
+ *
+ * `CodexSession.resolvedBinary` is evaluated at module-load via
+ * `resolveBinary('codex', BINARY_CANDIDATES)`, which always returns a string
+ * (never `null`):
+ *   1. The absolute path printed by `which codex` (when codex is on PATH).
+ *   2. The first existing candidate from `BINARY_CANDIDATES`.
+ *   3. The bare name `'codex'` as a last-resort fallback, so callers get a
+ *      descriptive ENOENT instead of a silent failure.
+ *
+ * Case 3 is what this helper has to defend against — `existsSync('codex')` is
+ * false even when the binary is invocable via a PATH lookup at test time.
+ * We re-probe candidates first (cheap, deterministic), then fall through to
+ * `which` so a PATH-only install is still recognised.
+ *
+ * Returns the resolved binary spec (absolute path) or `null` when no
+ * candidate exists and codex is not on PATH.
  */
 function resolveCodexBinary() {
-  if (CodexSession.resolvedBinary && existsSync(CodexSession.resolvedBinary)) {
+  // Case 1/2: resolvedBinary is an absolute path that exists on disk.
+  if (existsSync(CodexSession.resolvedBinary)) {
     return CodexSession.resolvedBinary
   }
+  // Re-scan candidates in case the module-load PATH was minimal.
   for (const candidate of CodexSession.binaryCandidates) {
     if (existsSync(candidate)) return candidate
   }
-  return null
+  // Case 3: resolvedBinary may be the bare name 'codex'. Verify it is
+  // genuinely invocable via the current PATH before claiming a hit, so we
+  // don't spawn a missing binary and report a confusing test failure.
+  try {
+    const whichPath = execFileSync('which', ['codex'], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim()
+    return whichPath || null
+  } catch {
+    return null
+  }
 }
 
 const CODEX_BIN = resolveCodexBinary()
@@ -118,7 +144,12 @@ if (!SHOULD_RUN) {
    *    without paying the full turn duration), then kill the child, OR
    *  - kill the child after SPAWN_GRACE_MS if no output arrives.
    *
-   * Returns `{ exitCode, signal, firstStdoutLine, stderr }`.
+   * Returns `{ exitCode, signal, firstStdoutLine, stderr, spawnError }`.
+   *
+   * `spawnError` is non-null when the OS rejected the spawn outright (ENOENT,
+   * EACCES, chdir failure). assertArgvAccepted() promotes any non-null
+   * `spawnError` to a hard failure so spawn-level breakage is never masked
+   * as "argv accepted".
    */
   function spawnCodexAndWait(argv, { graceMs = SPAWN_GRACE_MS } = {}) {
     return new Promise((resolve) => {
@@ -134,6 +165,16 @@ if (!SHOULD_RUN) {
       let stderr = ''
       let killTimer = null
       let earlyKill = false
+      let spawnError = null
+      let settled = false
+
+      const settle = (payload) => {
+        if (settled) return
+        settled = true
+        clearTimeout(killTimer)
+        try { rl.close() } catch { /* already closed */ }
+        resolve(payload)
+      }
 
       const rl = createInterface({ input: child.stdout })
       rl.on('line', (line) => {
@@ -156,26 +197,27 @@ if (!SHOULD_RUN) {
       }, graceMs)
 
       child.on('close', (code, signal) => {
-        clearTimeout(killTimer)
-        rl.close()
-        resolve({
+        settle({
           exitCode: code,
           signal,
           firstStdoutLine,
           stderr,
           earlyKill,
+          spawnError,
         })
       })
 
       child.on('error', (err) => {
-        clearTimeout(killTimer)
-        rl.close()
-        resolve({
+        // Capture so assertArgvAccepted() can promote this to a hard failure
+        // instead of silently treating `exitCode === null` as "argv accepted".
+        spawnError = err
+        settle({
           exitCode: null,
           signal: null,
           firstStdoutLine: null,
           stderr: `spawn error: ${err.message}`,
           earlyKill: false,
+          spawnError: err,
         })
       })
     })
@@ -186,9 +228,38 @@ if (!SHOULD_RUN) {
    * argv-rejection fragment. This is the core regression assertion: PR #3867's
    * misordered `--sandbox` flag on the resume subcommand surfaced as
    * `error: unexpected argument '--sandbox' found` on stderr.
+   *
+   * Also promotes OS-level spawn failures (ENOENT, EACCES, chdir) to hard
+   * failures — without this, `child.on('error')` resolves with
+   * `exitCode === null` and the `exitCode !== 2` check would silently treat a
+   * never-started process as "argv accepted".
    */
   function assertArgvAccepted(result, argv, formLabel) {
     const trimmedStderr = result.stderr.trim()
+
+    // Spawn-level failure (the OS rejected `spawn()` outright). This is NOT
+    // an argv-acceptance signal — fail loudly so a broken codex install or a
+    // bad CWD doesn't masquerade as a passing test.
+    if (result.spawnError) {
+      assert.fail(
+        `[${formLabel}] codex failed to spawn (OS-level error, not an argv decision).\n` +
+        `  argv: ${JSON.stringify(argv)}\n` +
+        `  error: ${result.spawnError.message}\n` +
+        `  stderr:\n${trimmedStderr}`,
+      )
+    }
+
+    // No exit code AND no signal — the child neither exited nor was killed.
+    // Should be unreachable given the SPAWN_GRACE_MS timer, but defend
+    // against a future regression where the timer is removed.
+    if (result.exitCode === null && result.signal === null) {
+      assert.fail(
+        `[${formLabel}] codex child resolved without an exit code or signal — ` +
+        `assertion cannot determine whether argv was accepted.\n` +
+        `  argv: ${JSON.stringify(argv)}\n` +
+        `  stderr:\n${trimmedStderr}`,
+      )
+    }
 
     for (const fragment of PARSE_ERROR_FRAGMENTS) {
       if (trimmedStderr.includes(fragment)) {
