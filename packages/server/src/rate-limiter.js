@@ -86,6 +86,20 @@ const STALE_SCAN_BUDGET = 8
 // is enough to give an operator the signal without a flood. The cumulative
 // counter (_evictionCount) captures the full magnitude either way.
 const DEFAULT_EVICTION_LOG_THROTTLE_MS = 60_000
+// #4005: sliding window for the eviction-rate metric. 60s matches the default
+// for a "is this happening RIGHT NOW?" alerting signal — short enough to fire
+// during a live attack, long enough to absorb a stray multi-evict burst.
+const DEFAULT_EVICTION_WINDOW_MS = 60_000
+// #4005: hard cap on the eviction-timestamp buffer. An attacker rotating
+// source IPs at line rate generates one eviction per spoofed IP — without a
+// cap, the timestamp array would grow without bound (one int64-ish entry per
+// evicted entry) and OOM the limiter. 1024 entries is well above any honest
+// burst (the largest realistic burst is `maxEntries` itself, ~10k, but those
+// are batched into one check() call and counted once for window purposes) and
+// keeps the array footprint at ~8KB worst case. Past the cap we set a
+// `_evictionWindowSaturated` flag instead of recording the timestamp;
+// operators still see the cumulative counter for total volume.
+const EVICTION_WINDOW_BUFFER_CAP = 1024
 
 const _evictionLog = createLogger('rate-limit')
 
@@ -107,8 +121,12 @@ export class RateLimiter {
    * @param {number} [opts.evictionLogThrottleMs] - Min ms between eviction
    *   WARN log lines. The cumulative counter is unaffected — only the log
    *   is throttled. Defaults to 60000. See #3996.
+   * @param {number} [opts.evictionWindowMs] - Window length (ms) for the
+   *   `evictionsInWindow` rate metric exposed by getEvictionStats(). Must be
+   *   a positive integer; invalid values fall back to the default. Defaults
+   *   to 60000 (1 minute). See #4005.
    */
-  constructor({ windowMs, maxMessages, burst, maxEntries, name, evictionLogThrottleMs } = {}) {
+  constructor({ windowMs, maxMessages, burst, maxEntries, name, evictionLogThrottleMs, evictionWindowMs } = {}) {
     this._windowMs = windowMs || DEFAULT_WINDOW_MS
     this._maxMessages = maxMessages || DEFAULT_MAX_MESSAGES
     this._burst = burst ?? DEFAULT_BURST
@@ -138,6 +156,19 @@ export class RateLimiter {
     this._evictionLogThrottleMs = Number.isInteger(evictionLogThrottleMs) && evictionLogThrottleMs >= 0
       ? evictionLogThrottleMs
       : DEFAULT_EVICTION_LOG_THROTTLE_MS
+    // #4005: sliding-window eviction-rate metric. Buffer is pruned lazily on
+    // every getEvictionStats() call (entries older than _evictionWindowMs are
+    // dropped); pushes are capped at EVICTION_WINDOW_BUFFER_CAP so an attacker
+    // can't OOM the limiter via the rate history. When the cap is hit we set
+    // _evictionWindowSaturated and stop recording timestamps until the
+    // existing buffer drains — the cumulative _evictionCount keeps capturing
+    // the full magnitude in the meantime.
+    this._evictionWindowMs = Number.isInteger(evictionWindowMs) && evictionWindowMs >= 1
+      ? evictionWindowMs
+      : DEFAULT_EVICTION_WINDOW_MS
+    this._evictionTimestamps = []
+    this._evictionWindowSaturated = false
+    this._lastSaturationAt = null
   }
 
   /**
@@ -177,6 +208,7 @@ export class RateLimiter {
       if (evictedThisCheck > 0) {
         this._evictionCount += evictedThisCheck
         this._lastEvictionAt = now
+        this._recordEvictionsInWindow(now, evictedThisCheck)
         this._maybeLogEviction(now, evictedThisCheck)
       }
       timestamps = []
@@ -257,10 +289,16 @@ export class RateLimiter {
     // Cursor points into the now-empty map; drop it so the next reap
     // starts a fresh iterator over whatever the map holds at that point.
     this._scanCursor = null
+    // #4005: drain the rate-window buffer alongside the per-client map.
+    // The cumulative _evictionCount stays put — it's the long-lived
+    // /diagnostics signal and only resets on process restart (see #3996).
+    this._evictionTimestamps.length = 0
+    this._evictionWindowSaturated = false
+    this._lastSaturationAt = null
   }
 
   /**
-   * Snapshot of eviction observability state for /diagnostics (#3996).
+   * Snapshot of eviction observability state for /diagnostics (#3996, #4005).
    *
    * - `evictionCount` — cumulative entries evicted since instantiation.
    *   Monotonic; resets only on process restart. Non-zero is the signal
@@ -273,16 +311,99 @@ export class RateLimiter {
    * - `name` — identifier passed to the constructor (ws / permission /
    *   diagnostics / http-permission); makes the snapshot self-describing
    *   when callers serialise multiple limiters into one payload.
+   * - `evictionsInWindow` — count of evictions in the last `evictionWindowMs`.
+   *   Answers "is this happening RIGHT NOW?" — pair with `evictionCount`
+   *   (which only tells you "has this ever happened?") for live alerting.
+   *   Pruned lazily on every call to this method. See #4005.
+   * - `evictionWindowMs` — the actual window length used for
+   *   `evictionsInWindow`. Surfaced for transparency so /diagnostics
+   *   consumers can render "X evictions in the last Y minutes" without
+   *   hard-coding the window.
+   * - `evictionWindowSaturated` — true when the in-window timestamp buffer
+   *   has hit its hard cap (EVICTION_WINDOW_BUFFER_CAP). Indicates the
+   *   eviction rate exceeded what the rate-history ring can hold and the
+   *   `evictionsInWindow` value is a floor, not the true count. The
+   *   cumulative `evictionCount` still captures full magnitude. Clears
+   *   automatically once the buffer drains.
    *
-   * @returns {{ name: string, evictionCount: number, lastEvictionAt: number|null, mapSize: number, maxEntries: number }}
+   * @returns {{ name: string, evictionCount: number, lastEvictionAt: number|null, mapSize: number, maxEntries: number, evictionsInWindow: number, evictionWindowMs: number, evictionWindowSaturated: boolean }}
    */
   getEvictionStats() {
+    const now = Date.now()
+    this._pruneEvictionWindow(now)
     return {
       name: this._name,
       evictionCount: this._evictionCount,
       lastEvictionAt: this._lastEvictionAt,
       mapSize: this._clients.size,
       maxEntries: this._maxEntries,
+      evictionsInWindow: this._evictionTimestamps.length,
+      evictionWindowMs: this._evictionWindowMs,
+      evictionWindowSaturated: this._evictionWindowSaturated,
+    }
+  }
+
+  /**
+   * #4005: append `count` eviction timestamps (all at `now`) to the rate
+   * window, capped at EVICTION_WINDOW_BUFFER_CAP. When the cap is hit we
+   * stop recording and set `_evictionWindowSaturated` — the cumulative
+   * `_evictionCount` keeps capturing magnitude, and the saturated flag
+   * tells operators the rate metric is a floor rather than exact.
+   *
+   * @param {number} now - Current Date.now() value (passed in to avoid a
+   *   second clock read on the hot path).
+   * @param {number} count - Number of evictions to record (>= 1).
+   * @private
+   */
+  _recordEvictionsInWindow(now, count) {
+    // Prune first so the cap reflects only entries currently in the window.
+    // Without this prune a bursty workload could trip saturation while the
+    // tail of the buffer was already stale.
+    this._pruneEvictionWindow(now)
+    const headroom = EVICTION_WINDOW_BUFFER_CAP - this._evictionTimestamps.length
+    if (count <= headroom) {
+      for (let i = 0; i < count; i++) this._evictionTimestamps.push(now)
+      return
+    }
+    // Fill any remaining headroom and mark the buffer saturated. Anything
+    // past the cap is intentionally dropped — the saturated flag plus the
+    // monotonic counter give operators the signal they need without
+    // unbounded memory growth. Track WHEN we saturated so the prune step
+    // can clear the flag once that event has aged out of the window —
+    // otherwise low-rate evictions continuing after a burst would keep
+    // the buffer non-empty and the flag stuck true forever, misleading
+    // diagnostics long after the actual saturation event.
+    for (let i = 0; i < headroom; i++) this._evictionTimestamps.push(now)
+    this._evictionWindowSaturated = true
+    this._lastSaturationAt = now
+  }
+
+  /**
+   * #4005: drop eviction timestamps that have aged past the rate window.
+   * Buffer is append-only and append-monotonic in `now`, so a leading-edge
+   * scan is O(k) in the number of expired entries — not O(N) every call.
+   * Also clears the saturated flag once the buffer empties: a saturated
+   * limiter that's drained is no longer suppressing data.
+   *
+   * @param {number} now - Current Date.now() value.
+   * @private
+   */
+  _pruneEvictionWindow(now) {
+    const cutoff = now - this._evictionWindowMs
+    let drop = 0
+    while (drop < this._evictionTimestamps.length && this._evictionTimestamps[drop] <= cutoff) {
+      drop++
+    }
+    if (drop > 0) this._evictionTimestamps.splice(0, drop)
+    // Clear the saturation flag once the saturation event itself has aged
+    // past the window — at that point the count over the window IS
+    // accurate again regardless of buffer occupancy. Pre-fix, this only
+    // cleared on an empty buffer, so low-rate evictions following a
+    // burst could keep the flag stuck true indefinitely.
+    if (this._evictionWindowSaturated &&
+        (this._lastSaturationAt === null || this._lastSaturationAt <= cutoff)) {
+      this._evictionWindowSaturated = false
+      this._lastSaturationAt = null
     }
   }
 

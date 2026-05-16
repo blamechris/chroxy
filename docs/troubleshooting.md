@@ -63,11 +63,11 @@ Rules:
   },
   "clients": { "connected": 2, "authenticated": 2 },
   "counters": { /* metrics.snapshot() */ },
-  "rateLimiters": [        // <-- per-limiter eviction stats (#3996)
-    { "name": "ws", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 3, "maxEntries": 10000 },
-    { "name": "permission", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 0, "maxEntries": 10000 },
-    { "name": "diagnostics", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 1, "maxEntries": 10000 },
-    { "name": "http-permission", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 0, "maxEntries": 10000 }
+  "rateLimiters": [        // <-- per-limiter eviction stats (#3996, #4005)
+    { "name": "ws", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 3, "maxEntries": 10000, "evictionsInWindow": 0, "evictionWindowMs": 60000, "evictionWindowSaturated": false },
+    { "name": "permission", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 0, "maxEntries": 10000, "evictionsInWindow": 0, "evictionWindowMs": 60000, "evictionWindowSaturated": false },
+    { "name": "diagnostics", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 1, "maxEntries": 10000, "evictionsInWindow": 0, "evictionWindowMs": 60000, "evictionWindowSaturated": false },
+    { "name": "http-permission", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 0, "maxEntries": 10000, "evictionsInWindow": 0, "evictionWindowMs": 60000, "evictionWindowSaturated": false }
   ],
   "sessions": [
     {
@@ -113,6 +113,9 @@ Rules:
 | `logs.lines` | Last ~8KB of `chroxy.log`. Look for `[ws]`, `[session-binding-*]`, or provider-error stack traces near the failure window. |
 | `logs.source: "disabled"` | File logging is off. Restart with `CHROXY_LOG_LEVEL=debug` (or set `logLevel`/`logDir` in config) to enable, then re-trigger the failure. |
 | `rateLimiters[].evictionCount` | Cumulative entries evicted from each limiter's per-IP map since process start (#3996). **Non-zero is the signal that the limiter is shedding entries** — usually source-IP rotation against an HTTP endpoint (`http-permission`, `diagnostics`, `permission`) or a DDoS pattern against `ws`. Pair with `rateLimiters[].mapSize == maxEntries` to confirm steady-state pressure. The throttled `[WARN] [rate-limit]` lines in `logs.lines` reference the same limiter `name`. |
+| `rateLimiters[].evictionsInWindow` | Evictions in the most recent `evictionWindowMs` (default 60s) (#4005). **This is the live-alert signal** — `evictionCount` only tells you "has this ever happened since boot?", whereas `evictionsInWindow` tells you "is it happening *right now*?". A non-zero value paired with mapSize at the cap is the textbook live-attack signature; alert on this rather than the cumulative counter. |
+| `rateLimiters[].evictionWindowMs` | The actual window length used for `evictionsInWindow`, surfaced for transparency so dashboards can render "X evictions in the last Y minutes" without hard-coding the constant. |
+| `rateLimiters[].evictionWindowSaturated` | `true` when the eviction-rate buffer hit its hard cap (1024 entries) and `evictionsInWindow` has degraded to a floor rather than the exact count. Cumulative `evictionCount` still captures full magnitude. Clears automatically once the buffer drains. |
 
 ### Common patterns
 
