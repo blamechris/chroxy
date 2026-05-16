@@ -76,15 +76,22 @@ export class RateLimiter {
    * @param {number} opts.maxMessages - Max messages per window
    * @param {number} opts.burst - Burst allowance above maxMessages
    * @param {number} [opts.maxEntries] - Cap on the per-client map size.
-   *   When exceeded, the oldest entries (by insertion order) are evicted
-   *   lazily on `check()`. Defaults to 10000. See #3979.
+   *   When exceeded, the oldest entries (FIFO — by original insertion order,
+   *   not last-access) are evicted lazily on `check()`. Must be a positive
+   *   integer; invalid values fall back to the default. Defaults to 10000.
+   *   See #3979.
    */
   constructor({ windowMs, maxMessages, burst, maxEntries } = {}) {
     this._windowMs = windowMs || DEFAULT_WINDOW_MS
     this._maxMessages = maxMessages || DEFAULT_MAX_MESSAGES
     this._burst = burst ?? DEFAULT_BURST
     this._limit = this._maxMessages + this._burst
-    this._maxEntries = maxEntries || DEFAULT_MAX_ENTRIES
+    // Validate maxEntries: must be a positive integer. `||` would silently
+    // accept 0/NaN/-1 and disable the cap (or worse, make eviction
+    // unpredictable). Fall back to the default for any invalid input.
+    this._maxEntries = Number.isInteger(maxEntries) && maxEntries >= 1
+      ? maxEntries
+      : DEFAULT_MAX_ENTRIES
     this._clients = new Map() // clientId -> [timestamp, ...]
   }
 
@@ -99,9 +106,10 @@ export class RateLimiter {
 
     let timestamps = this._clients.get(clientId)
     if (!timestamps) {
-      // #3979: evict oldest entries (insertion order — a Map guarantee)
-      // before inserting a new one, so map.size never exceeds maxEntries.
-      // Lazy: only runs on inserts that would push us over the cap.
+      // #3979: evict oldest entries (FIFO — by ORIGINAL insertion order,
+      // a Map guarantee — NOT last-access; entries are not re-inserted on
+      // check). Runs before inserting a new key so map.size never exceeds
+      // maxEntries. Lazy: only runs on inserts that would push us over.
       while (this._clients.size >= this._maxEntries) {
         const oldestKey = this._clients.keys().next().value
         if (oldestKey === undefined) break

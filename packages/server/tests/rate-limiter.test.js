@@ -176,6 +176,22 @@ describe('RateLimiter bounded map (#3979)', () => {
     assert.equal(limiter._clients.has('hot-client'), true)
     assert.equal(limiter.check('hot-client').allowed, false, 'limit must still apply')
   })
+
+  // Regression guard: pre-fix, `maxEntries || DEFAULT_MAX_ENTRIES` silently
+  // accepted 0/NaN/-1, which would either disable the cap (default 10000)
+  // or — worse — make the FIFO loop spin forever if some downstream code
+  // ever treated 0 as "no cap." Tighten to integer >= 1.
+  it('rejects invalid maxEntries and falls back to the default', () => {
+    for (const bad of [0, -1, -100, NaN, 0.5, '5', null, undefined]) {
+      const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 60_000, maxEntries: bad })
+      assert.equal(limiter._maxEntries, 10_000, `maxEntries=${bad} must fall back to default 10000`)
+    }
+  })
+
+  it('accepts a valid positive integer maxEntries override', () => {
+    const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 60_000, maxEntries: 42 })
+    assert.equal(limiter._maxEntries, 42)
+  })
 })
 
 describe('getClientIp (#2688)', () => {
