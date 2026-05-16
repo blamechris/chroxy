@@ -171,16 +171,27 @@ fn extract_string_literals(body: &str) -> BTreeSet<String> {
             }
             continue;
         }
-        // Skip `/* ... */` block comments.
+        // Skip `/* ... */` block comments, tracking nesting depth so a
+        // valid Rust nested comment like `/* outer /* inner */ "fake" */`
+        // doesn't exit at the first `*/` and re-expose `"fake"` as a
+        // captured literal — Rust's lexer treats block comments as
+        // nestable, so this parser must too.
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
             i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
+            let mut depth: u32 = 1;
+            while i + 1 < bytes.len() && depth > 0 {
+                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
-            // Consume the closing `*/` if present.
-            if i + 1 < bytes.len() {
-                i += 2;
-            } else {
+            // Unterminated comment: scan to EOF.
+            if depth > 0 {
                 i = bytes.len();
             }
             continue;
@@ -377,5 +388,47 @@ fn extract_string_literals_skips_comment_embedded_quotes() {
     assert_eq!(
         lits, expected,
         "extract_string_literals must skip quoted text inside `//` and `/* */` comments"
+    );
+}
+
+#[test]
+fn extract_string_literals_handles_nested_block_comments() {
+    // Regression for the Copilot-flagged hazard on PR #4000: Rust block
+    // comments are nestable, so a fixture like `/* outer /* inner */ "fake" */`
+    // would, with depth-1 scanning, exit at the first `*/` and capture
+    // `"fake"` as a phantom command. The parser must track nesting depth.
+    let body = r#"
+        "real_a",
+        /* outer /* inner with "should_not_leak" */ "fake_in_outer_tail" */
+        "real_b",
+        /* triply /* nested /* "deep_fake" */ "mid_fake" */ "outer_fake" */
+        "real_c",
+    "#;
+    let lits = extract_string_literals(body);
+    let expected: BTreeSet<String> = ["real_a", "real_b", "real_c"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        lits, expected,
+        "nested block comments leaked literals — parser is not depth-tracking"
+    );
+}
+
+#[test]
+fn extract_string_literals_handles_unterminated_block_comment() {
+    // An unterminated `/* ...` should consume to EOF rather than leaking
+    // any quoted text inside. Defensive — real source files won't have
+    // this, but we don't want a malformed fixture to silently inject
+    // phantom entries on a future regression.
+    let body = r#"
+        "real_one",
+        /* unterminated comment with "should_not_leak" and no closer
+    "#;
+    let lits = extract_string_literals(body);
+    let expected: BTreeSet<String> = ["real_one"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        lits, expected,
+        "unterminated block comment leaked literals — should consume to EOF"
     );
 }
