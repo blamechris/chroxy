@@ -101,19 +101,26 @@ fn find_matching_close_bracket(s: &str) -> Option<usize> {
 
 /// Strip every `#[cfg(...)]` attribute from a snippet, balancing brackets
 /// so nested parens inside `cfg(...)` don't confuse the parser.
+///
+/// Iterates by `char` (not byte) so multi-byte UTF-8 in the input — e.g. an
+/// em-dash inside a comment, or a unicode string literal inside a `cfg(...)`
+/// attribute — is preserved as-is rather than split into Latin-1 garbage
+/// (issue #3992). The `#`/`[`/`]` markers we scan for are all ASCII, so they
+/// always sit on char boundaries and never collide with UTF-8 continuation
+/// bytes.
 fn strip_cfg_attrs(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
+    let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
             // Skip `#[ ... ]`, accounting for nested `[`/`]` pairs.
             let mut depth = 0;
             let mut j = i + 1;
-            while j < bytes.len() {
-                if bytes[j] == b'[' {
+            while j < chars.len() {
+                if chars[j] == '[' {
                     depth += 1;
-                } else if bytes[j] == b']' {
+                } else if chars[j] == ']' {
                     depth -= 1;
                     if depth == 0 {
                         j += 1;
@@ -124,7 +131,7 @@ fn strip_cfg_attrs(input: &str) -> String {
             }
             i = j;
         } else {
-            out.push(bytes[i] as char);
+            out.push(chars[i]);
             i += 1;
         }
     }
@@ -430,5 +437,71 @@ fn extract_string_literals_handles_unterminated_block_comment() {
     assert_eq!(
         lits, expected,
         "unterminated block comment leaked literals — should consume to EOF"
+    );
+}
+
+#[test]
+fn strip_cfg_attrs_preserves_multibyte_em_dash() {
+    // Em-dash (U+2014) is 3 bytes in UTF-8. The original byte-indexed
+    // implementation produced Latin-1 garbage chars; chars()-based
+    // iteration must preserve the codepoint intact (issue #3992).
+    let input = "alpha,\n// tile across displays \u{2014} including externals\nbeta,";
+    let out = strip_cfg_attrs(input);
+    assert!(
+        out.contains('\u{2014}'),
+        "em-dash lost or corrupted by strip_cfg_attrs; got: {out:?}"
+    );
+    // Surrounding ASCII identifiers must still be intact.
+    assert!(out.contains("alpha"), "alpha lost: {out:?}");
+    assert!(out.contains("beta"), "beta lost: {out:?}");
+    // No replacement chars from accidental Latin-1 conversion.
+    assert!(
+        !out.contains('\u{FFFD}'),
+        "replacement char in output indicates UTF-8 corruption; got: {out:?}"
+    );
+}
+
+#[test]
+fn strip_cfg_attrs_preserves_multibyte_emoji() {
+    // Card index dividers (U+1F5C2) is 4 bytes in UTF-8. Same hazard as
+    // the em-dash but exercises the 4-byte branch (issue #3992).
+    let input = "alpha,\n// window tiling \u{1F5C2}\nbeta,";
+    let out = strip_cfg_attrs(input);
+    assert!(
+        out.contains('\u{1F5C2}'),
+        "emoji lost or corrupted by strip_cfg_attrs; got: {out:?}"
+    );
+    assert!(out.contains("alpha"), "alpha lost: {out:?}");
+    assert!(out.contains("beta"), "beta lost: {out:?}");
+    assert!(
+        !out.contains('\u{FFFD}'),
+        "replacement char in output indicates UTF-8 corruption; got: {out:?}"
+    );
+}
+
+#[test]
+fn parse_generate_handler_extracts_identifiers_with_multibyte_in_cfg_string() {
+    // Realistic regression fixture for #3992: a multi-byte char appears
+    // inside a `#[cfg(...)]` attribute string in the macro body. The
+    // original byte-indexed `strip_cfg_attrs` would corrupt downstream
+    // char output and could leak garbage bytes that the trim/split/filter
+    // pipeline turned into either a missing real command or a phantom
+    // identifier — both fail the drift test in misleading ways.
+    let sample = "\
+        .invoke_handler(tauri::generate_handler![\n\
+            alpha,\n\
+            #[cfg(feature = \"display \u{2014} tiling \u{1F5C2}\")]\n\
+            beta,\n\
+            gamma,\n\
+        ])\n\
+    ";
+    let handlers = parse_generate_handler(sample);
+    let expected: BTreeSet<String> = ["alpha", "beta", "gamma"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        handlers, expected,
+        "multi-byte char inside cfg attribute leaked phantom identifiers or dropped real ones"
     );
 }
