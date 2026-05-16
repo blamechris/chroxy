@@ -30,9 +30,9 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 >
 > Mobile/desktop clients can switch models live on providers that report `modelSwitch: true`. Docker providers inherit `modelSwitch` from their underlying Claude provider (`DockerSession` spreads `CliSession.capabilities`, `DockerSdkSession` spreads `SdkSession.capabilities`), so they behave the same as `claude-cli` / `claude-sdk` for model switching.
 
-## Claude (SDK + CLI)
+## Claude (SDK, CLI, TUI)
 
-The Claude Code providers are the primary, most-featured backends. Both use the same `claude` credentials; they differ mainly in transport and capabilities.
+The Claude Code providers are the primary, most-featured backends. All three use the same `claude` credentials; they differ in transport, billing surface, and capabilities.
 
 ### Install
 
@@ -70,18 +70,26 @@ Expected output includes:
 
 If `claude` is reported "Not found", ensure it's in one of the paths listed above. Under a GUI-launched server (e.g. the Tauri desktop app), `PATH` is minimal on macOS — Chroxy probes known install locations, but a Homebrew or npm-global install that's neither on `PATH` nor in the probe list will be missed.
 
-### Choose between SDK and CLI
+### Choose between SDK, CLI, and TUI
 
-| Feature | `claude-sdk` | `claude-cli` |
-|---------|--------------|--------------|
-| In-process permissions (`canUseTool`) | Yes | No (HTTP hook) |
-| Live `setModel` / `setPermissionMode` | Yes | Yes (restart) |
-| Plan mode | No | **Yes** |
-| Resume (`resumeSessionId`) | Yes | No |
-| Thinking level control | Yes | No |
-| Startup overhead | None (in-process) | One `claude -p` spawn per session |
+| Feature | `claude-sdk` | `claude-cli` | `claude-tui` |
+|---------|--------------|--------------|--------------|
+| In-process permissions (`canUseTool`) | Yes | No (HTTP hook) | No (HTTP hook) |
+| Live `setModel` | Yes | Yes (restart) | — |
+| Live `setPermissionMode` | Yes | Yes (restart) | — |
+| Plan mode | No | **Yes** | No |
+| Resume (`resumeSessionId`) | Yes | No | No |
+| Thinking level control | Yes | No | No |
+| Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
+| Auth | API key or `claude login` | API key or `claude login` | `claude login` only (`ANTHROPIC_API_KEY` rejected) |
+| Billing | Programmatic credits / API | Programmatic credits / API | **Subscription interactive allowance** |
+| Startup overhead | None (in-process) | One `claude -p` spawn per session | One `claude` PTY warmup (~3.5s) per session |
 
-Use `claude-cli` if you rely on plan mode. Use `claude-sdk` (the default) for everything else.
+Pick by billing surface and required features:
+
+- **`claude-sdk` (default)** — the right choice for most users. Programmatic billing, fastest startup, live model/mode switching, resume, thinking-level control.
+- **`claude-cli`** — pick this only when you need plan mode. Same billing as the SDK, but a `claude -p` subprocess per session.
+- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no permission-mode switch, no resume, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 
 ### Common pitfalls
 
