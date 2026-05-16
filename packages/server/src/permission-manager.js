@@ -337,11 +337,15 @@ export class PermissionManager extends EventEmitter {
     if (!this._pendingUserAnswer) return
     this._clearQuestionTimer()
     // #3988: include toolUseId on the answered emit for symmetry with the
-    // other 4 question-variant emit sites (aborted/timeout/cleared/auto).
-    // The user-response handler at input-handlers.js:451 already prunes
-    // questionSessionMap eagerly before calling this method, so the
-    // unified-pipeline cleanup is redundant on the happy path — but the
-    // sdk-session re-emit gate at sdk-session.js:281 keys on
+    // other 3 question-variant emit sites (aborted/timeout/cleared). The
+    // 'auto' path applies only to requestId-based prompts —
+    // autoAllowPending() leaves AskUserQuestion entries untouched — so
+    // there is no auto-variant question emit to mirror.
+    //
+    // The user-response handler at packages/server/src/handlers/input-handlers.js:451
+    // already prunes questionSessionMap eagerly before calling this method,
+    // so the unified-pipeline cleanup is redundant on the happy path — but
+    // the sdk-session re-emit gate at sdk-session.js:281 keys on
     // (data.requestId || data.toolUseId), and any future internal path
     // (or refactor that drops the eager delete) would silently leak. Read
     // toolUseId BEFORE the null-out below, mirroring the clearAll #3975
