@@ -765,8 +765,29 @@ pub fn run() {
                 app.exit(0);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Catch all app-exit paths (Cmd+Q, app menu Quit, AppleScript
+            // `tell application "Chroxy" to quit`, etc.) so the spawned Node
+            // server child gets a graceful SIGTERM and releases port 8765
+            // before Tauri tears down. Without this, the child gets
+            // reparented to launchd on macOS and holds the port, blocking
+            // the next launch with "Port 8765 is already in use" (#3696).
+            //
+            // The WindowEvent::CloseRequested handler above already covers
+            // window-close-driven exits, but those events do not fire for
+            // tray-only quit paths. Routing through ExitRequested gives us
+            // a single chokepoint that ServerManager::stop() — which already
+            // implements SIGTERM + 5s grace + SIGKILL fallback — can use to
+            // flush session-state.json before the process dies.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(mgr) = app_handle.try_state::<Mutex<ServerManager>>() {
+                    let mut mgr = lock_or_recover(&mgr);
+                    mgr.stop();
+                }
+            }
+        });
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {

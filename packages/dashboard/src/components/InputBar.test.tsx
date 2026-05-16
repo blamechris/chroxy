@@ -421,12 +421,19 @@ describe('InputBar', () => {
     })
 
     it('shows Send when busy with only pasted-text blocks', () => {
+      // #3984 — fixture must include the formatted marker so the block is
+      // actually dispatchable. Without it, expandPasteMarkers would emit an
+      // empty string and onSend('') would fire, dropping the paste content.
+      const block = { id: 1, content: 'a'.repeat(2000) }
+      const marker = `[Pasted text #${block.id} +${block.content.length} chars]`
       render(
         <InputBar
           onSend={vi.fn()}
           onInterrupt={vi.fn()}
           isBusy
-          pastedTextBlocks={[{ id: 1, content: 'big paste' }]}
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[block]}
           onRemovePastedText={vi.fn()}
         />,
       )
@@ -451,6 +458,136 @@ describe('InputBar', () => {
         />,
       )
       expect(screen.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send follow-up')
+    })
+  })
+
+  // #3984 — Copilot follow-up to #3972: `pastedTextBlocks.length > 0` alone
+  // was making canSubmit true even when the textarea had no marker referencing
+  // those blocks. App.tsx's send path only expands markers present in `text`
+  // (expandPasteMarkers), so Send would fire onSend('') and silently drop the
+  // pasted content. The fix is to require at least one referenced marker in
+  // `value` before treating pasted blocks as dispatchable content.
+  describe('paste marker desync — Send must require a referenced marker in text (#3984)', () => {
+    it('hides Send when busy with pasted blocks but no marker in textarea (non-dispatchable)', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue=""
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[{ id: 1, content: 'a'.repeat(2000) }]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      // No marker in text → expandPasteMarkers would produce '' → Send must
+      // stay hidden so we never dispatch onSend('') and drop the paste.
+      expect(screen.queryByTestId('send-button')).not.toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when busy with pasted blocks AND the formatted marker is in textarea', () => {
+      const block = { id: 1, content: 'a'.repeat(2000) }
+      const marker = `[Pasted text #${block.id} +${block.content.length} chars]`
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[block]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when busy with 2 blocks but only 1 marker referenced (the orphan is the user\'s problem; dispatch is non-empty)', () => {
+      const blocks = [
+        { id: 1, content: 'a'.repeat(2000) },
+        { id: 2, content: 'b'.repeat(2000) },
+      ]
+      // Only block #1's marker is in the text — block #2 is orphaned but
+      // dispatch will still contain block #1's expanded content, so Send is
+      // safe to enable.
+      const marker = `[Pasted text #1 +${blocks[0]!.content.length} chars]`
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={blocks}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+    })
+
+    it('does not crash when text contains a marker for a nonexistent block id (behaves like text-only)', () => {
+      // Stale marker (block was evicted but the marker is still in the text).
+      // App.tsx's expandPasteMarkers passes unknown markers through unchanged,
+      // so this is just text content from the user's perspective — Send must
+      // still surface because text.trim() is non-empty.
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue="[Pasted text #99 +500 chars]"
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      // hasText is true (the marker string itself is text content), so Send
+      // should be visible regardless of the dangling marker.
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+    })
+
+    it('non-busy: Send button disabled when pasted blocks exist but no marker in text', () => {
+      // Mirrors the busy-state behavior in the non-busy path. The Send button
+      // is always rendered when not busy, but canSubmit gates the actual
+      // send() invocation — clicking with no dispatchable content is a no-op.
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          controlledValue=""
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[{ id: 1, content: 'a'.repeat(2000) }]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      // Send button is present (non-busy always renders it) but clicking it
+      // must NOT dispatch onSend, because the paste block has no marker and
+      // text.trim() is empty.
+      fireEvent.click(screen.getByTestId('send-button'))
+      expect(onSend).not.toHaveBeenCalled()
+    })
+
+    it('non-busy: clicking Send with a referenced marker dispatches normally', () => {
+      const block = { id: 1, content: 'a'.repeat(2000) }
+      const marker = `[Pasted text #${block.id} +${block.content.length} chars]`
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[block]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('send-button'))
+      // App.tsx expands the marker before sending; InputBar just forwards the
+      // marker-bearing text verbatim.
+      expect(onSend).toHaveBeenCalledWith(marker)
     })
   })
 
