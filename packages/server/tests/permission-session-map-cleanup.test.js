@@ -301,4 +301,55 @@ describe('questionSessionMap cleanup on internal resolution paths (#3736)', () =
 
     pm.destroy()
   })
+
+  // #3988: symmetry follow-up to #3975. The user-response handler at
+  // handlers/input-handlers.js:451 already prunes questionSessionMap eagerly before
+  // calling respondToQuestion, so end-to-end the entry is gone either way
+  // — this regression locks the contract: respondToQuestion's emit MUST
+  // carry toolUseId so any future internal path (or refactor that drops
+  // the eager delete) inherits the unified-pipeline cleanup automatically.
+  it('prunes questionSessionMap end-to-end when respondToQuestion resolves a pending question (#3988)', async () => {
+    const ctx = makeMultiCtx()
+    setupForwarding(ctx)
+
+    const pm = new PermissionManager({ log: { info() {}, warn() {} } })
+
+    const sessionId = 'sess-3988'
+    pm.on('user_question', (data) => {
+      ctx.sessionManager.emit('session_event', {
+        sessionId,
+        event: 'user_question',
+        data,
+      })
+    })
+    pm.on('permission_resolved', (data) => {
+      if (data && (data.requestId || data.toolUseId)) {
+        ctx.sessionManager.emit('session_event', {
+          sessionId,
+          event: 'permission_resolved',
+          data,
+        })
+      }
+    })
+
+    const askPromise = pm.handlePermission(
+      'AskUserQuestion',
+      { questions: [{ question: 'go?' }] },
+      null,
+      'approve',
+    )
+    assert.equal(ctx.questionSessionMap.size, 1,
+      'precondition: user_question must seed questionSessionMap')
+    const [seededToolUseId] = ctx.questionSessionMap.keys()
+
+    pm.respondToQuestion('yes')
+    await askPromise
+
+    assert.equal(ctx.questionSessionMap.has(seededToolUseId), false,
+      'respondToQuestion must prune questionSessionMap via the unified pipeline')
+    assert.equal(ctx.questionSessionMap.size, 0,
+      'no stale entries after respondToQuestion')
+
+    pm.destroy()
+  })
 })
