@@ -4,8 +4,37 @@
  * Uses native <select> elements which render their dropdown menus via the OS
  * compositor, avoiding CSS overflow/z-index clipping issues in Tauri WKWebView.
  */
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import type { ModelInfo } from '../store/types'
+
+/**
+ * Compose the hover tooltip for the active-model select (#3888).
+ *
+ * Mirrors the prose used by `lib/status-tooltips.modelTooltip()` (#3887) so
+ * the header pill and footer chip stay in sync. Inlined here rather than
+ * imported because the helper module is not yet on `main` — once #3887
+ * lands, this can be refactored to call the shared helper.
+ *
+ * Picks the model entry by `fullId` first, then `id`, so users see the
+ * canonical "claude-opus-4-7"-style identifier when available rather than
+ * the dropdown's short `id` form.
+ */
+function buildActiveModelTooltip(
+  availableModels: ModelInfo[],
+  activeModel: string | null,
+): string {
+  const info = availableModels.find(
+    m => m.id === activeModel || m.fullId === activeModel,
+  )
+  const display = info?.fullId || info?.id || activeModel
+  if (!display) {
+    return 'Active model. Click the model picker in the header to switch.'
+  }
+  const win = typeof info?.contextWindow === 'number' && info.contextWindow > 0
+    ? ` Context window: ${info.contextWindow.toLocaleString()} tokens.`
+    : ''
+  return `Active model: ${display}.${win}`
+}
 
 export interface ChatSettingsDropdownProps {
   availableModels: ModelInfo[]
@@ -54,6 +83,13 @@ export function ChatSettingsDropdown({
     }
   }, [onModelChange, defaultModelId, availableModels])
 
+  // #3888: hover tooltip on the active-model pill so users can see the full
+  // model id and its context window without expanding the dropdown.
+  const modelTitle = useMemo(
+    () => buildActiveModelTooltip(availableModels, activeModel),
+    [availableModels, activeModel],
+  )
+
   return (
     <>
       {/* Model */}
@@ -63,6 +99,8 @@ export function ChatSettingsDropdown({
           data-kind="model"
           value={activeModel === defaultModelId ? '' : (activeModel || '')}
           onChange={handleModelChange}
+          title={modelTitle}
+          aria-label={modelTitle}
         >
           <option value="">
             Default ({(defaultModelId

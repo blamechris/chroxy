@@ -9,9 +9,9 @@ import { ChatSettingsDropdown, type ChatSettingsDropdownProps } from './ChatSett
 afterEach(cleanup)
 
 const MODELS = [
-  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4' },
+  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4', contextWindow: 200000 },
   { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku' },
-  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4' },
+  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: 200000 },
 ]
 
 const PERMISSION_MODES = [
@@ -161,5 +161,49 @@ describe('ChatSettingsDropdown', () => {
     renderDropdown({ defaultModelId: 'sonnet', activeModel: 'haiku', onModelChange })
     fireEvent.change(screen.getByTestId('chat-settings-trigger'), { target: { value: '' } })
     expect(onModelChange).toHaveBeenCalledWith('sonnet')
+  })
+
+  // #3888 — header model-picker tooltip surfaces model + context-window
+  describe('active-model tooltip (#3888)', () => {
+    it('exposes model id and context-window via title attribute', () => {
+      renderDropdown({ activeModel: 'opus' })
+      const select = screen.getByTestId('chat-settings-trigger')
+      const title = select.getAttribute('title') || ''
+      expect(title).toContain('claude-opus-4-7')
+      expect(title).toContain('200,000 tokens')
+    })
+
+    it('exposes the same prose via aria-label for screen readers', () => {
+      renderDropdown({ activeModel: 'opus' })
+      const select = screen.getByTestId('chat-settings-trigger')
+      expect(select.getAttribute('aria-label')).toBe(select.getAttribute('title'))
+    })
+
+    it('omits the context-window sentence when contextWindow is missing', () => {
+      // Haiku in the fixture has no contextWindow set, so the tooltip must
+      // not invent one — degrade gracefully to "Active model: <id>." only.
+      renderDropdown({ activeModel: 'haiku' })
+      const select = screen.getByTestId('chat-settings-trigger')
+      const title = select.getAttribute('title') || ''
+      expect(title).toContain('claude-haiku')
+      expect(title).not.toMatch(/context window/i)
+    })
+
+    it('falls back to a generic line when no model is active', () => {
+      renderDropdown({ availableModels: [{ id: 'x', label: 'X', fullId: 'x' }], activeModel: null })
+      const select = screen.getByTestId('chat-settings-trigger')
+      const title = select.getAttribute('title') || ''
+      expect(title.toLowerCase()).toContain('active model')
+    })
+
+    it('matches activeModel against fullId as well as id', () => {
+      // Server can broadcast either the short id or the full id; both must
+      // resolve to the same tooltip metadata so the pill is consistent.
+      renderDropdown({ activeModel: 'claude-opus-4-7' })
+      const select = screen.getByTestId('chat-settings-trigger')
+      const title = select.getAttribute('title') || ''
+      expect(title).toContain('claude-opus-4-7')
+      expect(title).toContain('200,000 tokens')
+    })
   })
 })
