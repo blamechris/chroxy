@@ -321,6 +321,35 @@ EOF
   grep -q "^## \[0.3.0\]" "$dir/CHANGELOG.md" || return 1
 }
 
+test_help_prints_full_header() {
+  # The header comment block expanded from 9 lines to 16+ in this PR. Earlier
+  # versions of --help printed a hardcoded line range (2,11) and silently
+  # truncated. Lock the contract: --help must include both the usage block
+  # AND the CHANGELOG scaffolding paragraph.
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.1.0"
+  install_bump_script "$dir"
+
+  local output
+  output=$(cd "$dir" && ./scripts/bump-version.sh --help 2>&1)
+  [ $? -eq 0 ] || return 1
+
+  echo "$output" | grep -q "Usage:" || {
+    echo "    --help missing 'Usage:'" >&2
+    return 1
+  }
+  echo "$output" | grep -q "no-changelog" || {
+    echo "    --help missing '--no-changelog' line" >&2
+    return 1
+  }
+  echo "$output" | grep -q "CHANGELOG scaffolding" || {
+    echo "    --help truncated before CHANGELOG scaffolding paragraph" >&2
+    return 1
+  }
+}
+
 test_rejects_unknown_flag() {
   local dir
   dir=$(mktemp -d)
@@ -355,6 +384,8 @@ run_test "auto-bumps patch version and scaffolds the new section" \
   test_auto_bump_patch_with_scaffold
 run_test "TODO check is scoped to the most-recent section only" \
   test_only_checks_most_recent_section_for_todo
+run_test "--help prints the full header (Usage + CHANGELOG scaffolding)" \
+  test_help_prints_full_header
 run_test "rejects unknown flags" \
   test_rejects_unknown_flag
 

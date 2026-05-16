@@ -28,7 +28,11 @@ for arg in "$@"; do
       SKIP_CHANGELOG=1
       ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      # Print the contiguous comment header (line 2 through the last `#`-led
+      # line before `set -euo pipefail`). Computed dynamically so the help
+      # output never goes out of sync when the header is expanded.
+      help_end=$(awk 'NR==1 {next} /^#/ {last=NR; next} {exit} END {print last}' "$0")
+      sed -n "2,${help_end}p" "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     --*)
