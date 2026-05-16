@@ -6,6 +6,7 @@ import { readConnectionInfo } from './connection-info.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
+import { getRateLimitKey } from './rate-limiter.js'
 
 const log = createLogger('ws')
 
@@ -219,6 +220,28 @@ export function createHttpHandler(server) {
     // codebase that adds endpoints regularly.
     const diagPathname = (req.url ?? '').split('?')[0]
     if (req.method === 'GET' && diagPathname === '/diagnostics') {
+      // #3737: per-IP rate limit. Check BEFORE auth so a stolen token can't
+      // DoS the endpoint, and so an unauthenticated flood doesn't get a free
+      // pass to the auth code path. Uses getRateLimitKey so forwarded
+      // headers (CF-Connecting-IP / X-Forwarded-For) are trusted only when
+      // the TCP peer is loopback — i.e. the request came through the local
+      // cloudflared process. Direct connections use the socket address so
+      // header spoofing cannot exhaust another IP's bucket.
+      const limiter = server._diagnosticsRateLimiter
+      if (limiter) {
+        const socketIp = req.socket?.remoteAddress || ''
+        const rateLimitKey = getRateLimitKey(socketIp, req)
+        const { allowed, retryAfterMs } = limiter.check(rateLimitKey)
+        if (!allowed) {
+          log.warn(`Rate limited GET /diagnostics from ${rateLimitKey}`)
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': Math.ceil(retryAfterMs / 1000),
+          })
+          res.end(JSON.stringify({ error: 'rate limited', retryAfterMs }))
+          return
+        }
+      }
       if (!server._validateBearerAuth(req, res)) return
       // #3739: optional `?logTailBytes=N` lets operators widen the log
       // window (e.g. to 32KB for a slow stall) or shrink it for a tight
