@@ -269,9 +269,16 @@ export class SdkSession extends BaseSession {
       this._resumeResultTimeoutForPermission()
       // #3048: re-emit so the unified pipeline (SessionManager → ws-forwarding
       // → EventNormalizer → broadcast) can fan out the resolution to every
-      // connected client. Gate on requestId — the AskUserQuestion paths emit
-      // with `toolUseId` and use a separate wire contract.
-      if (data && data.requestId) {
+      // connected client.
+      //
+      // #3736: also re-emit AskUserQuestion resolutions (which carry
+      // `toolUseId` instead of `requestId`) so the EventNormalizer can prune
+      // the questionSessionMap entry. Pre-fix this branch was silently
+      // dropped and the question map leaked one entry per timeout/abort/clear.
+      // The EventNormalizer + ws-forwarding handle both shapes; the
+      // permission-audit listener in ws-server.js gates on `data.requestId`
+      // and ignores the question variant.
+      if (data && (data.requestId || data.toolUseId)) {
         this.emit('permission_resolved', data)
       }
     })
