@@ -279,20 +279,30 @@ describe('SdkSession', () => {
       assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'aborted' })
     })
 
-    it('does NOT re-emit AskUserQuestion permission_resolved (no requestId — separate wire contract, #3048)', async () => {
+    it('re-emits AskUserQuestion permission_resolved WITH toolUseId so questionSessionMap can prune via the unified pipeline (#3048, #3975, #3988)', async () => {
       const upstream = []
       session.on('permission_resolved', (data) => upstream.push(data))
 
       // AskUserQuestion routes through _handlePermission but resolves via
-      // the question path (toolUseId, no requestId). The PermissionManager
-      // emits { reason: 'answered' } with no requestId — SdkSession must
-      // NOT re-emit it onto the unified pipeline.
+      // the question path. PermissionManager emits permission_resolved
+      // with { toolUseId, reason: 'answered' } (#3988 — symmetric with the
+      // aborted/timeout/cleared question-variant emits added in #3975).
+      // SdkSession's gate at line ~281 allows toolUseId-only payloads
+      // through so EventNormalizer + ws-forwarding can prune
+      // questionSessionMap on the unified pipeline. The ws-server
+      // permission-audit listener still ignores question variants by
+      // gating on data.requestId.
       const promise = session._handlePermission('AskUserQuestion', { questions: [{ question: 'ok?' }] }, null)
       session.respondToQuestion('yes')
       await promise
 
-      assert.equal(upstream.length, 0,
-        'question paths use toolUseId and route via user_question, not permission_resolved')
+      assert.equal(upstream.length, 1,
+        'question variant emits permission_resolved with toolUseId for unified-pipeline cleanup')
+      assert.equal(upstream[0].requestId, undefined,
+        'question variant carries no requestId — distinct wire from permission requests')
+      assert.equal(typeof upstream[0].toolUseId, 'string',
+        'toolUseId is propagated so EventNormalizer can prune questionSessionMap')
+      assert.equal(upstream[0].reason, 'answered')
     })
   })
 
