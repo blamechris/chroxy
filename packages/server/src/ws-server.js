@@ -54,7 +54,11 @@ export function sanitizeErrorMessage(err) {
  *   3. Defaults — 12 req/min + 4 burst (half of /permission since the cost
  *      is comparable but legitimate use is diagnostic, not interactive).
  *
- * Invalid env values (NaN, <= 0) silently fall through to defaults.
+ * Invalid env values (NaN, non-integer, < 1) silently fall through to
+ * defaults. Sub-integer values like `0.5` are rejected outright rather
+ * than truncated, because Math.trunc(0.5) = 0 and RateLimiter treats
+ * `maxMessages: 0` as "use default" via `||`, which would *raise* the
+ * limit instead of restoring it.
  *
  * @param {object|null} overrideOpts
  * @returns {{ windowMs: number, maxMessages: number, burst: number }}
@@ -64,12 +68,11 @@ export function resolveDiagnosticsRateLimit(overrideOpts) {
   const raw = process.env.CHROXY_DIAGNOSTICS_RATE_LIMIT
   if (raw != null && raw !== '') {
     const n = Number(raw)
-    if (Number.isFinite(n) && n > 0) {
-      const maxMessages = Math.trunc(n)
+    if (Number.isInteger(n) && n >= 1) {
       return {
         windowMs: 60_000,
-        maxMessages,
-        burst: Math.max(1, Math.floor(maxMessages / 3)),
+        maxMessages: n,
+        burst: Math.max(1, Math.floor(n / 3)),
       }
     }
   }

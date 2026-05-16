@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession } from './test-helpers.js'
 import { setLogListener, initFileLogging, closeFileLogging, createLogger } from '../src/logger.js'
+import { resolveDiagnosticsRateLimit } from '../src/ws-server.js'
 
 // Same wrapper pattern as ws-server-auth.test.js — disable encryption for
 // fast tests, mute the log listener WsServer.start() registers.
@@ -379,5 +380,77 @@ describe('GET /diagnostics rate limit (#3737)', () => {
     const replayed = await diagFetch(port, { ip: '203.0.113.7' })
     assert.equal(replayed.status, 200, 'request should succeed after window resets')
     await replayed.text()
+  })
+})
+
+describe('resolveDiagnosticsRateLimit env-var guard (#3737)', () => {
+  const ENV_KEY = 'CHROXY_DIAGNOSTICS_RATE_LIMIT'
+  let saved
+
+  beforeEach(() => {
+    saved = process.env[ENV_KEY]
+    delete process.env[ENV_KEY]
+  })
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV_KEY]
+    else process.env[ENV_KEY] = saved
+  })
+
+  it('overrideOpts short-circuits env parsing', () => {
+    process.env[ENV_KEY] = '500'
+    const opts = { windowMs: 1000, maxMessages: 3, burst: 1 }
+    assert.deepEqual(resolveDiagnosticsRateLimit(opts), opts)
+  })
+
+  it('returns defaults when env var is unset', () => {
+    const { windowMs, maxMessages, burst } = resolveDiagnosticsRateLimit(null)
+    assert.equal(windowMs, 60_000)
+    assert.equal(maxMessages, 12)
+    assert.equal(burst, 4)
+  })
+
+  it('integer >= 1 overrides maxMessages and auto-derives burst', () => {
+    process.env[ENV_KEY] = '60'
+    const { windowMs, maxMessages, burst } = resolveDiagnosticsRateLimit(null)
+    assert.equal(windowMs, 60_000)
+    assert.equal(maxMessages, 60)
+    assert.equal(burst, 20)
+  })
+
+  it('integer = 1 yields burst = 1 (floor(1/3) = 0 → max(1, 0) = 1)', () => {
+    process.env[ENV_KEY] = '1'
+    const { maxMessages, burst } = resolveDiagnosticsRateLimit(null)
+    assert.equal(maxMessages, 1)
+    assert.equal(burst, 1)
+  })
+
+  // Regression guard: pre-fix, Math.trunc(0.5) = 0, then RateLimiter's
+  // `maxMessages || DEFAULT_MAX_MESSAGES` would use the 100 default,
+  // EFFECTIVELY RAISING the limit instead of falling back to our 12/min
+  // default. Now sub-integer values are rejected outright.
+  it('rejects sub-integer values (Math.trunc would zero them) and falls back to defaults', () => {
+    for (const bad of ['0.5', '0.1', '0.9']) {
+      process.env[ENV_KEY] = bad
+      const { maxMessages, burst } = resolveDiagnosticsRateLimit(null)
+      assert.equal(maxMessages, 12, `sub-integer ${bad} must fall back to default 12`)
+      assert.equal(burst, 4, `sub-integer ${bad} must fall back to default burst 4`)
+    }
+  })
+
+  it('rejects 0 and negative values', () => {
+    for (const bad of ['0', '-1', '-100']) {
+      process.env[ENV_KEY] = bad
+      const { maxMessages } = resolveDiagnosticsRateLimit(null)
+      assert.equal(maxMessages, 12, `${bad} must fall back to default`)
+    }
+  })
+
+  it('rejects NaN / non-numeric / empty / whitespace-only', () => {
+    for (const bad of ['', 'abc', 'NaN', '   ']) {
+      process.env[ENV_KEY] = bad
+      const { maxMessages } = resolveDiagnosticsRateLimit(null)
+      assert.equal(maxMessages, 12, `"${bad}" must fall back to default`)
+    }
   })
 })
