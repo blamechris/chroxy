@@ -385,12 +385,12 @@ describe('RateLimiter cursor stability (#4003)', () => {
       // walks the cursor.
       mock.timers.tick(5_000)
 
-      // First check() advances the cursor across ~8 keys (some get reaped,
-      // some skipped because they're the caller — irrelevant here since the
-      // caller is a fresh client). Don't capture which ones — that's an
-      // internal ordering detail. The point is the cursor is now mid-map.
+      // First check() advances the cursor across some keys (the exact
+      // count depends on the scan-budget knob, which is intentionally not
+      // pinned here — a refactor that tunes that knob shouldn't break a
+      // cursor-stability regression test). Just call check() once to give
+      // the cursor a chance to be primed.
       limiter.check('fresh-a')
-      assert.ok(limiter._scanCursor, 'cursor should still be live after partial scan')
 
       // Externally remove one of the seeds. We don't know whether it was
       // already yielded by the cursor or not — both branches must work
@@ -440,6 +440,10 @@ describe('RateLimiter cursor stability (#4003)', () => {
 
       // Simulate an external mutation that bypasses limiter.clear() — e.g.
       // a test fixture or future code path that touches _clients directly.
+      // Capture the cursor before clear() so we can prove it was actually
+      // replaced (not the same object reused).
+      const cursorBeforeClear = limiter._scanCursor
+
       // Per Map spec, the existing iterator now returns { done: true } on
       // its next .next() call. The reap loop must detect this, null the
       // cursor, and rebuild on the subsequent call rather than throw.
@@ -460,6 +464,17 @@ describe('RateLimiter cursor stability (#4003)', () => {
       for (let i = 0; i < 5; i++) {
         assert.equal(limiter._clients.has(`post-${i}`), true)
       }
+      // CORE REGRESSION ASSERTION: the cursor MUST have been detected as
+      // done and replaced — a stale iterator over a cleared Map would
+      // yield done=true on every call, making the round-robin scan a
+      // permanent no-op for the rest of the limiter's life. Pre-fix
+      // (snapshot iterator over old keys) would re-use the same object
+      // indefinitely; the fix must observably replace it. Object identity
+      // is the tightest check that distinguishes the two implementations.
+      assert.notStrictEqual(
+        limiter._scanCursor, cursorBeforeClear,
+        'cursor must be detected as done over the cleared map and replaced — a stuck iterator would silently break future stale-reaps'
+      )
     } finally {
       mock.timers.reset()
     }
