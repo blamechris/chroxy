@@ -52,11 +52,231 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Desktop dashboard supports Ctrl+V to paste a screenshot from the clipboard into the composer on macOS (#3748, #3796).
 - Composer collapses large pastes (≥1500 chars or ≥20 lines) into an inline `[Pasted text #N]` placeholder with an attached chip, viewable in a read-only modal; full content is re-expanded on send. Mobile and desktop dashboards share the same selector via `@chroxy/store-core` (#3797, #3798).
 
+## [0.7.17] - 2026-05-10
+
+### Fixed
+
+- Auto-replay frames now carry `fullHistory: true` so reconnecting clients clear local state before applying replayed events. Fixes duplicated/scrambled chat turns after each mobile reconnect (#3744).
+
+## [0.7.16] - 2026-05-10
+
+### Added
+
+- Persistent file logging with rotation, plus a `/diagnostics` HTTP endpoint that returns build info, runtime status, and a tail of recent log lines for support and triage (#3734).
+
+### Fixed
+
+- Tauri 2.11 ACL grants for custom commands on the dashboard webview, restoring desktop command invocation after the Tauri upgrade (#3741).
+
+## [0.7.15] - 2026-05-10
+
+### Fixed
+
+- Auto permission mode now actually bypasses prompts. Three compounding bugs — silent rejection of mid-turn mode changes, missing auto short-circuit in `PermissionManager`, and pending prompts not draining on switch — caused "auto" to be confirmed by the server while still emitting permission prompts under the old mode (#3729, #3730).
+- Crash handlers now serialize session state before `destroyAll`, preventing state loss on abnormal shutdown (#3726).
+
 ### Changed
 
-- Backfilled missing entries: the 0.7.x line is not represented in this file (see #3803).
+- Cached the `_hasClaudeOAuthCreds` probe with a 5-second TTL to cut repeated filesystem checks on hot paths (#3724).
+- Extracted `_registerSessionHookSecretIfMissing` helper for reuse across restore/spawn paths (#3727).
 
-> Note: entries for 0.7.0 through 0.7.17 are tracked in issue #3803 and will be back-filled in a follow-up PR.
+### Removed
+
+- Stripped `[stream-debug]` diagnostic logs that were added in 0.7.4 for issue #3700 triage (#3723).
+
+## [0.7.14] - 2026-05-09
+
+### Fixed
+
+- Dashboard header selects now use per-kind widths so model, permission-mode, and skills dropdowns each get an appropriate width instead of all collapsing to a single fixed size (#3720).
+
+## [0.7.13] - 2026-05-09
+
+### Fixed
+
+- Server now re-registers permission hook secrets for restored sessions on startup. Previously a server restart left restored sessions with no hook secret, so the next permission prompt failed silently (#3716).
+
+## [0.7.12] - 2026-05-09
+
+### Fixed
+
+- Orphan permission-hook entries are now stripped from `settings.json` on hook register/unregister, preventing accumulation of dead hook references across session lifecycles (#3714).
+
+## [0.7.11] - 2026-05-09
+
+### Changed
+
+- Moved the Skills control from the dashboard header tab bar to an icon button in the header-right cluster, freeing horizontal space and matching the other secondary actions (#3713).
+
+## [0.7.10] - 2026-05-09
+
+### Fixed
+
+- Server now boot-prefixes `messageId` values so dashboard messages from different server boots can no longer collide on the same id after a restart (#3712).
+- Dashboard chat auto-scrolls to the bottom on mount, restoring expected behavior when reopening a session (#3712).
+
+## [0.7.8] - 2026-05-09
+
+### Fixed
+
+- Persisted the `messageId` counter across server restarts. Without persistence the counter restarted from zero each boot, colliding with messages from the previous boot still cached on the dashboard (#3700, #3709).
+
+## [0.7.7] - 2026-05-09
+
+### Changed
+
+- Moved the Auto-evaluate toggle out of the dashboard header into Settings, decluttering the header for session-scoped controls (#3707).
+
+## [0.7.6] - 2026-05-09
+
+### Changed
+
+- Rebuilt the dashboard header as a 3-column grid, fixing alignment drift between left/center/right clusters at narrow widths (#3706).
+
+## [0.7.5] - 2026-05-09
+
+### Fixed
+
+- Dashboard UI polish: header selects, model picker chrome, and minor spacing fixes across the composer and session row (#3704).
+- Persisted the booted model so it survives reconnects and is correctly reflected in the model picker on session resume (#3704).
+- Permission optimistic update no longer double-renders the prompt when the server's `permission_resolved` broadcast races the local accept (#3693, #3704).
+
+## [0.7.4] - 2026-05-09
+
+### Added
+
+- Temporary `[stream-debug]` server logging to diagnose dashboard messageId collisions tracked in #3700. Removed in 0.7.15 (#3702).
+
+### Fixed
+
+- Server shutdown is now idempotent. Duplicate `SIGTERM`/`SIGINT` signals no longer trigger a second shutdown pass that erased freshly-flushed session state (#3697, #3701).
+
+## [0.7.3] - 2026-05-09
+
+### Fixed
+
+- Dashboard markdown now renders GFM tables. Previously pipe-delimited tables in assistant responses fell back to plain-text rendering (#3695).
+
+## [0.7.2] - 2026-05-09
+
+### Fixed
+
+- Server now reports the actual booted model in `model_changed` broadcasts instead of the requested model, so the dashboard pill matches what the session is really running (#3687, #3688).
+- Dashboard provider auth status panel now includes a color legend (#3686).
+- Tunnel cold-start now retries on transient failures and catches errors cleanly instead of crashing the server (#3682).
+
+## [0.7.1] - 2026-05-08
+
+### Added
+
+**Auto-Evaluator**
+- Auto-evaluation hook on `user_input` with rewrite and clarify verdicts, dashboard UI for rendering both flows, and per-session `promptEvaluatorSkipPattern` override (#3188, #3625, #3634, #3639, #3643, #3663).
+- 30s timeout on `evaluateDraft` plus an `EVALUATOR_TIMEOUT` error code so a stuck evaluator can't wedge the input path (#3651, #3668).
+- `evaluator_rewrite` / `evaluator_clarify` broadcast schemas added to `@chroxy/protocol` (#3625).
+- Recorded rewritten text in session history when the verdict is "rewrite" so subsequent turns see the rewritten draft (#3660).
+- Per-provider auth/billing state surfaced to clients via `auth_ok` and on demand (#3404, #3673).
+- Push notifications gated on client foreground state so backgrounded clients don't miss completion pings (#3404, #3669).
+
+**Sidecar / Pod-Agent (Kubernetes Backend)**
+- `SidecarProcess` consumer signal when stdin forwarding is disabled, with `SdkSession` handling of the `stdin_disabled` signal (#3467, #3498).
+- `SidecarProcess` emits `stdin_dropped` on pre-dial buffer cap; detects wedged children via a stdin drain timeout in pod-agent (#3504, #3508).
+- `K8sBackend.createEnvironment` workspace mount + resource limits; native `imagePullPolicy` option; RFC 1123 namespace validation (#3316, #3343, #3367, #3370, #3591).
+- `CHROXY_AGENT_STDIN_CLOSE_GRACE_MS` env override; `SidecarProcess.stdin` wired to sidecar stdin frames (#3336, #3409, #3490).
+- `DockerBackend.execInEnvironment` honors `env` and `cwd` opts (#3312, #3357).
+
+**Stdin Forwarding Signals**
+- Server emits `stdin_dropped` cumulative totals and a `stdin_disabled` signal over WS; `SessionInfo` carries a new `stdinForwardingDisabled` flag, hydrated on reconnect via `auth_ok`/`session_list` (#3537, #3560, #3564, #3572, #3582, #3594).
+- Mobile and dashboard render a `stdinForwardingDisabled` banner on the session row / session screen (#3593, #3598).
+- Session emits an error on `stdin_disabled` signal; cumulative dropped-bytes counter + louder log severity (#3536, #3537).
+
+**Skills**
+- SkillsPanel pending-review section gains richer rendering — description/source/path — and dashboard cross-author collision tests for `skill_trust_granted` (#3309, #3310, #3351, #3365).
+- `skill_trust_grant` returns `INVALID_AUTHOR` when the author namespace mismatches, with `actualAuthor` surfaced in the error; toast retries the grant on dismiss (#3497, #3568, #3584, #3601).
+- Server scans `community/*` for cross-author skill name detection in `skill_trust_grant` (#3535).
+- `_scanCommunityForSkillName` `readdir` sorted for deterministic order (#3566).
+
+**Dashboard Polish**
+- Toast auto-dismiss pauses on hover and respects intra-toast focus moves; uses `performance.now()` for elapsed-time math (#3607, #3610, #3617, #3618).
+- Actionable `INVALID_AUTHOR` toast retries `skill_trust_grant`; `actualAuthor` rendered in error UI (#3568, #3584, #3601).
+
+### Fixed
+
+- Serialized per-session evaluator awaits and re-checked `input_conflict` to prevent overlapping evaluator runs (#3636, #3657).
+- Normalized history text trailing whitespace and serialized bursty input across all paths (#3665, #3666, #3667).
+- Deduped socket `onerror`/`onclose` reconnect scheduling on the dashboard (#3622).
+- Cleared `pendingTrustGrants` on the auto-reconnect path (#3613).
+- `StdinDisabledBanner` restart now uses create-then-destroy ordering to avoid losing the new session if create fails (#3606).
+- Cleared `SkillsPanel` pending state on `skill_trust_grant` errors so the row doesn't stay stuck in pending (#3600).
+- Active-session eviction now emits a `session_lost` frame (#3390, #3442).
+- `_enforceSessionCap` spawns before evicting and falls back when all sessions are active (#3392, #3395, #3430, #3433).
+- `LineLimitTransform` correctly counts CRLF bytes (#3381, #3420).
+- `K8sBackend` validates `imagePullPolicy` enum, deduplicates concurrent `_readAgentToken` fetches, validates container port range 1–65535, RFC 1123 namespace validation, and rejects Windows-style and 1-char `hostPath` mounts (#3371, #3375, #3386, #3426, #3431, #3443, #3455, #3499, #3591).
+- Sidecar idle-TTL eviction closes `child.stdin` before `SIGTERM`; eviction reason aligned with `session_lost` frame reason; backpressure handled on `child.stdin.write()`; WS closed in send callback to avoid flush race (#3466, #3469, #3471, #3475).
+- `DockerSdkSession`: preserve hydrated `_stdinForwardingDisabled` on restore; case-normalize community segment in skills walk; sort `_scanCommunityForSkillName` `readdir` for deterministic order (#3301, #3366, #3485, #3566, #3589).
+- `DockerBackend` coerces and filters null/undefined env values; uses `--no-trunc` in container listing (#3361, #3414, #3496).
+- Blocked prototype-pollution keys in handler `sendError` (#3590).
+- Cleared stale sessions on no-`containerId` reconnect (#3494, #3533).
+- Cancelled stdin drain timer on all sidecar kill paths (#3546).
+- Validated Claude session model against available models (#3503).
+- Resumed paused WS before close in sidecar terminal paths (#3557).
+- `EnvironmentManager.reconnect()`: aggregate warn on failure; flip `allHealthy` on `reconnectAgentToken` throw and `getEnvironmentStatus` failures (#3487, #3491).
+- Dashboard `CheckpointTimeline` description and active-skill row descriptions now use a `.trim()` guard; `SkillsPanel` pending-row path overflow + alignment fixed (#3368, #3425, #3458, #3483, #3519).
+- `chroxy-pod-agent` sidecar sentinel args truncation (#3393, #3438).
+- Required `firstSeen` in skill_trust v1 classifier and tolerated malformed entries in migration (#3486, #3531).
+- Sorted skills-loader community walk for deterministic order (#3485).
+- Suppressed sidecar close handler after terminal error closes WS (#3529).
+- Tightened `reconnectAgentToken` return check and acted on `false` in `EnvironmentManager` (#3462, #3522).
+- Warned on null/undefined env value in docker backend (#3463).
+- Unified session activity indicators across the dashboard (#3408).
+
+### Changed
+
+- Refactored auto-evaluator polish — render-path cleanups and the `pendingEvaluatorClarify` default to `null` with tighter typing (#3637, #3640, #3641, #3642, #3658, #3664).
+- `connectionPhase` is now the single dedupe source for reconnect on the dashboard (#3631).
+- App `createSession` switched to an options object and extended with `model`/`permissionMode` for restart preservation (#3609, #3620).
+- Rate-limited the `refused-sendMessage` warn log and formatted `stdin_dropped` cumulative bytes as KiB/MiB (#3559, #3586).
+- Renovate schedule + stability rule, plus a regex manager for the `claude-code` Dockerfile pin (#3354, #3410, #3447).
+- Pinned `@anthropic-ai/claude-code` in the sidecar Dockerfile via `ARG` (#3330, #3352).
+
+## [0.7.0] - 2026-05-06
+
+Dogfood release. Bumps Chroxy to 0.7.0 and stabilizes dogfood workflows: tunnel readiness improvements, Codex/OpenAI session fixes, stale Claude model preflight, restore-failure surfacing, persistence hardening, and related tests.
+
+### Added
+
+**Sidecar / Pod-Agent (Initial Landing)**
+- `K8sBackend` skeleton with pod create/destroy and streaming exec via a sidecar WS bridge (#3191, #3315, #3320, #3331).
+- `chroxy-pod-agent` sidecar — WS protocol, Dockerfile, kind-based integration test, and resume after restart (#3319, #3321, #3322, #3323, #3340, #3345).
+- Extracted `Backend` interface and `DockerBackend` implementation from `EnvironmentManager` (#3190, #3311).
+
+**Skills v2**
+- Two-pass priority-aware tier budget loader with per-tier global budget guardrail (#3222, #3274, #3279, #3285).
+- `_readFrontmatterOnly` bounded-read helper and split of `skills-loader.js` into three sibling modules (#3223, #3276, #3278, #3282).
+- `list_skills` fallback shows scoped skills (#3226, #3267).
+- `skill_trust_accept` WS endpoint exposes the skills-trust `acceptHash`, advertised via `auth_ok` capabilities (#3235, #3269, #3272, #3273).
+- SkillsPanel "Accept new content" button (#3270, #3271).
+- `skill_trust_grant` handler with trust-store schema migration (#3297, #3303).
+- Community-namespace gate and `community/<author>/` walk in skills-loader (#3296, #3299).
+- Skills loader hardening — TOCTOU close between `realpath` and `readFileSync`, mtime-keyed parse cache, content-sniff fix, symlink defense, markdown-only, size budgets, frontmatter (#3197, #3201, #3202, #3203, #3211, #3215, #3216, #3218, #3219, #3220, #3248, #3260, #3266).
+- Skills v2 frontmatter consumers — provider gating, manual activation, injection (#3198, #3199, #3200, #3224).
+- Skills trust SHA hashing, per-provider allowlist, atomic writes, case-insensitive keys, explicit mode in payload (#3204, #3207, #3228, #3231, #3232, #3233, #3234, #3237, #3238, #3239, #3240, #3241, #3242).
+- Skills metadata UI — version, hash, last-activated, mismatch indicator — and runtime activate/deactivate WS for manual skills (#3205, #3209, #3245, #3249).
+
+**Auto-Evaluator (Initial Landing)**
+- Per-session `promptEvaluator` toggle (#3185, #3243).
+- Evaluator skip heuristic for trivial messages (#3187, #3210).
+- Evaluator API error status code surfaced in error envelope (#3100, #3261).
+- `activateSkill` performs at most one layered skills scan (#3253, #3259).
+- Public getters for the trust store and active manual skills (#3252, #3258).
+
+### Changed
+
+- `store-core.validateGitElements` aggregates its drop log; `protocol.isRateLimitMessage` lowercases content internally; `dashboard.GitStatusEntry` deduped against the shared `GitFileStatus` (#3181, #3183, #3184, #3262, #3264, #3265).
+- Tightened `firstSeen`/`lastVerified` protocol schemas to `z.string().datetime()` (#3250, #3255).
+- Re-exported `SetPromptEvaluator` and `ServerPromptEvaluatorChanged` for downstream consumers (#3254).
+- Aligned pass-1 sort tiebreak with `_enforceTotalBudget` and updated JSDoc references (#3283, #3287, #3289, #3291).
+- Hoisted `MismatchFlag` outside the skill toggle label for accessibility (#3251, #3257).
+- Dropped the dead `entry` field from the `_collectCandidates` descriptor (#3293, #3295).
 
 ## [0.6.0] - 2026-03-18
 
