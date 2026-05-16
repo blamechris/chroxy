@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
-import { RateLimiter } from './rate-limiter.js'
+import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 
 const log = createLogger('ws')
@@ -53,21 +53,30 @@ function sanitizeToolInput(input) {
  * @param {Object|null} opts.pairingManager - PairingManager instance used to look up token→sessionId bindings for the HTTP permission-response fallback. Optional — when null, HTTP responses skip the binding check (single-token mode).
  * @param {Function} [opts.findSessionByHookSecret] - (hookSecret) => session|null. Optional session lookup used during /permission handling to resolve the session associated with a per-session hook secret (#2831 — pause that session's inactivity timer while a hook permission is outstanding).
  * @param {Function} [opts.getPermissionAudit] - () => PermissionAuditLog or null (late-bound). When present, HTTP user-initiated permission responses are audited with `clientId: 'http'` and `reason: 'user'` (#3059). Optional for backwards compat with existing test fixtures.
+ * @param {Object} [opts.rateLimit] - Override RateLimiter config for POST /permission. Mainly for tests; production uses the 30+10 default below.
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
-  const _httpPermissionLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 30, burst: 10 })
+  const _httpPermissionLimiter = new RateLimiter(rateLimit || { windowMs: 60_000, maxMessages: 30, burst: 10 })
 
   // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
   const _validateHookAuth = validateHookAuth || validateBearerAuth
 
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
-    // Rate limit by source IP
-    const clientIp = req.socket?.remoteAddress || 'unknown'
+    // Rate limit by source IP. Use getRateLimitKey so that when the request
+    // arrived via the local cloudflared process (TCP peer = 127.0.0.1) we key
+    // off the forwarded CF-Connecting-IP / X-Forwarded-For header instead of
+    // the loopback address. Without this every tunneled client collapses into
+    // one bucket and a single noisy mobile can rate-limit everyone (#3980).
+    // For direct (non-loopback) peers the helper falls back to the kernel-
+    // supplied socket address so the header cannot be spoofed to share or
+    // exhaust another IP's bucket — same approach #3978 took for /diagnostics.
+    const socketIp = req.socket?.remoteAddress || ''
+    const clientIp = getRateLimitKey(socketIp, req)
     const { allowed, retryAfterMs } = _httpPermissionLimiter.check(clientIp)
     if (!allowed) {
       log.warn(`Rate limited POST /permission from ${clientIp}`)

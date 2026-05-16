@@ -1268,3 +1268,93 @@ describe('sanitizeToolInput (#1845)', () => {
     assert.equal(sanitizeToolInput('string'), 'string')
   })
 })
+
+/**
+ * Issue #3980 — /permission rate limiter must key off the forwarded source IP
+ * when the TCP peer is loopback (i.e. the request arrived via cloudflared).
+ *
+ * Background: the local cloudflared process is the TCP peer for every tunneled
+ * client, so keying on `req.socket.remoteAddress` collapses every real-world
+ * source IP into a single 127.0.0.1 bucket. A single noisy mobile client can
+ * then rate-limit every other tunnel user. The shared `getRateLimitKey()`
+ * helper (added in #3978 for /diagnostics) trusts `CF-Connecting-IP` /
+ * `X-Forwarded-For` only when the socket is loopback, so direct connections
+ * can't spoof the header to share/exhaust another IP's bucket.
+ */
+describe('handlePermissionRequest rate limiter (#3980)', () => {
+  // Helper that mimics what http.IncomingMessage exposes for our purposes.
+  // The existing makeReq() helper produces a bare EventEmitter; for these
+  // tests we need control over both `socket.remoteAddress` and forwarded
+  // headers so we can prove the limiter keys off the right one.
+  function makeReqWithSocket(body, { socketIp, headers = {} } = {}) {
+    const req = makeReq(body, headers)
+    req.socket = { remoteAddress: socketIp }
+    return req
+  }
+
+  it('separates buckets by CF-Connecting-IP when the TCP peer is loopback', async () => {
+    // Tight 1+0 limit so a single request exhausts the bucket — keeps the
+    // assertion focused on per-key isolation rather than the counting math.
+    const opts = makeHandlerOpts({ rateLimit: { windowMs: 60_000, maxMessages: 1, burst: 0 } })
+    const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+
+    const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+
+    // Client A from the loopback peer (cloudflared) — first request allowed
+    const reqA1 = makeReqWithSocket(body, { socketIp: '127.0.0.1', headers: { 'cf-connecting-ip': '203.0.113.7' } })
+    const resA1 = makeRes()
+    handlePermissionRequest(reqA1, resA1)
+    await new Promise(r => setImmediate(r))
+    assert.notEqual(resA1.statusCode, 429, 'first request from IP A should not be rate-limited')
+
+    // Client A again — bucket is now full, must be rate-limited
+    const reqA2 = makeReqWithSocket(body, { socketIp: '127.0.0.1', headers: { 'cf-connecting-ip': '203.0.113.7' } })
+    const resA2 = makeRes()
+    handlePermissionRequest(reqA2, resA2)
+    await new Promise(r => setImmediate(r))
+    assert.equal(resA2.statusCode, 429, 'second request from IP A must be rate-limited')
+
+    // Client B from the SAME loopback peer but a different forwarded IP —
+    // must get its own bucket. This is the bug from #3980: without the fix,
+    // IP B is starved out because every tunnel client shares 127.0.0.1.
+    const reqB = makeReqWithSocket(body, { socketIp: '127.0.0.1', headers: { 'cf-connecting-ip': '198.51.100.42' } })
+    const resB = makeRes()
+    handlePermissionRequest(reqB, resB)
+    await new Promise(r => setImmediate(r))
+    assert.notEqual(resB.statusCode, 429,
+      'a different CF-Connecting-IP through cloudflared must get its own bucket')
+
+    destroy()
+  })
+
+  it('keys off the socket address (not the forwarded header) for direct non-loopback peers', async () => {
+    // SECURITY: a direct attacker on a public IP could otherwise spoof
+    // CF-Connecting-IP to share or exhaust another client's bucket. The
+    // forwarded header must only be trusted when the TCP peer is loopback.
+    const opts = makeHandlerOpts({ rateLimit: { windowMs: 60_000, maxMessages: 1, burst: 0 } })
+    const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+
+    const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+
+    // Direct connection from a public IP. The attacker forges
+    // CF-Connecting-IP=198.51.100.42 hoping the limiter will key off it.
+    const req1 = makeReqWithSocket(body, { socketIp: '203.0.113.99', headers: { 'cf-connecting-ip': '198.51.100.42' } })
+    const res1 = makeRes()
+    handlePermissionRequest(req1, res1)
+    await new Promise(r => setImmediate(r))
+    assert.notEqual(res1.statusCode, 429, 'first direct request should pass')
+
+    // Second request from the SAME socket IP but a DIFFERENT forged header.
+    // If the limiter trusted the header, this would slip through into a
+    // fresh bucket. The fix forces it to key off the socket address, so
+    // the bucket is shared and this request must be blocked.
+    const req2 = makeReqWithSocket(body, { socketIp: '203.0.113.99', headers: { 'cf-connecting-ip': '192.0.2.1' } })
+    const res2 = makeRes()
+    handlePermissionRequest(req2, res2)
+    await new Promise(r => setImmediate(r))
+    assert.equal(res2.statusCode, 429,
+      'header must NOT be trusted from a non-loopback peer — bucket keys off socket address')
+
+    destroy()
+  })
+})
