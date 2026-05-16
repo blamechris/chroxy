@@ -1023,6 +1023,11 @@ export class CliSession extends BaseSession {
 
   setPermissionMode(mode) {
     if (!super.setPermissionMode(mode)) return
+    // #3729 panic-button semantics: BaseSession.setPermissionMode lets `'auto'`
+    // bypass the `_isBusy` guard, so flipping to auto mid-turn IS destructive —
+    // the in-flight `claude -p` process is killed and respawned, dropping the
+    // current turn. This is by design (parity with SDK auto-resolve of pending
+    // prompts); see #3735 for the regression test pinning this behavior.
     log.info(`Permission mode changed to ${mode}, restarting process`)
     this._killAndRespawn()
   }
