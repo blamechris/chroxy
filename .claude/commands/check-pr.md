@@ -311,11 +311,19 @@ GraphQL is required here — REST doesn't expose thread state. Threads are Graph
 # silently produces UNRESOLVED=0 — the very failure mode this section guards).
 set -o pipefail
 
+# Workflow user login — used to filter out threads where the most recent
+# comment is from a human reviewer who posted after step 6's verification.
+# We must NEVER silently resolve a human's unreplied question.
+ME=$(gh api user --jq .login) || { echo "FAIL: could not resolve workflow user"; exit 1; }
+
 # Fetch all review threads (GraphQL — REST API doesn't expose thread state).
 # Page through with a cursor so PRs with >100 threads aren't silently truncated.
 # Hard-fails on transient errors and bounds the loop, so a misbehaving API
 # response can't silently truncate (re-introducing the bug this fixes) or
 # spin forever.
+#
+# `comments(last: 1)` fetches the most recent comment per thread so the
+# resolver loop below can verify the agent (not a human) had the last word.
 fetch_review_threads() {
   local cursor="null" page has_next next_cursor
   local pages=0 max_pages=100   # 100 pages * 100 threads = 10000-thread ceiling
@@ -326,7 +334,11 @@ fetch_review_threads() {
           pullRequest(number: ${PR_NUM}) {
             reviewThreads(first: 100, after: ${cursor}) {
               pageInfo { hasNextPage endCursor }
-              nodes { id isResolved }
+              nodes {
+                id
+                isResolved
+                comments(last: 1) { nodes { author { login } } }
+              }
             }
           }
         }
@@ -354,18 +366,27 @@ fetch_review_threads() {
 
 THREADS=$(fetch_review_threads | jq -s '.') || { echo "FAIL: review-thread fetch failed; refusing to proceed"; exit 1; }
 
-# Resolve each unresolved thread; surface any single-thread failure
-# instead of swallowing it (a 401/403 on one thread shouldn't be silent).
+# Resolve ONLY threads where the most recent comment was authored by the
+# workflow user. A human reviewer who posted a brand-new question between
+# step 6 and step 6b would otherwise be silently dismissed (#3896).
+# Threads with no last-comment author (deleted/ghost) are also skipped.
 #
-# The loop runs in a subshell because of the pipe, so a plain variable
-# (FAILED_IDS=...) wouldn't survive past `done`. Track failures in a temp
-# file instead and read them back after the loop. The mutation also needs
-# to confirm `isResolved: true` — a 200 response that returns `false`
-# (e.g., archived repo, permission silently downgraded) is still a failure.
+# Surface any single-thread failure instead of swallowing it (a 401/403 on
+# one thread shouldn't be silent — #3898). The loop runs in a subshell
+# because of the pipe, so a plain variable (FAILED_IDS=...) wouldn't
+# survive past `done`. Track failures in a temp file instead and read
+# them back after the loop. The mutation also needs to confirm
+# `isResolved: true` — a 200 response that returns `false` (e.g.,
+# archived repo, permission silently downgraded) is still a failure.
 FAILED_FILE=$(mktemp)
 trap 'rm -f "$FAILED_FILE"' EXIT
 
-echo "$THREADS" | jq -r '.[] | select(.isResolved == false) | .id' | while read -r tid; do
+echo "$THREADS" | jq -r --arg me "$ME" '
+  .[]
+  | select(.isResolved == false)
+  | select((.comments.nodes[-1].author.login // "") == $me)
+  | .id
+' | while read -r tid; do
   RESULT=$(gh api graphql -f query="
     mutation {
       resolveReviewThread(input: {threadId: \"$tid\"}) {
@@ -388,15 +409,32 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
   exit 1
 fi
 
-# Verify zero unresolved threads remain (re-paginate; same reason as above).
-# This is a belt-and-suspenders check against the mutation lying — e.g.,
-# returning isResolved: true while the thread is still open server-side, or
-# a thread re-opening between mutation and verification.
-UNRESOLVED=$(fetch_review_threads | jq -s '[.[] | select(.isResolved == false)] | length') \
-  || { echo "FAIL: verification fetch failed; refusing to claim success"; exit 1; }
+# Report any threads we deliberately did NOT resolve (human's last word).
+# These block merge — but resolving them would silently dismiss the human.
+# Surface them so the operator can answer instead of pretending success.
+SKIPPED=$(echo "$THREADS" | jq -r --arg me "$ME" '
+  [.[]
+   | select(.isResolved == false)
+   | select((.comments.nodes[-1].author.login // "") != $me)
+  ] | length
+')
+if [ "$SKIPPED" -gt 0 ]; then
+  echo "Skipped ${SKIPPED} unresolved thread(s) whose last comment is from a human reviewer; reply before merging."
+fi
 
-echo "Unresolved threads: ${UNRESOLVED}"
-[ "$UNRESOLVED" -eq 0 ] || { echo "FAIL: ${UNRESOLVED} threads still unresolved"; exit 1; }
+# Verify no agent-authored unresolved threads remain (re-paginate; same reason as above).
+# Threads where a human had the last word are excluded from this gate —
+# they're surfaced above but don't fail the workflow, since the agent
+# can't resolve them without dismissing the human's question.
+UNRESOLVED=$(fetch_review_threads | jq -s --arg me "$ME" '
+  [.[]
+   | select(.isResolved == false)
+   | select((.comments.nodes[-1].author.login // "") == $me)
+  ] | length
+') || { echo "FAIL: verification fetch failed; refusing to claim success"; exit 1; }
+
+echo "Unresolved agent-authored threads: ${UNRESOLVED}"
+[ "$UNRESOLVED" -eq 0 ] || { echo "FAIL: ${UNRESOLVED} agent-authored threads still unresolved"; exit 1; }
 ```
 
 **When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**.
