@@ -42,6 +42,42 @@ export function sanitizeErrorMessage(err) {
   }
   return 'An internal error occurred'
 }
+
+/**
+ * Resolve the per-IP rate-limit config for GET /diagnostics (#3737).
+ *
+ * Override precedence:
+ *   1. Constructor opt `diagnosticsRateLimit` — full RateLimiter options
+ *      object `{ windowMs, maxMessages, burst }`. Used by tests.
+ *   2. `CHROXY_DIAGNOSTICS_RATE_LIMIT` env var — a single positive integer
+ *      sets `maxMessages`; burst defaults to `Math.max(1, Math.floor(N/3))`.
+ *   3. Defaults — 12 req/min + 4 burst (half of /permission since the cost
+ *      is comparable but legitimate use is diagnostic, not interactive).
+ *
+ * Invalid env values (NaN, non-integer, < 1) silently fall through to
+ * defaults. Sub-integer values like `0.5` are rejected outright rather
+ * than truncated, because Math.trunc(0.5) = 0 and RateLimiter treats
+ * `maxMessages: 0` as "use default" via `||`, which would *raise* the
+ * limit instead of restoring it.
+ *
+ * @param {object|null} overrideOpts
+ * @returns {{ windowMs: number, maxMessages: number, burst: number }}
+ */
+export function resolveDiagnosticsRateLimit(overrideOpts) {
+  if (overrideOpts && typeof overrideOpts === 'object') return overrideOpts
+  const raw = process.env.CHROXY_DIAGNOSTICS_RATE_LIMIT
+  if (raw != null && raw !== '') {
+    const n = Number(raw)
+    if (Number.isInteger(n) && n >= 1) {
+      return {
+        windowMs: 60_000,
+        maxMessages: n,
+        burst: Math.max(1, Math.floor(n / 3)),
+      }
+    }
+  }
+  return { windowMs: 60_000, maxMessages: 12, burst: 4 }
+}
 const SERVER_VERSION = packageJson.version
 const log = createLogger('ws')
 
@@ -387,7 +423,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -407,6 +443,14 @@ export class WsServer {
     this._rateLimiter = new RateLimiter()
     // Separate, relaxed limiter for permission/question responses (60 per minute, no burst)
     this._permissionRateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 60, burst: 0 })
+    // #3737: per-IP limiter for GET /diagnostics. Default 12 req/min + 4 burst
+    // — half of /permission since the cost (FS read + session iteration) is
+    // comparable but legitimate use is diagnostic, not interactive. Override
+    // via constructor opt (tests) or `CHROXY_DIAGNOSTICS_RATE_LIMIT` (deploy:
+    // a single integer sets maxMessages, with a 1/3 burst).
+    this._diagnosticsRateLimiter = new RateLimiter(
+      resolveDiagnosticsRateLimit(diagnosticsRateLimit)
+    )
     this._clientSend = createClientSender(log)
     this._clientManager = new WsClientManager()
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
