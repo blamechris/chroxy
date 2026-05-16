@@ -398,6 +398,35 @@ describe('PermissionManager', () => {
       pm.respondToQuestion('stale answer')
     })
 
+    // #3988: symmetry follow-up to #3975. The user-response handler at
+    // input-handlers.js:451 already deletes from questionSessionMap before
+    // calling respondToQuestion, so the unified-pipeline cleanup is
+    // redundant on this path — but every other question-variant emit
+    // (aborted/timeout/cleared) carries toolUseId, and future internal
+    // paths shouldn't have to remember "every emit needs toolUseId
+    // EXCEPT this one." Defensive consistency.
+    it('emits permission_resolved with toolUseId + reason:answered on respondToQuestion (#3988)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      const userQuestionEvents = []
+      pm.on('user_question', (data) => userQuestionEvents.push(data))
+      const promise = pm._handleAskUserQuestion({ questions: [{ question: 'go?' }] }, null)
+      assert.equal(userQuestionEvents.length, 1)
+      const toolUseId = userQuestionEvents[0].toolUseId
+      assert.ok(toolUseId, 'precondition: user_question must carry toolUseId')
+
+      pm.respondToQuestion('yes')
+      await promise
+
+      const questionEmits = events.filter(e => !e.requestId)
+      assert.equal(questionEmits.length, 1,
+        'respondToQuestion must emit exactly one question-variant permission_resolved')
+      assert.equal(questionEmits[0].toolUseId, toolUseId,
+        'toolUseId must be propagated for symmetry with the other question-variant emits')
+      assert.equal(questionEmits[0].reason, 'answered')
+    })
+
     it('supports per-question answersMap', async () => {
       const questions = [
         { question: 'Color?', options: [{ label: 'Red' }] },

@@ -336,7 +336,17 @@ export class PermissionManager extends EventEmitter {
   respondToQuestion(text, answersMap) {
     if (!this._pendingUserAnswer) return
     this._clearQuestionTimer()
-    const { resolve, input } = this._pendingUserAnswer
+    // #3988: include toolUseId on the answered emit for symmetry with the
+    // other 4 question-variant emit sites (aborted/timeout/cleared/auto).
+    // The user-response handler at input-handlers.js:451 already prunes
+    // questionSessionMap eagerly before calling this method, so the
+    // unified-pipeline cleanup is redundant on the happy path — but the
+    // sdk-session re-emit gate at sdk-session.js:281 keys on
+    // (data.requestId || data.toolUseId), and any future internal path
+    // (or refactor that drops the eager delete) would silently leak. Read
+    // toolUseId BEFORE the null-out below, mirroring the clearAll #3975
+    // pattern.
+    const { resolve, input, toolUseId } = this._pendingUserAnswer
     this._pendingUserAnswer = null
     this._waitingForAnswer = false
 
@@ -345,7 +355,7 @@ export class PermissionManager extends EventEmitter {
     // Emit before resolve() so listeners (e.g. the SdkSession
     // inactivity-timer resumer, #2831) see the state flip before any
     // downstream synchronous work runs.
-    this.emit('permission_resolved', { reason: 'answered' })
+    this.emit('permission_resolved', { toolUseId, reason: 'answered' })
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }
     const answers = {}
