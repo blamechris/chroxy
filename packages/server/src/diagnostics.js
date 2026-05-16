@@ -78,18 +78,19 @@ export function buildDiagnosticsSnapshot({ server, serverVersion, logTailBytes =
 }
 
 /**
- * Snapshot eviction stats for every RateLimiter the server holds (#3996).
+ * Snapshot eviction stats for every RateLimiter the server holds (#3996, #4005).
  *
  * Returns an array (not a keyed object) so the surface is uniform regardless
  * of which limiters happen to exist on a given server build — operators
- * scanning for trouble look for any entry with `evictionCount > 0`. Each
- * entry already carries `name` from the limiter constructor.
+ * scanning for trouble look for any entry with `evictionCount > 0` (cumulative)
+ * or `evictionsInWindow > 0` (live signal). Each entry already carries `name`
+ * from the limiter constructor.
  *
  * Resilient to partial server objects (tests may pass mocks without every
  * limiter wired up): a missing or malformed limiter is silently skipped.
  *
  * @param {object} server - WsServer instance.
- * @returns {Array<{ name: string, evictionCount: number, lastEvictionAt: number|null, mapSize: number, maxEntries: number }>}
+ * @returns {Array<{ name: string, evictionCount: number, lastEvictionAt: number|null, mapSize: number, maxEntries: number, evictionsInWindow: number, evictionWindowMs: number, evictionWindowSaturated: boolean }>}
  */
 function collectRateLimiters(server) {
   const out = []

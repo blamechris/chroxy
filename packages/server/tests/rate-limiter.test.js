@@ -539,6 +539,233 @@ describe('RateLimiter eviction metering (#3996)', () => {
     assert.equal(logEntries.length, 1)
     assert.match(logEntries[0].message, /evicted 8 oldest entries/)
   })
+
+  // #4005: windowed eviction rate. Cumulative count answers "has this ever
+  // happened?"; the windowed count answers "is it happening RIGHT NOW?"
+  // which is what alerting hooks need.
+
+  it('reports zero evictionsInWindow when no evictions have occurred', () => {
+    const limiter = new RateLimiter({
+      name: 'no-evict',
+      maxMessages: 100,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 50,
+    })
+    for (let i = 0; i < 25; i++) limiter.check(`client-${i}`)
+    const stats = limiter.getEvictionStats()
+    assert.equal(stats.evictionsInWindow, 0)
+    assert.equal(stats.evictionWindowSaturated, false)
+    // Default window is 60s.
+    assert.equal(stats.evictionWindowMs, 60_000)
+  })
+
+  it('counts every recent eviction in evictionsInWindow', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const cap = 5
+      const overflow = 12
+      const limiter = new RateLimiter({
+        name: 'window-count',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: cap,
+        evictionWindowMs: 60_000,
+        evictionLogThrottleMs: 0,
+      })
+      for (let i = 0; i < cap + overflow; i++) {
+        limiter.check(`client-${i}`)
+      }
+      const stats = limiter.getEvictionStats()
+      assert.equal(stats.evictionCount, overflow, 'cumulative')
+      assert.equal(stats.evictionsInWindow, overflow, 'windowed')
+      assert.equal(stats.evictionWindowSaturated, false)
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('rolls evictions out of evictionsInWindow once they age past the window', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        name: 'window-rollover',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: 2,
+        evictionWindowMs: 60_000,
+        evictionLogThrottleMs: 0,
+      })
+      // Fill + force 3 evictions at t=0
+      limiter.check('a')
+      limiter.check('b')
+      limiter.check('c') // evicts a
+      limiter.check('d') // evicts b
+      limiter.check('e') // evicts c
+      assert.equal(limiter.getEvictionStats().evictionsInWindow, 3, 'all three at t=0')
+
+      // Just before the window expires: still all three.
+      mock.timers.tick(59_999)
+      assert.equal(limiter.getEvictionStats().evictionsInWindow, 3, 'still in window')
+
+      // Cross the window boundary: the t=0 evictions roll off.
+      mock.timers.tick(2)
+      const stats = limiter.getEvictionStats()
+      assert.equal(stats.evictionsInWindow, 0, 'rolled out of window')
+      // Cumulative is monotonic — must NOT decay.
+      assert.equal(stats.evictionCount, 3, 'cumulative untouched')
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('tracks a sliding window: old evictions roll off as new ones arrive', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        name: 'sliding',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: 1,
+        evictionWindowMs: 10_000,
+        evictionLogThrottleMs: 0,
+      })
+      // Two evictions at t=0
+      limiter.check('a')
+      limiter.check('b') // evicts a
+      limiter.check('c') // evicts b
+      assert.equal(limiter.getEvictionStats().evictionsInWindow, 2)
+
+      // Advance 8s, add one more eviction
+      mock.timers.tick(8_000)
+      limiter.check('d') // evicts c at t=8000
+      assert.equal(limiter.getEvictionStats().evictionsInWindow, 3, '3 evictions still in 10s window')
+
+      // Advance 3s more (t=11_000): the t=0 evictions are now outside the
+      // 10s window but the t=8_000 one is still inside.
+      mock.timers.tick(3_000)
+      const stats = limiter.getEvictionStats()
+      assert.equal(stats.evictionsInWindow, 1, 'only the t=8s eviction remains')
+      assert.equal(stats.evictionCount, 3, 'cumulative untouched')
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('respects the configured evictionWindowMs override', () => {
+    const limiter = new RateLimiter({
+      name: 'custom-window',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 10,
+      evictionWindowMs: 300_000,
+    })
+    assert.equal(limiter.getEvictionStats().evictionWindowMs, 300_000)
+  })
+
+  it('falls back to the default window when evictionWindowMs is invalid', () => {
+    // Negative, zero, NaN, non-integer, non-number all coerce to default.
+    for (const bad of [-1, 0, NaN, 1.5, 'sixty', null]) {
+      const limiter = new RateLimiter({
+        name: 'invalid-window',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: 10,
+        evictionWindowMs: bad,
+      })
+      assert.equal(
+        limiter.getEvictionStats().evictionWindowMs,
+        60_000,
+        `evictionWindowMs=${String(bad)} must fall back to 60_000`,
+      )
+    }
+  })
+
+  it('caps the eviction-timestamp buffer to bound memory under attack', () => {
+    // Attacker rotating IPs at line rate must not OOM the limiter via the
+    // eviction-rate history. Past the cap we degrade to a saturated flag
+    // rather than holding unbounded timestamps.
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        name: 'saturated',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: 1,
+        evictionWindowMs: 60_000,
+        evictionLogThrottleMs: 60_000,
+      })
+      // Force well over 1024 evictions in a single window.
+      for (let i = 0; i < 5_000; i++) {
+        limiter.check(`flood-${i}`)
+      }
+      const stats = limiter.getEvictionStats()
+      // Cumulative is unaffected — operators still see the magnitude.
+      assert.equal(stats.evictionCount, 4_999)
+      // Buffer capped → saturated flag set.
+      assert.equal(stats.evictionWindowSaturated, true, 'saturated under flood')
+      // Internal buffer must not exceed the documented cap.
+      assert.ok(
+        limiter._evictionTimestamps.length <= 1024,
+        `buffer length ${limiter._evictionTimestamps.length} must stay <=1024`,
+      )
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('clears the saturated flag once the window drains', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        name: 'saturate-then-drain',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: 1,
+        evictionWindowMs: 60_000,
+        evictionLogThrottleMs: 60_000,
+      })
+      for (let i = 0; i < 5_000; i++) {
+        limiter.check(`flood-${i}`)
+      }
+      assert.equal(limiter.getEvictionStats().evictionWindowSaturated, true)
+      // Advance past the eviction window — buffer drains.
+      mock.timers.tick(60_001)
+      const stats = limiter.getEvictionStats()
+      assert.equal(stats.evictionWindowSaturated, false, 'flag clears after drain')
+      assert.equal(stats.evictionsInWindow, 0)
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('clear() also clears the eviction-rate window', () => {
+    const limiter = new RateLimiter({
+      name: 'clear',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 2,
+      evictionWindowMs: 60_000,
+      evictionLogThrottleMs: 0,
+    })
+    for (let i = 0; i < 10; i++) limiter.check(`client-${i}`)
+    assert.ok(limiter.getEvictionStats().evictionsInWindow > 0)
+    limiter.clear()
+    const stats = limiter.getEvictionStats()
+    assert.equal(stats.evictionsInWindow, 0, 'clear() drains the window')
+    assert.equal(stats.evictionWindowSaturated, false)
+    // clear() leaves the cumulative counter alone — that's the long-lived
+    // diagnostic. (See existing #3996 contract: cumulative resets only on
+    // process restart.)
+  })
 })
 
 describe('getClientIp (#2688)', () => {
