@@ -440,16 +440,18 @@ export class WsServer {
     this._maxPendingConnections = maxPendingConnections ?? 20
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
-    this._rateLimiter = new RateLimiter()
+    // #3996: name each limiter so eviction logs and /diagnostics
+    // rateLimiters[].name can identify which one is shedding entries.
+    this._rateLimiter = new RateLimiter({ name: 'ws' })
     // Separate, relaxed limiter for permission/question responses (60 per minute, no burst)
-    this._permissionRateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 60, burst: 0 })
+    this._permissionRateLimiter = new RateLimiter({ name: 'permission', windowMs: 60_000, maxMessages: 60, burst: 0 })
     // #3737: per-IP limiter for GET /diagnostics. Default 12 req/min + 4 burst
     // — half of /permission since the cost (FS read + session iteration) is
     // comparable but legitimate use is diagnostic, not interactive. Override
     // via constructor opt (tests) or `CHROXY_DIAGNOSTICS_RATE_LIMIT` (deploy:
     // a single integer sets maxMessages, with a 1/3 burst).
     this._diagnosticsRateLimiter = new RateLimiter(
-      resolveDiagnosticsRateLimit(diagnosticsRateLimit)
+      { name: 'diagnostics', ...resolveDiagnosticsRateLimit(diagnosticsRateLimit) }
     )
     this._clientSend = createClientSender(log)
     this._clientManager = new WsClientManager()

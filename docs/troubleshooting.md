@@ -63,6 +63,12 @@ Rules:
   },
   "clients": { "connected": 2, "authenticated": 2 },
   "counters": { /* metrics.snapshot() */ },
+  "rateLimiters": [        // <-- per-limiter eviction stats (#3996)
+    { "name": "ws", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 3, "maxEntries": 10000 },
+    { "name": "permission", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 0, "maxEntries": 10000 },
+    { "name": "diagnostics", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 1, "maxEntries": 10000 },
+    { "name": "http-permission", "evictionCount": 0, "lastEvictionAt": null, "mapSize": 0, "maxEntries": 10000 }
+  ],
   "sessions": [
     {
       "id": "sess-42",
@@ -106,6 +112,7 @@ Rules:
 | `sessions[].lastActivityAt` | Wall-clock of the last persisted activity. Compared against `Date.now()` it tells you how stale the session is even when `isBusy` is true. |
 | `logs.lines` | Last ~8KB of `chroxy.log`. Look for `[ws]`, `[session-binding-*]`, or provider-error stack traces near the failure window. |
 | `logs.source: "disabled"` | File logging is off. Restart with `CHROXY_LOG_LEVEL=debug` (or set `logLevel`/`logDir` in config) to enable, then re-trigger the failure. |
+| `rateLimiters[].evictionCount` | Cumulative entries evicted from each limiter's per-IP map since process start (#3996). **Non-zero is the signal that the limiter is shedding entries** — usually source-IP rotation against an HTTP endpoint (`http-permission`, `diagnostics`, `permission`) or a DDoS pattern against `ws`. Pair with `rateLimiters[].mapSize == maxEntries` to confirm steady-state pressure. The throttled `[WARN] [rate-limit]` lines in `logs.lines` reference the same limiter `name`. |
 
 ### Common patterns
 

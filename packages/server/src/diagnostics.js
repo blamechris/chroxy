@@ -71,9 +71,46 @@ export function buildDiagnosticsSnapshot({ server, serverVersion, logTailBytes =
       authenticated: server?._clientManager?.authenticatedCount ?? 0,
     },
     counters: metrics.snapshot ? metrics.snapshot() : {},
+    rateLimiters: collectRateLimiters(server),
     sessions,
     logs: collectLogTail(logTailBytes),
   }
+}
+
+/**
+ * Snapshot eviction stats for every RateLimiter the server holds (#3996).
+ *
+ * Returns an array (not a keyed object) so the surface is uniform regardless
+ * of which limiters happen to exist on a given server build — operators
+ * scanning for trouble look for any entry with `evictionCount > 0`. Each
+ * entry already carries `name` from the limiter constructor.
+ *
+ * Resilient to partial server objects (tests may pass mocks without every
+ * limiter wired up): a missing or malformed limiter is silently skipped.
+ *
+ * @param {object} server - WsServer instance.
+ * @returns {Array<{ name: string, evictionCount: number, lastEvictionAt: number|null, mapSize: number, maxEntries: number }>}
+ */
+function collectRateLimiters(server) {
+  const out = []
+  const candidates = [
+    server?._rateLimiter,
+    server?._permissionRateLimiter,
+    server?._diagnosticsRateLimiter,
+    // The HTTP-permission limiter lives inside the permission handler
+    // closure and is re-exported on the handler object for this purpose.
+    server?._permissions?._httpPermissionLimiter,
+  ]
+  for (const limiter of candidates) {
+    if (limiter && typeof limiter.getEvictionStats === 'function') {
+      try {
+        out.push(limiter.getEvictionStats())
+      } catch {
+        // Defensive — never let a misbehaving limiter crash /diagnostics.
+      }
+    }
+  }
+  return out
 }
 
 /**

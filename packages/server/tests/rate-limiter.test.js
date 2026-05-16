@@ -1,6 +1,7 @@
-import { describe, it, mock } from 'node:test'
+import { describe, it, mock, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { RateLimiter, getClientIp, getRateLimitKey } from '../src/rate-limiter.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 describe('RateLimiter (#1828)', () => {
   it('allows messages under the limit', () => {
@@ -350,6 +351,184 @@ describe('RateLimiter lazy stale-reap (#3997)', () => {
     } finally {
       mock.timers.reset()
     }
+  })
+})
+
+describe('RateLimiter eviction metering (#3996)', () => {
+  // Capture rate-limit log lines emitted via createLogger('rate-limit'). The
+  // global addLogListener bus is shared across tests, so each test installs
+  // and removes its own listener to keep them isolated.
+  let logEntries
+  let listener
+
+  beforeEach(() => {
+    logEntries = []
+    listener = (entry) => {
+      if (entry.component === 'rate-limit') logEntries.push(entry)
+    }
+    addLogListener(listener)
+  })
+
+  afterEach(() => {
+    removeLogListener(listener)
+  })
+
+  it('starts with zero evictions and null lastEvictionAt', () => {
+    const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 60_000, maxEntries: 5 })
+    const stats = limiter.getEvictionStats()
+    assert.equal(stats.evictionCount, 0)
+    assert.equal(stats.lastEvictionAt, null)
+    assert.equal(stats.mapSize, 0)
+    assert.equal(stats.maxEntries, 5)
+    assert.equal(stats.name, 'unnamed')
+  })
+
+  it('exposes the configured name in eviction stats', () => {
+    const limiter = new RateLimiter({ name: 'http-permission', maxMessages: 1, burst: 0, windowMs: 60_000, maxEntries: 2 })
+    assert.equal(limiter.getEvictionStats().name, 'http-permission')
+  })
+
+  it('counter matches the number of entries evicted under overflow', () => {
+    const cap = 10
+    const overflow = 25
+    const limiter = new RateLimiter({
+      name: 'test',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: cap,
+      // Disable throttle so log assertions in other tests stay deterministic;
+      // counter is what we're checking here, log behaviour is asserted below.
+      evictionLogThrottleMs: 0,
+    })
+    // First `cap` inserts fill the map without evicting; every subsequent
+    // unique-key insert evicts exactly one entry.
+    for (let i = 0; i < cap + overflow; i++) {
+      limiter.check(`client-${i}`)
+    }
+    const stats = limiter.getEvictionStats()
+    assert.equal(stats.evictionCount, overflow, `expected ${overflow} evictions, got ${stats.evictionCount}`)
+    assert.equal(stats.mapSize, cap)
+    assert.ok(stats.lastEvictionAt !== null && stats.lastEvictionAt > 0, 'lastEvictionAt should be set after eviction')
+  })
+
+  it('does not increment counter when no eviction occurs (under cap)', () => {
+    const limiter = new RateLimiter({ name: 'test', maxMessages: 100, burst: 0, windowMs: 60_000, maxEntries: 50 })
+    for (let i = 0; i < 25; i++) {
+      limiter.check(`client-${i}`)
+    }
+    assert.equal(limiter.getEvictionStats().evictionCount, 0)
+    assert.equal(limiter.getEvictionStats().lastEvictionAt, null)
+  })
+
+  it('does not increment counter on repeated access by the same client', () => {
+    const limiter = new RateLimiter({ name: 'test', maxMessages: 100, burst: 0, windowMs: 60_000, maxEntries: 5 })
+    for (let i = 0; i < 50; i++) {
+      limiter.check('client-1')
+    }
+    assert.equal(limiter.getEvictionStats().evictionCount, 0)
+  })
+
+  it('emits a WARN log line on the first eviction', () => {
+    const limiter = new RateLimiter({
+      name: 'first-evict',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 2,
+      evictionLogThrottleMs: 60_000,
+    })
+    limiter.check('a')
+    limiter.check('b')
+    assert.equal(logEntries.length, 0, 'no log before first eviction')
+    limiter.check('c') // triggers first eviction
+    assert.equal(logEntries.length, 1, 'first eviction emits one log')
+    assert.equal(logEntries[0].level, 'warn')
+    assert.match(logEntries[0].message, /name=first-evict/)
+    assert.match(logEntries[0].message, /cumulative=1/)
+  })
+
+  it('throttles subsequent rapid evictions to a single log line per window', () => {
+    const limiter = new RateLimiter({
+      name: 'throttled',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 5,
+      // 60s window — well above what 100 synchronous check() calls take. If
+      // throttle is broken we'll see a flood of log lines.
+      evictionLogThrottleMs: 60_000,
+    })
+    // Fill + overflow with 100 unique keys to force 95 evictions.
+    for (let i = 0; i < 100; i++) {
+      limiter.check(`client-${i}`)
+    }
+    assert.equal(limiter.getEvictionStats().evictionCount, 95, 'all evictions counted')
+    assert.equal(logEntries.length, 1, 'throttle suppressed every eviction log after the first')
+  })
+
+  it('counter still increments even when the log line is throttled', () => {
+    // Regression guard: throttle must NOT short-circuit the counter — that
+    // would defeat /diagnostics observability under attack.
+    const limiter = new RateLimiter({
+      name: 'counter-vs-throttle',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 3,
+      evictionLogThrottleMs: 60_000,
+    })
+    for (let i = 0; i < 1000; i++) {
+      limiter.check(`client-${i}`)
+    }
+    assert.equal(limiter.getEvictionStats().evictionCount, 997)
+    assert.equal(logEntries.length, 1, 'log throttle held to a single line')
+  })
+
+  it('emits a fresh log line once the throttle window has elapsed', () => {
+    // Use a 0ms throttle to simulate "throttle window has fully elapsed."
+    // Real production runs at 60_000ms; tests can't realistically wait that
+    // long, and using fake timers across the createLogger import boundary is
+    // brittle. Throttle=0 still exercises the gate (the `<` comparison).
+    const limiter = new RateLimiter({
+      name: 'unthrottled',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 2,
+      evictionLogThrottleMs: 0,
+    })
+    for (let i = 0; i < 5; i++) {
+      limiter.check(`client-${i}`)
+    }
+    // 3 unique inserts past cap = 3 evictions = 3 log lines (no throttle).
+    assert.equal(limiter.getEvictionStats().evictionCount, 3)
+    assert.equal(logEntries.length, 3)
+  })
+
+  it('reports the burst count on a single check() call that evicts multiple entries', () => {
+    // Hard to trigger naturally — check() only ever inserts one new key, so
+    // the inner while-loop normally evicts exactly one entry. Construct the
+    // scenario by pre-stuffing the map past its cap (shrinking maxEntries
+    // under us is the realistic path: reload with a smaller cap).
+    const limiter = new RateLimiter({
+      name: 'burst',
+      maxMessages: 1,
+      burst: 0,
+      windowMs: 60_000,
+      maxEntries: 10,
+      evictionLogThrottleMs: 60_000,
+    })
+    // Fill to cap.
+    for (let i = 0; i < 10; i++) limiter.check(`client-${i}`)
+    // Mutate the cap downward; the next insert must shed multiple at once.
+    limiter._maxEntries = 3
+    limiter.check('overflow') // expect 8 evictions in one go
+    const stats = limiter.getEvictionStats()
+    assert.equal(stats.evictionCount, 8)
+    assert.equal(stats.mapSize, 3)
+    assert.equal(logEntries.length, 1)
+    assert.match(logEntries[0].message, /evicted 8 oldest entries/)
   })
 })
 
