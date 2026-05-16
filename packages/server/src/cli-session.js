@@ -955,6 +955,21 @@ export class CliSession extends BaseSession {
     }
     this._respawnScheduled = false
 
+    // #3966: release the soft + hard inactivity timers armed for the dropped
+    // turn. The panic-button path (`setPermissionMode('auto')` while busy)
+    // and `setModel` mid-turn both detach the in-flight message context, so
+    // these timers would otherwise either fire `_handleHardTimeout` against
+    // a stale messageId or linger past test boundaries as phantom timers.
+    if (this._resultTimeout) {
+      clearTimeout(this._resultTimeout)
+      this._resultTimeout = null
+    }
+    if (this._hardTimeout) {
+      clearTimeout(this._hardTimeout)
+      this._hardTimeout = null
+    }
+    this._resultTimeoutPaused = false
+
     this._cleanupReadlines()
 
     if (this._child) {

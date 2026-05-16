@@ -846,8 +846,40 @@ describe('CliSession _skillsPrepended deferral (#3225)', () => {
 // busy" defensive change can't silently regress the panic button.
 // ---------------------------------------------------------------------------
 describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
+  // #3966: every test in this block stubs `start()` to avoid spawning a real
+  // child, but the panic path arms long-fuse soft/hard inactivity timers
+  // (`_resultTimeout`, `_hardTimeout`) that would otherwise keep the event
+  // loop alive past the test and trip the test runner's leak detector. Track
+  // every session we create so the after-hook can clear whatever the panic
+  // flow left armed, regardless of which branch the test exercised.
+  const sessions = []
+
+  afterEach(() => {
+    while (sessions.length > 0) {
+      const session = sessions.pop()
+      if (session._resultTimeout) {
+        clearTimeout(session._resultTimeout)
+        session._resultTimeout = null
+      }
+      if (session._hardTimeout) {
+        clearTimeout(session._hardTimeout)
+        session._hardTimeout = null
+      }
+      if (session._interruptTimer) {
+        clearTimeout(session._interruptTimer)
+        session._interruptTimer = null
+      }
+      if (session._respawnTimer) {
+        clearTimeout(session._respawnTimer)
+        session._respawnTimer = null
+      }
+      session._isBusy = false
+    }
+  })
+
   it('mid-turn flip to auto kills the in-flight process and respawns', () => {
     const session = createReadySession({ permissionMode: 'approve' })
+    sessions.push(session)
     const oldChild = session._child
 
     // Simulate the user being mid-turn: claude -p is running, _isBusy=true,
@@ -855,8 +887,11 @@ describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
     session._isBusy = true
     session._currentMessageId = 'msg-abc-1'
     session._currentCtx = { hasStreamStarted: true, didStreamText: true }
-    session._resultTimeout = setTimeout(() => {}, 100000)
-    session._hardTimeout = setTimeout(() => {}, 100000)
+    // #3966: unref the test-armed timers so even if a future bug skips the
+    // afterEach cleanup, these long-fuse setTimeouts can't hold the event
+    // loop open past test completion.
+    session._resultTimeout = setTimeout(() => {}, 100000).unref()
+    session._hardTimeout = setTimeout(() => {}, 100000).unref()
 
     // Stub start() so we don't actually spawn a real claude process after kill.
     let startCalled = 0
@@ -888,12 +923,60 @@ describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
     assert.equal(session._destroying, false, 'session is NOT destroyed — only the turn died')
   })
 
+  // #3966: explicit contract — the panic kill+respawn flow must release the
+  // soft + hard inactivity timers that were armed for the dropped turn.
+  // Without this, the timers keep ticking against a stale messageId and
+  // either trip `_handleHardTimeout` against a now-irrelevant turn or leak
+  // into the next test as a phantom timer.
+  it('panic kill+respawn clears the armed soft + hard inactivity timers', () => {
+    const session = createReadySession({ permissionMode: 'approve' })
+    sessions.push(session)
+    const oldChild = session._child
+
+    // Spy on clearTimeout to prove both timer handles get released.
+    const cleared = new Set()
+    const originalClearTimeout = global.clearTimeout
+    global.clearTimeout = (handle) => {
+      if (handle) cleared.add(handle)
+      return originalClearTimeout(handle)
+    }
+
+    try {
+      session._isBusy = true
+      session._currentMessageId = 'msg-panic-clear'
+      session._currentCtx = { hasStreamStarted: true, didStreamText: true }
+      const resultHandle = setTimeout(() => {}, 100000).unref()
+      const hardHandle = setTimeout(() => {}, 100000).unref()
+      session._resultTimeout = resultHandle
+      session._hardTimeout = hardHandle
+
+      session.start = () => {}
+
+      session.setPermissionMode('auto')
+      oldChild.emit('close', 143)
+
+      // The kill+respawn must release BOTH the soft warning and hard cap so
+      // they don't fire against the dropped turn or linger into the next.
+      assert.equal(session._resultTimeout, null,
+        '_resultTimeout must be nulled after panic kill+respawn')
+      assert.equal(session._hardTimeout, null,
+        '_hardTimeout must be nulled after panic kill+respawn')
+      assert.ok(cleared.has(resultHandle),
+        'clearTimeout must be called on the armed _resultTimeout handle')
+      assert.ok(cleared.has(hardHandle),
+        'clearTimeout must be called on the armed _hardTimeout handle')
+    } finally {
+      global.clearTimeout = originalClearTimeout
+    }
+  })
+
   it('non-auto mode flip while busy is a no-op (does NOT kill the process)', () => {
     // Complement to the panic-button test: prove that the destructive
     // behavior is gated specifically on 'auto'. Flipping to 'plan' or
     // 'acceptEdits' mid-turn must still be rejected by the busy guard so
     // semantics don't change partway through a turn.
     const session = createReadySession({ permissionMode: 'approve' })
+    sessions.push(session)
     const oldChild = session._child
     session._isBusy = true
 
@@ -906,8 +989,5 @@ describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
     assert.equal(oldChild.kill.mock.calls.length, 0, 'no kill on rejected flip')
     assert.equal(startCalled, 0, 'no respawn on rejected flip')
     assert.equal(session._respawning, false)
-
-    // Cleanup _child reference so afterEach doesn't dangle.
-    session._isBusy = false
   })
 })
