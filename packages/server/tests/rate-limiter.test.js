@@ -1,7 +1,7 @@
 import { describe, it, mock, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { RateLimiter, getClientIp, getRateLimitKey } from '../src/rate-limiter.js'
-import { addLogListener, removeLogListener } from '../src/logger.js'
+import { addLogListener, removeLogListener, setLogLevel, getLogLevel } from '../src/logger.js'
 
 describe('RateLimiter (#1828)', () => {
   it('allows messages under the limit', () => {
@@ -358,10 +358,18 @@ describe('RateLimiter eviction metering (#3996)', () => {
   // Capture rate-limit log lines emitted via createLogger('rate-limit'). The
   // global addLogListener bus is shared across tests, so each test installs
   // and removes its own listener to keep them isolated.
+  //
+  // Pin the log level to 'debug' before each test so the WARN emits we
+  // assert on aren't filtered out by an inherited LOG_LEVEL=error from
+  // another test or the env. Restore in afterEach so other suites that
+  // depend on the inherited level still work.
   let logEntries
   let listener
+  let savedLevel
 
   beforeEach(() => {
+    savedLevel = getLogLevel()
+    setLogLevel('debug')
     logEntries = []
     listener = (entry) => {
       if (entry.component === 'rate-limit') logEntries.push(entry)
@@ -371,6 +379,7 @@ describe('RateLimiter eviction metering (#3996)', () => {
 
   afterEach(() => {
     removeLogListener(listener)
+    setLogLevel(savedLevel)
   })
 
   it('starts with zero evictions and null lastEvictionAt', () => {
