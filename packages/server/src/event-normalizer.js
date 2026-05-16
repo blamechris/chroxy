@@ -281,16 +281,44 @@ Object.assign(EVENT_MAP, {
   // The SDK paths in settings-handlers.js (WS) and ws-permissions.js (HTTP)
   // were de-inlined to use this mapping, but the legacy non-SDK branches in
   // those files (no PermissionManager available) still broadcast inline.
-  permission_resolved: (data, ctx) => ({
-    messages: [{
-      msg: {
-        type: 'permission_resolved',
-        requestId: data.requestId,
-        decision: data.decision,
-        sessionId: ctx.sessionId,
-      },
-    }],
-  }),
+  //
+  // #3736: also emit a delete registration so the WsServer routing map
+  // (permissionSessionMap or questionSessionMap) is pruned on every
+  // resolution path — including the internal auto-resolve paths (timeout,
+  // aborted, auto_mode, cleared) where no user response ever arrives to
+  // trigger the message-handler-level delete. Without this, long-running
+  // sessions accumulate stale entries (small leak, unbounded growth until
+  // session destroy). The AskUserQuestion variant carries `toolUseId`
+  // instead of `requestId` and uses a separate map.
+  permission_resolved: (data, ctx) => {
+    const out = { messages: [] }
+    if (data.requestId) {
+      // Permission-prompt variant — broadcast a permission_resolved message
+      // matching the original permission_request and prune the routing-map
+      // entry that ws-forwarding set when the request was first registered.
+      out.messages.push({
+        msg: {
+          type: 'permission_resolved',
+          requestId: data.requestId,
+          decision: data.decision,
+          sessionId: ctx.sessionId,
+        },
+      })
+      out.registrations = [{ map: 'permission', key: data.requestId, action: 'delete' }]
+    } else if (data.toolUseId) {
+      // AskUserQuestion variant — there is no `permission_resolved` wire
+      // contract for questions (clients dismiss the prompt via the
+      // user_question_response round-trip, not via a broadcast), so don't
+      // synthesise a bogus message with `requestId`/`decision` both
+      // undefined. Only emit the cleanup registration so questionSessionMap
+      // is pruned. Pre-#3736 the sdk-session re-emit was gated on
+      // `requestId` and dropped the question variant entirely, so the
+      // normalizer never saw it; widening the gate would now have emitted
+      // a malformed broadcast if we kept the unconditional messages entry.
+      out.registrations = [{ map: 'question', key: data.toolUseId, action: 'delete' }]
+    }
+    return out
+  },
 
   error: (data) => {
     const msg = {
