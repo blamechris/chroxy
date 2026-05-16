@@ -4228,6 +4228,11 @@
 .auth-status-row[data-tone="env"] { border-left-color: var(--accent-blue); }
 .auth-status-row[data-tone="oauth"] { border-left-color: var(--accent-green, #4ade80); }
 .auth-status-row[data-tone="missing"] { border-left-color: var(--accent-red, #ef4444); }
+/* #3690: providers without a preflight.credentials block return source:'none' +
+   ready:true. They render with the neutral border-primary fallback above; the
+   explicit rule keeps the legend swatch and row in lock-step if the default
+   ever changes. */
+.auth-status-row[data-tone="none"] { border-left-color: var(--border-primary); }
 
 .auth-status-legend {
   list-style: none;
@@ -4257,6 +4262,9 @@
 .auth-status-swatch[data-tone="env"] { background: var(--accent-blue); }
 .auth-status-swatch[data-tone="oauth"] { background: var(--accent-green, #4ade80); }
 .auth-status-swatch[data-tone="missing"] { background: var(--accent-red, #ef4444); }
+/* #3690: matches the default fallback above; declared explicitly so the legend
+   swatch documents the "Custom provider" row (source:'none' + ready:true). */
+.auth-status-swatch[data-tone="none"] { background: var(--border-primary); }
 
 .auth-status-name {
   font-weight: 600;
