@@ -746,6 +746,58 @@ describe('RateLimiter eviction metering (#3996)', () => {
     }
   })
 
+  // Regression for the post-#4005 review hazard: pre-fix the saturated
+  // flag only cleared when the eviction-rate buffer emptied. Low-rate
+  // evictions following a saturation burst keep the buffer non-empty
+  // indefinitely, so the flag would stay true forever — misleading
+  // /diagnostics long after the actual saturation event aged out. Fix
+  // tracks _lastSaturationAt and clears the flag once that timestamp
+  // ages past the window cutoff (regardless of buffer occupancy).
+  it('clears the saturated flag once the LAST saturation event ages out, even under continuing low-rate evictions', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({
+        name: 'saturate-then-trickle',
+        maxMessages: 1,
+        burst: 0,
+        windowMs: 60_000,
+        maxEntries: 1,
+        evictionWindowMs: 60_000,
+        evictionLogThrottleMs: 60_000,
+      })
+      // Saturate the eviction-rate buffer at t=0.
+      for (let i = 0; i < 2_000; i++) {
+        limiter.check(`flood-${i}`)
+      }
+      assert.equal(limiter.getEvictionStats().evictionWindowSaturated, true,
+        'should saturate after a 2k-eviction burst')
+      // Trickle at t=5..55s — each call re-saturates because the t=0
+      // flood is still occupying the entire buffer (no headroom). After
+      // the t=60s mark, the flood drops out, headroom appears, and
+      // trickles stop saturating. The last saturating event was the
+      // t=55s trickle.
+      for (let i = 1; i <= 11; i++) {
+        mock.timers.tick(5_000)
+        limiter.check(`trickle-${i}`)
+      }
+      // Trickle out to t=120s — none of these saturate, but they keep
+      // the buffer non-empty. Pre-fix this would have kept the flag
+      // stuck true forever. Post-fix: at t=55s + 60s = 115s, the last
+      // saturation event ages out and the flag clears.
+      for (let i = 12; i <= 24; i++) {
+        mock.timers.tick(5_000)
+        limiter.check(`trickle-${i}`)
+      }
+      const stats = limiter.getEvictionStats()
+      assert.equal(stats.evictionWindowSaturated, false,
+        'saturated flag must clear once the LAST saturation event ages out, even if newer non-saturating evictions keep the buffer non-empty')
+      assert.ok(stats.evictionsInWindow > 0,
+        'recent trickle evictions are still recorded after the saturation event ages out')
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
   it('clear() also clears the eviction-rate window', () => {
     const limiter = new RateLimiter({
       name: 'clear',

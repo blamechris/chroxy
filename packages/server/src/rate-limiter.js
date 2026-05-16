@@ -168,6 +168,7 @@ export class RateLimiter {
       : DEFAULT_EVICTION_WINDOW_MS
     this._evictionTimestamps = []
     this._evictionWindowSaturated = false
+    this._lastSaturationAt = null
   }
 
   /**
@@ -293,6 +294,7 @@ export class RateLimiter {
     // /diagnostics signal and only resets on process restart (see #3996).
     this._evictionTimestamps.length = 0
     this._evictionWindowSaturated = false
+    this._lastSaturationAt = null
   }
 
   /**
@@ -366,9 +368,14 @@ export class RateLimiter {
     // Fill any remaining headroom and mark the buffer saturated. Anything
     // past the cap is intentionally dropped — the saturated flag plus the
     // monotonic counter give operators the signal they need without
-    // unbounded memory growth.
+    // unbounded memory growth. Track WHEN we saturated so the prune step
+    // can clear the flag once that event has aged out of the window —
+    // otherwise low-rate evictions continuing after a burst would keep
+    // the buffer non-empty and the flag stuck true forever, misleading
+    // diagnostics long after the actual saturation event.
     for (let i = 0; i < headroom; i++) this._evictionTimestamps.push(now)
     this._evictionWindowSaturated = true
+    this._lastSaturationAt = now
   }
 
   /**
@@ -388,8 +395,15 @@ export class RateLimiter {
       drop++
     }
     if (drop > 0) this._evictionTimestamps.splice(0, drop)
-    if (this._evictionWindowSaturated && this._evictionTimestamps.length === 0) {
+    // Clear the saturation flag once the saturation event itself has aged
+    // past the window — at that point the count over the window IS
+    // accurate again regardless of buffer occupancy. Pre-fix, this only
+    // cleared on an empty buffer, so low-rate evictions following a
+    // burst could keep the flag stuck true indefinitely.
+    if (this._evictionWindowSaturated &&
+        (this._lastSaturationAt === null || this._lastSaturationAt <= cutoff)) {
       this._evictionWindowSaturated = false
+      this._lastSaturationAt = null
     }
   }
 
