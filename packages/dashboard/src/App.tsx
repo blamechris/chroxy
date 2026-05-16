@@ -457,6 +457,15 @@ export function App() {
 
   const handleCloseSession = useCallback((sessionId: string) => {
     if (!window.confirm('Close this session? The Claude process will be terminated.')) return
+    // #3800: evict the per-session composer state (draft + collapsed-paste
+    // blocks + next-id counter) so the refs further down don't leak the
+    // pasted-text content for the lifetime of <App />. `handleSend` already
+    // evicts on send; this closes the parallel path on session teardown.
+    // The refs themselves are declared in the render body below — they are
+    // stable across renders so they're omitted from the dep array.
+    inputDraftsRef.current.delete(sessionId)
+    pastedTextBlocksRef.current.delete(sessionId)
+    pastedTextNextIdRef.current.delete(sessionId)
     destroySession(sessionId)
   }, [destroySession])
 
@@ -484,6 +493,13 @@ export function App() {
       permissionMode: session.permissionMode || undefined,
       worktree: session.worktree,
     })
+    // #3800: same per-session composer eviction as handleCloseSession. The
+    // restart path also tears down the old session via destroySession, so
+    // its draft / collapsed-paste entries would otherwise linger keyed by
+    // the now-defunct sessionId.
+    inputDraftsRef.current.delete(sessionId)
+    pastedTextBlocksRef.current.delete(sessionId)
+    pastedTextNextIdRef.current.delete(sessionId)
     destroySession(sessionId)
   }, [sessions, destroySession, createSession])
 

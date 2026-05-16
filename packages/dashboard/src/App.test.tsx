@@ -6,7 +6,7 @@
  * avoiding real WebSocket connections.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
 
 vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
@@ -713,6 +713,162 @@ describe('App', () => {
 
       expect(createSessionFn).not.toHaveBeenCalled()
       expect(destroySessionFn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Per-session composer state cleanup (#3800)', () => {
+    // #3797 introduced per-session paste-collapse storage in three refs on
+    // App: `inputDraftsRef`, `pastedTextBlocksRef`, `pastedTextNextIdRef`.
+    // `handleSend` clears the entry for the active session, but
+    // `handleCloseSession` / `handleRestartSession` only invoked the store's
+    // `destroySession` and left the ref entries behind. For a long-running
+    // dashboard with frequent session churn the maps would grow unbounded
+    // (each holding the full pasted-text content) — see #3800. The fix wires
+    // a per-session eviction into both handlers. These tests assert observable
+    // proof of cleanup: a session whose composer had a paste chip, once
+    // closed, must not "remember" it when its sessionId is later re-presented
+    // to the dashboard.
+    function bigText(lines: number, charsPerLine = 100): string {
+      const line = 'x'.repeat(charsPerLine)
+      return Array(lines).fill(line).join('\n')
+    }
+
+    const twoSessions = [
+      {
+        sessionId: 's1', name: 'One', cwd: '/tmp', type: 'cli' as const,
+        hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+        createdAt: 1, conversationId: null, provider: 'claude-sdk', worktree: false,
+      },
+      {
+        sessionId: 's2', name: 'Two', cwd: '/tmp', type: 'cli' as const,
+        hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+        createdAt: 2, conversationId: null, provider: 'claude-sdk', worktree: false,
+      },
+    ]
+
+    it('evicts paste blocks for the closed session so re-presenting the id starts clean', () => {
+      const destroySessionFn = vi.fn()
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: twoSessions,
+        activeSessionId: 's1',
+        destroySession: destroySessionFn,
+      }
+      const { rerender } = render(<App />)
+
+      // Paste oversized text into the composer of session s1 — this calls
+      // App.handleLargePaste which stashes a PastedTextBlock in
+      // `pastedTextBlocksRef.current` under key 's1' and renders a chip.
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          files: [],
+          items: [],
+          getData: (type: string) => (type === 'text/plain' ? bigText(30) : ''),
+        },
+      })
+      expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
+
+      // Confirm dialog returns true so handleCloseSession proceeds.
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      try {
+        // Click the close (×) button on s1's tab. SessionBar hides the close
+        // button when only one session remains, so we need ≥2 sessions for
+        // this to render at all.
+        const s1Tab = screen.getByTestId('session-tab-s1')
+        const closeBtn = within(s1Tab).getByTestId('tab-close')
+        fireEvent.click(closeBtn)
+      } finally {
+        confirmSpy.mockRestore()
+      }
+      expect(destroySessionFn).toHaveBeenCalledWith('s1')
+
+      // Simulate the store completing destruction: s1 is gone, s2 is active.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions.filter(s => s.sessionId !== 's1'),
+        activeSessionId: 's2',
+      }
+      rerender(<App />)
+      // Sanity: no chips for s2 (it never had a paste).
+      expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
+
+      // Now re-present a session with id 's1' (proxy for the dashboard
+      // rehydrating, or a new session that happened to receive the same
+      // id). If handleCloseSession had not cleaned up `pastedTextBlocksRef`,
+      // the stale block would re-appear here — exactly the memory-leak
+      // failure mode #3800 describes.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: twoSessions,
+        activeSessionId: 's1',
+      }
+      rerender(<App />)
+      expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
+    })
+
+    it('evicts paste blocks for the restarted session (handleRestartSession)', () => {
+      const destroySessionFn = vi.fn()
+      const createSessionFn = vi.fn()
+      // Single session with stdinForwardingDisabled so the StdinDisabledBanner
+      // renders and we can drive `handleRestartSession` via its restart button.
+      const wedged = [{
+        sessionId: 's1', name: 'Wedged', cwd: '/tmp', type: 'cli' as const,
+        hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+        createdAt: 1, conversationId: null, provider: 'claude-sdk',
+        worktree: false, stdinForwardingDisabled: true,
+      }]
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: wedged,
+        activeSessionId: 's1',
+        destroySession: destroySessionFn,
+        createSession: createSessionFn,
+      }
+      const { rerender } = render(<App />)
+
+      // Stage a collapsed paste in s1's composer.
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          files: [],
+          items: [],
+          getData: (type: string) => (type === 'text/plain' ? bigText(30) : ''),
+        },
+      })
+      expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
+
+      // Trigger restart via the banner's mocked button (captures handler at
+      // module top). handleRestartSession creates a replacement first then
+      // destroys the wedged one — both must run, but the relevant assertion
+      // here is the cleanup pass on the OLD sessionId.
+      fireEvent.click(screen.getByTestId('stdin-disabled-restart-button'))
+      expect(createSessionFn).toHaveBeenCalledTimes(1)
+      expect(destroySessionFn).toHaveBeenCalledWith('s1')
+
+      // Simulate the store completing the swap: old 's1' replaced by a fresh
+      // session 's1-restart', which becomes the new active. Switch away first
+      // so the activeSessionId-keyed useEffect that hydrates composer state
+      // fires when we come back to 's1', re-reading from refs.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: [{ ...wedged[0]!, sessionId: 's1-restart', name: 'Restarted', stdinForwardingDisabled: false }],
+        activeSessionId: 's1-restart',
+      }
+      rerender(<App />)
+      expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
+
+      // Now re-present a session whose id is the wedged-original 's1' — same
+      // failure-mode probe as the close test. If handleRestartSession had not
+      // evicted the per-session refs, this rehydration would resurrect the
+      // stale paste chip from `pastedTextBlocksRef`.
+      stateOverrides = {
+        ...stateOverrides,
+        sessions: [{ ...wedged[0]!, stdinForwardingDisabled: false }],
+        activeSessionId: 's1',
+      }
+      rerender(<App />)
+      expect(screen.queryByTestId('pasted-text-chips')).not.toBeInTheDocument()
     })
   })
 })
