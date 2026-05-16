@@ -382,3 +382,17 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+  scripts-tests:
+    name: Scripts Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Run bump-version.sh tests
+        run: bash scripts/__tests__/bump-version.test.sh
