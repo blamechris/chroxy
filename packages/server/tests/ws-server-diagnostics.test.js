@@ -244,25 +244,27 @@ describe('GET /diagnostics?logTailBytes=N (#3739)', () => {
     const port = await startAuthed()
     const body = await fetchDiag(port, '?logTailBytes=garbage')
     const def = await fetchDiag(port)
-    // Garbage param should behave identically to no param.
-    assert.equal(tailBytes(body), tailBytes(def),
-      'invalid param falls through to default behavior')
+    // Garbage param should behave identically to no param. Use a tight
+    // tolerance (not strict equality) since each fetch emits a few
+    // WsServer log lines that grow the underlying file between requests.
+    assert.ok(Math.abs(tailBytes(body) - tailBytes(def)) < 500,
+      `invalid param falls through to default behavior (got ${tailBytes(body)} vs ${tailBytes(def)})`)
   })
 
   it('falls back to default for negative ?logTailBytes=-1', async () => {
     const port = await startAuthed()
     const body = await fetchDiag(port, '?logTailBytes=-1')
     const def = await fetchDiag(port)
-    assert.equal(tailBytes(body), tailBytes(def),
-      'negative param falls through to default behavior')
+    assert.ok(Math.abs(tailBytes(body) - tailBytes(def)) < 500,
+      `negative param falls through to default behavior (got ${tailBytes(body)} vs ${tailBytes(def)})`)
   })
 
   it('falls back to default for zero ?logTailBytes=0', async () => {
     const port = await startAuthed()
     const body = await fetchDiag(port, '?logTailBytes=0')
     const def = await fetchDiag(port)
-    assert.equal(tailBytes(body), tailBytes(def),
-      'zero param falls through to default behavior')
+    assert.ok(Math.abs(tailBytes(body) - tailBytes(def)) < 500,
+      `zero param falls through to default behavior (got ${tailBytes(body)} vs ${tailBytes(def)})`)
   })
 
   it('truncates a fractional ?logTailBytes=1024.9 to an integer', async () => {

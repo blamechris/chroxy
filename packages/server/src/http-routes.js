@@ -81,8 +81,16 @@ function parseLogTailBytes(url) {
   if (!url) return null
   const qIdx = url.indexOf('?')
   if (qIdx === -1) return null
-  const params = new URLSearchParams(url.slice(qIdx + 1))
-  const raw = params.get('logTailBytes')
+  // Use `new URL` (already used elsewhere in this file for the dashboard
+  // route) with a throwaway base, since URLSearchParams as a bare global
+  // isn't in the server's ESLint env. We only need the searchParams view.
+  let parsed
+  try {
+    parsed = new URL(url, 'http://_diag.local')
+  } catch {
+    return null
+  }
+  const raw = parsed.searchParams.get('logTailBytes')
   if (raw == null || raw === '') return null
   const n = Number(raw)
   if (!Number.isFinite(n)) return null
