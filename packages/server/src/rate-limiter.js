@@ -68,6 +68,17 @@ const DEFAULT_BURST = 20           // burst allowance above max
 // source-IP rotation against HTTP limiters (no disconnect hook). 10k entries
 // is well above realistic concurrent-client counts but still cheap to hold.
 const DEFAULT_MAX_ENTRIES = 10_000
+// #3997: opportunistic stale-reap budget. On every check() we scan up to
+// this many existing entries (round-robin via a cursor across calls) and
+// drop any whose newest timestamp is older than windowMs. Bounded scan
+// keeps per-call cost O(1) so the map converges to the active-IP count
+// under sweep workloads instead of waiting for the FIFO cap. 8 keeps the
+// per-call overhead negligible; the cursor needs map.size / 8 calls to
+// touch every entry (≈1250 calls at the default 10000-entry cap, fewer
+// for smaller deployments). On a busy limiter that's seconds-to-minutes;
+// on a quiet one stale entries will simply wait their turn — they're
+// bounded by FIFO either way.
+const STALE_SCAN_BUDGET = 8
 
 export class RateLimiter {
   /**
@@ -93,6 +104,13 @@ export class RateLimiter {
       ? maxEntries
       : DEFAULT_MAX_ENTRIES
     this._clients = new Map() // clientId -> [timestamp, ...]
+    // #3997: round-robin cursor for the bounded stale-reap scan. Holds a
+    // live `Map.keys()` iterator; we pull up to STALE_SCAN_BUDGET keys from
+    // it on each check() and rebuild it when exhausted. Deleting the current
+    // key during iteration is safe (per spec, a deleted key is not
+    // revisited); newly-added keys appended after the cursor will be visited
+    // in a future call, which is exactly what we want.
+    this._scanCursor = null
   }
 
   /**
@@ -103,6 +121,14 @@ export class RateLimiter {
   check(clientId) {
     const now = Date.now()
     const windowStart = now - this._windowMs
+
+    // #3997: opportunistic bounded stale-reap. Sweep a small slice of
+    // existing entries (cursor-resumed across calls) and drop any whose
+    // newest timestamp has expired. Runs on every check() — including
+    // repeat calls from a hot client — so the map converges to the active
+    // set under any workload, not just new-IP inserts. Bounded scan keeps
+    // the per-call cost O(1) regardless of map size.
+    this._reapStaleEntries(windowStart, clientId)
 
     let timestamps = this._clients.get(clientId)
     if (!timestamps) {
@@ -135,6 +161,49 @@ export class RateLimiter {
   }
 
   /**
+   * #3997: opportunistically drop a small bounded slice of stale entries
+   * (those whose newest timestamp has fallen outside the window). Uses a
+   * persistent cursor so successive calls round-robin through the map
+   * instead of re-scanning the same prefix. Bounded by STALE_SCAN_BUDGET
+   * to keep the per-call cost O(1) regardless of map size.
+   *
+   * The caller's own key is preserved here even if it looks stale: the
+   * subsequent prune-then-push in check() will refresh its timestamp, and
+   * deleting + re-inserting would also disrupt the FIFO insertion-order
+   * the #3979 LRU eviction relies on.
+   *
+   * @param {number} windowStart - now - windowMs; entries whose newest
+   *   timestamp is <= windowStart are considered stale and removed.
+   * @param {string} callerKey - skip this key (the active client) so its
+   *   bucket is not deleted out from under the pending check().
+   * @private
+   */
+  _reapStaleEntries(windowStart, callerKey) {
+    let scanned = 0
+    while (scanned < STALE_SCAN_BUDGET && this._clients.size > 0) {
+      if (!this._scanCursor) {
+        this._scanCursor = this._clients.keys()
+      }
+      const next = this._scanCursor.next()
+      if (next.done) {
+        // Exhausted — restart on the next call so we keep walking the map
+        this._scanCursor = null
+        break
+      }
+      scanned++
+      const key = next.value
+      if (key === callerKey) continue
+      const ts = this._clients.get(key)
+      // Stale if the bucket is empty or its newest entry is outside the
+      // window. Checking the LAST element is O(1) and sufficient: timestamps
+      // are appended in order, so if the newest is expired the rest are too.
+      if (!ts || ts.length === 0 || ts[ts.length - 1] <= windowStart) {
+        this._clients.delete(key)
+      }
+    }
+  }
+
+  /**
    * Remove a client's tracking data (on disconnect).
    * @param {string} clientId
    */
@@ -147,5 +216,8 @@ export class RateLimiter {
    */
   clear() {
     this._clients.clear()
+    // Cursor points into the now-empty map; drop it so the next reap
+    // starts a fresh iterator over whatever the map holds at that point.
+    this._scanCursor = null
   }
 }

@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { RateLimiter, getClientIp, getRateLimitKey } from '../src/rate-limiter.js'
 
@@ -191,6 +191,165 @@ describe('RateLimiter bounded map (#3979)', () => {
   it('accepts a valid positive integer maxEntries override', () => {
     const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 60_000, maxEntries: 42 })
     assert.equal(limiter._maxEntries, 42)
+  })
+})
+
+describe('RateLimiter lazy stale-reap (#3997)', () => {
+  it('reaps stale entries opportunistically when a new client is inserted', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({ maxMessages: 5, burst: 0, windowMs: 1_000, maxEntries: 100 })
+      // Seed a stale client whose timestamps will all expire
+      limiter.check('stale-client')
+      assert.equal(limiter._clients.has('stale-client'), true)
+
+      // Fast-forward well past the window so stale-client's bucket is fully expired
+      mock.timers.tick(5_000)
+
+      // A check() for a DIFFERENT, brand-new client should opportunistically
+      // sweep stale-client out of the map without needing the FIFO cap.
+      limiter.check('fresh-client')
+      assert.equal(
+        limiter._clients.has('stale-client'),
+        false,
+        'stale-client should have been reaped on unrelated insert'
+      )
+      assert.equal(limiter._clients.has('fresh-client'), true)
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('does NOT reap clients whose timestamps are still inside the window', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({ maxMessages: 5, burst: 0, windowMs: 60_000, maxEntries: 100 })
+      limiter.check('warm-client')
+      assert.equal(limiter._clients.has('warm-client'), true)
+
+      // Advance only a little — warm-client's timestamps are still fresh
+      mock.timers.tick(1_000)
+
+      // Many unrelated inserts must not knock warm-client out
+      for (let i = 0; i < 20; i++) {
+        limiter.check(`unrelated-${i}`)
+      }
+
+      assert.equal(
+        limiter._clients.has('warm-client'),
+        true,
+        'warm-client must NOT be reaped while its bucket is still fresh'
+      )
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('keeps the caller bucket non-empty after a check that prunes it to []', () => {
+    // Edge case: caller's own bucket is found and pruned to empty. The
+    // existing flow then pushes `now` so the entry is non-empty; we should
+    // not accidentally drop it during the same call.
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 1_000 })
+      limiter.check('caller')
+      mock.timers.tick(5_000)
+      const result = limiter.check('caller') // prunes to [] then pushes now
+      assert.equal(result.allowed, true)
+      assert.equal(limiter._clients.has('caller'), true)
+      assert.equal(limiter._clients.get('caller').length, 1)
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('bounded scan: per-call cost stays O(1) (does not scan the whole map)', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      // Fill many stale entries — far more than any reasonable bounded scan.
+      const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 1_000, maxEntries: 5_000 })
+      for (let i = 0; i < 1_000; i++) {
+        limiter.check(`stale-${i}`)
+      }
+      assert.equal(limiter._clients.size, 1_000)
+
+      // Expire them all
+      mock.timers.tick(5_000)
+
+      // A single insert should reap *some* but not necessarily ALL — bounded.
+      const sizeBefore = limiter._clients.size
+      limiter.check('fresh-1')
+      const sizeAfter = limiter._clients.size
+
+      // We added 1 fresh entry, so net change = (added 1) - (reaped K).
+      // Bounded scan means K <= some small constant (the scan budget).
+      // Assert we reaped at least one, and at most far less than the full map.
+      const reaped = sizeBefore + 1 - sizeAfter
+      assert.ok(reaped >= 1, `expected at least one stale entry reaped, got ${reaped}`)
+      assert.ok(
+        reaped <= 64,
+        `bounded scan should reap <=64 per call, got ${reaped} (likely full O(N) scan)`
+      )
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('converges to active-IP count under sweep workload', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({ maxMessages: 1, burst: 0, windowMs: 1_000, maxEntries: 10_000 })
+
+      // Phase 1: a "sweep" that hits many unique IPs once each
+      for (let i = 0; i < 500; i++) {
+        limiter.check(`sweep-${i}`)
+      }
+      assert.equal(limiter._clients.size, 500)
+
+      // Phase 2: time passes, all sweep entries become stale
+      mock.timers.tick(5_000)
+
+      // Phase 3: sustained activity from a small, fresh active set should
+      // gradually evict the stale sweep entries via the bounded scan.
+      // After enough fresh inserts, map size should converge near the active
+      // set, not still hold 500 stale entries.
+      for (let i = 0; i < 500; i++) {
+        limiter.check(`active-${i % 10}`) // 10 active IPs, repeated
+      }
+
+      // Final state: at most ~10 active + a small residue of un-scanned
+      // stale entries. Strictly less than the original 500 stale + 10 active.
+      assert.ok(
+        limiter._clients.size < 100,
+        `map should converge near active-IP count, got ${limiter._clients.size} (stale entries not reaping)`
+      )
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('reaping does not interfere with rate-limit correctness', () => {
+    mock.timers.enable({ apis: ['Date'], now: 0 })
+    try {
+      const limiter = new RateLimiter({ maxMessages: 2, burst: 0, windowMs: 60_000, maxEntries: 100 })
+
+      // Fill some stale entries then expire
+      for (let i = 0; i < 50; i++) {
+        limiter.check(`old-${i}`)
+      }
+      mock.timers.tick(120_000)
+
+      // hot-client comes in fresh and hits the limit
+      assert.equal(limiter.check('hot').allowed, true)
+      assert.equal(limiter.check('hot').allowed, true)
+      assert.equal(limiter.check('hot').allowed, false, 'limit must still apply')
+
+      // Reaping during another insert should not reset hot's bucket
+      limiter.check('newcomer')
+      assert.equal(limiter.check('hot').allowed, false, 'hot bucket must persist across reap')
+    } finally {
+      mock.timers.reset()
+    }
   })
 })
 
