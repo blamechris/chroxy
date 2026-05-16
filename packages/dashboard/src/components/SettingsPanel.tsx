@@ -314,9 +314,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 The server reports this from the same checks <code>chroxy doctor</code> runs.
               </p>
               <ul className="auth-status-legend" aria-label="Color legend">
-                <li><span className="auth-status-swatch" data-tone="oauth" /> Subscription / login</li>
-                <li><span className="auth-status-swatch" data-tone="env" /> API key</li>
-                <li><span className="auth-status-swatch" data-tone="missing" /> Not configured</li>
+                <li><span className="auth-status-swatch" data-tone="oauth" aria-hidden="true" /> Subscription / login</li>
+                <li><span className="auth-status-swatch" data-tone="env" aria-hidden="true" /> API key</li>
+                <li><span className="auth-status-swatch" data-tone="missing" aria-hidden="true" /> Not configured</li>
+                <li><span className="auth-status-swatch" data-tone="none" aria-hidden="true" /> Custom provider</li>
               </ul>
               <ul className="auth-status-list">
                 {availableProviders.map(p => {
