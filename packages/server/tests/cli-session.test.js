@@ -832,3 +832,82 @@ describe('CliSession _skillsPrepended deferral (#3225)', () => {
     assert.ok(errors.length >= 1, 'sendMessage should have surfaced the EPIPE error')
   })
 })
+
+// ---------------------------------------------------------------------------
+// #3735: mid-turn auto-mode panic-button must kill the in-flight `claude -p`
+// process and respawn cleanly.
+//
+// PR #3730 changed BaseSession.setPermissionMode so that `'auto'` overrides
+// the `_isBusy` guard (panic-button semantics, #3729). For SdkSession this is
+// covered in sdk-session.test.js; for CliSession the cascade is different —
+// the override succeeds AND _killAndRespawn() runs, dropping the in-flight
+// turn. The PR description acknowledges this as "destructive but workable";
+// this test pins that destructive behavior so a future "skip respawn while
+// busy" defensive change can't silently regress the panic button.
+// ---------------------------------------------------------------------------
+describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
+  it('mid-turn flip to auto kills the in-flight process and respawns', () => {
+    const session = createReadySession({ permissionMode: 'approve' })
+    const oldChild = session._child
+
+    // Simulate the user being mid-turn: claude -p is running, _isBusy=true,
+    // a messageId+ctx are set, and the result timer is armed.
+    session._isBusy = true
+    session._currentMessageId = 'msg-abc-1'
+    session._currentCtx = { hasStreamStarted: true, didStreamText: true }
+    session._resultTimeout = setTimeout(() => {}, 100000)
+    session._hardTimeout = setTimeout(() => {}, 100000)
+
+    // Stub start() so we don't actually spawn a real claude process after kill.
+    let startCalled = 0
+    session.start = () => { startCalled++ }
+
+    // Panic-button: flip to auto while busy. BaseSession.setPermissionMode
+    // lets 'auto' through despite _isBusy=true, so CliSession should call
+    // _killAndRespawn().
+    session.setPermissionMode('auto')
+
+    // permissionMode flipped (BaseSession override applied).
+    assert.equal(session.permissionMode, 'auto')
+    // _killAndRespawn ran: respawning flag set, child detached, SIGTERM sent.
+    assert.equal(session._respawning, true)
+    assert.equal(session._processReady, false)
+    assert.equal(session._child, null, 'old child detached during respawn')
+    assert.equal(oldChild.kill.mock.calls.length, 1, 'SIGTERM sent to in-flight process')
+    assert.equal(oldChild.kill.mock.calls[0].arguments[0], 'SIGTERM')
+
+    // start() is deferred until the old child's 'close' event fires.
+    assert.equal(startCalled, 0, 'start() waits for old child to close')
+
+    // Simulate the killed claude process exiting — respawn should fire.
+    oldChild.emit('close', 143) // 128 + SIGTERM(15)
+
+    assert.equal(startCalled, 1, 'respawn calls start() once after old child closes')
+    assert.equal(session._respawning, false, 'respawning flag cleared after restart')
+    assert.equal(session._respawnCount, 0, 'respawnCount reset so backoff is fresh')
+    assert.equal(session._destroying, false, 'session is NOT destroyed — only the turn died')
+  })
+
+  it('non-auto mode flip while busy is a no-op (does NOT kill the process)', () => {
+    // Complement to the panic-button test: prove that the destructive
+    // behavior is gated specifically on 'auto'. Flipping to 'plan' or
+    // 'acceptEdits' mid-turn must still be rejected by the busy guard so
+    // semantics don't change partway through a turn.
+    const session = createReadySession({ permissionMode: 'approve' })
+    const oldChild = session._child
+    session._isBusy = true
+
+    let startCalled = 0
+    session.start = () => { startCalled++ }
+
+    session.setPermissionMode('plan')
+
+    assert.equal(session.permissionMode, 'approve', 'plan flip rejected mid-turn')
+    assert.equal(oldChild.kill.mock.calls.length, 0, 'no kill on rejected flip')
+    assert.equal(startCalled, 0, 'no respawn on rejected flip')
+    assert.equal(session._respawning, false)
+
+    // Cleanup _child reference so afterEach doesn't dangle.
+    session._isBusy = false
+  })
+})
