@@ -70,7 +70,9 @@ Always include the first two. Add more from the extended roster based on the tar
 2. If SCOUT_COUNT >= 3 and DEPTH != quick: add Bloodhound
 3. If SCOUT_COUNT >= 4: add Scribe
 4. If SCOUT_COUNT >= 5 OR target is a specific area: add Native
-5. Clamp to SCOUT_COUNT
+5. If target involves the mobile app (e.g., `packages/app`) or Expo SDK: add Expo Expert
+6. If target involves Cloudflare tunnels, WebSocket proxying, or DNS/TLS: add Tunneler
+7. Clamp to SCOUT_COUNT
 ```
 
 State the selected panel to the user **before** launching.
