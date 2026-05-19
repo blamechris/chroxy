@@ -55,7 +55,7 @@ All hunters share the same job (find bugs) but bring different lenses. Always in
 | Hunter | Nickname | Lens | Personality |
 |--------|----------|------|-------------|
 | Logic | "Skeptic" | Logic errors, false assumptions, off-by-one, wrong operators, claims in comments that diverge from code | Cynical engineer who reads every line assuming it lies. Cross-references comments and docstrings against actual behavior. |
-| Reliability | "Guardian" | Race conditions, data integrity, persistence corruption, error handling gaps, recovery paths, lazy-init that overwrites state | Paranoid SRE who has watched production data disappear. Specifically hunts the class of bug where a fix silently destroys persisted state (e.g., default-then-save instead of load-then-merge). For Chroxy: WebSocket stale-socket bugs, tunnel reconnect storms, concurrent writes to session state. |
+| Reliability | "Guardian" | Race conditions, data integrity, persistence corruption, error handling gaps, recovery paths, lazy-init that overwrites state | Paranoid SRE who has watched production data disappear. Specifically hunts the class of bug where a fix silently destroys persisted state (e.g., default-then-save instead of load-then-merge). |
 | Edge Cases | "Tester" | Untested branches, boundary conditions (empty/null/max/zero/negative/unicode/concurrent), error paths, what happens when the happy path doesn't | QA engineer who believes every untested branch is a latent bug. Names specific inputs that would break each function. |
 
 #### Extended Roster (pick by relevance to target)
@@ -65,8 +65,8 @@ All hunters share the same job (find bugs) but bring different lenses. Always in
 | Security | "Adversary" | Injection, auth bypass, SSRF, path traversal, secret leakage, attack surface | Target touches auth, network code, user input, external APIs, file operations |
 | UX | "Operator" | User-facing regressions, broken error messages, accessibility, confusing states, broken links/buttons | Target touches UI, output formatting, user-facing strings, error flows |
 | Perf | "Profiler" | N+1 queries, accidental quadratic loops, missing indexes, unbounded growth, memory leaks, sync-in-async | Target touches data access, hot paths, request handling, large collections |
-| Mobile | "Expo Expert" | Expo SDK lifecycle, React Native constraints, OTA updates, dev client vs Expo Go, platform-specific edge cases | Target involves mobile app architecture, updates, or Expo-specific features |
-| Networking | "Tunneler" | Cloudflare tunnels, DNS, TLS, WebSocket proxying, network reliability, reconnect logic | Target involves tunnel configuration, connectivity, WebSocket protocol, or networking |
+| Expo Expert | "Expo Expert" | Expo SDK lifecycle, React Native constraints, OTA updates, dev client vs Expo Go | Target involves mobile app architecture, updates, or Expo-specific features |
+| Tunneler | "Tunneler" | Cloudflare tunnels, DNS, TLS, WebSocket proxying, network reliability | Target involves tunnel configuration, connectivity, or networking |
 
 #### Selection Algorithm
 
@@ -76,8 +76,8 @@ All hunters share the same job (find bugs) but bring different lenses. Always in
    - Adversary if target touches auth/network/input/external IO
    - Operator if target touches UI/output/user-facing strings
    - Profiler if target touches data/hot paths/large collections
-   - Expo Expert if target involves mobile app or Expo SDK
-   - Tunneler if target involves tunnels, WebSocket, or networking
+   - Expo Expert if target involves mobile app architecture, updates, or Expo-specific features
+   - Tunneler if target involves tunnel configuration, connectivity, or networking
 3. Stop when slots are full
 ```
 
@@ -311,4 +311,4 @@ Output a final summary:
 | "Review this PR before merge" | `/agentic-audit` |
 
 A typical pipeline: `/recon src/payments` → `/bug-hunt src/payments` → `/tackle-issues` on the newly-filed issues.
-<!-- skill-templates: bug-hunt a696a37 2026-05-18 -->
+<!-- skill-templates: bug-hunt 7f5fa28 2026-05-19 -->
