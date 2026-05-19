@@ -70,8 +70,8 @@ Always include the first two. Add more from the extended roster based on the tar
 2. If SCOUT_COUNT >= 3 and DEPTH != quick: add Bloodhound
 3. If SCOUT_COUNT >= 4: add Scribe
 4. If SCOUT_COUNT >= 5 OR target is a specific area: add Native
-5. If target involves mobile app or Expo features: add Expo Expert
-6. If target involves tunnels or networking: add Tunneler
+5. If target involves mobile app (packages/app): add Expo Expert
+6. If target involves tunnel/networking: add Tunneler
 7. Clamp to SCOUT_COUNT
 ```
 
@@ -273,5 +273,6 @@ Output a concise summary:
 /recon "the websocket protocol" scouts=4 depth=deep
 /recon scouts=2 depth=quick output=-    # print-only quick sweep
 /recon . scouts=5                       # full panel including Native + Scribe
+/recon packages/app scouts=4            # mobile app with Expo Expert
 ```
-<!-- skill-templates: recon a696a37 2026-05-18 -->
+<!-- skill-templates: recon d4d2115 2026-05-18 -->
