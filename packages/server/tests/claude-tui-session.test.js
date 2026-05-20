@@ -493,12 +493,16 @@ describe('ClaudeTuiSession', () => {
       session.on('error', () => {})
 
       // Shrink the probe budget to keep the test fast — same code path.
-      const origMax = ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS
+      // Capture the original descriptor (a static getter) and restore it
+      // verbatim. A naive { value: origMax } restore would replace the
+      // getter with a data property, permanently mutating the class shape
+      // for the rest of the process and silently breaking later tests.
+      const origDesc = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS')
       Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', { value: 80, configurable: true })
       try {
         await session.sendMessage('hello')
       } finally {
-        Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', { value: origMax, configurable: true })
+        Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', origDesc)
       }
 
       assert.equal(wrote, true, 'probe miss does not block the write')
