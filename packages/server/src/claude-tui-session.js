@@ -237,6 +237,23 @@ export class ClaudeTuiSession extends BaseSession {
   static get PTY_TAIL_BYTES() { return 4096 }
   static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
 
+  // Glyph the TUI prints to mark its input prompt. The readiness probe
+  // looks for this in the trailing bytes of _outputTail; when it appears
+  // near the end of the buffer the TUI is sitting at the prompt waiting
+  // for a keypress, which is the only state where writing bytes is safe.
+  static get PROMPT_GLYPH() { return '❯ ' }   // ❯ followed by space
+  // Only scan the trailing slice of _outputTail when checking for the
+  // prompt — the glyph from an earlier turn will still be in the buffer
+  // for a while, but it tells us nothing about *current* readiness.
+  static get PROMPT_TAIL_WINDOW_BYTES() { return 256 }
+  // Upper bounds on how long we'll wait for the prompt before falling
+  // through (and writing anyway, with a warn). Spawn warmup is generous
+  // because cold claude can take >5s on a fresh keychain unlock; per-turn
+  // is short because between-turn rendering is fast unless something is
+  // already broken.
+  static get SPAWN_WARMUP_MAX_MS() { return 15_000 }
+  static get TURN_PROMPT_WAIT_MAX_MS() { return 5_000 }
+
   get sessionId() {
     return this._sessionId
   }
@@ -380,12 +397,43 @@ export class ClaudeTuiSession extends BaseSession {
       }
     })
 
-    // Wait for TUI to render + accept input. One-time warmup cost; the
-    // whole point of the persistent-PTY refactor is to pay this once at
-    // session start instead of on every sendMessage().
-    // TODO(post-MVP): detect readiness by watching for "❯ " in pty output.
-    const WARMUP_MS = 3500
-    await new Promise((r) => setTimeout(r, WARMUP_MS))
+    // Wait for the TUI to render its input prompt before returning. The
+    // prior implementation used a hardcoded 3.5s sleep, which silently
+    // failed when claude took longer to come up — the first sendMessage
+    // would write bytes into a non-prompt buffer and the turn would stall
+    // indefinitely (#4014; same root-cause class as #4010). The probe
+    // watches _outputTail for the "❯ " glyph; on miss we still proceed so
+    // a tail-encoding edge case can't permanently brick the session.
+    const ready = await this._waitForPrompt(ClaudeTuiSession.SPAWN_WARMUP_MAX_MS)
+    if (!ready && !this._ptyExited) {
+      log.warn(`TUI prompt glyph not seen within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms — proceeding (first sendMessage may stall)`)
+    }
+  }
+
+  /**
+   * Resolve `true` when the TUI input prompt is rendered, `false` on
+   * timeout or PTY exit. The probe scans only the trailing
+   * PROMPT_TAIL_WINDOW_BYTES of _outputTail: an older prompt glyph from
+   * an earlier turn will still be in the buffer for a while but says
+   * nothing about *current* readiness — when the TUI is mid-render the
+   * recent bytes are response/animation frames, not the prompt.
+   *
+   * Used by _spawnPty (one-time, generous timeout) and sendMessage
+   * (per-turn, short timeout). The per-turn call closes the
+   * between-turn race that produced #4014 — Stop hook fires before the
+   * TUI re-renders its input box, and the next prompt's bytes arrive
+   * during that transient render and get dropped.
+   */
+  async _waitForPrompt(timeoutMs) {
+    const glyph = ClaudeTuiSession.PROMPT_GLYPH
+    const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
+    const start = Date.now()
+    while (Date.now() - start < timeoutMs) {
+      if (this._ptyExited) return false
+      if (this._outputTail.slice(-windowBytes).includes(glyph)) return true
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return this._outputTail.slice(-windowBytes).includes(glyph)
   }
 
   async sendMessage(prompt, _attachments, _options = {}) {
@@ -415,6 +463,25 @@ export class ClaudeTuiSession extends BaseSession {
     // even though _isBusy=true, so the Send button doesn't toggle to Stop
     // and the user has no UI escape hatch from a stuck session.
     this.emit('stream_start', { messageId })
+
+    // #4014: wait for the TUI to be at its input prompt before writing.
+    // Between turns the TUI re-renders "❯ " after Stop hook fires, and
+    // if our bytes arrive during that transient render they get dropped
+    // and the turn stalls indefinitely. On the first turn this also
+    // catches the case where _spawnPty's warmup window expired without
+    // ever seeing the glyph. We still write if the probe misses — the
+    // glyph might be encoded unexpectedly on some terminals and we'd
+    // rather risk a stall than refuse to deliver any prompt.
+    const ready = await this._waitForPrompt(ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS)
+    if (!ready && !this._ptyExited) {
+      log.warn(`TUI not at prompt before turn (msg=${messageId}) — writing anyway`)
+    }
+    if (this._ptyExited) {
+      const code = this._ptyExitInfo?.exitCode
+      const signal = this._ptyExitInfo?.signal
+      this._finishTurnError(`Claude PTY exited before prompt write (code=${code}${signal ? ` signal=${signal}` : ''})`, messageId)
+      return
+    }
 
     try {
       this._term.write(prompt + '\r')
