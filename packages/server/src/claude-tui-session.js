@@ -419,7 +419,7 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       this._term.write(prompt + '\r')
     } catch (err) {
-      this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`)
+      this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
       return
     }
 
@@ -509,7 +509,7 @@ export class ClaudeTuiSession extends BaseSession {
         reason = `Stop hook timeout after ${Math.round((Date.now() - pollStart) / 1000)}s`
       }
       const tail = this._outputTailDiagnostic()
-      this._finishTurnError(tail ? `${reason}\nTUI output tail:\n${tail}` : reason)
+      this._finishTurnError(tail ? `${reason}\nTUI output tail:\n${tail}` : reason, messageId)
       return
     }
 
@@ -609,14 +609,21 @@ export class ClaudeTuiSession extends BaseSession {
     })
   }
 
-  _finishTurnError(message) {
+  _finishTurnError(message, callerMessageId) {
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     // #4010: balance the early stream_start with stream_end + result so the
     // dashboard's busy state clears (event-normalizer.js:215 synthesizes
     // agent_idle from result). Without this, an aborted/failed TUI turn
     // leaves the Send button toggled to Stop indefinitely.
-    const messageId = this._currentMessageId
+    //
+    // Prefer the caller-supplied messageId so a PTY-exit-mid-turn race
+    // (onExit nulls _currentMessageId before the poll loop falls through
+    // to here) still pairs stream_end with the stream_start we opened.
+    // Without that fallback, the if(messageId) guard would silently skip
+    // stream_end, leaving session-message-history._pendingStreams holding
+    // the entry until destroy().
+    const messageId = callerMessageId || this._currentMessageId
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
     if (messageId) this.emit('stream_end', { messageId })
     this.emit('error', { message })

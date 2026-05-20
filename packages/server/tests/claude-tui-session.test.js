@@ -348,6 +348,41 @@ describe('ClaudeTuiSession', () => {
       assert.ok(types.includes('result'), 'result emitted → agent_idle clears busy state')
       assert.equal(session._isBusy, false, 'busy flag cleared')
     })
+
+    it('pairs stream_end with stream_start when PTY exits mid-turn (review follow-up)', async () => {
+      // PTY-exit-mid-turn race: the onExit handler runs synchronously and
+      // nulls _currentMessageId + _activeTurn BEFORE the poll loop notices
+      // _ptyExited=true and falls into _finishTurnError. Without the
+      // callerMessageId fallback, the if(messageId) guard would silently
+      // skip stream_end, leaving the stream_start opened at turn-start
+      // unbalanced and session-message-history._pendingStreams holding the
+      // entry until destroy(). Simulate the race directly by calling
+      // _finishTurnError after the onExit-style clear, with the original
+      // messageId passed as the second arg (matching sendMessage's call).
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sessionId = 'sess-pty-exit'
+      // Simulate state AFTER onExit handler has nulled everything.
+      session._isBusy = false
+      session._currentMessageId = null
+      session._activeTurn = null
+      session._ptyExited = true
+      session._ptyExitInfo = { exitCode: 137, signal: 'SIGKILL' }
+
+      const events = []
+      session.on('stream_end', (e) => events.push(['stream_end', e.messageId]))
+      session.on('error', (e) => events.push(['error', e.message]))
+      session.on('result', (e) => events.push(['result', e.sessionId]))
+
+      // sendMessage passes the local messageId from the top of the function
+      // as the second arg precisely to survive this race.
+      session._finishTurnError('Claude PTY exited mid-turn (code=137 signal=SIGKILL)', 'msg-pty-race')
+
+      const streamEnd = events.find(([t]) => t === 'stream_end')
+      assert.ok(streamEnd, 'stream_end fires even after onExit nulled _currentMessageId')
+      assert.equal(streamEnd[1], 'msg-pty-race', 'stream_end carries the original messageId so it pairs with the early stream_start')
+      assert.ok(events.find(([t]) => t === 'error'), 'error emitted')
+      assert.ok(events.find(([t]) => t === 'result'), 'result emitted → agent_idle')
+    })
   })
 
   describe('destroy()', () => {
