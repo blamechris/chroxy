@@ -160,7 +160,11 @@ export class ClaudeTuiSession extends BaseSession {
       permissions: true,
       inProcessPermissions: false,
       modelSwitch: false,
-      permissionModeSwitch: false,
+      // #4013: TUI supports mid-session permission switch via a sidecar
+      // file the hook script re-reads on every tool call. No PTY restart
+      // (which would lose the resumed conversation context), unlike
+      // CliSession's restart-based setPermissionMode.
+      permissionModeSwitch: true,
       planMode: false,
       resume: false,
       terminal: false,
@@ -221,6 +225,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._sinkDir = null     // created on start, removed on destroy
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
+    // #4013: sidecar file containing the current permission mode. The
+    // hook script re-reads it on every tool call so setPermissionMode()
+    // can take effect without restarting the PTY (which would lose the
+    // resumed conversation context).
+    this._permissionModeFile = null
     this._consumedFiles = new Set()  // hook payload filenames already processed
     this._activeTurn = null  // { messageId, startedAt, aborted, synthSeq }
     this._ptyExited = false
@@ -279,6 +288,16 @@ export class ClaudeTuiSession extends BaseSession {
     const permissionsEnabled = !!(this._port && this._hookSecret)
     this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled })
 
+    // #4013: write the initial permission mode to a sidecar file so the
+    // hook script can pick up mid-session changes (env vars on the
+    // running PTY can't be mutated from outside). The file is the source
+    // of truth once start() returns; the CHROXY_PERMISSION_MODE env var
+    // only matters as a fallback when the file is unreadable.
+    if (permissionsEnabled) {
+      this._permissionModeFile = join(this._sinkDir, 'permission-mode')
+      writeFileSync(this._permissionModeFile, this.permissionMode || 'approve')
+    }
+
     // Spawn node-pty + wait for TUI warmup. Extracted so tests can stub
     // the prototype method instead of mocking node-pty at the module level.
     await this._spawnPty(permissionsEnabled)
@@ -323,6 +342,12 @@ export class ClaudeTuiSession extends BaseSession {
       env.CHROXY_PORT = String(this._port)
       env.CHROXY_HOOK_SECRET = this._hookSecret
       env.CHROXY_PERMISSION_MODE = this.permissionMode || 'approve'
+      // #4013: hook reads sidecar first (per-tool-call, picks up
+      // mid-session changes from setPermissionMode), falls back to the
+      // env var above when the file is missing/unreadable.
+      if (this._permissionModeFile) {
+        env.CHROXY_PERMISSION_MODE_FILE = this._permissionModeFile
+      }
     }
 
     const args = [
@@ -789,6 +814,31 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #4013: mid-session permission switch. Unlike CliSession, the TUI
+   * does NOT restart its PTY on mode change — env vars on a running
+   * process can't be mutated from outside, so we write the new mode to
+   * a sidecar file the hook script re-reads on every tool call. The
+   * persistent conversation context survives the change. Takes effect
+   * on the next tool-call boundary; an in-flight tool that already
+   * routed to /permission is unaffected.
+   */
+  setPermissionMode(mode) {
+    if (!super.setPermissionMode(mode)) return
+    if (!this._permissionModeFile) {
+      // Permissions weren't enabled at start (no port). Mode was
+      // updated on `this.permissionMode` by super; nothing else to do.
+      log.info(`Permission mode changed to ${mode} (no sidecar — hook script not active)`)
+      return
+    }
+    try {
+      writeFileSync(this._permissionModeFile, mode)
+      log.info(`Permission mode changed to ${mode} (sidecar updated, no PTY restart)`)
+    } catch (err) {
+      log.warn(`failed to write permission-mode sidecar (${err.message}) — next tool call will use stale env var`)
+    }
+  }
+
+  /**
    * Abort the current turn. Sends SIGINT to the persistent PTY — claude's
    * TUI treats Ctrl-C as "cancel current request, return to input prompt"
    * (NOT as a process kill), so the session stays alive and the next
@@ -825,6 +875,9 @@ export class ClaudeTuiSession extends BaseSession {
       catch (err) { log.warn(`sink dir cleanup failed: ${err.message}`) }
       this._sinkDir = null
     }
+    // Sidecar file lived inside _sinkDir which we just removed — clear
+    // the reference so setPermissionMode() after destroy() no-ops cleanly.
+    this._permissionModeFile = null
     this._consumedFiles.clear()
     this._clearMessageState()
   }
