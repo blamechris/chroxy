@@ -482,6 +482,16 @@ export class ClaudeTuiSession extends BaseSession {
       this._finishTurnError(`Claude PTY exited before prompt write (code=${code}${signal ? ` signal=${signal}` : ''})`, messageId)
       return
     }
+    // If the user clicked Stop during the probe wait, interrupt() has
+    // already written Ctrl-C to the PTY and marked the turn aborted.
+    // Writing the prompt now would queue it behind the cancel and either
+    // execute against a half-reset TUI or silently desync busy state
+    // (server clears busy via _finishTurnError below, but the TUI might
+    // still process the bytes once it returns to prompt). Bail cleanly.
+    if (this._activeTurn?.aborted) {
+      this._finishTurnError('Turn aborted before prompt write', messageId)
+      return
+    }
 
     try {
       this._term.write(prompt + '\r')

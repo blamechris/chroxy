@@ -534,6 +534,53 @@ describe('ClaudeTuiSession', () => {
         `expected "exited before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
       assert.equal(session._isBusy, false, 'busy cleared after probe-time PTY death')
     })
+
+    it('sendMessage bails out via _finishTurnError when interrupt() fires during the probe wait', async () => {
+      // Race: user clicks Stop while the readiness probe is still polling.
+      // Without the abort guard, sendMessage would happily write the
+      // prompt after interrupt() has already sent Ctrl-C, queuing a turn
+      // behind the cancel and desynchronizing busy state with the TUI.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._outputTail = ''   // probe will keep polling
+      let promptWritten = false
+      session._term = {
+        write: (bytes) => {
+          // Track only the prompt write (Ctrl-C from interrupt() is a
+          // single 0x03 byte; the prompt is 'hello\r').
+          if (typeof bytes === 'string' && bytes.length > 1) promptWritten = true
+        },
+        kill: () => {},
+      }
+      session._hardTimeoutMs = 5000
+      session._resultTimeoutMs = 5000
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      // Fire interrupt() partway through the probe wait. _outputTail
+      // never gains the glyph, so the probe is still polling when this
+      // runs.
+      setTimeout(() => session.interrupt(), 40)
+
+      // Shrink the probe budget so the test doesn't wait 5s for the
+      // timeout fall-through.
+      const origDesc = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS')
+      Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', { value: 200, configurable: true })
+      try {
+        await session.sendMessage('hello')
+      } finally {
+        Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', origDesc)
+      }
+
+      assert.equal(promptWritten, false,
+        'prompt MUST NOT be written after interrupt() during probe wait')
+      assert.ok(errors.find((e) => /aborted before prompt write/.test(e.message)),
+        `expected "aborted before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      assert.equal(session._isBusy, false, 'busy cleared after probe-time abort')
+      assert.equal(session._activeTurn, null, 'active turn cleared after probe-time abort')
+    })
   })
 
   describe('destroy()', () => {
