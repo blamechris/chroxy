@@ -226,6 +226,130 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  describe('busy-signal lifecycle (#4010)', () => {
+    // The dashboard derives `agent_busy` from `stream_start` and `agent_idle`
+    // from `result` (event-normalizer.js). The TUI provider has to fire those
+    // two events on every exit path of every turn, or the Stop button gets
+    // stuck (busy without a way to abort) or never appears (silent stall).
+    // These tests pin the contract for both the success path and the failure
+    // paths so a future refactor cannot quietly drop one.
+
+    it('emits stream_start at turn start, not at completion', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      // Capture the write so we can assert stream_start fires BEFORE the
+      // PTY write (i.e. before we hand the turn to claude). Pre-#4010 the
+      // emit happened only after the Stop hook came back — for a stuck
+      // turn that never returned, agent_busy never fired and the user had
+      // no Stop button.
+      const events = []
+      session._term = {
+        write: () => { events.push('pty_write') },
+        kill: () => {},
+      }
+      session.on('stream_start', () => events.push('stream_start'))
+      // Catch the timeout 'error' so EventEmitter doesn't throw on it —
+      // the test only cares about the start-of-turn emit order.
+      session.on('error', () => {})
+      session._hardTimeoutMs = 25  // fail fast so the test doesn't hang
+      session._resultTimeoutMs = 5000
+
+      await session.sendMessage('hi')
+
+      const startIdx = events.indexOf('stream_start')
+      const writeIdx = events.indexOf('pty_write')
+      assert.ok(startIdx >= 0, 'stream_start fired at all')
+      assert.ok(writeIdx >= 0, 'pty write happened')
+      assert.ok(startIdx < writeIdx, `stream_start must precede pty write (got start=${startIdx}, write=${writeIdx})`)
+    })
+
+    it('emits exactly one stream_start per turn (no duplicate at completion)', async () => {
+      // Pre-#4010 the success path also emitted stream_start, so moving the
+      // early emit in without removing the late emit would render two
+      // assistant bubbles per turn. Drop a fake stop hook to force the
+      // success path and count emits.
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-uuid'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-busy-'))
+      session._term = {
+        write: () => {
+          // Drop a stop hook immediately so the poll loop completes.
+          writeFileSync(join(session._sinkDir, 'stop-fake.json'), JSON.stringify({
+            last_assistant_message: 'hello',
+          }))
+        },
+        kill: () => {},
+      }
+      let starts = 0, deltas = 0, ends = 0, results = 0
+      session.on('stream_start', () => starts++)
+      session.on('stream_delta', () => deltas++)
+      session.on('stream_end', () => ends++)
+      session.on('result', () => results++)
+
+      await session.sendMessage('hi')
+
+      assert.equal(starts, 1, 'stream_start fires once per turn')
+      assert.equal(deltas, 1, 'stream_delta fires once with the response')
+      assert.equal(ends, 1, 'stream_end fires once')
+      assert.equal(results, 1, 'result fires once → triggers agent_idle')
+    })
+
+    it('emits result on hard timeout so dashboard clears busy state', async () => {
+      // Without this, a stalled turn that trips the hard timeout would leave
+      // the dashboard showing Stop forever — stream_end alone only clears
+      // streamingMessageId, it does not flip isIdle back to true.
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-stall'
+      session._activeTurn = { messageId: 'msg-stall', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      session._sessionId = 'sess-stall'
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+      session.on('error', () => events.push('error'))
+      session.on('result', () => events.push('result'))
+
+      session._armResultTimeout()
+      await new Promise((r) => setTimeout(r, 60))
+
+      assert.ok(events.includes('stream_end'), 'stream_end emitted on timeout')
+      assert.ok(events.includes('result'), 'result emitted on timeout → agent_idle')
+      assert.equal(session._isBusy, false, 'busy state cleared')
+    })
+
+    it('emits result on _finishTurnError so aborted/failed turns clear busy', async () => {
+      // _finishTurnError is the common exit for prompt-write failures and
+      // poll-loop bailouts (aborted, pty-exit, stop-timeout). Each one must
+      // round-trip agent_busy → agent_idle.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = 'msg-fail'
+      session._activeTurn = { messageId: 'msg-fail', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      session._sessionId = 'sess-fail'
+
+      const events = []
+      session.on('stream_end', (e) => events.push(['stream_end', e.messageId]))
+      session.on('error', (e) => events.push(['error', e.message]))
+      session.on('result', (e) => events.push(['result', e.sessionId]))
+
+      session._finishTurnError('something broke')
+
+      const types = events.map(([t]) => t)
+      assert.ok(types.includes('stream_end'), 'stream_end emitted')
+      assert.ok(types.includes('error'), 'error emitted')
+      assert.ok(types.includes('result'), 'result emitted → agent_idle clears busy state')
+      assert.equal(session._isBusy, false, 'busy flag cleared')
+    })
+  })
+
   describe('destroy()', () => {
     it('kills the persistent PTY and clears state', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })

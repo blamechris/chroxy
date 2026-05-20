@@ -405,6 +405,17 @@ export class ClaudeTuiSession extends BaseSession {
     const startedAt = Date.now()
     this._activeTurn = { messageId, startedAt, aborted: false, synthSeq: 0 }
 
+    // #4010: fire stream_start the moment the turn begins, not after the
+    // Stop hook arrives. This is the only signal the dashboard has for
+    // `agent_busy` (event-normalizer.js:62-66 synthesizes it from
+    // stream_start). Pre-fix, stream_start was deferred until the response
+    // came back as one burst — fine on a normal 10-30s turn, but if the
+    // TUI stalls (claude not yet at the prompt when our bytes arrive),
+    // stream_start NEVER fires, the dashboard thinks the session is idle
+    // even though _isBusy=true, so the Send button doesn't toggle to Stop
+    // and the user has no UI escape hatch from a stuck session.
+    this.emit('stream_start', { messageId })
+
     try {
       this._term.write(prompt + '\r')
     } catch (err) {
@@ -507,7 +518,8 @@ export class ClaudeTuiSession extends BaseSession {
 
     // Deliver the response as a single stream burst so the dashboard renders
     // one assistant bubble (matches CliSession's event shape on Claude's side).
-    this.emit('stream_start', { messageId })
+    // stream_start was already emitted at turn start (#4010) — don't fire it
+    // again here or the dashboard creates two assistant bubbles for one turn.
     if (text) this.emit('stream_delta', { messageId, delta: text })
     this.emit('stream_end', { messageId })
 
@@ -600,7 +612,15 @@ export class ClaudeTuiSession extends BaseSession {
   _finishTurnError(message) {
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    // #4010: balance the early stream_start with stream_end + result so the
+    // dashboard's busy state clears (event-normalizer.js:215 synthesizes
+    // agent_idle from result). Without this, an aborted/failed TUI turn
+    // leaves the Send button toggled to Stop indefinitely.
+    const messageId = this._currentMessageId
+    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
+    if (messageId) this.emit('stream_end', { messageId })
     this.emit('error', { message })
+    this.emit('result', { cost: 0, duration, usage: null, sessionId: this._sessionId })
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
@@ -673,11 +693,15 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._term) {
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
+    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._hardTimeoutMs
     this.emit('stream_end', { messageId })
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
     this.emit('error', { message: `Response timed out after ${friendly}` })
+    // #4010: emit result so the dashboard receives agent_idle and clears
+    // the Stop button. stream_end on its own only clears streamingMessageId.
+    this.emit('result', { cost: 0, duration, usage: null, sessionId: this._sessionId })
   }
 
   /**
