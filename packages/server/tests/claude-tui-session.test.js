@@ -237,6 +237,10 @@ describe('ClaudeTuiSession', () => {
     it('emits stream_start at turn start, not at completion', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
+      // Pre-seed the prompt glyph so the #4014 readiness probe resolves
+      // immediately — the probe's per-turn budget would otherwise force
+      // every sendMessage test to wait the full TURN_PROMPT_WAIT_MAX_MS.
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
       // Capture the write so we can assert stream_start fires BEFORE the
       // PTY write (i.e. before we hand the turn to claude). Pre-#4010 the
       // emit happened only after the Stop hook came back — for a stuck
@@ -275,6 +279,9 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-uuid'
       session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-busy-'))
+      // Satisfy the #4014 readiness probe so we don't burn the full
+      // TURN_PROMPT_WAIT_MAX_MS budget on every assertion.
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
       session._term = {
         write: () => {
           // Drop a stop hook immediately so the poll loop completes.
@@ -382,6 +389,197 @@ describe('ClaudeTuiSession', () => {
       assert.equal(streamEnd[1], 'msg-pty-race', 'stream_end carries the original messageId so it pairs with the early stream_start')
       assert.ok(events.find(([t]) => t === 'error'), 'error emitted')
       assert.ok(events.find(([t]) => t === 'result'), 'result emitted → agent_idle')
+    })
+  })
+
+  describe('readiness probe (#4014)', () => {
+    // The probe replaces the hardcoded 3.5s warmup sleep. It scans the
+    // trailing slice of _outputTail for the "❯ " glyph that the TUI
+    // prints at its input prompt; until that glyph is visible, writing
+    // bytes to the PTY gets them dropped by whatever transient state the
+    // TUI is in (intro animation, response render, between-turn refresh).
+    // Pre-probe, that race produced the #4014 turn-2-stall and the
+    // first-send-stall class behind #4010.
+
+    it('_waitForPrompt resolves true when glyph is in trailing window', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = 'some intro text\n' + ClaudeTuiSession.PROMPT_GLYPH
+      const ready = await session._waitForPrompt(100)
+      assert.equal(ready, true, 'glyph in last 256 bytes counts as ready')
+    })
+
+    it('_waitForPrompt resolves false when glyph is older than the trailing window', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      // Glyph at the head, then 300 bytes of non-glyph content pushes it
+      // outside the 256-byte trailing window — represents "the TUI was at
+      // a prompt earlier but is now mid-render of a tool result".
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH + 'X'.repeat(300)
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'an old glyph past the window does not count as ready')
+    })
+
+    it('_waitForPrompt returns false when PTY exited even if glyph is present', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._ptyExited = true
+      const ready = await session._waitForPrompt(100)
+      assert.equal(ready, false, 'PTY death overrides a stale prompt glyph')
+    })
+
+    it('_waitForPrompt polls until glyph appears, not just at start', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = 'no prompt yet'
+      setTimeout(() => {
+        session._outputTail = session._outputTail + '\n' + ClaudeTuiSession.PROMPT_GLYPH
+      }, 80)
+      const ready = await session._waitForPrompt(500)
+      assert.equal(ready, true, 'probe sees the glyph once it lands in the tail')
+    })
+
+    it('sendMessage waits for the prompt before writing to the PTY', async () => {
+      // The whole point of the probe — bytes must not hit the PTY until
+      // the input box is ready. We delay the glyph appearance and assert
+      // the write fires AFTER the delay, not before.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-probe-'))
+      session._outputTail = 'rendering...'   // no glyph yet
+      let writeAt = null
+      session._term = {
+        write: () => {
+          writeAt = Date.now()
+          writeFileSync(join(session._sinkDir, 'stop-x.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session._hardTimeoutMs = 5000
+      session._resultTimeoutMs = 5000
+      session.on('error', () => {})
+
+      const sendStart = Date.now()
+      const glyphAt = sendStart + 80
+      setTimeout(() => {
+        session._outputTail = session._outputTail + ClaudeTuiSession.PROMPT_GLYPH
+      }, 80)
+
+      await session.sendMessage('hello')
+
+      assert.ok(writeAt, 'PTY write happened')
+      assert.ok(writeAt >= glyphAt - 20,
+        `PTY write must wait for prompt glyph (write@${writeAt - sendStart}ms, glyph@${glyphAt - sendStart}ms)`)
+    })
+
+    it('sendMessage falls through and writes anyway on probe timeout', async () => {
+      // A timeout is logged but never blocks the write — if our heuristic
+      // is wrong on some terminal encoding we'd rather risk a stall than
+      // silently swallow every prompt the user types.
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        hardTimeoutMs: 5000, resultTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-probe-to-'))
+      session._outputTail = ''   // no glyph, will stay absent
+      let wrote = false
+      session._term = {
+        write: () => {
+          wrote = true
+          writeFileSync(join(session._sinkDir, 'stop-y.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      // Shrink the probe budget to keep the test fast — same code path.
+      // Capture the original descriptor (a static getter) and restore it
+      // verbatim. A naive { value: origMax } restore would replace the
+      // getter with a data property, permanently mutating the class shape
+      // for the rest of the process and silently breaking later tests.
+      const origDesc = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS')
+      Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', { value: 80, configurable: true })
+      try {
+        await session.sendMessage('hello')
+      } finally {
+        Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', origDesc)
+      }
+
+      assert.equal(wrote, true, 'probe miss does not block the write')
+    })
+
+    it('sendMessage routes to _finishTurnError when PTY dies during the probe wait', async () => {
+      // Edge case: probe is waiting, PTY exits, probe returns false. We
+      // must surface a clear error and clear busy — not silently fall
+      // through to a write on a dead PTY.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._outputTail = ''
+      session._term = { write: () => {}, kill: () => {} }
+      session._hardTimeoutMs = 5000
+      session._resultTimeoutMs = 5000
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      setTimeout(() => {
+        session._ptyExited = true
+        session._ptyExitInfo = { exitCode: 1, signal: null }
+      }, 40)
+
+      await session.sendMessage('hello')
+
+      assert.ok(errors.find((e) => /exited before prompt write/.test(e.message)),
+        `expected "exited before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      assert.equal(session._isBusy, false, 'busy cleared after probe-time PTY death')
+    })
+
+    it('sendMessage bails out via _finishTurnError when interrupt() fires during the probe wait', async () => {
+      // Race: user clicks Stop while the readiness probe is still polling.
+      // Without the abort guard, sendMessage would happily write the
+      // prompt after interrupt() has already sent Ctrl-C, queuing a turn
+      // behind the cancel and desynchronizing busy state with the TUI.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._outputTail = ''   // probe will keep polling
+      let promptWritten = false
+      session._term = {
+        write: (bytes) => {
+          // Track only the prompt write (Ctrl-C from interrupt() is a
+          // single 0x03 byte; the prompt is 'hello\r').
+          if (typeof bytes === 'string' && bytes.length > 1) promptWritten = true
+        },
+        kill: () => {},
+      }
+      session._hardTimeoutMs = 5000
+      session._resultTimeoutMs = 5000
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      // Fire interrupt() partway through the probe wait. _outputTail
+      // never gains the glyph, so the probe is still polling when this
+      // runs.
+      setTimeout(() => session.interrupt(), 40)
+
+      // Shrink the probe budget so the test doesn't wait 5s for the
+      // timeout fall-through.
+      const origDesc = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS')
+      Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', { value: 200, configurable: true })
+      try {
+        await session.sendMessage('hello')
+      } finally {
+        Object.defineProperty(ClaudeTuiSession, 'TURN_PROMPT_WAIT_MAX_MS', origDesc)
+      }
+
+      assert.equal(promptWritten, false,
+        'prompt MUST NOT be written after interrupt() during probe wait')
+      assert.ok(errors.find((e) => /aborted before prompt write/.test(e.message)),
+        `expected "aborted before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      assert.equal(session._isBusy, false, 'busy cleared after probe-time abort')
+      assert.equal(session._activeTurn, null, 'active turn cleared after probe-time abort')
     })
   })
 
