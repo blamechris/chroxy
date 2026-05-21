@@ -128,9 +128,17 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
 
 /**
  * Build the prompt suffix that names each materialized attachment so the
- * TUI agent knows where to find them. The format is deliberately
- * machine-readable-ish — claude is good at picking up "I attached these
- * files at these paths" structures and reaching for its Read tool.
+ * TUI agent knows where to find them.
+ *
+ * IMPORTANT (#4012 review follow-up): the suffix MUST be a SINGLE LINE
+ * with no embedded `\n`. The TUI's PTY input box treats every newline
+ * as Enter, so a multi-line suffix would prematurely submit on the
+ * first line and the remaining lines would either drop or fire as
+ * separate (malformed) turns. The same constraint is documented at
+ * claude-tui-session.js where the skills-prefix code routes around it
+ * via `--append-system-prompt` — we can't do that here because the
+ * attachment list is per-turn user content, not session-level system
+ * prompt. So: keep it one line, semicolon-separated.
  *
  * Empty input → empty string (caller appends, so an empty suffix
  * produces the original prompt unchanged).
@@ -140,13 +148,13 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
  */
 export function buildAttachmentsPromptSuffix(files) {
   if (!Array.isArray(files) || files.length === 0) return ''
-  const lines = ['', '[I attached the following file(s) for you to read:]']
-  for (const f of files) {
-    const sizeHint = formatBytes(f.size)
-    const parts = [f.path]
-    const meta = [f.name, f.mediaType, sizeHint].filter(Boolean).join(', ')
-    if (meta) parts.push(`(${meta})`)
-    lines.push(`- ${parts.join(' ')}`)
-  }
-  return lines.join('\n')
+  const items = files.map((f) => {
+    const meta = [f.name, f.mediaType, formatBytes(f.size)].filter(Boolean).join(', ')
+    return meta ? `${f.path} (${meta})` : f.path
+  })
+  // Single leading space so the suffix appends to whatever the user
+  // typed without a hard newline. The square-bracketed prefix and
+  // semicolon list keep the structure machine-recognisable for claude's
+  // tool-selection heuristics without leaning on linebreaks.
+  return ` [I attached the following file(s) for you to read: ${items.join('; ')}]`
 }

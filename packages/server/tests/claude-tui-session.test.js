@@ -630,6 +630,12 @@ describe('ClaudeTuiSession', () => {
       assert.ok(writtenToPty.includes('shot.png'), 'display name appears in suffix')
       // PTY writes always end with \r so claude interprets it as Enter.
       assert.ok(writtenToPty.endsWith('\r'), 'still terminated with carriage return')
+      // The whole-prompt MUST have exactly one trailing \r and no other
+      // line breaks — embedded \n would prematurely-submit the prompt
+      // mid-suffix and split the user's turn (#4012 review finding).
+      const body = writtenToPty.slice(0, -1)   // strip trailing \r
+      assert.ok(!body.includes('\n'), `no embedded LF in prompt body, got ${JSON.stringify(body)}`)
+      assert.ok(!body.includes('\r'), 'no embedded CR in prompt body either')
 
       // 2) File actually materialized on disk under the per-turn dir.
       const turnDir = join(sinkDir, 'attachments')

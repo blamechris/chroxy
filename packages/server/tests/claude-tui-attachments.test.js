@@ -127,13 +127,29 @@ describe('claude-tui-attachments', () => {
       assert.equal(buildAttachmentsPromptSuffix([]), '')
     })
 
+    it('contains NO embedded newlines — the TUI PTY treats \\n as Enter', () => {
+      // The whole reason this suffix is single-line — see the function
+      // docstring + the parallel comment in claude-tui-session.js where
+      // skills-prefix routes around the same PTY behaviour. If this
+      // assertion ever fails, the fix has regressed and turns will
+      // prematurely submit mid-suffix.
+      const files = [
+        { path: '/tmp/x/msg-1/att-1.png', name: 'a.png', mediaType: 'image/png', size: 100 },
+        { path: '/tmp/x/msg-1/att-2.txt', name: 'b.txt', mediaType: 'text/plain', size: 200 },
+        { path: '/tmp/x/msg-1/att-3.md', name: 'c.md', mediaType: 'text/markdown', size: 300 },
+      ]
+      const suffix = buildAttachmentsPromptSuffix(files)
+      assert.ok(!suffix.includes('\n'), `suffix must not contain LF, got ${JSON.stringify(suffix)}`)
+      assert.ok(!suffix.includes('\r'), 'suffix must not contain CR either')
+    })
+
     it('lists each file with its path and metadata', () => {
       const files = [
         { path: '/tmp/x/msg-1/att-1.png', name: 'screenshot.png', mediaType: 'image/png', size: 23456 },
         { path: '/tmp/x/msg-1/att-2.txt', name: 'notes.txt', mediaType: 'text/plain', size: 800 },
       ]
       const suffix = buildAttachmentsPromptSuffix(files)
-      assert.ok(suffix.startsWith('\n'), 'starts with a separator so it appends cleanly')
+      assert.ok(suffix.startsWith(' '), 'starts with a space so it appends cleanly to the user prompt')
       assert.match(suffix, /attached the following file\(s\)/)
       assert.match(suffix, /\/tmp\/x\/msg-1\/att-1\.png/)
       assert.match(suffix, /screenshot\.png/)
@@ -141,6 +157,8 @@ describe('claude-tui-attachments', () => {
       assert.match(suffix, /22\.9KB|23\.0KB/)   // 23456 / 1024 ≈ 22.9
       assert.match(suffix, /\/tmp\/x\/msg-1\/att-2\.txt/)
       assert.match(suffix, /800B/)
+      // Single-line list separator.
+      assert.match(suffix, /;/, 'multi-file list uses ; separator')
     })
 
     it('formats byte sizes in B / KB / MB', () => {
