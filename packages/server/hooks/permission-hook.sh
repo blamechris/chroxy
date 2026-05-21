@@ -25,7 +25,22 @@ fi
 
 PORT="$CHROXY_PORT"
 TOKEN="$CHROXY_HOOK_SECRET"
-PERM_MODE="${CHROXY_PERMISSION_MODE:-approve}"
+# Permission mode resolution order:
+#   1. CHROXY_PERMISSION_MODE_FILE — if set AND readable AND non-empty.
+#      ClaudeTuiSession writes this sidecar file when setPermissionMode()
+#      is called mid-session, since env vars on a running PTY can't be
+#      mutated from outside (#4013).
+#   2. CHROXY_PERMISSION_MODE env var — the value at session-spawn time.
+#      Used by CliSession (which restarts on mode change) and as the
+#      initial value for TUI sessions.
+#   3. "approve" — default if nothing else is set.
+PERM_MODE=""
+if [ -n "$CHROXY_PERMISSION_MODE_FILE" ] && [ -r "$CHROXY_PERMISSION_MODE_FILE" ]; then
+  PERM_MODE=$(tr -d '[:space:]' < "$CHROXY_PERMISSION_MODE_FILE" 2>/dev/null)
+fi
+if [ -z "$PERM_MODE" ]; then
+  PERM_MODE="${CHROXY_PERMISSION_MODE:-approve}"
+fi
 
 # Sanitize: PORT must be numeric
 case "$PORT" in

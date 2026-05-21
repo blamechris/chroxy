@@ -10,11 +10,16 @@ import { homedir } from 'os'
 import { resolve, relative, sep } from 'path'
 
 // -- Permission modes --
+// `description` is a short, plain-English sentence the dashboard
+// surfaces as a tooltip / inline hint (#4013). Keep terse — the picker
+// space is limited and screen readers re-narrate the whole string.
+// The auto-mode description deliberately names `--dangerously-skip-permissions`
+// so users searching for that Claude CLI flag find the chroxy equivalent.
 export const PERMISSION_MODES = [
-  { id: 'approve', label: 'Approve' },
-  { id: 'acceptEdits', label: 'Accept Edits' },
-  { id: 'auto', label: 'Auto (bypass)' },
-  { id: 'plan', label: 'Plan' },
+  { id: 'approve', label: 'Approve', description: 'Default. Every tool call gates on your approval in the dashboard or mobile app.' },
+  { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.' },
+  { id: 'auto', label: 'Auto (skip all prompts)', description: 'Auto-approve every tool call without prompting. Equivalent to `claude --dangerously-skip-permissions`.' },
+  { id: 'plan', label: 'Plan', description: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.' },
 ]
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
