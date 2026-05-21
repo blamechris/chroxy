@@ -47,11 +47,17 @@ const ANSI_STRIP = new RegExp(
 // lines. Used by the probe-timeout diagnostic so the actual TUI output
 // is visible — no more guessing whether the glyph was missing, mangled,
 // or just past the search window (#4031).
-function formatHexDump(s) {
+//
+// `maxBytes` caps the dump size; caller is expected to pass at least
+// PROMPT_TAIL_WINDOW_BYTES so the dump covers the full probe-scan
+// region. A smaller cap would hide bytes the probe actually checked,
+// defeating the diagnostic's purpose (review-caught regression: PR
+// originally hardcoded 256 internally while the probe widened to 1024).
+function formatHexDump(s, maxBytes) {
   if (typeof s !== 'string' || s.length === 0) return '<empty>'
   const buf = Buffer.from(s, 'utf8')
-  const max = 256                              // keep dump bounded for logs
-  const slice = buf.subarray(-Math.min(buf.length, max))
+  const cap = typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : buf.length
+  const slice = buf.subarray(-Math.min(buf.length, cap))
   const omitted = buf.length - slice.length
   const lines = []
   for (let i = 0; i < slice.length; i += 16) {
@@ -301,15 +307,40 @@ export class ClaudeTuiSession extends BaseSession {
   //   - "❯"    — same glyph without trailing space (cursor on top, some
   //              terminal widths render without the pad)
   //   - "> "   — ASCII fallback when the TUI detects a non-Unicode TERM
-  // The probe wins if ANY candidate is in the search window. We err
-  // toward more matches (false-positive "ready" is recoverable; false
-  // negative stalls the user) — see #4031 for the dogfood that proved
-  // a too-narrow candidate set was masking real readiness.
+  //
+  // All three are required to appear at line-start (preceded by '\n' or
+  // the very beginning of the search window) — without that anchor,
+  // "> " false-positives against markdown blockquotes in assistant
+  // output, and bare "❯" false-positives against any text that happens
+  // to use the glyph as a list bullet. The match is line-anchored to
+  // mean "the TUI just rendered an empty prompt line", which is what
+  // we actually care about (#4031, #4033).
   static get PROMPT_GLYPHS() { return ['❯ ', '❯', '> '] }
   // Backwards-compatibility shim — tests imported PROMPT_GLYPH prior to
   // #4031. Returns the primary candidate. New code should prefer the
   // PROMPT_GLYPHS list directly.
   static get PROMPT_GLYPH() { return this.PROMPT_GLYPHS[0] }
+
+  /**
+   * True iff `tail` contains any PROMPT_GLYPHS candidate at line-start
+   * (after a newline, or at the very start of the string). Used by the
+   * readiness probe + tests; extracted for clarity since the line-
+   * anchor logic isn't obvious from `.includes()` calls.
+   */
+  static promptGlyphAppearsIn(tail) {
+    if (typeof tail !== 'string' || tail.length === 0) return false
+    return this.PROMPT_GLYPHS.some((g) => {
+      const idx = tail.indexOf(g)
+      if (idx < 0) return false
+      // Walk through every occurrence; accept if any is at line-start.
+      let i = idx
+      while (i >= 0) {
+        if (i === 0 || tail[i - 1] === '\n') return true
+        i = tail.indexOf(g, i + 1)
+      }
+      return false
+    })
+  }
   // Window for the probe scan. Widened from 256 → 1024 in #4031 because
   // claude TUI's startup splash + redraw cycle is larger than the
   // original budget assumed, leading to probe misses on cold sessions.
@@ -541,10 +572,9 @@ export class ClaudeTuiSession extends BaseSession {
    * during that transient render and get dropped.
    */
   async _waitForPrompt(timeoutMs) {
-    const glyphs = ClaudeTuiSession.PROMPT_GLYPHS
     const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
     const start = Date.now()
-    const matches = (tail) => glyphs.some((g) => tail.includes(g))
+    const matches = (tail) => ClaudeTuiSession.promptGlyphAppearsIn(tail)
     while (Date.now() - start < timeoutMs) {
       if (this._ptyExited) return false
       if (matches(this._outputTail.slice(-windowBytes))) return true
@@ -563,7 +593,11 @@ export class ClaudeTuiSession extends BaseSession {
    * format without re-implementing it.
    */
   _outputTailHexDump() {
-    return formatHexDump(this._outputTail.slice(-ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES))
+    // Pass the window size so the dump covers the FULL region the probe
+    // scanned — anything less would hide bytes that may have caused the
+    // miss, defeating the diagnostic's purpose (#4031 review).
+    const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
+    return formatHexDump(this._outputTail.slice(-windowBytes), windowBytes)
   }
 
   async sendMessage(prompt, attachments, _options = {}) {

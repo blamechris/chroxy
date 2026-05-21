@@ -452,6 +452,38 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
+    it('_waitForPrompt rejects candidate glyphs mid-line (#4031 review)', async () => {
+      // The "> " candidate would false-positive against markdown
+      // blockquotes ("> some text") in assistant output, and bare "❯"
+      // false-positives against any text using it as a bullet ("- ❯
+      // important note"). The matcher is line-anchored to mean "the
+      // TUI just rendered an empty prompt line" — without that anchor,
+      // claude responses containing these glyphs would trigger a false
+      // ready and we'd write the next prompt mid-response.
+      const cases = [
+        '\nSome paragraph > with a blockquote-ish marker',
+        '\nLine one\nLine two with ❯ as a bullet in prose',
+        '\nMixed > and ❯ in narrative text\n',
+      ]
+      for (const tail of cases) {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._outputTail = tail
+        const ready = await session._waitForPrompt(50)
+        assert.equal(ready, false, `mid-line glyph must NOT count as ready, tail=${JSON.stringify(tail)}`)
+      }
+    })
+
+    it('_waitForPrompt accepts glyph at position 0 (no leading newline)', async () => {
+      // Edge case: glyph at the very start of the buffer (or start of
+      // the slice we scan). The line-anchor logic accepts position 0 as
+      // line-start, matching the natural intuition that "first char of
+      // the window" is at the start of a line.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = '❯ '
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, true, 'glyph at position 0 must trigger ready')
+    })
+
     it('_outputTailHexDump returns a readable hex+ascii dump for log lines (#4031)', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._outputTail = 'hello'
@@ -468,6 +500,37 @@ describe('ClaudeTuiSession', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._outputTail = ''
       assert.equal(session._outputTailHexDump(), '<empty>')
+    })
+
+    it('_outputTailHexDump covers the FULL probe-scan window (#4031 review)', () => {
+      // Regression test for a review-caught bug: the dump originally
+      // hardcoded a 256-byte cap while the probe scanned 1024 bytes, so
+      // a glyph in the [-1024, -257] range would be in the search
+      // window but hidden from the diagnostic. Assert that the dump
+      // size matches the window — if someone widens the window again
+      // without widening the dump, this fails.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
+      // Fill the tail with EXACTLY window-size content so the dump
+      // should report ALL of it (no truncation header).
+      session._outputTail = 'A'.repeat(windowBytes)
+      const dump = session._outputTailHexDump()
+      // Should report the full window size, not a smaller hardcoded cap.
+      assert.ok(dump.includes(`(${windowBytes} bytes)`),
+        `dump should report full window size ${windowBytes}, got header: ${dump.slice(0, 80)}`)
+    })
+
+    it('_outputTailHexDump never reports MORE bytes than the probe window scanned', () => {
+      // Honesty invariant: the dump should never claim to show bytes the
+      // probe didn't actually check. If _outputTail is huge but the
+      // probe only scans the trailing window, the dump must report
+      // window-many bytes, not the full tail.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
+      session._outputTail = 'X'.repeat(windowBytes * 3)   // way more than window
+      const dump = session._outputTailHexDump()
+      assert.ok(dump.includes(`(${windowBytes} bytes)`),
+        `dump should report exactly the window size, got header: ${dump.slice(0, 80)}`)
     })
 
     it('sendMessage waits for the prompt before writing to the PTY', async () => {
