@@ -19,6 +19,53 @@ const PERMISSION_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hoo
 
 const log = createLogger('claude-tui-session')
 
+// #4031: broaden ANSI strip beyond CSI to also handle the escape
+// categories that the claude TUI emits during startup + redraw:
+//
+//   CSI:                ESC [ <params> <final byte 0x40..0x7E>
+//   OSC:                ESC ] <data> ( BEL | ESC \ )    e.g. title set
+//   SS3:                ESC O <byte>                    e.g. function keys
+//   Bracketed paste:    ESC [ ? 2004 [hl]               handled by CSI re
+//   Single-char:        ESC = | ESC > | ESC c | ...     terminal-mode bytes
+//
+// The previous regex only covered CSI, so OSC title-sets / SS3 cursor
+// keys interleaved with the "❯ " glyph would survive the strip and
+// leave control bytes in _outputTail, breaking the substring match.
+// Strip them all so the saved tail is plain printable text only.
+const ANSI_STRIP = new RegExp(
+  [
+    '\\x1b\\[[0-9;?]*[\\x40-\\x7E]', // CSI
+    '\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)', // OSC ... BEL or ST
+    '\\x1bO.', // SS3
+    '\\x1b[=>cN]', // common single-char terminal-mode codes
+    '[\\x00-\\x08\\x0b-\\x1f\\x7f]', // stray C0 controls except \t and \n
+  ].join('|'),
+  'g',
+)
+
+// Render a byte buffer as a compact hex + ASCII dump suitable for log
+// lines. Used by the probe-timeout diagnostic so the actual TUI output
+// is visible — no more guessing whether the glyph was missing, mangled,
+// or just past the search window (#4031).
+function formatHexDump(s) {
+  if (typeof s !== 'string' || s.length === 0) return '<empty>'
+  const buf = Buffer.from(s, 'utf8')
+  const max = 256                              // keep dump bounded for logs
+  const slice = buf.subarray(-Math.min(buf.length, max))
+  const omitted = buf.length - slice.length
+  const lines = []
+  for (let i = 0; i < slice.length; i += 16) {
+    const chunk = slice.subarray(i, i + 16)
+    const hex = Array.from(chunk).map((b) => b.toString(16).padStart(2, '0')).join(' ')
+    const ascii = Array.from(chunk).map((b) => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.').join('')
+    lines.push(`${hex.padEnd(48)}  |${ascii}|`)
+  }
+  const header = omitted > 0
+    ? `(${slice.length} of ${buf.length} bytes; first ${omitted} omitted)`
+    : `(${slice.length} bytes)`
+  return `${header}\n${lines.join('\n')}`
+}
+
 const CLAUDE = resolveBinary('claude', [
   join(homedir(), '.local/bin/claude'),
   '/opt/homebrew/bin/claude',
@@ -247,15 +294,29 @@ export class ClaudeTuiSession extends BaseSession {
   static get PTY_TAIL_BYTES() { return 4096 }
   static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
 
-  // Glyph the TUI prints to mark its input prompt. The readiness probe
-  // looks for this in the trailing bytes of _outputTail; when it appears
-  // near the end of the buffer the TUI is sitting at the prompt waiting
-  // for a keypress, which is the only state where writing bytes is safe.
-  static get PROMPT_GLYPH() { return '❯ ' }   // ❯ followed by space
-  // Only scan the trailing slice of _outputTail when checking for the
-  // prompt — the glyph from an earlier turn will still be in the buffer
-  // for a while, but it tells us nothing about *current* readiness.
-  static get PROMPT_TAIL_WINDOW_BYTES() { return 256 }
+  // Glyphs the TUI may print to mark its input prompt. The original "❯ "
+  // (U+276F + space) was the only candidate before #4031; expanded to
+  // cover variants seen in different claude TUI builds and configs:
+  //   - "❯ "   — modern claude TUI, glyph followed by space
+  //   - "❯"    — same glyph without trailing space (cursor on top, some
+  //              terminal widths render without the pad)
+  //   - "> "   — ASCII fallback when the TUI detects a non-Unicode TERM
+  // The probe wins if ANY candidate is in the search window. We err
+  // toward more matches (false-positive "ready" is recoverable; false
+  // negative stalls the user) — see #4031 for the dogfood that proved
+  // a too-narrow candidate set was masking real readiness.
+  static get PROMPT_GLYPHS() { return ['❯ ', '❯', '> '] }
+  // Backwards-compatibility shim — tests imported PROMPT_GLYPH prior to
+  // #4031. Returns the primary candidate. New code should prefer the
+  // PROMPT_GLYPHS list directly.
+  static get PROMPT_GLYPH() { return this.PROMPT_GLYPHS[0] }
+  // Window for the probe scan. Widened from 256 → 1024 in #4031 because
+  // claude TUI's startup splash + redraw cycle is larger than the
+  // original budget assumed, leading to probe misses on cold sessions.
+  // The glyph from an earlier turn that's drifted past 1KB no longer
+  // counts as "current" — the same drift logic as before, just a more
+  // generous threshold.
+  static get PROMPT_TAIL_WINDOW_BYTES() { return 1024 }
   // Upper bounds on how long we'll wait for the prompt before falling
   // through (and writing anyway, with a warn). Spawn warmup is generous
   // because cold claude can take >5s on a fresh keychain unlock; per-turn
@@ -405,7 +466,10 @@ export class ClaudeTuiSession extends BaseSession {
       // the TUI renders an error inline (#3919). Strip ANSI escape
       // sequences before storing so the saved tail is readable; we
       // don't visual-render the PTY, so the colors aren't useful.
-      const stripped = String(data).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      // Strip pattern broadened in #4031 to cover OSC/SS3/single-char
+      // codes that the original CSI-only regex left behind — those
+      // interleaved with the "❯ " glyph and broke the readiness probe.
+      const stripped = String(data).replace(ANSI_STRIP, '')
       this._outputTail = (this._outputTail + stripped).slice(-ClaudeTuiSession.PTY_TAIL_BYTES)
     })
     this._term.onExit((info) => {
@@ -447,7 +511,14 @@ export class ClaudeTuiSession extends BaseSession {
     // a tail-encoding edge case can't permanently brick the session.
     const ready = await this._waitForPrompt(ClaudeTuiSession.SPAWN_WARMUP_MAX_MS)
     if (!ready && !this._ptyExited) {
-      log.warn(`TUI prompt glyph not seen within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms — proceeding (first sendMessage may stall)`)
+      // #4031: dump what claude actually wrote so we can tell whether
+      // the glyph is missing, in a different encoding, or just past
+      // the search window. Pre-fix this was a guess-and-rebuild loop;
+      // the dump turns it into one round-trip.
+      log.warn(
+        `TUI prompt glyph not seen within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms — proceeding (first sendMessage may stall)\n` +
+        `_outputTail dump:\n${this._outputTailHexDump()}`,
+      )
     }
   }
 
@@ -459,6 +530,10 @@ export class ClaudeTuiSession extends BaseSession {
    * nothing about *current* readiness — when the TUI is mid-render the
    * recent bytes are response/animation frames, not the prompt.
    *
+   * Tries each candidate in PROMPT_GLYPHS to handle TUI variants
+   * (modern unicode prompt, no-trailing-space cursor placement, ASCII
+   * fallback). Win if ANY candidate matches.
+   *
    * Used by _spawnPty (one-time, generous timeout) and sendMessage
    * (per-turn, short timeout). The per-turn call closes the
    * between-turn race that produced #4014 — Stop hook fires before the
@@ -466,15 +541,29 @@ export class ClaudeTuiSession extends BaseSession {
    * during that transient render and get dropped.
    */
   async _waitForPrompt(timeoutMs) {
-    const glyph = ClaudeTuiSession.PROMPT_GLYPH
+    const glyphs = ClaudeTuiSession.PROMPT_GLYPHS
     const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
     const start = Date.now()
+    const matches = (tail) => glyphs.some((g) => tail.includes(g))
     while (Date.now() - start < timeoutMs) {
       if (this._ptyExited) return false
-      if (this._outputTail.slice(-windowBytes).includes(glyph)) return true
+      if (matches(this._outputTail.slice(-windowBytes))) return true
       await new Promise((r) => setTimeout(r, 50))
     }
-    return this._outputTail.slice(-windowBytes).includes(glyph)
+    return matches(this._outputTail.slice(-windowBytes))
+  }
+
+  /**
+   * #4031: dump the trailing bytes of _outputTail as a hex+ASCII block
+   * for a log line. Called when the readiness probe times out so the
+   * actual TUI output is visible — saves a debugging round-trip where
+   * we'd otherwise have to guess whether the glyph was missing,
+   * mangled by an unstripped control byte, or just past the search
+   * window. Public-ish (single underscore) so tests can assert on the
+   * format without re-implementing it.
+   */
+  _outputTailHexDump() {
+    return formatHexDump(this._outputTail.slice(-ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES))
   }
 
   async sendMessage(prompt, attachments, _options = {}) {
@@ -547,7 +636,13 @@ export class ClaudeTuiSession extends BaseSession {
     // rather risk a stall than refuse to deliver any prompt.
     const ready = await this._waitForPrompt(ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS)
     if (!ready && !this._ptyExited) {
-      log.warn(`TUI not at prompt before turn (msg=${messageId}) — writing anyway`)
+      // #4031: dump the trailing tail so the next dogfood failure
+      // tells us WHY the probe missed (missing glyph, mangled bytes,
+      // glyph past window) instead of forcing a guess-and-rebuild loop.
+      log.warn(
+        `TUI not at prompt before turn (msg=${messageId}) — writing anyway\n` +
+        `_outputTail dump:\n${this._outputTailHexDump()}`,
+      )
     }
     if (this._ptyExited) {
       const code = this._ptyExitInfo?.exitCode

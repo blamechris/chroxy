@@ -410,10 +410,13 @@ describe('ClaudeTuiSession', () => {
 
     it('_waitForPrompt resolves false when glyph is older than the trailing window', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      // Glyph at the head, then 300 bytes of non-glyph content pushes it
-      // outside the 256-byte trailing window — represents "the TUI was at
-      // a prompt earlier but is now mid-render of a tool result".
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH + 'X'.repeat(300)
+      // Glyph at the head, then enough non-glyph content to push it
+      // outside the trailing window — represents "the TUI was at a
+      // prompt earlier but is now mid-render of a tool result". Pad
+      // length is derived from the constant so the test stays correct
+      // regardless of #4031's window widening.
+      const padLen = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES + 50
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH + 'X'.repeat(padLen)
       const ready = await session._waitForPrompt(50)
       assert.equal(ready, false, 'an old glyph past the window does not count as ready')
     })
@@ -434,6 +437,37 @@ describe('ClaudeTuiSession', () => {
       }, 80)
       const ready = await session._waitForPrompt(500)
       assert.equal(ready, true, 'probe sees the glyph once it lands in the tail')
+    })
+
+    it('_waitForPrompt accepts any candidate glyph from PROMPT_GLYPHS (#4031)', async () => {
+      // Pre-#4031 the probe only matched "❯ " (U+276F + space). Real TUI
+      // builds also use the bare "❯" (cursor pad ate the trailing space)
+      // and an ASCII "> " fallback when TERM doesn't grok Unicode. Any
+      // candidate must count.
+      for (const glyph of ClaudeTuiSession.PROMPT_GLYPHS) {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._outputTail = `intro text\n${glyph}`
+        const ready = await session._waitForPrompt(50)
+        assert.equal(ready, true, `glyph ${JSON.stringify(glyph)} must trigger ready=true`)
+      }
+    })
+
+    it('_outputTailHexDump returns a readable hex+ascii dump for log lines (#4031)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = 'hello'
+      const dump = session._outputTailHexDump()
+      // Header reports byte count.
+      assert.match(dump, /\(5 bytes\)/, `dump should report byte count, got: ${JSON.stringify(dump)}`)
+      // Hex side has the bytes for "hello" (68 65 6c 6c 6f).
+      assert.match(dump, /68 65 6c 6c 6f/, `hex side missing, got: ${JSON.stringify(dump)}`)
+      // ASCII side shows the printable chars wrapped in pipes.
+      assert.match(dump, /\|hello\|/, `ascii side missing, got: ${JSON.stringify(dump)}`)
+    })
+
+    it('_outputTailHexDump handles empty buffer', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._outputTail = ''
+      assert.equal(session._outputTailHexDump(), '<empty>')
     })
 
     it('sendMessage waits for the prompt before writing to the PTY', async () => {
