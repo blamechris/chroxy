@@ -44,6 +44,28 @@ const MEDIA_TYPE_EXTENSIONS = {
 // mediaType map or `.bin`.
 const SAFE_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/
 
+// #4023: extname() returns only the final extension, so `archive.tar.gz`
+// becomes `.gz` — claude's Read-tool hint loses the "this is a tarball"
+// signal. Explicit allowlist of common compound suffixes we care about
+// preserving. Each entry MUST also pass SAFE_EXTENSION when split on `.`
+// (no control chars / slashes / oversized parts), so the safety guarantee
+// for individual extension components is unchanged.
+const SAFE_COMPOUND_EXTENSIONS = new Set([
+  '.tar.gz',
+  '.tar.bz2',
+  '.tar.xz',
+  '.tar.zst',
+])
+
+// #4024: cap on the prompt suffix written to PTY. Path lengths under
+// /tmp/chroxy-claude-tui/s-<uuid>/attachments/<msgId>/att-N.<ext> are
+// typically ~150-200 bytes; 5 attachments * (~200 bytes path + ~100
+// bytes metadata) ≈ 1.5KB. We cap well above that so today's typical
+// case is always under-limit, but truncate explicitly rather than let
+// PTY canonical-mode silently chop the line at ~4KB and split the
+// user's prompt mid-suffix.
+const MAX_ATTACHMENT_SUFFIX_BYTES = 8 * 1024
+
 /**
  * Choose a file extension for an attachment. Prefer the original name's
  * extension when it exists AND is safe — the user picked it for a
@@ -53,12 +75,35 @@ const SAFE_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/
  * length) is treated the same as "no extension" and goes to the
  * fallback.
  *
+ * #4023: also detects common compound extensions (`.tar.gz`, `.tar.bz2`,
+ * etc.) and preserves them so the on-disk filename keeps the "this is
+ * a tarball" signal that bare `.gz` would lose. Lookup is case-
+ * insensitive to match real-world `.TAR.GZ` filenames.
+ *
  * @param {string} name
  * @param {string} mediaType
  * @returns {string} extension with leading dot; never empty (falls back to `.bin`)
  */
 function pickExtension(name, mediaType) {
   if (typeof name === 'string' && name.length > 0) {
+    // Compound-extension probe first — if `archive.tar.gz` matches we
+    // want `.tar.gz`, not the `.gz` that extname() returns. Lowercase
+    // the candidate for set lookup; preserve original case in the
+    // returned value so the on-disk filename matches what the user sent.
+    const lower = name.toLowerCase()
+    for (const compound of SAFE_COMPOUND_EXTENSIONS) {
+      if (lower.endsWith(compound)) {
+        // Snap the original-case suffix off the source name to preserve
+        // the user's capitalisation (e.g. .TAR.GZ stays .TAR.GZ).
+        const ext = name.slice(name.length - compound.length)
+        // Compound entries are validated when defined, but re-check the
+        // individual components anyway in case a future addition slips
+        // past review.
+        if (ext.split('.').slice(1).every((part) => SAFE_EXTENSION.test('.' + part))) {
+          return ext
+        }
+      }
+    }
     const fromName = extname(name)
     if (fromName && SAFE_EXTENSION.test(fromName)) return fromName
   }
@@ -178,5 +223,30 @@ export function buildAttachmentsPromptSuffix(files) {
   // typed without a hard newline. The square-bracketed prefix and
   // semicolon list keep the structure machine-recognisable for claude's
   // tool-selection heuristics without leaning on linebreaks.
-  return ` [I attached the following file(s) for you to read: ${items.join('; ')}]`
+  const fullSuffix = ` [I attached the following file(s) for you to read: ${items.join('; ')}]`
+  // #4024: cap the suffix so an unusually long path list (deterministic
+  // hash names, deeply-nested base dirs, future regressions) can't push
+  // the PTY input over canonical-mode's silent ~4KB truncation point.
+  // We drop trailing entries until the suffix fits, then mark the
+  // truncation so the agent (and a human reading the transcript)
+  // knows files were omitted.
+  if (Buffer.byteLength(fullSuffix, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
+    return fullSuffix
+  }
+  // Drop one entry at a time from the end, re-checking the rebuilt
+  // suffix each iteration. A more efficient binary search isn't worth
+  // the complexity for N≤5 in normal usage; even at N=20 this is fine.
+  const truncated = items.slice()
+  while (truncated.length > 0) {
+    const omitted = files.length - truncated.length
+    const candidate = ` [I attached the following file(s) for you to read: ${truncated.join('; ')}; ...and ${omitted} more file(s) omitted from this list due to size]`
+    if (Buffer.byteLength(candidate, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
+      return candidate
+    }
+    truncated.pop()
+  }
+  // Even the single-entry fallback didn't fit (one path > 8KB —
+  // pathological). Return the bare marker; the files are still on disk
+  // and the agent will at least know attachments were intended.
+  return ` [Attachment list omitted: ${files.length} file(s) exceeded the suffix size cap of ${MAX_ATTACHMENT_SUFFIX_BYTES}B]`
 }
