@@ -292,10 +292,19 @@ export class ClaudeTuiSession extends BaseSession {
     // hook script can pick up mid-session changes (env vars on the
     // running PTY can't be mutated from outside). The file is the source
     // of truth once start() returns; the CHROXY_PERMISSION_MODE env var
-    // only matters as a fallback when the file is unreadable.
+    // only matters as a fallback when the file is unreadable. If the
+    // initial write itself fails (disk full, permissions, etc.) we drop
+    // the sidecar and continue with env-var-only mode — losing the
+    // ability to hot-swap is acceptable; failing session start is not.
     if (permissionsEnabled) {
-      this._permissionModeFile = join(this._sinkDir, 'permission-mode')
-      writeFileSync(this._permissionModeFile, this.permissionMode || 'approve')
+      const sidecarPath = join(this._sinkDir, 'permission-mode')
+      try {
+        writeFileSync(sidecarPath, this.permissionMode || 'approve')
+        this._permissionModeFile = sidecarPath
+      } catch (err) {
+        log.warn(`initial permission-mode sidecar write failed (${err.message}) — falling back to env-var-only mode; mid-session permission switch will not take effect`)
+        this._permissionModeFile = null
+      }
     }
 
     // Spawn node-pty + wait for TUI warmup. Extracted so tests can stub
@@ -830,11 +839,25 @@ export class ClaudeTuiSession extends BaseSession {
       log.info(`Permission mode changed to ${mode} (no sidecar — hook script not active)`)
       return
     }
+    // Atomic update: write a tmp file then rename. Direct writeFileSync
+    // truncates-then-writes, so a concurrent hook read could observe an
+    // empty/partial value mid-write and fall through to the stale env
+    // var. rename(2) is atomic within the same filesystem, so readers
+    // either see the OLD complete value or the NEW complete value —
+    // never an empty/partial value.
+    const tmpPath = `${this._permissionModeFile}.tmp-${randomUUID()}`
     try {
-      writeFileSync(this._permissionModeFile, mode)
+      writeFileSync(tmpPath, mode)
+      renameSync(tmpPath, this._permissionModeFile)
       log.info(`Permission mode changed to ${mode} (sidecar updated, no PTY restart)`)
     } catch (err) {
-      log.warn(`failed to write permission-mode sidecar (${err.message}) — next tool call will use stale env var`)
+      // Best-effort cleanup of the tmp file if rename never landed.
+      try { rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
+      // Hook precedence is file → env var. If the rename failed the
+      // sidecar still holds the previous mode, so the next tool call
+      // reads the stale FILE value (not the env var). Be explicit so
+      // the operator isn't misled.
+      log.warn(`failed to write permission-mode sidecar (${err.message}) — next tool call will use the previously written mode from the sidecar file`)
     }
   }
 

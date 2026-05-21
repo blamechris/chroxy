@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
@@ -743,6 +743,56 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._permissionModeFile, null, 'sidecar path nulled')
       session.setPermissionMode('auto')
       assert.equal(session.permissionMode, 'auto')
+    })
+
+    it('setPermissionMode writes atomically (no truncated read window)', () => {
+      // The hook script reads the sidecar on every PreToolUse. A naive
+      // truncate-then-write would let a concurrent reader observe an
+      // empty/partial value. We verify the impl uses a tmp+rename dance
+      // by asserting the final file contents are complete and no .tmp
+      // siblings linger after the call.
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-perm-atomic-'))
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sinkDir = sinkDir
+      session._permissionModeFile = join(sinkDir, 'permission-mode')
+      writeFileSync(session._permissionModeFile, 'approve')
+      session.permissionMode = 'approve'
+      session._term = { write: () => {}, kill: () => {} }
+
+      session.setPermissionMode('acceptEdits')
+
+      assert.equal(readFileSync(session._permissionModeFile, 'utf8'), 'acceptEdits')
+      // No leftover .tmp-<uuid> siblings — rename either succeeded
+      // (sidecar replaced) or failed (tmp cleaned up in the catch).
+      const lingering = readdirSync(sinkDir).filter((f) => f.startsWith('permission-mode.tmp-'))
+      assert.deepEqual(lingering, [], 'no .tmp-* siblings remain after atomic update')
+      rmSync(sinkDir, { recursive: true, force: true })
+    })
+
+    it('setPermissionMode swallows sidecar write failures (instance state still updates)', () => {
+      // Production failure mode: disk fills mid-session, or a tmpdir
+      // remount changes permissions. setPermissionMode must NOT throw
+      // out to its caller (the WS handler) — the handler treats a throw
+      // as session-fatal. Verify both that:
+      //   (a) the call returns without throwing, and
+      //   (b) instance permissionMode still reflects the requested mode
+      //       (super.setPermissionMode updates state before the file
+      //       write, so the in-process bookkeeping is still consistent).
+      const sinkParent = mkdtempSync(join(tmpdir(), 'chroxy-tui-perm-fail-'))
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      // Point sidecar at a path whose PARENT directory doesn't exist.
+      // writeFileSync will fail with ENOENT — the catch must swallow it.
+      session._sinkDir = sinkParent
+      session._permissionModeFile = join(sinkParent, 'no-such-dir', 'permission-mode')
+      session.permissionMode = 'approve'
+      session._term = { write: () => {}, kill: () => {} }
+
+      // Must not throw.
+      session.setPermissionMode('auto')
+
+      assert.equal(session.permissionMode, 'auto',
+        'instance state updated even though sidecar write failed')
+      rmSync(sinkParent, { recursive: true, force: true })
     })
   })
 
