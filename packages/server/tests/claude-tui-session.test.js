@@ -514,6 +514,34 @@ describe('ClaudeTuiSession', () => {
       assert.equal(ready, true, 'status=waiting counts as ready')
     })
 
+    it('_waitForPrompt sets _lastProbeSawStatus=false when session file never appeared', async () => {
+      // Silent-degrade signal: if the probe runs full-duration without
+      // ever reading a non-null status, the file format/path has likely
+      // changed (e.g. claude entrypoint switched away from `cli` and no
+      // longer writes `status`). The warn site at the timeout reads
+      // `_lastProbeSawStatus` to surface this case distinctly from a
+      // genuinely busy session.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'absent file → not-ready')
+      assert.equal(session._lastProbeSawStatus, false,
+        '_lastProbeSawStatus must be false when no readable status was ever seen')
+    })
+
+    it('_waitForPrompt sets _lastProbeSawStatus=true once a status is read, even on busy timeout', async () => {
+      // Distinguish "stuck on busy" from "file never appeared". A long
+      // busy stretch is normal during a real turn; the warn site should
+      // NOT mention degraded probe in that case.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'busy')
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'busy → not-ready')
+      assert.equal(session._lastProbeSawStatus, true,
+        '_lastProbeSawStatus must be true once any status was successfully read')
+    })
+
     it('_waitForPrompt tolerates a malformed session file (transient mid-write race)', async () => {
       // Atomic-write races: claude rewrites the file by truncate+write
       // (not rename), so a JSON.parse can hit a half-written body. The

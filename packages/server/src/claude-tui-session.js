@@ -322,6 +322,14 @@ export class ClaudeTuiSession extends BaseSession {
   // input prompt is bordered + has status widgets rendered AFTER it,
   // so any "glyph at trailing edge" regex misses, and any "glyph
   // anywhere in window" regex false-positives on welcome text).
+  //
+  // Coupling worth flagging: claude only writes `status` when its
+  // entrypoint is `cli` (the plain `claude` binary we spawn). If a
+  // future refactor switches this provider to spawn via `sdk-cli` or
+  // a different entrypoint, the file may exist without a `status`
+  // field — `readSessionStatus` will return null forever, the probe
+  // will time out on every turn, and we degrade silently to "always
+  // not-ready" (the warn at the timeout site catches this at runtime).
   static sessionFilePath(pid) {
     return join(homedir(), '.claude', 'sessions', `${pid}.json`)
   }
@@ -548,8 +556,11 @@ export class ClaudeTuiSession extends BaseSession {
     // proceed so a transient FS race doesn't brick the session.
     const ready = await this._waitForPrompt(ClaudeTuiSession.SPAWN_WARMUP_MAX_MS)
     if (!ready && !this._ptyExited) {
+      const degraded = this._lastProbeSawStatus === false
+        ? ' — session file never appeared with a `status` field; if claude was spawned via a non-cli entrypoint or upstream changed the file format, the probe has degraded and will never see ready'
+        : ''
       log.warn(
-        `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms — proceeding (first sendMessage may stall)\n` +
+        `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${degraded} — proceeding (first sendMessage may stall)\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
     }
@@ -585,16 +596,31 @@ export class ClaudeTuiSession extends BaseSession {
     if (!Number.isInteger(pid) || pid <= 0) return false
     const sessFile = ClaudeTuiSession.sessionFilePath(pid)
     const start = Date.now()
+    // Track whether we ever read a non-null status. Distinguishes
+    // "claude wrote status but never reached idle" (real busy/stuck)
+    // from "status field never appeared" (probe degraded — see the
+    // entrypoint:cli note on sessionFilePath). The warn sites read
+    // `_lastProbeSawStatus` to surface the difference in logs.
+    let sawStatus = false
     const checkReady = () => {
       const status = ClaudeTuiSession.readSessionStatus(sessFile)
+      if (status !== null) sawStatus = true
       return status !== null && status !== 'busy'
     }
     while (Date.now() - start < timeoutMs) {
-      if (this._ptyExited) return false
-      if (checkReady()) return true
+      if (this._ptyExited) {
+        this._lastProbeSawStatus = sawStatus
+        return false
+      }
+      if (checkReady()) {
+        this._lastProbeSawStatus = sawStatus
+        return true
+      }
       await new Promise((r) => setTimeout(r, 100))
     }
-    return checkReady()
+    const ready = checkReady()
+    this._lastProbeSawStatus = sawStatus
+    return ready
   }
 
   /**
@@ -689,8 +715,11 @@ export class ClaudeTuiSession extends BaseSession {
     // refuse to deliver the prompt.
     const ready = await this._waitForPrompt(ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS)
     if (!ready && !this._ptyExited) {
+      const degraded = this._lastProbeSawStatus === false
+        ? ' — and the probe has never seen a `status` field this session, suggesting a degraded probe (see sessionFilePath docs)'
+        : ''
       log.warn(
-        `TUI session file not at status=idle before turn (msg=${messageId}) — writing anyway\n` +
+        `TUI session file not at status=idle before turn (msg=${messageId})${degraded} — writing anyway\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
     }
