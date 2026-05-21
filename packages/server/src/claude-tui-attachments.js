@@ -57,13 +57,44 @@ const SAFE_COMPOUND_EXTENSIONS = new Set([
   '.tar.zst',
 ])
 
-// #4024: cap on the prompt suffix written to PTY. Path lengths under
-// /tmp/chroxy-claude-tui/s-<uuid>/attachments/<msgId>/att-N.<ext> are
-// typically ~150-200 bytes; 5 attachments * (~200 bytes path + ~100
-// bytes metadata) ≈ 1.5KB. We cap well above that so today's typical
-// case is always under-limit, but truncate explicitly rather than let
-// PTY canonical-mode silently chop the line at ~4KB and split the
-// user's prompt mid-suffix.
+// Module-load validation: every compound entry must start with a dot and
+// every dot-separated component (after the leading dot) must independently
+// pass SAFE_EXTENSION. This is the fail-fast guard for future additions —
+// if someone adds `.tar.x/y` or `.tar.${huge}` to the set above, the
+// module throws on import rather than silently letting an unsafe extension
+// reach the on-disk filename. pickExtension() re-checks at use time too
+// (defense in depth), but the use-time check returns the fallback
+// silently; this one crashes loud at load.
+for (const compound of SAFE_COMPOUND_EXTENSIONS) {
+  if (typeof compound !== 'string' || !compound.startsWith('.')) {
+    throw new Error(`SAFE_COMPOUND_EXTENSIONS entry must start with a dot: ${JSON.stringify(compound)}`)
+  }
+  const parts = compound.split('.').slice(1)
+  if (parts.length < 2) {
+    throw new Error(`SAFE_COMPOUND_EXTENSIONS entry must have at least two components: ${compound}`)
+  }
+  for (const part of parts) {
+    if (!SAFE_EXTENSION.test('.' + part)) {
+      throw new Error(`SAFE_COMPOUND_EXTENSIONS component fails SAFE_EXTENSION: .${part} (in ${compound})`)
+    }
+  }
+}
+
+// #4024: sanity cap on the prompt suffix written to PTY. Path lengths
+// under /tmp/chroxy-claude-tui/s-<uuid>/attachments/<msgId>/att-N.<ext>
+// are typically ~150-200 bytes; 5 attachments * (~200 bytes path + ~100
+// bytes metadata) ≈ 1.5KB, so today's typical case sits well under the
+// cap. The cap exists as a guardrail against future regressions
+// (deterministic content-hashed names, deeper base dirs, runaway
+// attachment counts) producing a suffix large enough to stress PTY
+// line-discipline buffers or the TUI's input box. It is NOT scoped to
+// any specific kernel limit — canonical-mode truncation points vary by
+// tty driver and the user's prompt text also counts toward whatever
+// line buffer is in play, so a hard byte-equivalence to a real boundary
+// isn't possible here. The value is set generously above realistic
+// usage and conservatively below the smallest plausible limit; truncate
+// explicitly rather than risk a silent chop that splits the user's
+// prompt mid-suffix.
 const MAX_ATTACHMENT_SUFFIX_BYTES = 8 * 1024
 
 /**
@@ -96,9 +127,12 @@ function pickExtension(name, mediaType) {
         // Snap the original-case suffix off the source name to preserve
         // the user's capitalisation (e.g. .TAR.GZ stays .TAR.GZ).
         const ext = name.slice(name.length - compound.length)
-        // Compound entries are validated when defined, but re-check the
-        // individual components anyway in case a future addition slips
-        // past review.
+        // Compound entries are validated at module load (see the
+        // assertion loop after SAFE_COMPOUND_EXTENSIONS), so this
+        // re-check is belt-and-suspenders against any future code path
+        // that mutates the set at runtime. Fail-quiet here: drop through
+        // to the extname fallback so a runtime-corrupted set degrades to
+        // the single-extension behaviour rather than crashing the turn.
         if (ext.split('.').slice(1).every((part) => SAFE_EXTENSION.test('.' + part))) {
           return ext
         }

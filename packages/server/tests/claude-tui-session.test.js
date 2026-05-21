@@ -845,6 +845,60 @@ describe('ClaudeTuiSession', () => {
       session._cleanupTurnAttachments(null)
       session._cleanupTurnAttachments({ messageId: 'x', startedAt: 0, aborted: false, synthSeq: 0 })
     })
+
+    it('cleans up the per-turn dir even when every attachment is skipped', async () => {
+      // Regression for the case where materializeAttachments() creates
+      // the per-turn dir but every entry is malformed (missing .data),
+      // so the function returns []. Pre-fix, attachmentsDir was only
+      // recorded when the suffix was truthy, so an "all skipped" outcome
+      // left an empty dir on disk until destroy(). After the fix, the
+      // per-turn dir is recorded up-front and gets rm'd by the normal
+      // success-path cleanup.
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-cleanup-skipped-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-cleanup-skipped'
+      session._sinkDir = sinkDir
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      let midTurnSubdirCount = -1
+      session._term = {
+        write: () => {
+          // Snapshot disk state at the moment the PTY received the prompt;
+          // success cleanup runs after the stop hook below.
+          const attDir = join(sinkDir, 'attachments')
+          try { midTurnSubdirCount = readdirSync(attDir).length } catch { midTurnSubdirCount = 0 }
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      // Every attachment is malformed — materializeAttachments() will
+      // create the per-turn dir, skip each entry, and return [].
+      await session.sendMessage('Try anyway', [
+        { type: 'image', mediaType: 'image/png', data: undefined, name: 'broken1.png' },
+        { type: 'image', mediaType: 'image/png', data: undefined, name: 'broken2.png' },
+      ])
+
+      // The per-turn dir was created mid-turn (mkdirSync inside materialize)
+      // even though all entries were skipped — sanity-check that.
+      assert.equal(midTurnSubdirCount, 1,
+        'per-turn subdir should exist during the turn even when all attachments are skipped')
+
+      // And the post-turn cleanup MUST have removed it. Pre-fix this
+      // assertion would fail: the empty dir would linger because
+      // attachmentsDir was never set on the activeTurn.
+      const attDir = join(sinkDir, 'attachments')
+      if (existsSync(attDir)) {
+        const subdirs = readdirSync(attDir)
+        assert.equal(subdirs.length, 0,
+          `expected empty per-turn dir to be cleaned up, found: ${subdirs.join(', ')}`)
+      }
+    })
   })
 
   describe('permissionMode switch (#4013)', () => {

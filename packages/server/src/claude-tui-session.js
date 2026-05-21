@@ -505,15 +505,20 @@ export class ClaudeTuiSession extends BaseSession {
     if (attachments?.length && this._sinkDir) {
       try {
         const baseDir = join(this._sinkDir, 'attachments')
+        // #4022: record the per-turn dir up-front so cleanup runs on
+        // every exit path (success, abort, hard timeout, PTY exit
+        // mid-turn). materializeAttachments() creates the dir before it
+        // decides whether any individual attachment is salvageable, so
+        // even an "all skipped" outcome (every att.data invalid → files
+        // returns []) leaves the empty dir on disk. If we only recorded
+        // attachmentsDir when the suffix was truthy, that empty dir
+        // would leak until destroy() rmSync'd the whole sinkDir — fine
+        // for short sessions, an on-disk drip for long-lived ones.
+        this._activeTurn.attachmentsDir = join(baseDir, messageId)
         const files = materializeAttachments(attachments, baseDir, messageId)
         const suffix = buildAttachmentsPromptSuffix(files)
         if (suffix) {
           promptToSend = (prompt || '') + suffix
-          // #4022: remember the per-turn attachment dir on the active
-          // turn so every exit path (success, abort, hard timeout, PTY
-          // exit mid-turn) can clean it up. Without this, long sessions
-          // with many large attachments accumulate gigabytes in tmpfs.
-          this._activeTurn.attachmentsDir = join(baseDir, messageId)
           log.info(`TUI attachments materialized (msg=${messageId} count=${files.length} dir=${this._activeTurn.attachmentsDir})`)
         }
       } catch (err) {
