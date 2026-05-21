@@ -416,6 +416,12 @@ export class ClaudeTuiSession extends BaseSession {
       // (it'll still reject with "no longer alive", but won't be locked
       // by stale _isBusy from a turn the PTY interrupted) (#3924).
       const hadActiveTurn = this._activeTurn !== null
+      // #4022: clean up the in-flight turn's attachment dir BEFORE
+      // nulling _activeTurn, otherwise sendMessage's poll loop reaches
+      // _finishTurnError with activeTurn=null and the helper no-ops →
+      // dir leaks until destroy(). The cleanup is idempotent (rmSync
+      // with force:true), so _finishTurnError calling it again is fine.
+      this._cleanupTurnAttachments(this._activeTurn)
       this._activeTurn = null
       this._isBusy = false
       this._currentMessageId = null
@@ -499,11 +505,21 @@ export class ClaudeTuiSession extends BaseSession {
     if (attachments?.length && this._sinkDir) {
       try {
         const baseDir = join(this._sinkDir, 'attachments')
+        // #4022: record the per-turn dir up-front so cleanup runs on
+        // every exit path (success, abort, hard timeout, PTY exit
+        // mid-turn). materializeAttachments() creates the dir before it
+        // decides whether any individual attachment is salvageable, so
+        // even an "all skipped" outcome (every att.data invalid → files
+        // returns []) leaves the empty dir on disk. If we only recorded
+        // attachmentsDir when the suffix was truthy, that empty dir
+        // would leak until destroy() rmSync'd the whole sinkDir — fine
+        // for short sessions, an on-disk drip for long-lived ones.
+        this._activeTurn.attachmentsDir = join(baseDir, messageId)
         const files = materializeAttachments(attachments, baseDir, messageId)
         const suffix = buildAttachmentsPromptSuffix(files)
         if (suffix) {
           promptToSend = (prompt || '') + suffix
-          log.info(`TUI attachments materialized (msg=${messageId} count=${files.length} dir=${join(baseDir, messageId)})`)
+          log.info(`TUI attachments materialized (msg=${messageId} count=${files.length} dir=${this._activeTurn.attachmentsDir})`)
         }
       } catch (err) {
         log.warn(`TUI attachment materialization failed (msg=${messageId}): ${err.message} — sending prompt without attachments`)
@@ -667,9 +683,32 @@ export class ClaudeTuiSession extends BaseSession {
     // Clear inactivity timers — turn done, nothing to backstop (#3920).
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    // #4022: drop the per-turn attachment dir now that the Stop hook
+    // has fired and the response has streamed back. The Read-tool
+    // results are already in the model's context window, so the bytes
+    // on disk aren't needed for the next turn.
+    this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+  }
+
+  /**
+   * #4022: rmSync the per-turn attachment directory if the turn
+   * materialized any files. No-op when the turn had no attachments
+   * (the common case). rmSync uses `force: true` so a missing dir
+   * (already cleaned up by an earlier path, or never created) doesn't
+   * throw. The session-level _sinkDir cleanup in destroy() remains as
+   * a backstop for any cleanup we miss here.
+   */
+  _cleanupTurnAttachments(activeTurn) {
+    const dir = activeTurn?.attachmentsDir
+    if (!dir) return
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch (err) {
+      log.warn(`per-turn attachment cleanup failed (${dir}): ${err.message}`)
+    }
   }
 
   /**
@@ -762,6 +801,10 @@ export class ClaudeTuiSession extends BaseSession {
     if (messageId) this.emit('stream_end', { messageId })
     this.emit('error', { message })
     this.emit('result', { cost: 0, duration, usage: null, sessionId: this._sessionId })
+    // #4022: drop the per-turn attachment dir on every failure path so
+    // a stalled/aborted/PTY-exited turn doesn't leak the materialized
+    // files until destroy(). No-op when the turn had no attachments.
+    this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
@@ -836,6 +879,10 @@ export class ClaudeTuiSession extends BaseSession {
     }
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._hardTimeoutMs
     this.emit('stream_end', { messageId })
+    // #4022: drop the per-turn attachment dir on hard timeout. Done
+    // BEFORE nulling _activeTurn so the helper still has access to the
+    // attachmentsDir path. No-op when the turn had no attachments.
+    this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null

@@ -606,9 +606,27 @@ describe('ClaudeTuiSession', () => {
       session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
 
       let writtenToPty = ''
+      // Inspect attachment state DURING the turn (before the success path
+      // cleans up under #4022). The poll loop runs after term.write so by
+      // the time await sendMessage() returns, _cleanupTurnAttachments has
+      // fired and the per-turn dir is gone — we have to snapshot disk
+      // state inside the write callback to verify it landed at all.
+      let midTurnSubdirCount = -1
+      let midTurnFiles = []
       session._term = {
         write: (s) => {
           writtenToPty = s
+          // Snapshot the attachments dir contents at the moment the
+          // prompt is being written to the PTY. This is the state claude
+          // sees when it tries to Read the file path from the suffix.
+          const attDir = join(sinkDir, 'attachments')
+          try {
+            const subdirs = readdirSync(attDir)
+            midTurnSubdirCount = subdirs.length
+            if (subdirs.length > 0) {
+              midTurnFiles = readdirSync(join(attDir, subdirs[0]))
+            }
+          } catch { midTurnSubdirCount = 0 }
           // Drop a stop hook so the poll loop completes the turn.
           writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({
             last_assistant_message: 'ok',
@@ -637,13 +655,12 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!body.includes('\n'), `no embedded LF in prompt body, got ${JSON.stringify(body)}`)
       assert.ok(!body.includes('\r'), 'no embedded CR in prompt body either')
 
-      // 2) File actually materialized on disk under the per-turn dir.
-      const turnDir = join(sinkDir, 'attachments')
-      const subdirs = readdirSync(turnDir)
-      assert.equal(subdirs.length, 1, 'exactly one per-turn subdir created')
-      const filesInTurn = readdirSync(join(turnDir, subdirs[0]))
-      assert.equal(filesInTurn.length, 1)
-      assert.ok(filesInTurn[0].endsWith('.png'), `expected .png, got ${filesInTurn[0]}`)
+      // 2) File actually materialized on disk at the moment the prompt
+      // was handed to the PTY — the snapshot taken in term.write above.
+      // Post-turn cleanup (#4022) will have removed the dir by now.
+      assert.equal(midTurnSubdirCount, 1, 'exactly one per-turn subdir was on disk when PTY received the prompt')
+      assert.equal(midTurnFiles.length, 1)
+      assert.ok(midTurnFiles[0].endsWith('.png'), `expected .png, got ${midTurnFiles[0]}`)
     })
 
     it('does NOT touch the prompt when no attachments are present', async () => {
@@ -715,6 +732,172 @@ describe('ClaudeTuiSession', () => {
         'materialization failure must NOT drop the user prompt')
 
       rmSync(sinkDir, { recursive: true, force: true })
+    })
+  })
+
+  describe('per-turn attachment cleanup (#4022)', () => {
+    // Long-running sessions with many large attachments would
+    // accumulate gigabytes in tmpfs without per-turn cleanup. Drop the
+    // turn's attachment dir on the success path AND every failure exit
+    // path (abort, _finishTurnError, _handleHardTimeout, onExit).
+    //
+    // The session-level rmSync(_sinkDir) in destroy() remains as a
+    // backstop for anything we miss here.
+
+    it('removes the per-turn dir after the success path completes', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-cleanup-success-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-cleanup-success'
+      session._sinkDir = sinkDir
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      session._term = {
+        write: () => {
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      await session.sendMessage('Look', [
+        { type: 'image', mediaType: 'image/png', data: Buffer.from('abc').toString('base64'), name: 'a.png' },
+      ])
+
+      const turnDir = join(sinkDir, 'attachments')
+      // attachments/ parent may exist (we only rm the per-turn child),
+      // but the per-turn child MUST be gone after the success path.
+      if (existsSync(turnDir)) {
+        const subdirs = readdirSync(turnDir)
+        assert.equal(subdirs.length, 0,
+          `expected per-turn subdir to be removed after success, found: ${subdirs.join(', ')}`)
+      }
+    })
+
+    it('removes the per-turn dir when _finishTurnError fires', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-cleanup-err-'))
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._sessionId = 'test-cleanup-err'
+      session._sinkDir = sinkDir
+      // Simulate a turn that materialized attachments but then failed
+      // post-write — _finishTurnError is the common error exit.
+      const turnSubdir = join(sinkDir, 'attachments', 'msg-err')
+      writeFileSync(`${sinkDir}/.placeholder`, '')   // ensure sinkDir exists
+      session._activeTurn = {
+        messageId: 'msg-err',
+        startedAt: Date.now(),
+        aborted: false,
+        synthSeq: 0,
+        attachmentsDir: turnSubdir,
+      }
+      // Materialize a real file there so the rm has something to delete.
+      writeFileSync(`${sinkDir}/.scratch`, '')
+      const fs = await import('fs')
+      fs.mkdirSync(turnSubdir, { recursive: true })
+      fs.writeFileSync(join(turnSubdir, 'att-1.png'), Buffer.from('xyz'))
+      assert.ok(existsSync(turnSubdir), 'precondition: dir exists before failure')
+
+      session.on('error', () => {})
+      session._finishTurnError('something broke', 'msg-err')
+
+      assert.equal(existsSync(turnSubdir), false,
+        'per-turn attachment dir must be removed when _finishTurnError fires')
+    })
+
+    it('removes the per-turn dir when the hard timeout fires', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-cleanup-hto-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-hto'
+      session._sessionId = 'test-cleanup-hto'
+      session._sinkDir = sinkDir
+      session._term = { write: () => {}, kill: () => {} }
+      const turnSubdir = join(sinkDir, 'attachments', 'msg-hto')
+      const fs = await import('fs')
+      fs.mkdirSync(turnSubdir, { recursive: true })
+      fs.writeFileSync(join(turnSubdir, 'att-1.png'), Buffer.from('xyz'))
+      session._activeTurn = {
+        messageId: 'msg-hto', startedAt: Date.now(), aborted: false, synthSeq: 0,
+        attachmentsDir: turnSubdir,
+      }
+
+      session.on('error', () => {})
+
+      session._armResultTimeout()
+      await new Promise((r) => setTimeout(r, 60))
+
+      assert.equal(existsSync(turnSubdir), false,
+        'per-turn attachment dir must be removed when the hard timeout fires')
+    })
+
+    it('cleanup helper no-ops gracefully when turn had no attachments', () => {
+      // The common case: 99% of turns have no attachments. The helper
+      // must not throw when activeTurn lacks attachmentsDir, and must
+      // not fall over if activeTurn itself is null (the PTY-exit race).
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      // Both of these must be no-throw.
+      session._cleanupTurnAttachments(null)
+      session._cleanupTurnAttachments({ messageId: 'x', startedAt: 0, aborted: false, synthSeq: 0 })
+    })
+
+    it('cleans up the per-turn dir even when every attachment is skipped', async () => {
+      // Regression for the case where materializeAttachments() creates
+      // the per-turn dir but every entry is malformed (missing .data),
+      // so the function returns []. Pre-fix, attachmentsDir was only
+      // recorded when the suffix was truthy, so an "all skipped" outcome
+      // left an empty dir on disk until destroy(). After the fix, the
+      // per-turn dir is recorded up-front and gets rm'd by the normal
+      // success-path cleanup.
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-cleanup-skipped-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-cleanup-skipped'
+      session._sinkDir = sinkDir
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      let midTurnSubdirCount = -1
+      session._term = {
+        write: () => {
+          // Snapshot disk state at the moment the PTY received the prompt;
+          // success cleanup runs after the stop hook below.
+          const attDir = join(sinkDir, 'attachments')
+          try { midTurnSubdirCount = readdirSync(attDir).length } catch { midTurnSubdirCount = 0 }
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      // Every attachment is malformed — materializeAttachments() will
+      // create the per-turn dir, skip each entry, and return [].
+      await session.sendMessage('Try anyway', [
+        { type: 'image', mediaType: 'image/png', data: undefined, name: 'broken1.png' },
+        { type: 'image', mediaType: 'image/png', data: undefined, name: 'broken2.png' },
+      ])
+
+      // The per-turn dir was created mid-turn (mkdirSync inside materialize)
+      // even though all entries were skipped — sanity-check that.
+      assert.equal(midTurnSubdirCount, 1,
+        'per-turn subdir should exist during the turn even when all attachments are skipped')
+
+      // And the post-turn cleanup MUST have removed it. Pre-fix this
+      // assertion would fail: the empty dir would linger because
+      // attachmentsDir was never set on the activeTurn.
+      const attDir = join(sinkDir, 'attachments')
+      if (existsSync(attDir)) {
+        const subdirs = readdirSync(attDir)
+        assert.equal(subdirs.length, 0,
+          `expected empty per-turn dir to be cleaned up, found: ${subdirs.join(', ')}`)
+      }
     })
   })
 
