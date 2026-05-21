@@ -583,6 +583,141 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  describe('attachment passthrough (#4012)', () => {
+    // Pre-fix, sendMessage's second positional was `_attachments` (the
+    // underscore meaning "intentionally unused") and attachments were
+    // silently dropped. The fix materializes each attachment under
+    // <sinkDir>/attachments/<messageId>/ and appends a structured suffix
+    // to the prompt so the spawned `claude` TUI can find the files via
+    // its Read tool. These tests pin both halves of the contract: the
+    // files reach disk AND the prompt the PTY receives names them.
+
+    it('appends an attachments suffix to the prompt and writes files to disk', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-send-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-att'
+      session._sinkDir = sinkDir
+      // Pre-seed the prompt glyph so the readiness probe resolves
+      // immediately (otherwise sendMessage burns the full 5s budget).
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      let writtenToPty = ''
+      session._term = {
+        write: (s) => {
+          writtenToPty = s
+          // Drop a stop hook so the poll loop completes the turn.
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({
+            last_assistant_message: 'ok',
+          }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+      await session.sendMessage('Look at this screenshot', [
+        { type: 'image', mediaType: 'image/png', data: png.toString('base64'), name: 'shot.png' },
+      ])
+
+      // 1) Prompt that hit the PTY contains the original text PLUS the suffix.
+      assert.ok(writtenToPty.includes('Look at this screenshot'), 'original prompt text preserved')
+      assert.ok(writtenToPty.includes('attached the following file'),
+        `expected suffix in PTY write, got: ${JSON.stringify(writtenToPty.slice(0, 200))}`)
+      assert.ok(writtenToPty.includes('shot.png'), 'display name appears in suffix')
+      // PTY writes always end with \r so claude interprets it as Enter.
+      assert.ok(writtenToPty.endsWith('\r'), 'still terminated with carriage return')
+      // The whole-prompt MUST have exactly one trailing \r and no other
+      // line breaks — embedded \n would prematurely-submit the prompt
+      // mid-suffix and split the user's turn (#4012 review finding).
+      const body = writtenToPty.slice(0, -1)   // strip trailing \r
+      assert.ok(!body.includes('\n'), `no embedded LF in prompt body, got ${JSON.stringify(body)}`)
+      assert.ok(!body.includes('\r'), 'no embedded CR in prompt body either')
+
+      // 2) File actually materialized on disk under the per-turn dir.
+      const turnDir = join(sinkDir, 'attachments')
+      const subdirs = readdirSync(turnDir)
+      assert.equal(subdirs.length, 1, 'exactly one per-turn subdir created')
+      const filesInTurn = readdirSync(join(turnDir, subdirs[0]))
+      assert.equal(filesInTurn.length, 1)
+      assert.ok(filesInTurn[0].endsWith('.png'), `expected .png, got ${filesInTurn[0]}`)
+    })
+
+    it('does NOT touch the prompt when no attachments are present', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-noatt-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = sinkDir
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      let writtenToPty = ''
+      session._term = {
+        write: (s) => {
+          writtenToPty = s
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      await session.sendMessage('Just a plain prompt')
+
+      assert.equal(writtenToPty, 'Just a plain prompt\r',
+        'no attachments → byte-for-byte identical to pre-#4012 behaviour')
+    })
+
+    it('logs and proceeds with unaugmented prompt when materialization throws', async () => {
+      // Failure to write the attachment must NOT lose the user's text.
+      // Force the catch path by setting _sinkDir to a path containing a
+      // NUL byte so mkdirSync inside materializeAttachments throws.
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-fail-'))
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = `${sinkDir}\0invalid`   // mkdirSync will reject
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      let writtenToPty = ''
+      session._term = {
+        write: (s) => {
+          writtenToPty = s
+          // The stop hook needs to land in a VALID sink dir for the
+          // poll loop to read it. Use the real sinkDir for that.
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      // Point poll loop at the real sinkDir AFTER the failed materialize
+      // (drainHookFiles reads _sinkDir each tick). The sendMessage
+      // function doesn't snapshot it, so mutating mid-call works.
+      const realSinkDir = sinkDir
+      const send = session.sendMessage('Important message', [
+        { type: 'image', mediaType: 'image/png', data: Buffer.from('x').toString('base64'), name: 'a.png' },
+      ])
+      // After the materialize-then-write block runs, swap sinkDir so the
+      // poll loop can find the stop hook.
+      queueMicrotask(() => { session._sinkDir = realSinkDir })
+      await send
+
+      assert.equal(writtenToPty, 'Important message\r',
+        'materialization failure must NOT drop the user prompt')
+
+      rmSync(sinkDir, { recursive: true, force: true })
+    })
+  })
+
   describe('permissionMode switch (#4013)', () => {
     // The TUI provider supports mid-session permission switch via a
     // sidecar file the permission-hook.sh script re-reads on every tool

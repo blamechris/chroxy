@@ -8,6 +8,7 @@ import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContex
 import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -470,7 +471,7 @@ export class ClaudeTuiSession extends BaseSession {
     return this._outputTail.slice(-windowBytes).includes(glyph)
   }
 
-  async sendMessage(prompt, _attachments, _options = {}) {
+  async sendMessage(prompt, attachments, _options = {}) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
@@ -486,6 +487,28 @@ export class ClaudeTuiSession extends BaseSession {
     this._currentMessageId = messageId
     const startedAt = Date.now()
     this._activeTurn = { messageId, startedAt, aborted: false, synthSeq: 0 }
+
+    // #4012: TUI can't accept inline multimodal blocks the way SDK/CLI
+    // do, but it CAN read files via the Read tool. Materialize each
+    // attachment under the per-session sink dir and append a structured
+    // suffix to the prompt naming each file. Pre-fix, attachments were
+    // dropped on the floor (the `_attachments` underscore was load-
+    // bearing). Failure here is non-fatal: we log and proceed with the
+    // unaugmented prompt so a write-fault doesn't lose the user's text.
+    let promptToSend = prompt
+    if (attachments?.length && this._sinkDir) {
+      try {
+        const baseDir = join(this._sinkDir, 'attachments')
+        const files = materializeAttachments(attachments, baseDir, messageId)
+        const suffix = buildAttachmentsPromptSuffix(files)
+        if (suffix) {
+          promptToSend = (prompt || '') + suffix
+          log.info(`TUI attachments materialized (msg=${messageId} count=${files.length} dir=${join(baseDir, messageId)})`)
+        }
+      } catch (err) {
+        log.warn(`TUI attachment materialization failed (msg=${messageId}): ${err.message} — sending prompt without attachments`)
+      }
+    }
 
     // #4010: fire stream_start the moment the turn begins, not after the
     // Stop hook arrives. This is the only signal the dashboard has for
@@ -528,7 +551,7 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     try {
-      this._term.write(prompt + '\r')
+      this._term.write(promptToSend + '\r')
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
       return
