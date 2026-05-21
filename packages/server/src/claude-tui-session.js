@@ -340,23 +340,36 @@ export class ClaudeTuiSession extends BaseSession {
   static get PROMPT_GLYPH() { return this.PROMPT_GLYPHS[0] }
 
   /**
-   * True iff `tail` contains any PROMPT_GLYPHS candidate at line-start
-   * (after a newline, or at the very start of the string). Used by the
-   * readiness probe + tests; extracted for clarity since the line-
-   * anchor logic isn't obvious from `.includes()` calls.
+   * True iff `tail` ends with any PROMPT_GLYPHS candidate at line-start.
+   * The real claude TUI input prompt is always the LAST thing rendered
+   * — anything followed by more content is welcome-text, examples, or
+   * tool output, NOT the cursor's resting position.
+   *
+   * Match rules:
+   *   1. Trim trailing whitespace (the cursor sits in/after the glyph;
+   *      pure whitespace following the glyph is fine).
+   *   2. Find the rightmost candidate via lastIndexOf.
+   *   3. Require it to be at line-start (idx === 0 OR preceded by '\n').
+   *   4. Require everything after the glyph to be whitespace-only.
+   *
+   * This is tighter than the previous "line-anchored anywhere in
+   * window" rule, which #4035 proved was too permissive — claude TUI's
+   * welcome screen contains line-start `> ` and `❯` text that triggered
+   * a 563ms false-ready, well before the actual input box existed.
    */
   static promptGlyphAppearsIn(tail) {
     if (typeof tail !== 'string' || tail.length === 0) return false
+    // Match: (start-of-string OR newline) + glyph + (optional trailing
+    // whitespace) + end-of-string. The whitespace tolerance handles
+    // cursor padding the TUI emits; the end-anchor enforces the glyph
+    // is the LAST thing on screen (the real input cursor's resting
+    // position). Trimming first would eat trailing spaces that are
+    // part of glyphs like "> " — instead encode the optional-trailing-
+    // whitespace into the regex.
     return this.PROMPT_GLYPHS.some((g) => {
-      const idx = tail.indexOf(g)
-      if (idx < 0) return false
-      // Walk through every occurrence; accept if any is at line-start.
-      let i = idx
-      while (i >= 0) {
-        if (i === 0 || tail[i - 1] === '\n') return true
-        i = tail.indexOf(g, i + 1)
-      }
-      return false
+      const escaped = g.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
+      const re = new RegExp(`(?:^|\\n)${escaped}\\s*$`)
+      return re.test(tail)
     })
   }
   // Window for the probe scan, in JS string code units (UTF-16, NOT

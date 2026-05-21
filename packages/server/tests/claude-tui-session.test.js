@@ -484,6 +484,50 @@ describe('ClaudeTuiSession', () => {
       assert.equal(ready, true, 'glyph at position 0 must trigger ready')
     })
 
+    it('_waitForPrompt rejects line-start glyph that is NOT the trailing line (#4035)', async () => {
+      // The dogfood failure that prompted #4035: claude TUI's welcome
+      // screen contains line-start `> ` and `❯` text (examples, bullets,
+      // instructions) that triggered a 563ms false-ready, well before
+      // the actual input box existed. The probe now requires the glyph
+      // to be at the END of the buffer (whitespace-only after it) so a
+      // line-start match deep in the welcome text doesn't fool it.
+      const cases = [
+        '\n> Use this command to start\nMore welcome text\n', // line-start > but more content after
+        '\n❯ example bullet\nfollowed by paragraph text\n',   // line-start ❯ but content follows
+        '\nLine A\n> Line B\nLine C',                          // line-start > sandwiched in the middle
+        '\n❯ first welcome line\n\n❯ second welcome line\n actual junk',
+      ]
+      for (const tail of cases) {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._outputTail = tail
+        const ready = await session._waitForPrompt(50)
+        assert.equal(ready, false,
+          `glyph not at trailing edge must NOT count as ready, tail=${JSON.stringify(tail)}`)
+      }
+    })
+
+    it('_waitForPrompt accepts a trailing-edge glyph with whitespace after it (#4035)', async () => {
+      // The real claude TUI input prompt is the LAST line. The probe
+      // must still accept trailing-whitespace variants because the
+      // cursor sits in/after the glyph and may emit padding spaces /
+      // newlines as it draws.
+      const cases = [
+        '\nWelcome\n❯ ',                          // glyph + space, nothing else
+        '\nSome intro\n❯',                        // bare glyph at end
+        '\nWelcome\n> ',                          // ASCII fallback at end
+        '\nWelcome\n❯ \n',                        // trailing newline ok (cursor drew it)
+        '\nWelcome\n❯ \n\n  \t  ',                // mixed trailing whitespace
+        '> ',                                       // glyph at position 0, only whitespace after
+      ]
+      for (const tail of cases) {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._outputTail = tail
+        const ready = await session._waitForPrompt(50)
+        assert.equal(ready, true,
+          `trailing-edge glyph must count as ready, tail=${JSON.stringify(tail)}`)
+      }
+    })
+
     it('_outputTailHexDump returns a readable hex+ascii dump for log lines (#4031)', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       // #4031 review: dump reads from _outputTailRaw (the UNSTRIPPED
