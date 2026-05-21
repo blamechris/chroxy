@@ -115,16 +115,26 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
   const dir = join(baseDir, turnSlug)
   mkdirSync(dir, { recursive: true })
   const out = []
+  // Use a separate counter for the on-disk filename so a skipped
+  // attachment (missing data, unresolved file_ref) doesn't leave a
+  // hole in the sequence. Without this you can end up with only
+  // `att-2.png` on disk when the first attachment is malformed —
+  // confusing both for the agent reading the suffix and for anyone
+  // poking the sink dir by hand.
+  let n = 0
   for (let i = 0; i < attachments.length; i++) {
     const att = attachments[i]
     // Defensive: we expect upstream validation to catch this, but if a
     // file_ref ever slips through unresolved we'd crash on the base64
     // decode below. Skip silently rather than crash the whole turn.
     if (!att || typeof att.data !== 'string') continue
+    n++
     const ext = pickExtension(att.name, att.mediaType)
     // Predictable, collision-free filename: att-1.png, att-2.txt, ...
-    // (NOT the user-supplied name — see sanitizeDisplayName comment).
-    const filename = `att-${i + 1}${ext}`
+    // (NOT the user-supplied name — see sanitizeDisplayName comment.)
+    // Numbered against the count of SUCCESSFULLY materialized files,
+    // not the input index, so skips don't create gaps.
+    const filename = `att-${n}${ext}`
     const fullPath = join(dir, filename)
     const buf = Buffer.from(att.data, 'base64')
     writeFileSync(fullPath, buf)
