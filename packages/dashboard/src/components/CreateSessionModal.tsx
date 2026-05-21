@@ -539,7 +539,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <option value="approve">Approve — gate every tool call</option>
               <option value="acceptEdits">Accept Edits — auto-approve file ops</option>
               <option value="auto">Auto — skip all prompts (`--dangerously-skip-permissions`)</option>
-              <option value="plan">Plan — no tool execution</option>
+              <option value="plan">Plan — Claude plans before acting; each tool gates on approval</option>
             </select>
             <span id="permission-mode-hint" className="form-hint">
               {permissionMode === 'auto'
@@ -547,7 +547,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 : permissionMode === 'acceptEdits'
                 ? 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.'
                 : permissionMode === 'plan'
-                ? 'Plan mode — Claude responds but does not execute tools.'
+                ? 'Claude is asked to plan before acting; each tool call still gates on your approval.'
                 : permissionMode === 'approve'
                 ? 'Default. Each tool call gates on your approval in the dashboard or mobile app.'
                 : 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'}

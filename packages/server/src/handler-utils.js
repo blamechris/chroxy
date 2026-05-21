@@ -17,9 +17,9 @@ import { resolve, relative, sep } from 'path'
 // so users searching for that Claude CLI flag find the chroxy equivalent.
 export const PERMISSION_MODES = [
   { id: 'approve', label: 'Approve', description: 'Default. Every tool call gates on your approval in the dashboard or mobile app.' },
-  { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve file/read/grep tools. Everything else still gates on approval.' },
+  { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.' },
   { id: 'auto', label: 'Auto (skip all prompts)', description: 'Auto-approve every tool call without prompting. Equivalent to `claude --dangerously-skip-permissions`.' },
-  { id: 'plan', label: 'Plan', description: 'Plan mode — no tool execution, just discussion.' },
+  { id: 'plan', label: 'Plan', description: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.' },
 ]
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
