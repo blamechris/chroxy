@@ -237,11 +237,13 @@ describe('ClaudeTuiSession', () => {
     it('emits stream_start at turn start, not at completion', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
-      // _term has no `pid` field — the #4040 readiness probe treats a
-      // pid-less term stub as "skip readiness gating", so sendMessage
-      // doesn't burn the full TURN_PROMPT_WAIT_MAX_MS waiting for a
-      // session file that will never appear. Probe-specific behavior is
-      // covered separately under the readiness-probe describe block.
+      // Skip readiness gating — this test pins event-emit ORDER, not
+      // probe behavior. The probe gets its own coverage under the
+      // readiness-probe describe block. Stubbing the probe (rather than
+      // relying on a side effect of the no-pid path) keeps the test's
+      // intent explicit and survives the #4040 review hardening that
+      // made invalid-pid a not-ready signal.
+      session._waitForPrompt = async () => true
       const events = []
       session._term = {
         write: () => { events.push('pty_write') },
@@ -275,8 +277,8 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-uuid'
       session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-busy-'))
-      // _term has no pid → readiness probe (#4040) returns true
-      // immediately. See note in the prior test.
+      // Skip readiness gating — see note in the prior test.
+      session._waitForPrompt = async () => true
       session._term = {
         write: () => {
           // Drop a stop hook immediately so the poll loop completes.
@@ -452,6 +454,30 @@ describe('ClaudeTuiSession', () => {
       session._term = { write: () => {}, kill: () => {}, pid: fakePid }
       const ready = await session._waitForPrompt(50)
       assert.equal(ready, false, 'absent session file is treated as not-ready')
+    })
+
+    it('_waitForPrompt returns false when pid is missing or invalid (Copilot review on #4040)', async () => {
+      // Returning true on a missing/invalid pid would silently disable
+      // readiness gating on any platform/runtime where node-pty fails to
+      // populate pid, reintroducing the race the probe exists to prevent.
+      // Tests that explicitly want to skip the probe stub
+      // `_waitForPrompt` directly rather than relying on this guard.
+      const cases = [
+        { pid: undefined, label: 'undefined' },
+        { pid: null, label: 'null' },
+        { pid: NaN, label: 'NaN' },
+        { pid: -1, label: 'negative' },
+        { pid: 0, label: 'zero' },
+        { pid: 1.5, label: 'non-integer' },
+        { pid: '12345', label: 'string' },
+      ]
+      for (const { pid, label } of cases) {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._term = { write: () => {}, kill: () => {}, pid }
+        const ready = await session._waitForPrompt(20)
+        assert.equal(ready, false,
+          `pid=${label} must NOT count as ready (would silently disable gating)`)
+      }
     })
 
     it('_waitForPrompt returns false when PTY exited even if status=idle', async () => {
@@ -749,9 +775,10 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-att'
       session._sinkDir = sinkDir
-      // Pre-seed the prompt glyph so the readiness probe resolves
-      // immediately (otherwise sendMessage burns the full 5s budget).
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      // Skip readiness gating — attachment behavior is independent of
+      // the #4040 probe. Probe-specific tests live under their own
+      // describe block.
+      session._waitForPrompt = async () => true
 
       let writtenToPty = ''
       // Inspect attachment state DURING the turn (before the success path
@@ -820,7 +847,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test'
       session._sinkDir = sinkDir
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       let writtenToPty = ''
       session._term = {
@@ -850,7 +877,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test'
       session._sinkDir = `${sinkDir}\0invalid`   // mkdirSync will reject
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       let writtenToPty = ''
       session._term = {
@@ -901,7 +928,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-cleanup-success'
       session._sinkDir = sinkDir
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       session._term = {
         write: () => {
@@ -1010,7 +1037,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-cleanup-skipped'
       session._sinkDir = sinkDir
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       let midTurnSubdirCount = -1
       session._term = {

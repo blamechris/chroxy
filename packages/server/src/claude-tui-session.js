@@ -575,11 +575,15 @@ export class ClaudeTuiSession extends BaseSession {
    * decoupled from rendering and survives TUI redraw changes (#4040).
    */
   async _waitForPrompt(timeoutMs) {
-    // No PTY pid available (test stub without one). Treat as ready —
-    // tests that exercise probe behavior wire the pid + session file
-    // explicitly; tests that don't care want to skip readiness gating.
-    if (!this._term || typeof this._term.pid !== 'number') return true
-    const sessFile = ClaudeTuiSession.sessionFilePath(this._term.pid)
+    // No usable PTY pid — treat as not-ready and fall through to the
+    // existing warn-and-write path. Returning true here would silently
+    // disable readiness gating on any platform/runtime where node-pty
+    // doesn't populate `pid` (Copilot review on #4040). Tests that
+    // explicitly want to skip the probe stub `_waitForPrompt` directly
+    // rather than rely on this guard.
+    const pid = this._term && this._term.pid
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    const sessFile = ClaudeTuiSession.sessionFilePath(pid)
     const start = Date.now()
     const checkReady = () => {
       const status = ClaudeTuiSession.readSessionStatus(sessFile)
