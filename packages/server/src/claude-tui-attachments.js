@@ -35,20 +35,32 @@ const MEDIA_TYPE_EXTENSIONS = {
   'application/json': '.json',
 }
 
+// Only treat a name-derived extension as safe if it's a short run of
+// ASCII alphanumerics after a single leading dot. validateAttachments()
+// only requires `name` to be a string, so a malicious client could pack
+// control chars, slashes, or megabytes of junk into the extension and
+// have it land in our on-disk `att-N<ext>` filename. This regex is the
+// allowlist gate — anything that doesn't match falls back to the
+// mediaType map or `.bin`.
+const SAFE_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/
+
 /**
  * Choose a file extension for an attachment. Prefer the original name's
- * extension when it exists — the user picked it for a reason, and we
- * don't want to rename `.tsx` to `.txt` just because the mediaType says
- * text/plain. Falls back to the mediaType map, then to `.bin`.
+ * extension when it exists AND is safe — the user picked it for a
+ * reason, and we don't want to rename `.tsx` to `.txt` just because the
+ * mediaType says text/plain. Falls back to the mediaType map, then to
+ * `.bin`. An unsafe extension (control chars, path separators, absurd
+ * length) is treated the same as "no extension" and goes to the
+ * fallback.
  *
  * @param {string} name
  * @param {string} mediaType
- * @returns {string} extension with leading dot, or '' if name is empty
+ * @returns {string} extension with leading dot; never empty (falls back to `.bin`)
  */
 function pickExtension(name, mediaType) {
   if (typeof name === 'string' && name.length > 0) {
     const fromName = extname(name)
-    if (fromName) return fromName
+    if (fromName && SAFE_EXTENSION.test(fromName)) return fromName
   }
   return MEDIA_TYPE_EXTENSIONS[mediaType] || '.bin'
 }
