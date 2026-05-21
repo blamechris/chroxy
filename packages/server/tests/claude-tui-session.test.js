@@ -486,7 +486,9 @@ describe('ClaudeTuiSession', () => {
 
     it('_outputTailHexDump returns a readable hex+ascii dump for log lines (#4031)', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTail = 'hello'
+      // #4031 review: dump reads from _outputTailRaw (the UNSTRIPPED
+      // parallel buffer) so escape/control bytes survive into the log.
+      session._outputTailRaw = Buffer.from('hello', 'utf8')
       const dump = session._outputTailHexDump()
       // Header reports byte count.
       assert.match(dump, /\(5 bytes\)/, `dump should report byte count, got: ${JSON.stringify(dump)}`)
@@ -498,8 +500,25 @@ describe('ClaudeTuiSession', () => {
 
     it('_outputTailHexDump handles empty buffer', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTail = ''
+      session._outputTailRaw = Buffer.alloc(0)
       assert.equal(session._outputTailHexDump(), '<empty>')
+    })
+
+    it('_outputTailHexDump surfaces UNSTRIPPED escape/control bytes (#4031 review)', () => {
+      // The original implementation sourced from the ANSI-stripped
+      // _outputTail, so the diagnostic could never surface the very
+      // escape sequences ("0x1b ...") we wanted to see when the probe
+      // missed. Lock in that the dump reads from the raw buffer.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      // Raw output as the PTY emits it: OSC title-set followed by the
+      // glyph. The stripped tail would have only "❯ "; the raw dump
+      // must show the leading 0x1b 0x5d (ESC ]) bytes.
+      session._outputTail = '❯ '
+      session._outputTailRaw = Buffer.from('\x1b]0;claude\x07❯ ', 'utf8')
+      const dump = session._outputTailHexDump()
+      // Hex side must include the ESC byte that the strip would have
+      // hidden.
+      assert.match(dump, /1b 5d/, `dump should surface raw ESC byte, got: ${JSON.stringify(dump)}`)
     })
 
     it('_outputTailHexDump covers the FULL probe-scan window (#4031 review)', () => {
@@ -510,27 +529,34 @@ describe('ClaudeTuiSession', () => {
       // size matches the window — if someone widens the window again
       // without widening the dump, this fails.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
-      // Fill the tail with EXACTLY window-size content so the dump
-      // should report ALL of it (no truncation header).
-      session._outputTail = 'A'.repeat(windowBytes)
+      const windowChars = ClaudeTuiSession.PROMPT_TAIL_WINDOW_CHARS
+      // Fill the raw tail with EXACTLY window-size ASCII content so the
+      // dump should report ALL of it (no truncation header). ASCII so
+      // bytes == chars and the assertion stays exact.
+      session._outputTailRaw = Buffer.from('A'.repeat(windowChars), 'utf8')
       const dump = session._outputTailHexDump()
       // Should report the full window size, not a smaller hardcoded cap.
-      assert.ok(dump.includes(`(${windowBytes} bytes)`),
-        `dump should report full window size ${windowBytes}, got header: ${dump.slice(0, 80)}`)
+      assert.ok(dump.includes(`(${windowChars} bytes)`),
+        `dump should report full window size ${windowChars}, got header: ${dump.slice(0, 80)}`)
     })
 
     it('_outputTailHexDump never reports MORE bytes than the probe window scanned', () => {
       // Honesty invariant: the dump should never claim to show bytes the
-      // probe didn't actually check. If _outputTail is huge but the
+      // probe didn't actually check. If the raw tail is huge but the
       // probe only scans the trailing window, the dump must report
-      // window-many bytes, not the full tail.
+      // window-many bytes, not the full tail. When the source buffer
+      // exceeds the window, the dump uses the "(N of M bytes; first K
+      // omitted)" form to be honest about what was elided.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      const windowBytes = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES
-      session._outputTail = 'X'.repeat(windowBytes * 3)   // way more than window
+      const windowChars = ClaudeTuiSession.PROMPT_TAIL_WINDOW_CHARS
+      const totalBytes = windowChars * 3
+      const omitted = totalBytes - windowChars
+      session._outputTailRaw = Buffer.from('X'.repeat(totalBytes), 'utf8')
       const dump = session._outputTailHexDump()
-      assert.ok(dump.includes(`(${windowBytes} bytes)`),
-        `dump should report exactly the window size, got header: ${dump.slice(0, 80)}`)
+      assert.ok(
+        dump.includes(`(${windowChars} of ${totalBytes} bytes; first ${omitted} omitted)`),
+        `dump should report exactly the window size with truncation header, got: ${dump.slice(0, 120)}`,
+      )
     })
 
     it('sendMessage waits for the prompt before writing to the PTY', async () => {
