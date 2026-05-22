@@ -180,9 +180,12 @@ export class ClaudeByokSession extends BaseSession {
     // #4085: Per-session set of model ids we've already logged a
     // "no pricing entry" warn for. Without this, a tool-heavy 50-turn
     // session on an unknown model logs 50 identical warns — noise that
-    // drowns out signal. The set is reset by destroy() implicitly (the
-    // session goes away). setModel() is the natural place to clear an
-    // entry if a user switches off an unpriced model — handled inline.
+    // drowns out signal. The set lives until destroy() (the session
+    // goes away). setModel() does NOT clear entries: a user switching
+    // unknown → known just stops adding; switching unknown → different-
+    // unknown adds a new entry (one warn for the new one). The
+    // semantically-correct invariant is "one warn per (session, model)
+    // pair" — not "one warn per current model."
     this._pricingWarnedModels = new Set()
   }
 

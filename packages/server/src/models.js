@@ -84,9 +84,12 @@ function resolvePricingKey(modelId) {
   if (typeof modelId !== 'string' || modelId.length === 0) return null
   const stripped = modelId.endsWith(ONE_M_SUFFIX) ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
   if (CLAUDE_PRICING_USD_PER_MTOK[stripped]) return stripped
-  // Dated full id? Strip the 8-digit date suffix and retry. Guarded on
-  // the prefix `claude-` so a bare `opus-4-7-20251201` doesn't accidentally
-  // resolve via the short-id path with no family resolution.
+  // Dated full id? Strip the 8-digit date suffix and retry against the
+  // pricing table. The strip applies unconditionally; safety comes from
+  // the table itself — only `claude-*` keys exist, so a short-form like
+  // `opus-4-7-20251201` strips to `opus-4-7`, misses the table, and
+  // falls through to the FALLBACK_MODELS short-id lookup (which expects
+  // the un-stripped id).
   const dateStripped = stripped.replace(/-\d{8,}$/, '')
   if (CLAUDE_PRICING_USD_PER_MTOK[dateStripped]) return dateStripped
   const fallback = FALLBACK_MODELS.find((m) => m.id === stripped)
