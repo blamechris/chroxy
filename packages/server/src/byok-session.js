@@ -30,6 +30,7 @@ import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { translateSdkEvent } from './byok-event-translator.js'
 import { BUILTIN_TOOLS } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
+import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
 
 const log = createLogger('byok-session')
 
@@ -174,6 +175,13 @@ export class ClaudeByokSession extends BaseSession {
     // Realpath cache used by the tool executor's path-safety check. One
     // cache per session — fresh sessions don't reuse a stale cwd.
     this._cwdRealCache = new Map()
+
+    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath || opts.claudeConfigPath)
+    for (const warning of mcpConfig.warnings) {
+      log.warn(`BYOK MCP config: ${warning}`)
+    }
+    this._mcpServerConfigs = mcpConfig.servers
+    this.mcpServers = Object.freeze(mcpConfig.servers.map(toMcpServerMetadata))
   }
 
   async start() {

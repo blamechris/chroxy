@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ClaudeByokSession } from '../src/byok-session.js'
@@ -111,6 +111,61 @@ describe('ClaudeByokSession', () => {
       assert.ok(errorEvent, 'error event must fire')
       assert.match(errorEvent.payload.message, /BYOK credentials not found/)
       assert.equal(captured.find((e) => e.name === 'ready'), undefined)
+    })
+
+    it('surfaces parsed MCP server metadata without spawning tools', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          github: {
+            command: 'node',
+            args: ['github-mcp.js'],
+            env: { GITHUB_TOKEN: 'secret' },
+          },
+        },
+      }))
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        model: 'claude-opus-4-7',
+        mcpConfigPath: configPath,
+      })
+      const captured = captureEvents(session)
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      await session.start()
+      assert.ok(Object.isFrozen(session.mcpServers), 'MCP metadata list is read-only')
+      assert.deepEqual(session.mcpServers, [
+        {
+          name: 'github',
+          command: 'node',
+          args: ['github-mcp.js'],
+          envKeys: ['GITHUB_TOKEN'],
+        },
+      ])
+      assert.deepEqual(session._mcpServerConfigs, [
+        {
+          name: 'github',
+          command: 'node',
+          args: ['github-mcp.js'],
+          env: { GITHUB_TOKEN: 'secret' },
+        },
+      ])
+      const ready = captured.find((e) => e.name === 'ready')
+      assert.ok(ready, 'ready event must fire')
+      assert.deepEqual(ready.payload.tools, [], 'foundation slice does not materialize MCP tools yet')
+      await session.destroy()
+    })
+
+    it('starts cleanly when MCP config is malformed', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, '{ bad json')
+      const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      const captured = captureEvents(session)
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      await session.start()
+      assert.deepEqual(session.mcpServers, [])
+      assert.deepEqual(session._mcpServerConfigs, [])
+      assert.ok(captured.find((e) => e.name === 'ready'), 'malformed MCP config must not block startup')
+      await session.destroy()
     })
   })
 
