@@ -70,6 +70,7 @@ import {
   handleAvailableModels,
   handleMcpServers,
   handleCostUpdate,
+  handleSessionUsage,
   handleResultUsage,
   handleServerError,
   handleServerShutdown,
@@ -3512,6 +3513,137 @@ describe('handleCostUpdate', () => {
     // Empty string is falsy, so the legacy `||` falls back to activeSessionId.
     const result = handleCostUpdate(
       { sessionId: '', sessionCost: 0.5 },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionUsage
+// ---------------------------------------------------------------------------
+describe('handleSessionUsage', () => {
+  it('passes a fully-populated cumulativeUsage through', () => {
+    const result = handleSessionUsage(
+      {
+        sessionId: 'sess-1',
+        cumulativeUsage: {
+          inputTokens: 1234,
+          outputTokens: 567,
+          cacheReadTokens: 8000,
+          cacheCreationTokens: 200,
+          costUsd: 0.0345,
+          turnsBilled: 3,
+        },
+      },
+      'active-1',
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: {
+        cumulativeUsage: {
+          inputTokens: 1234,
+          outputTokens: 567,
+          cacheReadTokens: 8000,
+          cacheCreationTokens: 200,
+          costUsd: 0.0345,
+          turnsBilled: 3,
+        },
+      },
+    })
+  })
+
+  it('coerces missing fields to 0 (always emits a complete block)', () => {
+    const result = handleSessionUsage({ cumulativeUsage: {} }, 'active-1')
+    expect(result.patch).toEqual({
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+  })
+
+  it('coerces non-finite fields to 0 (NaN, Infinity, strings, null all become 0)', () => {
+    // A corrupted payload must not poison the store with `$NaN` or
+    // `$Infinity` values the renderer would format literally.
+    const result = handleSessionUsage(
+      {
+        cumulativeUsage: {
+          inputTokens: NaN,
+          outputTokens: Infinity,
+          cacheReadTokens: -Infinity,
+          cacheCreationTokens: '500',
+          costUsd: null,
+          turnsBilled: undefined,
+        },
+      },
+      'active-1',
+    )
+    expect(result.patch).toEqual({
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+  })
+
+  it('emits an all-zero block when cumulativeUsage is missing entirely', () => {
+    // Defensive: if the server somehow emits the event without a payload,
+    // the renderer still sees a well-formed zero block (not undefined).
+    const result = handleSessionUsage({ sessionId: 'sess-1' }, null)
+    expect(result.patch).toEqual({
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+  })
+
+  it('uses sessionId from message when present', () => {
+    expect(
+      handleSessionUsage(
+        { sessionId: 'sess-9', cumulativeUsage: { costUsd: 0.5 } },
+        'active-1',
+      ).sessionId,
+    ).toBe('sess-9')
+  })
+
+  it('falls back to active session when sessionId missing', () => {
+    expect(
+      handleSessionUsage({ cumulativeUsage: { costUsd: 0.5 } }, 'active-1').sessionId,
+    ).toBe('active-1')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    expect(handleSessionUsage({}, null).sessionId).toBeNull()
+  })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim, no fallback)', () => {
+    // Mirrors handleCostUpdate semantics — a non-empty whitespace-padded
+    // string is truthy, so the downstream sessionStates lookup misses
+    // rather than silently routing the usage update to the active session.
+    const result = handleSessionUsage(
+      { sessionId: '  sess-1  ', cumulativeUsage: { costUsd: 0.5 } },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    const result = handleSessionUsage(
+      { sessionId: '', cumulativeUsage: { costUsd: 0.5 } },
       'active-1',
     )
     expect(result.sessionId).toBe('active-1')
