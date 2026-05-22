@@ -285,7 +285,16 @@ export class ClaudeByokSession extends BaseSession {
       log.warn(`no pricing entry for model=${pricingModel}; result.cost will be 0 — update CLAUDE_PRICING_USD_PER_MTOK in models.js`)
     }
     let lastStopReason = null
-    let rolledBack = false
+    // Snapshot the pre-turn history length so any stream-init failure (at
+    // any round) can rollback the entire turn atomically. We derive it
+    // from the current length minus the user message we just pushed at
+    // L251 — clamped to 0 so this stays defensive if the trim above ever
+    // collapses history harder than expected. Pre-#4109 the rollback only
+    // ran at round 0, leaving a trailing tool_result `user` turn after a
+    // round-1+ failure — the next sendMessage would then push another
+    // `user` turn back-to-back, soft-breaking the alternation invariant
+    // the API may tighten on in future.
+    const historyLengthBeforeSend = Math.max(0, this._history.length - 1)
 
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -302,16 +311,14 @@ export class ClaudeByokSession extends BaseSession {
             { signal: this._abortController.signal },
           )
         } catch (err) {
-          // Stream init threw synchronously. On the FIRST round only,
-          // roll back the user message we pushed above so the next turn
-          // doesn't double-send and the alternation invariant holds.
-          // After the first round, _history contains assistant + user
-          // tool_result pairs we should NOT discard.
-          if (round === 0 && !rolledBack) {
-            if (this._history.length > 0 && this._history[this._history.length - 1].role === 'user') {
-              this._history.pop()
-              rolledBack = true
-            }
+          // Stream init threw synchronously. Rollback the ENTIRE turn —
+          // the user prompt + every assistant/tool_result pair appended
+          // by completed rounds. Truncating to the pre-send length is
+          // simpler and stronger than the previous round-0-only pop:
+          // the next sendMessage starts from a known-clean state with no
+          // possibility of back-to-back user turns (#4109).
+          if (this._history.length > historyLengthBeforeSend) {
+            this._history.length = historyLengthBeforeSend
           }
           throw err
         }
