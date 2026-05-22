@@ -507,6 +507,65 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('fills synthetic tool_result blocks for unexecuted tool_use on mid-loop abort (#4061)', async () => {
+      // Three tool_use blocks. The executor stub aborts the session
+      // controller right after the FIRST block returns. Without the
+      // fix, history.push would land 1 tool_result for 3 tool_use
+      // blocks and the next sendMessage would 400. With the fix, two
+      // synthetic is_error: true tool_results fill the gap.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let executeCalls = 0
+      session._executeToolBlock = async function ({ block }) {
+        executeCalls += 1
+        // After block 1 completes, fire the abort so the loop breaks
+        // when it re-checks signal.aborted.
+        if (executeCalls === 1) {
+          this._abortController.abort()
+        }
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+              {
+                stop_reason: 'tool_use',
+                content: [
+                  { type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } },
+                  { type: 'tool_use', id: 'tu_2', name: 'Read', input: { file_path: '/b' } },
+                  { type: 'tool_use', id: 'tu_3', name: 'Read', input: { file_path: '/c' } },
+                ],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            ),
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      // Only the first block executed — the abort fired during its
+      // executor call, the loop breaks before block 2 / block 3 run.
+      assert.equal(executeCalls, 1, 'only one real execute before abort')
+      // History MUST carry a user message with exactly 3 tool_result
+      // blocks: tu_1 real, tu_2 + tu_3 synthetic. The next sendMessage
+      // would otherwise 400.
+      const userTurns = session._history.filter((m) => m.role === 'user' && Array.isArray(m.content))
+      const toolResultTurn = userTurns[userTurns.length - 1]
+      assert.ok(toolResultTurn, 'tool_result user-turn must be pushed even after abort')
+      const ids = toolResultTurn.content.map((b) => b.tool_use_id).sort()
+      assert.deepEqual(ids, ['tu_1', 'tu_2', 'tu_3'],
+        'every tool_use id must have a matching tool_result block')
+      // The synthetic ones are explicit errors.
+      const synthetic = toolResultTurn.content.filter((b) => b.tool_use_id !== 'tu_1')
+      assert.equal(synthetic.length, 2)
+      for (const s of synthetic) {
+        assert.equal(s.is_error, true, 'synthetic tool_result must mark is_error')
+        assert.match(s.content, /[Ii]nterrupted/, 'synthetic content should reference the abort')
+      }
+      await session.destroy()
+    })
+
     it('breaks out of the loop after MAX_TOOL_ROUNDS (infinite-loop safety)', async () => {
       // Model insists on calling a tool on every round — agent loop must
       // bail at the cap and emit result so the session doesn't hang.
