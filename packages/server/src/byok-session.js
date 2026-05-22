@@ -14,7 +14,7 @@
  * to follow-ups #4048-#4051.
  */
 
-import Anthropic from '@anthropic-ai/sdk'
+import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { BaseSession } from './base-session.js'
@@ -508,7 +508,19 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   _emitTurnError(messageId, err, fallbackCode) {
-    const aborted = err?.name === 'AbortError' || this._abortController?.signal?.aborted
+    // #4057: SDK v0.81+ throws `APIUserAbortError` (not the generic
+    // `AbortError`) when an in-flight messages.stream sees its signal
+    // aborted. Primary check is `instanceof` — the SDK class itself
+    // never sets `.name`, so a name-string check would fail
+    // (instance.name === 'Error', verified at runtime). Keep the
+    // legacy `name === 'AbortError'` fallback for raw fetch aborts
+    // (the SDK's own internal abort helper uses this convention). The
+    // signal.aborted fallback catches paths where the SDK swallowed
+    // the original error and re-threw something we don't recognise.
+    const aborted =
+      err instanceof APIUserAbortError ||
+      err?.name === 'AbortError' ||
+      this._abortController?.signal?.aborted
     if (aborted) {
       this.emit('error', {
         messageId,
