@@ -1,0 +1,193 @@
+/**
+ * Local file operations used by the claude-byok provider's Read, Write,
+ * and Edit tools. Mirrors Claude Code's documented semantics:
+ *
+ *   Read   — line-numbered output with optional offset/limit + byte cap
+ *   Write  — full-file write, truncate, mode 0644 by default
+ *   Edit   — string-replace with strict-uniqueness check unless `replaceAll`
+ *
+ * Path-safety is the caller's responsibility — by the time we reach here
+ * the BYOK tool executor has already run validatePathWithinCwd() from
+ * ws-file-ops/common.js to defeat symlink escape attempts. These helpers
+ * receive realpaths that are known to be inside the session cwd.
+ *
+ * Each function returns `{ ok: true, ... }` on success or
+ * `{ ok: false, code, message }` on a recoverable error (file not found,
+ * uniqueness violation, etc.). Unexpected errors throw — the executor
+ * catches and surfaces them as tool errors to the model.
+ */
+
+import { readFile, writeFile, stat } from 'node:fs/promises'
+
+export const DEFAULT_READ_MAX_BYTES = 256_000
+export const DEFAULT_READ_LINE_LIMIT = 2_000
+
+/**
+ * Read a file, optionally with a line range. Lines are 1-indexed in
+ * Claude Code's Read semantics, so `offset=1, limit=100` means "lines
+ * 1..100". The output is line-numbered (`<5-digit>→<content>`) matching
+ * what Claude Code's Read tool produces, so the model sees a consistent
+ * shape across providers.
+ *
+ * On a binary file (NUL byte detected in the first 8KB) we refuse and
+ * return ok:false with a clear code — the model should use a different
+ * tool for binary inspection.
+ */
+export async function readFileTool({
+  filePath,
+  offset,
+  limit,
+  maxBytes = DEFAULT_READ_MAX_BYTES,
+} = {}) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    return { ok: false, code: 'EINVAL', message: 'filePath is required' }
+  }
+
+  let st
+  try {
+    st = await stat(filePath)
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return { ok: false, code: 'ENOENT', message: `file not found: ${filePath}` }
+    }
+    throw err
+  }
+  if (!st.isFile()) {
+    return { ok: false, code: 'ENOTFILE', message: `not a regular file: ${filePath}` }
+  }
+  if (st.size > maxBytes && !Number.isFinite(limit)) {
+    return {
+      ok: false,
+      code: 'TOO_LARGE',
+      message: `file is ${st.size} bytes (cap ${maxBytes}); use offset+limit to read a slice`,
+    }
+  }
+
+  const raw = await readFile(filePath)
+  // Binary sniff on the first 8KB. NUL bytes are the cheapest reliable
+  // signal; UTF-8 valid text rarely contains them.
+  const sniff = raw.subarray(0, 8192)
+  if (sniff.includes(0)) {
+    return { ok: false, code: 'BINARY', message: `binary content in ${filePath}; Read is text-only` }
+  }
+
+  const text = raw.toString('utf8')
+  const allLines = text.split('\n')
+  const totalLines = allLines.length
+
+  const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) - 1 : 0
+  const requestedCount = Number.isFinite(limit) && limit > 0
+    ? Math.min(Math.floor(limit), DEFAULT_READ_LINE_LIMIT)
+    : DEFAULT_READ_LINE_LIMIT
+  const slice = allLines.slice(start, start + requestedCount)
+
+  // Match Claude Code's tabular line-numbered format: 5-space-padded
+  // 1-indexed line number, then arrow, then the line. Final trailing
+  // newline preserved when the slice ends at a real EOL.
+  const numbered = slice
+    .map((line, i) => `${String(start + i + 1).padStart(5)}→${line}`)
+    .join('\n')
+
+  return {
+    ok: true,
+    content: numbered,
+    totalLines,
+    linesReturned: slice.length,
+    truncatedByLimit: slice.length < totalLines - start,
+  }
+}
+
+/**
+ * Write a file, truncating any existing content. Creates the file (and
+ * any missing parent directories) if absent. Returns `created: true`
+ * when the path did not exist before.
+ */
+export async function writeFileTool({ filePath, content, mode = 0o644 } = {}) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    return { ok: false, code: 'EINVAL', message: 'filePath is required' }
+  }
+  if (typeof content !== 'string') {
+    return { ok: false, code: 'EINVAL', message: 'content must be a string' }
+  }
+
+  let existedBefore = true
+  try {
+    await stat(filePath)
+  } catch (err) {
+    if (err.code === 'ENOENT') existedBefore = false
+    else throw err
+  }
+
+  await writeFile(filePath, content, { mode })
+  return {
+    ok: true,
+    bytesWritten: Buffer.byteLength(content, 'utf8'),
+    created: !existedBefore,
+  }
+}
+
+/**
+ * String-replace edit matching Claude Code's semantics:
+ *   - Without `replaceAll`: refuses if `oldString` appears more than
+ *     once. This avoids the very common LLM mistake of asking for an
+ *     "edit" that accidentally touches more than one site.
+ *   - Without `replaceAll`: refuses if `oldString` is not found at all.
+ *   - With `replaceAll: true`: replaces every occurrence; the count is
+ *     reported back so the model can sanity-check.
+ *
+ * Errors are returned as ok:false so the model gets a clear feedback
+ * loop instead of an exception bubbling up as "internal error".
+ */
+export async function editFileTool({
+  filePath,
+  oldString,
+  newString,
+  replaceAll = false,
+} = {}) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    return { ok: false, code: 'EINVAL', message: 'filePath is required' }
+  }
+  if (typeof oldString !== 'string' || oldString.length === 0) {
+    return { ok: false, code: 'EINVAL', message: 'oldString is required and must be non-empty' }
+  }
+  if (typeof newString !== 'string') {
+    return { ok: false, code: 'EINVAL', message: 'newString must be a string' }
+  }
+  if (oldString === newString) {
+    return { ok: false, code: 'NO_CHANGE', message: 'oldString and newString are identical' }
+  }
+
+  let content
+  try {
+    content = await readFile(filePath, 'utf8')
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return { ok: false, code: 'ENOENT', message: `file not found: ${filePath}` }
+    }
+    throw err
+  }
+
+  // Count occurrences without allocating a full split for huge files —
+  // indexOf walk is O(n) and predictable.
+  let count = 0
+  let idx = -1
+  while ((idx = content.indexOf(oldString, idx + 1)) !== -1) count++
+
+  if (count === 0) {
+    return { ok: false, code: 'NOT_FOUND', message: `oldString not found in ${filePath}` }
+  }
+  if (count > 1 && !replaceAll) {
+    return {
+      ok: false,
+      code: 'NOT_UNIQUE',
+      message: `oldString matched ${count} sites in ${filePath}; pass replaceAll=true or add surrounding context to make it unique`,
+    }
+  }
+
+  const next = replaceAll
+    ? content.split(oldString).join(newString)
+    : content.replace(oldString, newString)
+
+  await writeFile(filePath, next)
+  return { ok: true, replacements: count, bytesWritten: Buffer.byteLength(next, 'utf8') }
+}

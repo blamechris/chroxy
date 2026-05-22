@@ -6,18 +6,19 @@
  * Motivation + scope: docs/decisions/2026-05-byok-provider-scope.md
  * Audit:              docs/audit-results/clarp-proxy-provider-viability/
  *
- * PR 1 (this file) ships chat-only: the session can stream a response but
- * cannot execute tools. PR 2 adds tools + permission-gated execution.
- *
- * Capability flags reflect that contract — `permissions: false`,
- * `inProcessPermissions: false` for now. They flip in PR 2 alongside the
- * `respondToPermission` / `respondToQuestion` methods.
+ * PR 2 (this file) adds tool execution: when the model emits a tool_use
+ * block, chroxy gates it through PermissionManager, dispatches to a local
+ * executor (byok-tool-executor.js), feeds the tool_result back, and loops
+ * until the model stops calling tools. Built-in tools: Read, Write, Edit,
+ * Bash, Glob, Grep (see byok-tools.js). MCP / Task / WebFetch are deferred
+ * to follow-ups #4048-#4051.
  */
 
 import Anthropic from '@anthropic-ai/sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { BaseSession } from './base-session.js'
+import { PermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
 import {
   FALLBACK_MODELS,
@@ -27,6 +28,8 @@ import {
 } from './models.js'
 import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { translateSdkEvent } from './byok-event-translator.js'
+import { BUILTIN_TOOLS } from './byok-tools.js'
+import { executeBuiltinTool } from './byok-tool-executor.js'
 
 const log = createLogger('byok-session')
 
@@ -39,6 +42,19 @@ const DEFAULT_MAX_TOKENS = 64000
 // a Claude API message ({ role, content }). At 50 turns we're well within
 // any model's context window before the SDK does its own pruning.
 const MAX_HISTORY_TURNS = 50
+
+// Safety cap on tool-use rounds within a single user turn. The model can
+// legitimately need 5-10 tool calls for a complex task; 25 is a generous
+// ceiling that still catches infinite loops if the model misbehaves.
+// Hitting the cap surfaces a clear error to the model rather than running
+// up an unbounded API bill.
+const MAX_TOOL_ROUNDS = 25
+
+// TTL for the per-session realpath cache used by validatePathWithinCwd
+// in the tool executor. The cwd shouldn't change mid-session, but caching
+// for 30s strikes a balance between safety (re-stat to catch a swap) and
+// performance (don't re-realpath the same cwd on every file op).
+const CWD_CACHE_TTL_MS = 30_000
 
 export class ClaudeByokSession extends BaseSession {
   static get displayLabel() {
@@ -55,23 +71,19 @@ export class ClaudeByokSession extends BaseSession {
 
   static get capabilities() {
     return {
-      // PR 1: chat only, no tool dispatch yet. permissions flip true
-      // in PR 2 alongside respondToPermission/respondToQuestion.
-      permissions: false,
-      inProcessPermissions: false,
+      // PR 2: tool execution enabled with permission gating via
+      // PermissionManager (same machinery as claude-sdk).
+      permissions: true,
+      inProcessPermissions: true,
       modelSwitch: true,
-      // permissionModeSwitch is true so the dropdown lets the user pre-
-      // set the mode they want when tools arrive in PR 2. The mode is
-      // stored on the BaseSession; setPermissionMode validates the value.
       permissionModeSwitch: true,
       planMode: false,
-      // PR 1 doesn't persist history across restarts (no resumable id
-      // beyond in-memory _history). Flip to true once we wire a session
-      // file or DB write.
+      // Still no cross-restart resume. _history is in-memory; #4047
+      // tracks a follow-up to persist + resume.
       resume: false,
       terminal: false,
-      // Anthropic SDK supports extended thinking via thinking config
-      // block; left off for PR 1 — wire in PR 2 alongside tools.
+      // Thinking config supported by the SDK but not wired through the
+      // chroxy UI yet — leave off until the toggle lands.
       thinkingLevel: false,
       streaming: true,
       // We rebuild the system prompt on every turn from
@@ -83,7 +95,12 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   static get customEvents() {
-    return []
+    // tool_start / tool_result are surfaced per turn for the dashboard's
+    // tool-call bubble UI. permission_request / user_question /
+    // permission_resolved are re-emitted from PermissionManager and
+    // already known to the SessionManager forwarding pipeline, but list
+    // them here so the capability matrix reflects reality.
+    return ['tool_start', 'tool_result']
   }
 
   /**
@@ -138,6 +155,25 @@ export class ClaudeByokSession extends BaseSession {
     this._history = []
     // AbortController for the active stream so interrupt() can cancel.
     this._abortController = null
+
+    // PermissionManager + event re-emission. Same wiring as
+    // sdk-session.js:254-275 so the dashboard / mobile permission UI
+    // and the audit log work uniformly across providers.
+    this._permissions = new PermissionManager({ log })
+    this._permissions.on('permission_request', (data) => this.emit('permission_request', data))
+    this._permissions.on('user_question', (data) => this.emit('user_question', data))
+    this._permissions.on('permission_resolved', (data) => {
+      if (data && (data.requestId || data.toolUseId)) {
+        this.emit('permission_resolved', data)
+      }
+    })
+    // Backward-compatible accessors used by ws-permissions.js + settings-handlers.js.
+    this._pendingPermissions = this._permissions._pendingPermissions
+    this._lastPermissionData = this._permissions._lastPermissionData
+
+    // Realpath cache used by the tool executor's path-safety check. One
+    // cache per session — fresh sessions don't reuse a stale cwd.
+    this._cwdRealCache = new Map()
   }
 
   async start() {
@@ -177,23 +213,19 @@ export class ClaudeByokSession extends BaseSession {
     this._abortController = new AbortController()
     const turnStartedAt = Date.now()
 
-    // PR 1: attachments are not yet materialised (no Read tool to read them
-    // back). Surface a clear error rather than silently dropping content.
-    // PR 2 will route attachments through file-ops + the tool layer.
+    // Attachments — PR 2 still keeps these as a warn until Read can
+    // pick up materialised files. Tracked separately; not blocking.
     if (Array.isArray(attachments) && attachments.length > 0) {
       this.emit('error', {
         messageId,
-        message: `BYOK provider does not yet support attachments (${attachments.length} dropped). Coming in PR 2.`,
+        message: `BYOK provider does not yet materialise attachments (${attachments.length} dropped). Track follow-up: file-via-Read tool flow.`,
       })
-      // Continue with the text-only prompt rather than aborting the turn —
-      // matches the pattern in claude-tui-session.js attachments fallback.
     }
 
     // Build the user message. On the very first turn, prepend any skills
-    // text from BaseSession._buildPrependPrompt() so a skill that asked
-    // for `injection: prepend` lands in the first user turn. Subsequent
-    // turns are plain prompt text — skills that targeted `system` ride
-    // on the rebuilt systemPrompt instead.
+    // text from BaseSession._buildPrependPrompt(). Subsequent turns are
+    // plain prompt text — skills that targeted `system` ride on the
+    // rebuilt systemPrompt instead.
     let userText = typeof prompt === 'string' ? prompt : String(prompt ?? '')
     if (this._history.length === 0) {
       const prepend = typeof this._buildPrependPrompt === 'function'
@@ -216,117 +248,241 @@ export class ClaudeByokSession extends BaseSession {
       ? this._buildSystemPrompt()
       : ''
 
-    let stream
-    try {
-      stream = this._client.messages.stream(
-        {
-          model: this.model || 'claude-opus-4-7',
-          max_tokens: DEFAULT_MAX_TOKENS,
-          ...(systemPrompt ? { system: systemPrompt } : {}),
-          messages: this._history,
-          // PR 1: no tools — chat only. Tools land in PR 2.
-        },
-        { signal: this._abortController.signal },
-      )
-    } catch (err) {
-      // Stream init threw synchronously (rare — usually validation errors
-      // from the SDK). Roll back the user message we just pushed onto
-      // _history so the next turn doesn't double-send it and so the
-      // user/assistant alternation invariant the SDK requires holds.
-      if (this._history.length > 0 && this._history[this._history.length - 1].role === 'user') {
-        this._history.pop()
-      }
-      this._emitTurnError(messageId, err, 'STREAM_INIT')
-      this._finishTurn()
-      return
-    }
-
     this.emit('stream_start', { messageId })
 
+    // Agent loop. Each iteration:
+    //   1. Stream the next assistant turn (text + possibly tool_use blocks)
+    //   2. If the turn ended with stop_reason !== 'tool_use', break.
+    //   3. Otherwise, execute each tool_use block locally (with permission
+    //      gating) and push a user message of tool_result blocks.
+    //   4. Loop back to (1).
+    // Bounded by MAX_TOOL_ROUNDS to catch infinite-loop misbehavior.
     let lastUsage = null
     let lastStopReason = null
+    let rolledBack = false
 
     try {
-      for await (const event of stream) {
-        const t = translateSdkEvent(event)
-        if (!t) continue
-        switch (t.kind) {
-          case 'stream_start':
-            // SDK's message_start. We already emitted our own
-            // stream_start above so the dashboard could spin up the
-            // bubble before the model started talking; if the model
-            // returns a different one (typical), emit a model_info
-            // here would be useful, but for PR 1 the initial event is
-            // enough. Skip.
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        let stream
+        try {
+          stream = this._client.messages.stream(
+            {
+              model: this.model || 'claude-opus-4-7',
+              max_tokens: DEFAULT_MAX_TOKENS,
+              ...(systemPrompt ? { system: systemPrompt } : {}),
+              tools: BUILTIN_TOOLS,
+              messages: this._history,
+            },
+            { signal: this._abortController.signal },
+          )
+        } catch (err) {
+          // Stream init threw synchronously. On the FIRST round only,
+          // roll back the user message we pushed above so the next turn
+          // doesn't double-send and the alternation invariant holds.
+          // After the first round, _history contains assistant + user
+          // tool_result pairs we should NOT discard.
+          if (round === 0 && !rolledBack) {
+            if (this._history.length > 0 && this._history[this._history.length - 1].role === 'user') {
+              this._history.pop()
+              rolledBack = true
+            }
+          }
+          throw err
+        }
+
+        for await (const event of stream) {
+          const t = translateSdkEvent(event)
+          if (!t) continue
+          switch (t.kind) {
+            case 'stream_delta':
+              this.emit('stream_delta', { messageId, delta: t.text })
+              break
+            case 'tool_start':
+              // Surface the tool_use opening to the dashboard so it can
+              // render a tool-call bubble. Matches sdk-session.js custom
+              // event names.
+              this.emit('tool_start', {
+                messageId,
+                toolUseId: t.toolUseId,
+                toolName: t.toolName,
+              })
+              break
+            case 'tool_input_delta':
+              // Streaming JSON for the tool input. We don't currently
+              // forward partial tool input to the UI (the final block
+              // arrives in finalMessage), but logging helps debug
+              // multi-tool turns.
+              break
+            case 'message_delta':
+              if (t.stopReason) lastStopReason = t.stopReason
+              if (t.usage) lastUsage = t.usage
+              break
+            case 'unknown':
+              log.warn(`unknown SDK event type=${t.sdkType} forwarded as no-op`)
+              break
+            default:
+              break
+          }
+        }
+
+        const final = await stream.finalMessage()
+        lastStopReason = final.stop_reason
+        lastUsage = final.usage
+
+        // Append the assistant turn — full content array preserves
+        // tool_use blocks for the next round of conversation.
+        this._history.push({ role: 'assistant', content: final.content })
+
+        if (lastStopReason !== 'tool_use') {
+          // Done — model wants no more tools. Break out and emit result.
+          break
+        }
+
+        // Execute each tool_use block. Build a tool_result content array
+        // to send back as the user message.
+        const toolBlocks = (final.content || []).filter((b) => b?.type === 'tool_use')
+        const toolResults = []
+        for (const block of toolBlocks) {
+          const result = await this._executeToolBlock({ block, messageId })
+          toolResults.push(result)
+          if (this._abortController?.signal?.aborted) {
+            // User pressed Stop mid-tool-loop. Treat the rest as denied.
             break
-          case 'stream_delta':
-            // Canonical chroxy payload shape: { messageId, delta }. The
-            // dashboard + mobile consumers both read `msg.delta`; emitting
-            // `text` here renders empty bubbles (matches sdk-session.js
-            // shape and the ws-server.js protocol comment).
-            this.emit('stream_delta', { messageId, delta: t.text })
-            break
-          case 'thinking_delta':
-            // PR 1: forward as a regular delta. PR 2 will route via a
-            // dedicated thinking surface when thinkingLevel capability
-            // is enabled.
-            break
-          case 'tool_start':
-          case 'tool_input_delta':
-            // PR 1 doesn't pass tools to the SDK, so the model can't
-            // emit tool_use blocks. If it ever does (e.g. a model
-            // ignored the empty tool list and fabricated one), log
-            // and ignore — don't crash the turn.
-            log.warn(`PR1: unexpected tool event ignored: ${t.kind}`)
-            break
-          case 'message_delta':
-            if (t.stopReason) lastStopReason = t.stopReason
-            if (t.usage) lastUsage = t.usage
-            break
-          case 'content_block_stop':
-          case 'result':
-            // result fires below from finalMessage(); the SDK's own
-            // message_stop is informational.
-            break
-          case 'unknown':
-            log.warn(`PR1: unknown SDK event type=${t.sdkType} forwarded as no-op`)
-            break
+          }
+        }
+        if (toolResults.length === 0) {
+          // stop_reason was tool_use but no tool_use blocks — defensive
+          // bailout to avoid an empty user message that the SDK rejects.
+          log.warn(`stop_reason=tool_use but no tool_use blocks in final.content; ending turn`)
+          break
+        }
+        this._history.push({ role: 'user', content: toolResults })
+
+        if (this._abortController?.signal?.aborted) break
+
+        if (round === MAX_TOOL_ROUNDS - 1) {
+          // Hit the safety cap. Push one more assistant note + bail.
+          log.warn(`hit MAX_TOOL_ROUNDS=${MAX_TOOL_ROUNDS} cap; stopping agent loop`)
+          break
         }
       }
 
-      const final = await stream.finalMessage()
-      lastStopReason = lastStopReason || final.stop_reason
-      lastUsage = lastUsage || final.usage
-
-      // Append the assistant turn to history so the next sendMessage
-      // sees the full conversation. Store final.content (the structured
-      // array of blocks) so any future tool_use blocks survive a resume.
-      this._history.push({ role: 'assistant', content: final.content })
-
-      // stream_end MUST fire before result — dashboard's message-handler
-      // flushes the debounced delta buffer + clears streamingMessageId on
-      // stream_end. Without it the spinner hangs and trailing deltas may
-      // not flush. Mirrors sdk-session.js:696.
       this.emit('stream_end', { messageId })
       this.emit('result', {
-        sessionId: null,  // BYOK has no upstream session id (SDK is stateless)
+        sessionId: null,
         messageId,
         stopReason: lastStopReason,
         duration: Date.now() - turnStartedAt,
         usage: lastUsage,
-        // cost intentionally omitted — until #4054 wires a per-model rate
-        // table, session-manager.js gates cost tracking on
-        // `typeof data.cost === 'number'` so undefined is the right
-        // signal for "cost tracking deferred."
       })
     } catch (err) {
-      // Always emit stream_end on the error path too so the dashboard
-      // doesn't strand the spinner. Errors fire AFTER stream_end so
-      // consumers can finalize the bubble before showing the error.
       this.emit('stream_end', { messageId })
       this._emitTurnError(messageId, err, 'STREAM_ERROR')
     } finally {
       this._finishTurn()
+    }
+  }
+
+  /**
+   * Run one tool_use block: permission gate, dispatch to executor, emit
+   * tool_result events, return the {type:'tool_result', ...} content
+   * block to append to the next user message.
+   */
+  async _executeToolBlock({ block, messageId }) {
+    const toolUseId = block.id
+    const toolName = block.name
+    const input = block.input || {}
+    const signal = this._abortController?.signal
+
+    // Permission gate. PermissionManager handles all four modes
+    // (approve / auto / acceptEdits / plan) and session rules.
+    let decision
+    try {
+      decision = await this._permissions.handlePermission(
+        toolName,
+        input,
+        signal,
+        this.permissionMode,
+      )
+    } catch (err) {
+      // permission_request was rejected (timeout, abort, etc.)
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: `Permission gate error: ${err?.message || String(err)}`,
+        is_error: true,
+      }
+    }
+
+    if (decision.behavior !== 'allow') {
+      const msg = decision.message || 'Permission denied by user.'
+      this.emit('tool_result', {
+        messageId,
+        toolUseId,
+        toolName,
+        result: msg,
+        isError: true,
+      })
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: msg,
+        is_error: true,
+      }
+    }
+
+    // Execute locally.
+    const effectiveInput = decision.updatedInput || input
+    const { content, isError } = await executeBuiltinTool({
+      toolName,
+      input: effectiveInput,
+      cwd: this.cwd,
+      cwdRealCache: this._cwdRealCache,
+      cwdCacheTtl: CWD_CACHE_TTL_MS,
+      signal,
+    })
+
+    this.emit('tool_result', {
+      messageId,
+      toolUseId,
+      toolName,
+      result: content,
+      isError,
+    })
+
+    return {
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      content,
+      is_error: isError,
+    }
+  }
+
+  /**
+   * In-process permission response — called by ws-permissions.js when the
+   * user taps Approve/Deny on the phone or dashboard. Forwards to
+   * PermissionManager which resolves the pending Promise in
+   * handlePermission() above.
+   */
+  respondToPermission(requestId, decision) {
+    return this._permissions.respondToPermission(requestId, decision)
+  }
+
+  /**
+   * Response to an AskUserQuestion tool. Same forwarding pattern.
+   */
+  respondToQuestion(text, answersMap) {
+    this._permissions.respondToQuestion(text, answersMap)
+  }
+
+  /**
+   * Session-scoped permission rules (the dashboard's "Allow for Session"
+   * affordance, #3072). Optional method — providers.js's capability check
+   * uses presence to advertise sessionRules: true.
+   */
+  setPermissionRules(rules) {
+    if (typeof this._permissions.setRules === 'function') {
+      this._permissions.setRules(rules)
     }
   }
 
@@ -374,6 +530,22 @@ export class ClaudeByokSession extends BaseSession {
     if (this._destroying) return
     this._destroying = true
     this.interrupt()
+    // Reject any pending permission Promises so the dashboard doesn't
+    // hang. Same teardown pattern as sdk-session.js.
+    if (typeof this._permissions?.autoAllowPending !== 'function') {
+      // Older PermissionManager API — best-effort: leave pendings to be GC'd.
+    } else {
+      // PR 2: we deny on destroy (not auto-allow) to be defensive when
+      // the user closes the tab mid-prompt. Pending requests get a
+      // rejection so the loop above unblocks cleanly.
+      try {
+        for (const [requestId] of this._permissions._pendingPermissions) {
+          this._permissions.respondToPermission(requestId, { behavior: 'deny', message: 'Session destroyed' })
+        }
+      } catch (err) {
+        log.warn(`pending-permission teardown failed: ${err.message}`)
+      }
+    }
     this._history = []
     this._client = null
   }
