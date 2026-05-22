@@ -2672,3 +2672,155 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     assert.equal(costUpdates.length, 0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// SessionManager cost-threshold soft warning (#4075)
+// ---------------------------------------------------------------------------
+
+describe('SessionManager cost-threshold soft warning (#4075)', () => {
+  function makeMgr({ threshold } = {}) {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      costThresholdUsd: threshold,
+    })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s1', session)
+    return { mgr, session }
+  }
+
+  function captureCrossings(mgr) {
+    const events = []
+    mgr.on('session_event', (e) => {
+      if (e.event === 'session_cost_threshold_crossed') events.push(e)
+    })
+    return events
+  }
+
+  it('defaults to $5.00 when no costThresholdUsd is configured', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.getCostThresholdUsd(), 5.00)
+  })
+
+  it('accepts a custom threshold from config', () => {
+    const { mgr } = makeMgr({ threshold: 10.50 })
+    assert.equal(mgr.getCostThresholdUsd(), 10.50)
+  })
+
+  it('emits session_cost_threshold_crossed exactly once when the running cost crosses the threshold', () => {
+    const { mgr } = makeMgr({ threshold: 1.00 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.50 })
+    assert.equal(crossings.length, 0, 'still under threshold')
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.49 })
+    assert.equal(crossings.length, 0, 'still under threshold (0.99)')
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.02 })
+    assert.equal(crossings.length, 1, 'fires on first crossing')
+    assert.ok(crossings[0].data.costUsd >= 1.00, `costUsd should be >= 1.00; got ${crossings[0].data.costUsd}`)
+    assert.equal(crossings[0].data.thresholdUsd, 1.00)
+  })
+
+  it('does NOT re-fire on subsequent turns once the latch is set (one warning per session)', () => {
+    const { mgr } = makeMgr({ threshold: 1.00 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 1.50 })
+    assert.equal(crossings.length, 1)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 5.00 })
+    assert.equal(crossings.length, 1, 'must not re-fire even at much higher cost')
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 100.00 })
+    assert.equal(crossings.length, 1, 'still no re-fire')
+  })
+
+  it('does NOT fire for subscription-billed sessions (cost stays at 0)', () => {
+    const { mgr, session } = makeMgr({ threshold: 0.001 })
+    const crossings = captureCrossings(mgr)
+    // claude-tui-like flow: cost is null on the result event. The wired
+    // result handler gates _trackUsage on `Number.isFinite(data.cost)`
+    // (#4088), so subscription-billed sessions never increment the
+    // accumulator OR fire the threshold. From the badge's perspective
+    // both surfaces stay at 0 — no clutter.
+    session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 }, cost: null })
+    session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 }, cost: null })
+    assert.equal(crossings.length, 0, 'subscription sessions must never trigger the threshold')
+    assert.equal(mgr.getCumulativeUsage('s1').costUsd, 0)
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 0, 'tokens are not tracked when cost is null')
+  })
+
+  it('is disabled when threshold is 0', () => {
+    const { mgr } = makeMgr({ threshold: 0 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 100.00 })
+    assert.equal(crossings.length, 0, 'threshold=0 must disable the soft warning')
+  })
+
+  it('coerces invalid threshold values to the default', () => {
+    // Negative, NaN, Infinity, strings all fall back to default $5.
+    const mgrA = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: -5 })
+    assert.equal(mgrA.getCostThresholdUsd(), 5.00)
+    const mgrB = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: NaN })
+    assert.equal(mgrB.getCostThresholdUsd(), 5.00)
+    const mgrC = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: Infinity })
+    assert.equal(mgrC.getCostThresholdUsd(), 5.00)
+    const mgrD = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: '5.00' })
+    assert.equal(mgrD.getCostThresholdUsd(), 5.00)
+  })
+
+  it('setCostThresholdUsd updates the active threshold at runtime', () => {
+    const { mgr } = makeMgr({ threshold: 10 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 5.00 })
+    assert.equal(crossings.length, 0)
+    mgr.setCostThresholdUsd(4.00)
+    assert.equal(mgr.getCostThresholdUsd(), 4.00)
+    // Next turn crosses the NEW (lower) threshold.
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.01 })
+    assert.equal(crossings.length, 1, 'lowered threshold should fire on the next crossing')
+  })
+
+  it('latches per-session (multiple sessions each fire once independently)', () => {
+    const { mgr, session } = makeMgr({ threshold: 1.00 })
+    // Add a second session.
+    const session2 = new EventEmitter()
+    session2.isRunning = false
+    session2.destroy = () => {}
+    mgr._sessions.set('s2', {
+      session: session2,
+      name: 'S2',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+        cacheCreationTokens: 0, costUsd: 0, turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s2', session2)
+    const crossings = captureCrossings(mgr)
+    session.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    session2.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    assert.equal(crossings.length, 2, 'each session fires its own latch')
+    assert.deepEqual(crossings.map((e) => e.sessionId).sort(), ['s1', 's2'])
+    // Second tick on each does NOT re-fire.
+    session.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    session2.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    assert.equal(crossings.length, 2)
+  })
+})

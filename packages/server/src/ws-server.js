@@ -367,6 +367,7 @@ function _isSecureRequest(req) {
  *   { type: 'push_token_error', message }               — push token registration error
  *   { type: 'cost_update', sessionId, sessionCost, totalCost, budget } — session cost update (budget-oriented; sessionId injected by _broadcastToSession)
  *   { type: 'session_usage', sessionId, cumulativeUsage } — per-session cumulative tokens + cost; cumulativeUsage = { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled } (#4072)
+ *   { type: 'session_cost_threshold_crossed', sessionId, costUsd, thresholdUsd } — soft "you've spent $X" warning; fires ONCE per session when cumulativeUsage.costUsd >= threshold (#4075)
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
  *   { type: 'web_feature_status', features }            — web feature availability

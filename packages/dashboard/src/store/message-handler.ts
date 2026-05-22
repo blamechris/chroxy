@@ -2698,6 +2698,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'session_cost_threshold_crossed': {
+      // #4075: soft "you've spent $X" warning. Fires ONCE per session.
+      // The dashboard owns the dismissible banner state per-session; the
+      // server doesn't re-fire even if costs continue rising, so a
+      // missed banner stays missed (don't store-and-replay).
+      const sid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const costUsd = typeof msg.costUsd === 'number' && Number.isFinite(msg.costUsd) ? msg.costUsd : 0;
+      const thresholdUsd = typeof msg.thresholdUsd === 'number' && Number.isFinite(msg.thresholdUsd) ? msg.thresholdUsd : 0;
+      if (sid && get().sessionStates[sid]) {
+        updateSession(sid, () => ({
+          costThresholdWarning: { costUsd, thresholdUsd, dismissedAt: null },
+        }));
+      }
+      break;
+    }
+
     case 'dev_preview': {
       const builder = sharedDevPreview(msg, get().activeSessionId);
       const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;

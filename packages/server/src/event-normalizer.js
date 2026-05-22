@@ -238,6 +238,15 @@ Object.assign(EVENT_MAP, {
     messages: [{ msg: { type: 'session_usage', cumulativeUsage: data.cumulativeUsage } }],
   }),
 
+  // #4075: soft per-session cost-threshold crossing. Distinct from
+  // budget_warning (which is budget-cap-relative); this is the
+  // "you've spent $X" notification that fires ONCE per session when
+  // cumulativeUsage.costUsd crosses the configured threshold (default
+  // $5). The dashboard + app render a dismissible banner.
+  session_cost_threshold_crossed: (data) => ({
+    messages: [{ msg: { type: 'session_cost_threshold_crossed', costUsd: data.costUsd, thresholdUsd: data.thresholdUsd } }],
+  }),
+
   budget_warning: (data) => ({
     messages: [{ msg: { type: 'budget_warning', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
   }),

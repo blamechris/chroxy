@@ -102,12 +102,17 @@ export interface ModelInfo {
 
 /**
  * Per-session running totals of token usage and USD cost across every
- * `result` event the server has seen for the session. Emitted as part of
- * the `session_list` snapshot (PR #4088) and updated incrementally via
- * the `session_usage` event (#4072). Subscription-billed providers
- * (claude-tui) leave `costUsd` at 0 since their result events emit
- * `cost: null`. Renderers should treat `costUsd === 0` as "don't render
- * a cost badge" (avoids decoration on subscription sessions).
+ * priced `result` event the server has seen for the session.
+ *
+ * Subscription-billed providers (claude-tui) emit `cost: null` on their
+ * result events; the server's `_trackUsage` is gated on
+ * `Number.isFinite(data.cost)` (#4088) and skips entirely for those —
+ * so subscription sessions' totals stay at all-zero, NOT just `costUsd`.
+ * Renderers should treat `costUsd === 0` (or the whole field being null)
+ * as "no cost badge."
+ *
+ * Surfaced via the `session_list` snapshot (#4088) and incrementally
+ * updated via the `session_usage` event (#4072).
  */
 export interface CumulativeUsage {
   inputTokens: number;
@@ -396,9 +401,18 @@ export interface BaseSessionState {
   lastResultDuration: number | null;
   sessionCost: number | null;
   // #4073 / #4074: rolling per-session totals updated via the
-  // `session_usage` event and seeded from the `session_list` snapshot.
-  // Null until the first result event lands.
+  // `session_usage` event and seeded from the `session_list` snapshot
+  // (which always carries an all-zero block when the session has no
+  // priced result events yet). Null only when no snapshot has arrived
+  // — the field stays an all-zero CumulativeUsage even for sessions
+  // that have never priced a turn (e.g. subscription-billed).
   cumulativeUsage: CumulativeUsage | null;
+  // #4075: latched threshold-crossed warning. Set by the
+  // `session_cost_threshold_crossed` event; the server fires only once
+  // per session, so this field stays populated until the user dismisses
+  // it (sets `dismissedAt`). Renderers should hide the banner when
+  // `dismissedAt != null`. Null = no warning has fired.
+  costThresholdWarning: { costUsd: number; thresholdUsd: number; dismissedAt: number | null } | null;
   isIdle: boolean;
   /**
    * Wall-clock timestamp (Date.now()) of the most recent activity-bearing
