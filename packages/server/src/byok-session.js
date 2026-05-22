@@ -510,15 +510,16 @@ export class ClaudeByokSession extends BaseSession {
   _emitTurnError(messageId, err, fallbackCode) {
     // #4057: SDK v0.81+ throws `APIUserAbortError` (not the generic
     // `AbortError`) when an in-flight messages.stream sees its signal
-    // aborted. Primary check is `instanceof` so we match by class
-    // identity. Fallback to the name string for raw fetch aborts (the
-    // dispatcher could conceivably surface those if a future SDK
-    // changes its error class). The final fallback (`signal.aborted`)
-    // catches paths where the SDK swallowed the original error.
+    // aborted. Primary check is `instanceof` — the SDK class itself
+    // never sets `.name`, so a name-string check would fail
+    // (instance.name === 'Error', verified at runtime). Keep the
+    // legacy `name === 'AbortError'` fallback for raw fetch aborts
+    // (the SDK's own internal abort helper uses this convention). The
+    // signal.aborted fallback catches paths where the SDK swallowed
+    // the original error and re-threw something we don't recognise.
     const aborted =
       err instanceof APIUserAbortError ||
       err?.name === 'AbortError' ||
-      err?.name === 'APIUserAbortError' ||
       this._abortController?.signal?.aborted
     if (aborted) {
       this.emit('error', {
