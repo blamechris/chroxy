@@ -1065,6 +1065,19 @@ export class SessionManager extends EventEmitter {
         // was not replayed. Strict-boolean coerce so non-Sdk providers
         // (which never set this field) round-trip as `false`.
         stdinForwardingDisabled: !!entry.session._stdinForwardingDisabled,
+        // #4089: persist cumulativeUsage so the dashboard sidebar badge
+        // (#4073) and mobile session-header badge (#4074) survive a
+        // server restart. Without this, the badge resets to $0 on
+        // restart even though the operator's spending continues. Round-
+        // trips through restoreState below as the entry's
+        // `cumulativeUsage` field. Older state files (pre-#4089) restore
+        // as null — restoreState seeds an all-zero block in that case.
+        cumulativeUsage: entry.cumulativeUsage || null,
+        // #4124: persist the per-session threshold-notified latch so the
+        // "you've spent $X" warning fires once per LOGICAL session, not
+        // once per process. Without this the warning re-fires on every
+        // restart even after the user has already seen and dismissed it.
+        costThresholdNotified: !!entry.costThresholdNotified,
       })
     }
 
@@ -1149,6 +1162,30 @@ export class SessionManager extends EventEmitter {
           skipPersist: true,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)
+        // #4089 / #4124: restore the per-session running totals + the
+        // threshold-notified latch onto the freshly-created entry. We do
+        // this AFTER createSession so the entry exists, and BEFORE
+        // history replay so a synthetic result event during replay
+        // (unlikely but defensive) doesn't double-count. Validate shape:
+        // missing / corrupt cumulativeUsage falls back to all-zero;
+        // non-boolean costThresholdNotified falls back to false.
+        const restoredEntry = this._sessions.get(sessionId)
+        if (restoredEntry) {
+          if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
+            const u = saved.cumulativeUsage
+            restoredEntry.cumulativeUsage = {
+              inputTokens: Number.isFinite(u.inputTokens) ? u.inputTokens : 0,
+              outputTokens: Number.isFinite(u.outputTokens) ? u.outputTokens : 0,
+              cacheReadTokens: Number.isFinite(u.cacheReadTokens) ? u.cacheReadTokens : 0,
+              cacheCreationTokens: Number.isFinite(u.cacheCreationTokens) ? u.cacheCreationTokens : 0,
+              costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
+              turnsBilled: Number.isFinite(u.turnsBilled) ? u.turnsBilled : 0,
+            }
+          }
+          if (saved.costThresholdNotified === true) {
+            restoredEntry.costThresholdNotified = true
+          }
+        }
         // Keep _sessionCounter ahead of any restored "Session N" names so the
         // first new auto-named session after restore never collides (#2338).
         if (saved.name) {
@@ -1582,11 +1619,10 @@ export class SessionManager extends EventEmitter {
     // their cost stays at 0 — the `> 0` gate on the threshold itself
     // also short-circuits when an operator disables the feature.
     //
-    // Caveat: neither the latch NOR `cumulativeUsage` is persisted in
-    // the session-state snapshot today (#4124), so a server restart that
-    // restores sessions effectively resets the latch — the warning will
-    // re-fire once per process lifetime, not strictly once per logical
-    // session. Acceptable for v1; a follow-up serialises both.
+    // Both the latch and `cumulativeUsage` are persisted in the
+    // session-state snapshot (#4089 / #4124), so the warning fires once
+    // per LOGICAL session — survives server restarts and matches what
+    // the dashboard / mobile UI shows.
     if (
       this._costThresholdUsd > 0 &&
       !entry.costThresholdNotified &&

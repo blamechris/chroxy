@@ -345,6 +345,72 @@ describe('SessionManager.serializeState', () => {
     assert.equal(missingEntry.stdinForwardingDisabled, false)
     assert.equal(typeof missingEntry.stdinForwardingDisabled, 'boolean')
   })
+
+  it('persists cumulativeUsage so the badge survives a restart (#4089)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const session = new EventEmitter()
+    session.model = 'claude-opus-4-7'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      type: 'cli',
+      name: 'Cost Session',
+      cwd: '/tmp',
+      cumulativeUsage: {
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadTokens: 200,
+        cacheCreationTokens: 100,
+        costUsd: 0.0345,
+        turnsBilled: 3,
+      },
+    })
+    const state = mgr.serializeState()
+    assert.deepEqual(state.sessions[0].cumulativeUsage, {
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheCreationTokens: 100,
+      costUsd: 0.0345,
+      turnsBilled: 3,
+    })
+  })
+
+  it('persists costThresholdNotified latch (#4124)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const session = new EventEmitter()
+    session.model = 'claude-opus-4-7'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      type: 'cli',
+      name: 'Latched',
+      cwd: '/tmp',
+      cumulativeUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0, turnsBilled: 0 },
+      costThresholdNotified: true,
+    })
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].costThresholdNotified, true)
+  })
+
+  it('round-trips missing fields as defaults (older state files)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const session = new EventEmitter()
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    // Entry without cumulativeUsage or costThresholdNotified (pre-#4089/#4124 shape)
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Legacy', cwd: '/tmp' })
+    const state = mgr.serializeState()
+    // Persistence emits explicit defaults — null for missing usage, false for missing latch.
+    assert.equal(state.sessions[0].cumulativeUsage, null)
+    assert.equal(state.sessions[0].costThresholdNotified, false)
+  })
 })
 
 describe('SessionManager.restoreState', () => {
@@ -430,6 +496,80 @@ describe('SessionManager.restoreState', () => {
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 2, 'Should have 2 restored sessions')
 
+    mgr.destroyAll()
+  })
+
+  it('restores cumulativeUsage and threshold latch (#4089 / #4124)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        {
+          name: 'Restored',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'approve',
+          sdkSessionId: null,
+          cumulativeUsage: {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadTokens: 200,
+            cacheCreationTokens: 100,
+            costUsd: 0.0345,
+            turnsBilled: 3,
+          },
+          costThresholdNotified: true,
+        },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 1)
+    // cumulativeUsage survives the restart — badge shows the running cost.
+    assert.equal(sessions[0].cumulativeUsage.costUsd, 0.0345)
+    assert.equal(sessions[0].cumulativeUsage.turnsBilled, 3)
+    // Latch survives — the threshold warning won't re-fire on next priced turn.
+    const restoredSessionId = sessions[0].sessionId
+    const entry = mgr._sessions.get(restoredSessionId)
+    assert.equal(entry.costThresholdNotified, true,
+      'threshold-notified latch must round-trip so the warning fires once per LOGICAL session')
+    mgr.destroyAll()
+  })
+
+  it('coerces corrupt cumulativeUsage fields to defaults on restore (#4089 defensive)', () => {
+    // A truncated/corrupt entry in session-state.json must not poison
+    // the renderer with NaN/Infinity values when restored.
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        {
+          name: 'Corrupt',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'approve',
+          sdkSessionId: null,
+          cumulativeUsage: {
+            inputTokens: NaN,
+            outputTokens: 'oops',
+            cacheReadTokens: Infinity,
+            cacheCreationTokens: null,
+            // costUsd intentionally missing
+            turnsBilled: -5, // negative — still finite, but the gate doesn't reject; pin it through
+          },
+        },
+      ],
+    }))
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    assert.equal(sessions[0].cumulativeUsage.inputTokens, 0, 'NaN → 0')
+    assert.equal(sessions[0].cumulativeUsage.outputTokens, 0, 'string → 0')
+    assert.equal(sessions[0].cumulativeUsage.cacheReadTokens, 0, 'Infinity → 0')
+    assert.equal(sessions[0].cumulativeUsage.cacheCreationTokens, 0, 'null → 0')
+    assert.equal(sessions[0].cumulativeUsage.costUsd, 0, 'missing → 0')
     mgr.destroyAll()
   })
 
