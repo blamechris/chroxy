@@ -1579,6 +1579,12 @@ export class SessionManager extends EventEmitter {
     // banner. Subscription-billed providers never trigger this because
     // their cost stays at 0 — the `> 0` gate on the threshold itself
     // also short-circuits when an operator disables the feature.
+    //
+    // Caveat: neither the latch NOR `cumulativeUsage` is persisted in
+    // the session-state snapshot today (#4124), so a server restart that
+    // restores sessions effectively resets the latch — the warning will
+    // re-fire once per process lifetime, not strictly once per logical
+    // session. Acceptable for v1; a follow-up serialises both.
     if (
       this._costThresholdUsd > 0 &&
       !entry.costThresholdNotified &&
@@ -1628,8 +1634,13 @@ export class SessionManager extends EventEmitter {
    * since the latch records "we already warned." Lowering the threshold
    * causes the next turn that crosses the new threshold to fire as
    * expected on sessions that haven't yet been notified.
+   *
+   * Invalid input (negative, NaN, Infinity, non-number) is silently
+   * coerced to the CURRENT value via `_normalizeCostThreshold`'s
+   * fallback — bad input is a no-op. Callers that want to validate
+   * up-front should compare the return value against the input.
    * @param {number} value USD; must be a finite non-negative number
-   * @returns {number} the applied value
+   * @returns {number} the applied value (unchanged if input was invalid)
    */
   setCostThresholdUsd(value) {
     this._costThresholdUsd = this._normalizeCostThreshold(value, this._costThresholdUsd)
