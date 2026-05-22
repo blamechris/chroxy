@@ -33,6 +33,12 @@ const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
     tooltip: 'Interactive Claude Code TUI under PTY — uses your claude.ai subscription, bypasses programmatic credit metering',
     type: 'cli',
   },
+  'claude-byok': {
+    short: 'BYOK',
+    label: 'Claude (API key — BYOK)',
+    tooltip: 'Direct Anthropic API via @anthropic-ai/sdk — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
+    type: 'sdk',
+  },
   'docker-cli': {
     short: 'Docker CLI',
     label: 'Claude Code (Docker CLI)',
