@@ -108,11 +108,28 @@ const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
 // users may pin for reproducibility (#4084). The pricing table is keyed
 // on family heads (`claude-opus-4-7`), so a regex strip of the trailing
 // 8+-digit date suffix lets the lookup succeed for either form.
+//
+// [1m] re-attach after fallback (#4105 + #4107): when the input ended
+// with `[1m]` and a non-verbatim match resolves to a family head, try
+// `${head}[1m]` first so the explicit premium entry wins over the base.
+// Otherwise short-form `opus[1m]` and dated-form `*-YYYYMMDD[1m]` would
+// silently route to base rates and undercount >200K turns.
 function resolvePricingKey(modelId) {
   if (typeof modelId !== 'string' || modelId.length === 0) return null
   if (CLAUDE_PRICING_USD_PER_MTOK[modelId]) return modelId
-  const stripped = modelId.endsWith(ONE_M_SUFFIX) ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
-  if (CLAUDE_PRICING_USD_PER_MTOK[stripped]) return stripped
+  const had1m = modelId.endsWith(ONE_M_SUFFIX)
+  const stripped = had1m ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
+  // When the input carried [1m] AND a non-verbatim resolution lands on a
+  // family head with an explicit [1m] entry, prefer the [1m] entry so the
+  // longContext premium block is reachable.
+  const preferOneM = (key) => {
+    if (had1m) {
+      const oneMKey = `${key}${ONE_M_SUFFIX}`
+      if (CLAUDE_PRICING_USD_PER_MTOK[oneMKey]) return oneMKey
+    }
+    return key
+  }
+  if (CLAUDE_PRICING_USD_PER_MTOK[stripped]) return preferOneM(stripped)
   // Dated full id? Strip the 8-digit date suffix and retry against the
   // pricing table. The strip applies unconditionally; safety comes from
   // the table itself — only `claude-*` keys exist, so a short-form like
@@ -120,9 +137,9 @@ function resolvePricingKey(modelId) {
   // falls through to the FALLBACK_MODELS short-id lookup (which expects
   // the un-stripped id).
   const dateStripped = stripped.replace(/-\d{8,}$/, '')
-  if (CLAUDE_PRICING_USD_PER_MTOK[dateStripped]) return dateStripped
+  if (CLAUDE_PRICING_USD_PER_MTOK[dateStripped]) return preferOneM(dateStripped)
   const fallback = FALLBACK_MODELS.find((m) => m.id === stripped)
-  return fallback ? fallback.fullId : null
+  return fallback ? preferOneM(fallback.fullId) : null
 }
 
 /**

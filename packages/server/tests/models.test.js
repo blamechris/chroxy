@@ -488,10 +488,15 @@ describe('getModelPricing()', () => {
     assert.deepEqual(getModelPricing('claude-haiku-4-5-20251001'), getModelPricing('claude-haiku-4-5'))
   })
 
-  it('combines dated suffix + [1m] long-context (still returns family pricing)', () => {
-    // Belt-and-braces: a user pinning to a dated long-context variant.
-    const base = getModelPricing('claude-opus-4-7')
-    assert.deepEqual(getModelPricing('claude-opus-4-7-20251201[1m]'), base)
+  it('combines dated suffix + [1m] long-context → routes to explicit [1m] entry (#4107)', () => {
+    // A user pinning to a dated long-context variant must still get the
+    // longContext premium block — pre-#4107 this fell through to the base
+    // family entry, silently undercounting >200K turns. The combined form
+    // walks: verbatim miss → strip [1m] → 'claude-opus-4-7-20251201' miss
+    // → strip date → 'claude-opus-4-7' HIT base. The [1m] re-attach then
+    // promotes 'claude-opus-4-7' → 'claude-opus-4-7[1m]'.
+    const longOpus = getModelPricing('claude-opus-4-7[1m]')
+    assert.deepEqual(getModelPricing('claude-opus-4-7-20251201[1m]'), longOpus)
   })
 
   it('still returns null for genuinely unknown dated families (no false-positive resolution)', () => {
@@ -537,6 +542,60 @@ describe('getModelPricing()', () => {
   it('returned entries are frozen so callers cannot mutate the constant', () => {
     const p = getModelPricing('claude-sonnet-4-6')
     assert.ok(Object.isFrozen(p))
+  })
+
+  describe('[1m] re-attach after fallback resolution (#4105 + #4107)', () => {
+    it('short-form opus[1m] routes to the explicit [1m] entry (premium pricing preserved)', () => {
+      // resolvePricingKey walks: verbatim miss → strip [1m] → 'opus' table
+      // miss → fallback m.id === 'opus' → fullId 'claude-opus-4-7'. Before
+      // the fix, this returned the base entry (no longContext block);
+      // after, it re-attaches [1m] and returns 'claude-opus-4-7[1m]'
+      // with the longContext premium.
+      const longOpus = getModelPricing('opus[1m]')
+      assert.ok(longOpus, 'opus[1m] should resolve to a pricing entry')
+      assert.ok(longOpus.longContext, 'opus[1m] must keep premium tier (was missed pre-#4105)')
+      assert.equal(longOpus.longContext.input, 30.00, 'must be the 2x premium input rate')
+    })
+
+    it('dated + [1m] combined form routes to the explicit [1m] entry', () => {
+      // claude-opus-4-7-20251201[1m] walks: verbatim miss → strip [1m] →
+      // 'claude-opus-4-7-20251201' miss → strip date → 'claude-opus-4-7'
+      // HIT (base entry). Before the fix, returned base. After, re-attaches
+      // [1m] → returns 'claude-opus-4-7[1m]'.
+      const pricing = getModelPricing('claude-opus-4-7-20251201[1m]')
+      assert.ok(pricing, 'dated [1m] form should resolve')
+      assert.ok(pricing.longContext, 'dated + [1m] form must keep premium tier (was missed pre-#4107)')
+    })
+
+    it('short-form opus (without [1m]) still routes to the base entry', () => {
+      // Regression guard: the re-attach must NOT fire when the original
+      // input lacked the [1m] suffix.
+      const opus = getModelPricing('opus')
+      assert.ok(opus, 'opus should resolve to base pricing')
+      assert.equal(opus.longContext, undefined, 'opus (no [1m]) must stay on base entry')
+    })
+
+    it('short-form sonnet[1m] falls back to base sonnet (no premium entry for sonnet)', () => {
+      // Operator error case: a user requests sonnet[1m] but no premium
+      // entry exists. Re-attach attempts 'claude-sonnet-4-6[1m]' → table
+      // miss → fall through to base 'claude-sonnet-4-6'. Pricing is
+      // still computable, just at base rates.
+      const sonnet1m = getModelPricing('sonnet[1m]')
+      assert.ok(sonnet1m, 'sonnet[1m] should resolve to *some* pricing')
+      assert.equal(sonnet1m.longContext, undefined, 'no sonnet [1m] entry → base rates apply')
+      assert.equal(sonnet1m.input, 3.00, 'base sonnet input rate')
+    })
+
+    it('compute end-to-end: 300K input on opus[1m] uses premium rates (#4105 behavioural)', () => {
+      // Round-trip test: short-form opus[1m] + >200K usage → premium
+      // pricing applied via computePromptCostUsd. This catches both the
+      // resolvePricingKey routing (#4105) and the premium-tier selection
+      // in one assertion.
+      const pricing = getModelPricing('opus[1m]')
+      const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, pricing)
+      // 300K * 30/Mtok = 9.0 (premium rate, NOT 4.5 at base 15/Mtok)
+      assert.ok(Math.abs(cost - 9.0) < 1e-6, `expected 9.0 (premium), got ${cost}`)
+    })
   })
 })
 
