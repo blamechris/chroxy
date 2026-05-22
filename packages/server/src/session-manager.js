@@ -182,6 +182,12 @@ export class SessionManager extends EventEmitter {
     transforms,
     sandbox,
     costBudget,
+    // #4075: per-session "you've spent $X" soft warning. Distinct from
+    // `costBudget` (which hard-blocks at the cap). Fires once per session
+    // per crossing; subscription-billed providers never trigger it
+    // because their cumulativeUsage.costUsd stays at 0.
+    // Default: 5.00 (USD). Set to 0 / null to disable.
+    costThresholdUsd,
     maxSkillBytes,
     maxTotalSkillBytes,
     providerSkillAllowlist,
@@ -236,6 +242,11 @@ export class SessionManager extends EventEmitter {
         ? hardTimeoutMs
         : null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
+    // #4075: per-session crossing threshold. Stored as a runtime-mutable
+    // field so the settings panel can update it without restarting the
+    // server. Operators set this via setCostThresholdUsd() to pin the
+    // soft warning point (default $5).
+    this._costThresholdUsd = this._normalizeCostThreshold(costThresholdUsd, 5.00)
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     // Setting either to 0 in config disables that cap.
     this._maxSkillBytes = Number.isFinite(maxSkillBytes) ? maxSkillBytes : null
@@ -1562,6 +1573,67 @@ export class SessionManager extends EventEmitter {
       event: 'session_usage',
       data: { cumulativeUsage: { ...acc } },
     })
+    // #4075: soft threshold crossing. Fire ONCE per session: the latch
+    // (`costThresholdNotified`) stays true for the session's lifetime so
+    // a tool-heavy turn that crosses the threshold doesn't spam the
+    // banner. Subscription-billed providers never trigger this because
+    // their cost stays at 0 — the `> 0` gate on the threshold itself
+    // also short-circuits when an operator disables the feature.
+    if (
+      this._costThresholdUsd > 0 &&
+      !entry.costThresholdNotified &&
+      acc.costUsd >= this._costThresholdUsd
+    ) {
+      entry.costThresholdNotified = true
+      this.emit('session_event', {
+        sessionId,
+        event: 'session_cost_threshold_crossed',
+        data: {
+          costUsd: acc.costUsd,
+          thresholdUsd: this._costThresholdUsd,
+        },
+      })
+    }
+  }
+
+  /**
+   * #4075: Validate + clamp a costThresholdUsd input. Accepts finite
+   * non-negative numbers; coerces null/undefined to the supplied default;
+   * rejects strings, NaN, Infinity, negatives.
+   * @param {unknown} value
+   * @param {number} fallback
+   * @returns {number} threshold in USD; 0 means "disabled"
+   */
+  _normalizeCostThreshold(value, fallback) {
+    if (value === null || value === undefined) return fallback
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return fallback
+    }
+    return value
+  }
+
+  /**
+   * #4075: Get the current cost threshold (USD). 0 means disabled.
+   * @returns {number}
+   */
+  getCostThresholdUsd() {
+    return this._costThresholdUsd
+  }
+
+  /**
+   * #4075: Update the cost threshold at runtime (e.g. from the dashboard
+   * settings panel). Setting to 0 disables the soft warning. Does NOT
+   * reset per-session latches — operators raising the threshold mid-
+   * session won't re-trigger an already-fired warning on the SAME session,
+   * since the latch records "we already warned." Lowering the threshold
+   * causes the next turn that crosses the new threshold to fire as
+   * expected on sessions that haven't yet been notified.
+   * @param {number} value USD; must be a finite non-negative number
+   * @returns {number} the applied value
+   */
+  setCostThresholdUsd(value) {
+    this._costThresholdUsd = this._normalizeCostThreshold(value, this._costThresholdUsd)
+    return this._costThresholdUsd
   }
 
   /**

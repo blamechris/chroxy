@@ -943,6 +943,12 @@ export function App() {
   // reconnect), so the toast survives the entire disconnect and stays
   // clickable once the socket recovers.
   const isSocketConnected = connectionPhase === 'connected'
+  // #4075: surface the active session's cost-threshold warning as a Toast
+  // when set and not yet dismissed. The server fires the event ONCE per
+  // session; renderer-side dismissal is per-session via `dismissedAt`.
+  const activeCostWarning = activeSessionId
+    ? sessionStates[activeSessionId]?.costThresholdWarning ?? null
+    : null
   const toastItems: ToastItem[] = useMemo(
     () => [
       ...serverErrors
@@ -961,8 +967,15 @@ export function App() {
         })),
       ...infoNotifications
         .map(e => ({ id: e.id, message: e.message, level: 'info' as const })),
+      ...(activeCostWarning && activeCostWarning.dismissedAt == null
+        ? [{
+            id: `cost-threshold-${activeSessionId}`,
+            message: `Session has used $${activeCostWarning.costUsd.toFixed(2)}. (Threshold: $${activeCostWarning.thresholdUsd.toFixed(2)}).`,
+            level: 'info' as const,
+          }]
+        : []),
     ],
-    [serverErrors, infoNotifications, activeSessionId, isSocketConnected],
+    [serverErrors, infoNotifications, activeSessionId, isSocketConnected, activeCostWarning],
   )
 
   // Per-session input draft persistence.
@@ -1914,6 +1927,26 @@ export function App() {
 
       {/* Toasts */}
       <Toast items={toastItems} onDismiss={(id) => {
+        // #4075: cost-threshold toast IDs are routed via the per-session
+        // dismissedAt latch; everything else falls through to the
+        // existing server-error / info-notification dismissal paths.
+        if (id.startsWith('cost-threshold-')) {
+          const sid = id.slice('cost-threshold-'.length)
+          const states = useConnectionStore.getState().sessionStates
+          const ss = states[sid]
+          if (ss?.costThresholdWarning) {
+            useConnectionStore.setState({
+              sessionStates: {
+                ...states,
+                [sid]: {
+                  ...ss,
+                  costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+                },
+              },
+            })
+          }
+          return
+        }
         const item = toastItems.find(t => t.id === id)
         if (!item) return
         if (item.level === 'error') {

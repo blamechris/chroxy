@@ -37,6 +37,7 @@ import { BackgroundSessionProgress } from '../components/BackgroundSessionProgre
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
 import { StdinDisabledBanner } from '../components/StdinDisabledBanner';
+import { CostThresholdBanner } from '../components/CostThresholdBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -258,6 +259,12 @@ export function SessionScreen() {
   const cumulativeUsage = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].cumulativeUsage : null;
+  });
+  // #4075: soft cost-threshold warning. Banner stays visible until the
+  // user dismisses (we set dismissedAt to flip the gate).
+  const costThresholdWarning = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].costThresholdWarning : null;
   });
   const costBudget = useConnectionStore((s) => s.costBudget);
   const devPreviews = useConnectionStore((s) => {
@@ -1148,6 +1155,31 @@ export function SessionScreen() {
         visible={!!activeSession?.stdinForwardingDisabled}
         sessionId={activeSessionId}
         onRestart={handleRestartStdinSession}
+      />
+
+      {/* #4075: cost-threshold soft warning banner. Server fires once per
+          session via `session_cost_threshold_crossed`; user dismissal
+          flips `dismissedAt` so the banner stays hidden for this session's
+          lifetime even though the record persists. */}
+      <CostThresholdBanner
+        visible={!!costThresholdWarning && costThresholdWarning.dismissedAt == null}
+        costUsd={costThresholdWarning?.costUsd ?? 0}
+        thresholdUsd={costThresholdWarning?.thresholdUsd ?? 0}
+        onDismiss={() => {
+          if (!activeSessionId || !costThresholdWarning) return;
+          const { sessionStates } = useConnectionStore.getState();
+          const ss = sessionStates[activeSessionId];
+          if (!ss?.costThresholdWarning) return;
+          useConnectionStore.setState({
+            sessionStates: {
+              ...sessionStates,
+              [activeSessionId]: {
+                ...ss,
+                costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+              },
+            },
+          });
+        }}
       />
 
       {/* Session timeout warning banner */}

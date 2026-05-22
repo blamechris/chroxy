@@ -399,6 +399,12 @@ export interface BaseSessionState {
   // `session_usage` event and seeded from the `session_list` snapshot.
   // Null until the first result event lands.
   cumulativeUsage: CumulativeUsage | null;
+  // #4075: latched threshold-crossed warning. Set by the
+  // `session_cost_threshold_crossed` event; the server fires only once
+  // per session, so this field stays populated until the user dismisses
+  // it (sets `dismissedAt`). Renderers should hide the banner when
+  // `dismissedAt != null`. Null = no warning has fired.
+  costThresholdWarning: { costUsd: number; thresholdUsd: number; dismissedAt: number | null } | null;
   isIdle: boolean;
   /**
    * Wall-clock timestamp (Date.now()) of the most recent activity-bearing
