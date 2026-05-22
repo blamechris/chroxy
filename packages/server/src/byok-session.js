@@ -32,6 +32,7 @@ import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { translateSdkEvent } from './byok-event-translator.js'
 import { BUILTIN_TOOLS } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
+import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
 
 const log = createLogger('byok-session')
 
@@ -227,6 +228,18 @@ export class ClaudeByokSession extends BaseSession {
     // UI.) The PermissionManager keys its pending map by requestId, not
     // toolUseId, so we maintain a separate Set on the session.
     this._pendingPermissionToolUseIds = new Set()
+
+    // #4076: MCP config discovery. Parses ~/.claude.json (or an
+    // override) for the `mcpServers` block. Parse-only at this stage —
+    // no child spawn, no tool wiring — those land in #4077/#4078/#4079.
+    // Malformed configs log a single warn per server and produce an
+    // empty list, so a corrupt user config can't take down session start.
+    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath || opts.claudeConfigPath)
+    for (const warning of mcpConfig.warnings) {
+      log.warn(`BYOK MCP config: ${warning}`)
+    }
+    this._mcpServerConfigs = mcpConfig.servers
+    this.mcpServers = Object.freeze(mcpConfig.servers.map(toMcpServerMetadata))
   }
 
   async start() {
