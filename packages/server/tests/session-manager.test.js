@@ -2624,6 +2624,7 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     const { mgr, session } = makeWired({ budget: 5.00 })
     const costUpdates = captureSessionEvents(mgr, 'cost_update')
     session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    assert.equal(costUpdates.length, 1, 'wire must emit one cost_update per priced result')
     assert.equal(costUpdates[0].data.budget, 5.00)
   })
 
