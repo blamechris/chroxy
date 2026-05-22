@@ -2522,3 +2522,140 @@ describe('SessionManager._trackUsage (#4072)', () => {
     assert.equal(snap.cumulativeUsage.turnsBilled, 0)
   })
 })
+
+describe('SessionManager._trackCost integration with result events (#4086)', () => {
+  // #4086 / #4056 AC #4: lock down the production wire end-to-end.
+  // ClaudeByokSession (or any provider) emits `result` with cost →
+  // SessionManager._wireSessionEvents → typeof gate →
+  // _trackCost(sessionId, cost, model) → CostBudgetManager.trackCost →
+  // 'cost_update' session_event broadcast. A refactor of any link in
+  // this chain (rename, gate-tightening, gate-swap to a different
+  // predicate) would silently kill BYOK cost accounting; these tests
+  // catch that.
+  //
+  // The CostBudgetManager itself is unit-tested in cost-budget-manager.test.js.
+  // What's NEW here is the wire from a session's `result` event through
+  // SessionManager's listener to the budget tracker.
+
+  function makeWired({ budget = null } = {}) {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      costBudget: budget,
+    })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    session.currentModel = 'claude-opus-4-7'
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s1', session)
+    return { mgr, session }
+  }
+
+  function captureSessionEvents(mgr, eventName) {
+    const events = []
+    mgr.on('session_event', (e) => {
+      if (e.event === eventName) events.push(e)
+    })
+    return events
+  }
+
+  it('a single BYOK result event drives _trackCost end-to-end', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    // Emit the exact shape a BYOK turn produces.
+    session.emit('result', {
+      messageId: 'msg_1',
+      stopReason: 'end_turn',
+      duration: 123,
+      usage: { input_tokens: 100, output_tokens: 50 },
+      cost: 0.025,
+    })
+    // CostBudgetManager has the cumulative.
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.025) < 1e-9,
+      `getSessionCost should reflect the trackCost call: got ${mgr.getSessionCost('s1')}`)
+    // The wire broadcasts the cost_update.
+    assert.equal(costUpdates.length, 1, 'one cost_update per priced result')
+    assert.ok(Math.abs(costUpdates[0].data.sessionCost - 0.025) < 1e-9)
+  })
+
+  it('multiple result events accumulate via _trackCost', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: 0.01, usage: { input_tokens: 10 } })
+    session.emit('result', { cost: 0.02, usage: { input_tokens: 20 } })
+    session.emit('result', { cost: 0.005, usage: { input_tokens: 5 } })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.035) < 1e-9,
+      `expected cumulative 0.035, got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 3)
+    // The third event's payload reflects the FULL cumulative, not just
+    // the delta — locks down the budget-display contract.
+    assert.ok(Math.abs(costUpdates[2].data.sessionCost - 0.035) < 1e-9)
+  })
+
+  it('configured budget triggers budget_warning at 80% via the wire', () => {
+    // $1 budget; emit a single result that crosses 80% ($0.80+).
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('result', { cost: 0.85, usage: { input_tokens: 1 } })
+    assert.equal(warnings.length, 1, 'budget_warning fires on the wire when cumulative crosses 80%')
+    assert.equal(warnings[0].data.percent, 85)
+    assert.ok(warnings[0].data.message.includes('85% of the $1.00 budget'))
+  })
+
+  it('configured budget triggers budget_exceeded at 100% via the wire', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('result', { cost: 1.05, usage: { input_tokens: 1 } })
+    assert.equal(exceeded.length, 1)
+    assert.equal(exceeded[0].data.percent, 105)
+  })
+
+  it('refuses to trackCost when `cost` is a string (gate is Number.isFinite, not typeof)', () => {
+    // The #4086 issue body specifically calls out the regression risk
+    // of a future change persisting + rehydrating cost and producing a
+    // string-typed value. The gate (#4088) is Number.isFinite, which
+    // rejects strings. Lock it down: a string-cost result must NOT
+    // tick the cost counter or fire cost_update.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: '0.025', usage: { input_tokens: 100 } })
+    assert.equal(mgr.getSessionCost('s1'), 0, 'string cost must be rejected')
+    assert.equal(costUpdates.length, 0, 'no cost_update for string cost')
+  })
+
+  it('refuses to trackCost when `cost` is missing (claude-tui subscription shape)', () => {
+    // Subscription-only providers emit result without cost — must not
+    // tick the budget tracker.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('result', { usage: { input_tokens: 100 } })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(warnings.length, 0)
+  })
+
+  it('refuses to trackCost when `cost` is null (claude-tui new shape)', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: null, usage: null })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+  })
+})
