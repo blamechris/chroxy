@@ -2526,7 +2526,7 @@ describe('SessionManager._trackUsage (#4072)', () => {
 describe('SessionManager._trackCost integration with result events (#4086)', () => {
   // #4086 / #4056 AC #4: lock down the production wire end-to-end.
   // ClaudeByokSession (or any provider) emits `result` with cost →
-  // SessionManager._wireSessionEvents → typeof gate →
+  // SessionManager._wireSessionEvents → Number.isFinite(data?.cost) gate →
   // _trackCost(sessionId, cost, model) → CostBudgetManager.trackCost →
   // 'cost_update' session_event broadcast. A refactor of any link in
   // this chain (rename, gate-tightening, gate-swap to a different
@@ -2536,6 +2536,18 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
   // The CostBudgetManager itself is unit-tested in cost-budget-manager.test.js.
   // What's NEW here is the wire from a session's `result` event through
   // SessionManager's listener to the budget tracker.
+
+  // Track managers so afterEach can cancel pending persistence timers
+  // (#4086 review — emitting result events records history and schedules
+  // a debounced persist; without explicit cancellation we leak timers
+  // and extra state-file writes past the test).
+  const _managers = []
+  afterEach(() => {
+    for (const mgr of _managers) {
+      try { mgr._persistence?.cancelPersist?.() } catch {}
+    }
+    _managers.length = 0
+  })
 
   function makeWired({ budget = null } = {}) {
     const mgr = new SessionManager({
@@ -2564,6 +2576,7 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
       },
     })
     mgr._wireSessionEvents('s1', session)
+    _managers.push(mgr)
     return { mgr, session }
   }
 
