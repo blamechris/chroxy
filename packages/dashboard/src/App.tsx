@@ -878,9 +878,16 @@ export function App() {
   // turn (#4119 review followup #4120).
   const sidebarCumulativeUsage = useConnectionStore(
     useShallow((s) => {
+      // for-in + index lookup avoids the per-call Object.entries()
+      // intermediate array allocation. This selector still runs on every
+      // store update (zustand fires the selector to compute the new
+      // value and compare against the previous); only the SHALLOW-EQUAL
+      // RESULT comparison short-circuits the React subscribers.
+      // Skipping the array allocation keeps the hot path tight (#4130
+      // review).
       const out: Record<string, BaseSessionState['cumulativeUsage']> = {}
-      for (const [id, st] of Object.entries(s.sessionStates)) {
-        out[id] = st.cumulativeUsage
+      for (const id in s.sessionStates) {
+        out[id] = s.sessionStates[id]!.cumulativeUsage
       }
       return out
     }),
