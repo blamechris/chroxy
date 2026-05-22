@@ -442,10 +442,36 @@ describe('getModelPricing()', () => {
     assert.equal(getModelPricing('haiku').input, 1.00)
   })
 
-  it('returns pricing for the [1m] long-context suffix (same rate as default window)', () => {
+  it('returns base rates matching the default-window entry for the [1m] suffix below threshold (#4087)', () => {
     const base = getModelPricing('claude-opus-4-7')
     const long = getModelPricing('claude-opus-4-7[1m]')
-    assert.deepEqual(long, base, 'long-context variant must use the same rate; Anthropic charges per token not per window')
+    // The base rates on the [1m] entry match the default-window entry —
+    // sub-200K turns on Opus 1M cost the same as default Opus.
+    assert.equal(long.input, base.input)
+    assert.equal(long.output, base.output)
+    assert.equal(long.cacheRead, base.cacheRead)
+    assert.equal(long.cacheWrite, base.cacheWrite)
+  })
+
+  it('[1m] entry carries a longContext block with the >200K premium rates (#4087)', () => {
+    const long = getModelPricing('claude-opus-4-7[1m]')
+    assert.ok(long.longContext, '[1m] entry must declare premium rates')
+    assert.equal(long.longContext.thresholdInputTokens, 200_000)
+    // Anthropic's published 1M premium: 2× input, 2× output (verify on
+    // pricing review). These literals are the contract — if Anthropic
+    // changes them, this test fails loudly.
+    assert.equal(long.longContext.input, 30.00)
+    assert.equal(long.longContext.output, 150.00)
+    assert.equal(long.longContext.cacheRead, 3.00)
+    assert.equal(long.longContext.cacheWrite, 37.50)
+  })
+
+  it('default-window (non-[1m]) Opus entry does NOT carry a longContext block', () => {
+    // The default-window entry can't ever exceed 200K (the window itself
+    // is 200K), so premium pricing is irrelevant and would be misleading
+    // if present. Confirms the design: longContext lives on `[1m]` only.
+    const base = getModelPricing('claude-opus-4-7')
+    assert.equal(base.longContext, undefined)
   })
 
   it('returns family-head pricing for dated full ids (Anthropic SDK Model enum form, #4084)', () => {
@@ -531,5 +557,61 @@ describe('computePromptCostUsd()', () => {
     // If the rate ever changes, the byok-session test's literal must change too.
     const cost = computePromptCostUsd({ input_tokens: 5, output_tokens: 4 }, opus)
     assert.ok(Math.abs(cost - 0.000375) < 1e-9, `opus 5in/4out reference: expected 0.000375, got ${cost}`)
+  })
+
+  describe('long-context premium tier (#4087)', () => {
+    const longOpus = getModelPricing('claude-opus-4-7[1m]')
+
+    it('uses BASE rates when total input is below 200K (Opus [1m])', () => {
+      // 100K input, 50K output — both well below threshold.
+      const cost = computePromptCostUsd({ input_tokens: 100_000, output_tokens: 50_000 }, longOpus)
+      // 100K * 15/Mtok + 50K * 75/Mtok = 1.5 + 3.75 = 5.25
+      assert.ok(Math.abs(cost - 5.25) < 1e-6, `expected 5.25 (base rates), got ${cost}`)
+    })
+
+    it('uses BASE rates at exactly the 200K threshold (boundary)', () => {
+      // 200K input is NOT > 200K — boundary stays on base.
+      const cost = computePromptCostUsd({ input_tokens: 200_000, output_tokens: 0 }, longOpus)
+      // 200K * 15/Mtok = 3.0 (base, not premium)
+      assert.ok(Math.abs(cost - 3.0) < 1e-6, `boundary 200K must use base, got ${cost}`)
+    })
+
+    it('uses PREMIUM rates when total input exceeds 200K (Opus [1m])', () => {
+      // 201K input — one token past the threshold flips ALL tokens to
+      // premium. Matches Anthropic's table-tier semantics.
+      const cost = computePromptCostUsd({ input_tokens: 201_000, output_tokens: 50_000 }, longOpus)
+      // 201K * 30/Mtok + 50K * 150/Mtok = 6.03 + 7.5 = 13.53
+      assert.ok(Math.abs(cost - 13.53) < 1e-6, `expected 13.53 (premium rates), got ${cost}`)
+    })
+
+    it('cache_read + cache_creation count toward the threshold', () => {
+      // 100K input + 60K cache_read + 50K cache_creation = 210K total
+      // input → over threshold → premium rates apply.
+      const cost = computePromptCostUsd({
+        input_tokens: 100_000,
+        output_tokens: 1_000,
+        cache_read_input_tokens: 60_000,
+        cache_creation_input_tokens: 50_000,
+      }, longOpus)
+      // Premium rates: 100K*30 + 1K*150 + 60K*3 + 50K*37.5 = 3+0.15+0.18+1.875 = 5.205
+      assert.ok(Math.abs(cost - 5.205) < 1e-6, `cache-fed threshold expected 5.205 premium, got ${cost}`)
+    })
+
+    it('default-window Opus never enters premium tier even if usage somehow exceeds 200K', () => {
+      // A pathological usage report (claims 300K input on default-window
+      // model) must still use base rates — there's no longContext block
+      // to flip into.
+      const baseOpus = getModelPricing('claude-opus-4-7')
+      const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, baseOpus)
+      // 300K * 15/Mtok = 4.5 (base)
+      assert.ok(Math.abs(cost - 4.5) < 1e-6, `default-window must stay on base regardless, got ${cost}`)
+    })
+
+    it('Sonnet and Haiku entries never enter premium tier (no [1m] variant)', () => {
+      const sonnet = getModelPricing('claude-sonnet-4-6')
+      const haiku = getModelPricing('claude-haiku-4-5')
+      assert.equal(sonnet.longContext, undefined)
+      assert.equal(haiku.longContext, undefined)
+    })
   })
 })
