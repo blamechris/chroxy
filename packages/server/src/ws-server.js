@@ -365,7 +365,8 @@ function _isSecureRequest(req) {
  *   { type: 'skill_trust_granted', sessionId, skillName, author } — community skill trust granted (#3297)
  *   { type: 'skill_trust_grant_ok', requestId, sessionId, skillName, author } — ack for skill_trust_grant handler (#3297)
  *   { type: 'push_token_error', message }               — push token registration error
- *   { type: 'cost_update', sessionId, cost }            — session cost update
+ *   { type: 'cost_update', sessionId, sessionCost, totalCost, budget } — session cost update (budget-oriented; sessionId injected by _broadcastToSession)
+ *   { type: 'session_usage', sessionId, cumulativeUsage } — per-session cumulative tokens + cost; cumulativeUsage = { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled } (#4072)
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
  *   { type: 'web_feature_status', features }            — web feature availability
