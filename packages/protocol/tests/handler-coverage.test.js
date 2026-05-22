@@ -48,8 +48,9 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  // 'session_usage' removed from PLATFORM_SPECIFIC in #4074 — both
-  // dashboard (#4073) and app (#4074) handlers are now wired.
+  // 'session_usage' is now handled by both dashboard (#4073) and mobile
+  // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
+  // because each handler has a `case 'session_usage':` clause.
   // 'evaluator_rewrite' removed — dashboard now handles it (#3188)
   // 'evaluator_clarify' removed — dashboard now handles it (#3188)
   // 'skills_list' removed — dashboard now handles it (#3209)

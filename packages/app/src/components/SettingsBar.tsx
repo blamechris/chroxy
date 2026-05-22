@@ -168,6 +168,13 @@ export function SettingsBar({
   // the session resets or a state restore drops the cumulative block).
   // Without this guard the badge disappears but the modal stays open on
   // top, anchored to data that no longer applies (#4121 review).
+  //
+  // Known limitation: switching between two sessions that both have
+  // cumulativeUsage > 0 keeps the sheet open and re-anchors it to the
+  // NEW session's data without an explicit user open. The Sheet is
+  // dismissible (Close button + backdrop tap) so the impact is minor;
+  // a cleaner fix would pass `activeSessionId` through SettingsBar and
+  // useEffect on the id to auto-close on switch — tracked as a follow-up.
   useEffect(() => {
     if (!hasCumulativeCost && costBreakdownOpen) setCostBreakdownOpen(false);
   }, [hasCumulativeCost, costBreakdownOpen]);
