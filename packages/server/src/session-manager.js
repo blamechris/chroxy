@@ -23,6 +23,24 @@ const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
 /**
+ * Zero-initialized cumulative usage record (#4072). Lives on the session
+ * entry; increments on every priced `result` event. Field names are
+ * camelCase here even though the SDK delivers snake_case usage — the
+ * client-facing API (`session_usage` event, `listSessions()` snapshot)
+ * uses camelCase to match chroxy's protocol convention.
+ */
+function makeZeroCumulativeUsage() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    costUsd: 0,
+    turnsBilled: 0,
+  }
+}
+
+/**
  * Base error class for session management operations.
  */
 export class SessionError extends Error {
@@ -598,6 +616,12 @@ export class SessionManager extends EventEmitter {
       // Original repo dir needed for `git worktree remove` during cleanup
       worktreeRepoDir: worktreePath ? baseCwd : null,
       isolation: resolvedIsolation,
+      // #4072: cumulative usage accumulator (tokens + cost) populated by
+      // _trackUsage on every priced `result` event. Subscription-only
+      // providers (e.g. claude-tui) emit `result` without `cost`, so the
+      // accumulator stays at zero for them and the dashboard / app side
+      // knows to skip the cost badge.
+      cumulativeUsage: makeZeroCumulativeUsage(),
     }
 
     this._sessions.set(sessionId, entry)
@@ -756,6 +780,15 @@ export class SessionManager extends EventEmitter {
         // is the authoritative seed for clients connecting late.
         stdinDroppedBytes,
         stdinDroppedCount,
+        // #4072: hydrate cumulative token usage + cost so a dashboard /
+        // mobile client connecting after a session has already racked up
+        // turns sees the running totals immediately instead of waiting
+        // for the next `session_usage` event. Shallow-copy on the wire
+        // so a client that mutates the payload can't corrupt the
+        // canonical accumulator. Subscription-only sessions never emit
+        // `cost` so this stays zero — the UI uses `turnsBilled === 0`
+        // or `costUsd === 0` to suppress the cost badge.
+        cumulativeUsage: entry.cumulativeUsage ? { ...entry.cumulativeUsage } : makeZeroCumulativeUsage(),
       })
     }
     return list
@@ -1383,6 +1416,10 @@ export class SessionManager extends EventEmitter {
           const sessionEntry = this._sessions.get(sessionId)
           const model = session.currentModel || sessionEntry?.model || null
           this._trackCost(sessionId, data.cost, model)
+          // #4072: also accumulate token usage for cumulative-display.
+          // Gated on the same `typeof data.cost === 'number'` predicate
+          // so subscription-only providers stay zero (no badge in UI).
+          this._trackUsage(sessionId, data)
         }
       })
     }
@@ -1480,6 +1517,54 @@ export class SessionManager extends EventEmitter {
         },
       })
     }
+  }
+
+  /**
+   * Accumulate per-session token usage + cost across turns and broadcast
+   * a `session_usage` event so subscribed clients can update their
+   * cost/token badges live (#4072 — sub-task of #4054).
+   *
+   * Reads SDK-style usage shape (`input_tokens`, `output_tokens`,
+   * `cache_read_input_tokens`, `cache_creation_input_tokens`) and the
+   * `cost` field added by #4056. Emits the camelCased aggregate shape
+   * for the UI.
+   *
+   * Defensive: if the entry has no `cumulativeUsage` (e.g. a custom
+   * provider built the entry directly without going through createSession),
+   * lazily initialize on first use so subsequent calls accumulate.
+   * @param {string} sessionId
+   * @param {{ usage?: object, cost?: number }} resultData
+   */
+  _trackUsage(sessionId, resultData) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return
+    if (!entry.cumulativeUsage) entry.cumulativeUsage = makeZeroCumulativeUsage()
+    const u = resultData?.usage || {}
+    const acc = entry.cumulativeUsage
+    acc.inputTokens += Number(u.input_tokens) || 0
+    acc.outputTokens += Number(u.output_tokens) || 0
+    acc.cacheReadTokens += Number(u.cache_read_input_tokens) || 0
+    acc.cacheCreationTokens += Number(u.cache_creation_input_tokens) || 0
+    acc.costUsd += Number(resultData?.cost) || 0
+    acc.turnsBilled += 1
+    // Shallow-copy on emit so a subscriber that mutates the payload
+    // can't corrupt the canonical accumulator (#4072 review-prep).
+    this.emit('session_event', {
+      sessionId,
+      event: 'session_usage',
+      data: { cumulativeUsage: { ...acc } },
+    })
+  }
+
+  /**
+   * Read the current cumulative usage for a session, or null if missing.
+   * Returns a shallow copy so callers can't mutate the canonical entry.
+   * @param {string} sessionId
+   */
+  getCumulativeUsage(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry?.cumulativeUsage) return null
+    return { ...entry.cumulativeUsage }
   }
 
   /**
