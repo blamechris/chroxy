@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
@@ -155,6 +155,52 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, false)
       assert.match(r.content, /No matches/)
     })
+
+    it('refuses pattern with shell command-substitution metacharacters (security #4070)', async () => {
+      // Pre-fix PoC: pattern `*.ts $(touch /tmp/CHROXY_PWN)` would
+      // execute the touch on `for f in $pattern` interpolation.
+      const pwn = join(dir, 'CHROXY_PWN')
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: `*.ts $(touch ${pwn})` },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /shell-dangerous characters/)
+      // Most important: the side effect must NOT have happened.
+      assert.equal(
+        existsSync(pwn),
+        false,
+        'command substitution must be refused, not executed',
+      )
+    })
+
+    it('refuses absolute path outside the workspace (security #4071)', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: '*.conf', path: '/etc' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /outside workspace/)
+    })
+
+    it('refuses backtick command substitution', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: '`whoami`' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /shell-dangerous characters/)
+    })
+
+    it('refuses pipe / redirect / semicolon', async () => {
+      for (const pat of ['*.ts | cat', '*.ts; ls', '*.ts > /tmp/x', '*.ts && rm -rf']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: pat }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pat}`)
+      }
+    })
   })
 
   describe('Grep', () => {
@@ -180,6 +226,65 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, false)
       assert.match(r.content, /No matches/)
+    })
+
+    it('refuses absolute path outside the workspace (security #4071)', async () => {
+      // Pre-fix PoC: Grep with path=/etc returned /etc/passwd contents.
+      const r = await executeBuiltinTool({
+        toolName: 'Grep',
+        input: { pattern: 'root', path: '/etc' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /outside workspace/)
+    })
+  })
+
+  describe('Bash env hardening (#4069)', () => {
+    it('strips ANTHROPIC_API_KEY before spawning bash', async () => {
+      const original = process.env.ANTHROPIC_API_KEY
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-leak'
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'Bash',
+          input: { command: 'echo "KEY=$ANTHROPIC_API_KEY"' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /KEY=\s*$/m)
+        assert.equal(r.content.includes('sk-ant-must-not-leak'), false,
+          'BYOK API key must not be reachable from the model-controlled subprocess')
+      } finally {
+        if (original) process.env.ANTHROPIC_API_KEY = original
+        else delete process.env.ANTHROPIC_API_KEY
+      }
+    })
+
+    it('strips CLAUDE_CODE_OAUTH_TOKEN before spawning bash', async () => {
+      const original = process.env.CLAUDE_CODE_OAUTH_TOKEN
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-secret-leak-this-and-die'
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'Bash',
+          input: { command: 'env | grep -c OAUTH || echo zero' },
+          ...ctx(),
+        })
+        assert.equal(r.content.includes('oauth-secret-leak-this-and-die'), false)
+      } finally {
+        if (original) process.env.CLAUDE_CODE_OAUTH_TOKEN = original
+        else delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+      }
+    })
+
+    it('preserves non-secret env vars like PATH and HOME', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'Bash',
+        input: { command: 'echo "PATH_LEN=${#PATH} HOME_PRESENT=$([ -n "$HOME" ] && echo yes || echo no)"' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /HOME_PRESENT=yes/)
+      assert.match(r.content, /PATH_LEN=\d/)
     })
   })
 })
