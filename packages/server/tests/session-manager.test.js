@@ -2322,6 +2322,36 @@ describe('SessionManager._trackUsage (#4072)', () => {
     assert.equal(got.inputTokens, 0, 'tokens stay zero')
   })
 
+  it('does NOT accumulate when result has `cost: null` (claude-tui subscription shape)', () => {
+    // #4072 review: claude-tui emits `cost: null` to mean "subscription-
+    // billed, not measured." The gate is `typeof cost === 'number'` so
+    // null skips (typeof null === 'object'). Locking this down prevents
+    // a regression where someone changes claude-tui back to `cost: 0`,
+    // which would silently tick `turnsBilled` for non-billed sessions.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: null, usage: null })
+    assert.equal(events.length, 0, 'cost: null must not fire session_usage')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0)
+  })
+
+  it('DOES accumulate when result has `cost: 0` (legitimate free turn)', () => {
+    // A genuinely-free turn (all cache-read, output truncated) is still a
+    // billable interaction we want to count in turnsBilled. Distinguishing
+    // semantically: cost: 0 = "tracked, and zero"; cost: null = "not
+    // tracked." This test pins the semantics so a future widening of the
+    // gate to `cost > 0` doesn't accidentally drop these.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1000 } })
+    assert.equal(events.length, 1, 'cost: 0 IS a tracked turn (free, but tracked)')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.cacheReadTokens, 1000)
+    assert.equal(got.costUsd, 0)
+  })
+
   it('handles missing usage object on result gracefully (no NaN)', () => {
     const { mgr, session } = makeWiredManager()
     session.emit('result', { cost: 0.001 }) // usage missing entirely
