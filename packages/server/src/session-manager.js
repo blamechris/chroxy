@@ -1077,7 +1077,12 @@ export class SessionManager extends EventEmitter {
         // "you've spent $X" warning fires once per LOGICAL session, not
         // once per process. Without this the warning re-fires on every
         // restart even after the user has already seen and dismissed it.
-        costThresholdNotified: !!entry.costThresholdNotified,
+        //
+        // Strict-boolean check (not `!!`) so a stray truthy non-boolean
+        // value (an accidentally-stored string, etc.) does not silently
+        // round-trip as `true` — only an explicit `true` latches.
+        // Mirrors the restore side which gates on `=== true`.
+        costThresholdNotified: entry.costThresholdNotified === true,
       })
     }
 
@@ -1169,17 +1174,24 @@ export class SessionManager extends EventEmitter {
         // (unlikely but defensive) doesn't double-count. Validate shape:
         // missing / corrupt cumulativeUsage falls back to all-zero;
         // non-boolean costThresholdNotified falls back to false.
+        //
+        // Per-field clamps:
+        //   - Token counts + turnsBilled are monotonic counters; corrupt
+        //     state with negatives clamps to 0.
+        //   - costUsd accepts negatives per #4099 (refund / credit
+        //     adjustments). Only non-finite values fall back to 0.
         const restoredEntry = this._sessions.get(sessionId)
+        const nonNegFinite = (v) => (Number.isFinite(v) && v >= 0 ? v : 0)
         if (restoredEntry) {
           if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
             const u = saved.cumulativeUsage
             restoredEntry.cumulativeUsage = {
-              inputTokens: Number.isFinite(u.inputTokens) ? u.inputTokens : 0,
-              outputTokens: Number.isFinite(u.outputTokens) ? u.outputTokens : 0,
-              cacheReadTokens: Number.isFinite(u.cacheReadTokens) ? u.cacheReadTokens : 0,
-              cacheCreationTokens: Number.isFinite(u.cacheCreationTokens) ? u.cacheCreationTokens : 0,
+              inputTokens: nonNegFinite(u.inputTokens),
+              outputTokens: nonNegFinite(u.outputTokens),
+              cacheReadTokens: nonNegFinite(u.cacheReadTokens),
+              cacheCreationTokens: nonNegFinite(u.cacheCreationTokens),
               costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
-              turnsBilled: Number.isFinite(u.turnsBilled) ? u.turnsBilled : 0,
+              turnsBilled: nonNegFinite(u.turnsBilled),
             }
           }
           if (saved.costThresholdNotified === true) {
