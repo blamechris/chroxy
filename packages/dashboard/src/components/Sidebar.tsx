@@ -81,22 +81,24 @@ function abbreviateTunnel(url: string): string {
 }
 
 /**
- * Format a USD value for the cost badge.
+ * Format a USD value for the cost badge. Three tiers of fixed-decimal
+ * precision based on magnitude — sub-dollar accuracy matters for spotting
+ * whether a session ran one tiny test or dozens of expensive turns; at
+ * dollar scale, fractional cents are noise.
  *
- * Below $1, show 2 significant digits (e.g. `$0.07`, `$0.013`) — sub-dollar
- * accuracy matters for spotting whether a session ran one tiny test or
- * dozens of expensive turns.
+ *   `< $0.01`  → 4 decimals (`$0.0023`) — very small turns stay readable
+ *   `$0.01–$1` → 3 decimals (`$0.070`, `$0.420`) — sub-dollar accuracy
+ *   `>= $1`    → 2 decimals (`$1.23`, `$42.50`) — dollars are the unit
  *
- * At $1 and above, use 2 decimal places (`$1.23`, `$42.50`) — dollars at
- * that scale are the unit, fractional cents are noise.
+ * Returns `'$0'` for zero / negative / non-finite input (defensive — the
+ * Sidebar still guards on `> 0` before rendering, but a corrupted
+ * upstream payload must not poison the renderer with `$NaN`).
  *
  * #4073.
  */
 export function formatCostBadge(costUsd: number): string {
   if (!Number.isFinite(costUsd) || costUsd <= 0) return '$0'
   if (costUsd >= 1) return `$${costUsd.toFixed(2)}`
-  // Below $1, keep two leading non-zero digits. Don't use toPrecision
-  // directly — it switches to exponential for very small numbers.
   if (costUsd < 0.01) return `$${costUsd.toFixed(4)}`
   return `$${costUsd.toFixed(3)}`
 }

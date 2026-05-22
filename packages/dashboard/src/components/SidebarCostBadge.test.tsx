@@ -73,6 +73,12 @@ describe('formatCostBadge (#4073)', () => {
 })
 
 describe('formatCostBreakdown (#4073)', () => {
+  // Locale-agnostic helper — `toLocaleString()` output varies by
+  // runtime locale (comma in en-US, period in de-DE, space in fr-FR).
+  // Use the current runtime's formatter so the test passes everywhere
+  // (#4119 review note).
+  const localeNum = (n: number) => n.toLocaleString()
+
   it('contains all six rows in a stable order', () => {
     const breakdown = formatCostBreakdown({
       inputTokens: 1234,
@@ -85,19 +91,19 @@ describe('formatCostBreakdown (#4073)', () => {
     const lines = breakdown.split('\n')
     expect(lines).toHaveLength(6)
     expect(lines[0]).toMatch(/^Total cost: \$0\.0345$/)
-    expect(lines[1]).toBe('Turns billed: 3')
-    expect(lines[2]).toBe('Input tokens: 1,234')
-    expect(lines[3]).toBe('Output tokens: 567')
-    expect(lines[4]).toBe('Cache read: 8,000')
-    expect(lines[5]).toBe('Cache write: 200')
+    expect(lines[1]).toBe(`Turns billed: ${localeNum(3)}`)
+    expect(lines[2]).toBe(`Input tokens: ${localeNum(1234)}`)
+    expect(lines[3]).toBe(`Output tokens: ${localeNum(567)}`)
+    expect(lines[4]).toBe(`Cache read: ${localeNum(8000)}`)
+    expect(lines[5]).toBe(`Cache write: ${localeNum(200)}`)
   })
 
-  it('uses locale formatting for large token counts (1,234,567 not 1234567)', () => {
+  it('uses locale formatting for large token counts (delegates to toLocaleString)', () => {
     const breakdown = formatCostBreakdown({
       ...baseUsage,
       inputTokens: 1234567,
     })
-    expect(breakdown).toMatch(/Input tokens: 1,234,567/)
+    expect(breakdown).toContain(`Input tokens: ${localeNum(1234567)}`)
   })
 })
 
@@ -138,13 +144,18 @@ describe('Sidebar cost badge rendering (#4073)', () => {
   }
 
   it('renders a cost badge when costUsd > 0', () => {
+    // Locale-agnostic — derive expected strings via the runtime's own
+    // `toLocaleString()` so the test passes under any system locale
+    // (#4119 review note).
+    const localeNum = (n: number) => n.toLocaleString()
     render(<Sidebar {...makeProps({ ...baseUsage, costUsd: 0.42, inputTokens: 1000, turnsBilled: 2 })} />)
     const badge = screen.getByTestId('sidebar-cost-badge-sess-1')
     expect(badge).toBeInTheDocument()
     expect(badge.textContent).toBe('$0.420')
-    expect(badge.getAttribute('title')).toMatch(/Total cost: \$0\.4200/)
-    expect(badge.getAttribute('title')).toMatch(/Turns billed: 2/)
-    expect(badge.getAttribute('title')).toMatch(/Input tokens: 1,000/)
+    const title = badge.getAttribute('title') ?? ''
+    expect(title).toMatch(/Total cost: \$0\.4200/)
+    expect(title).toContain(`Turns billed: ${localeNum(2)}`)
+    expect(title).toContain(`Input tokens: ${localeNum(1000)}`)
   })
 
   it('hides the badge when costUsd is exactly 0 (subscription-billed session)', () => {
