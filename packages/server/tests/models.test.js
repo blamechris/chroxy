@@ -501,6 +501,32 @@ describe('getModelPricing()', () => {
     assert.equal(getModelPricing('claude-future-model-1-0-20260615'), null)
   })
 
+  it('does not strip trailing suffixes shorter than 8 digits (#4102 regex guard)', () => {
+    // The date-strip regex is `-\d{8,}$` — the 8-digit lower bound exists
+    // so a future Anthropic version-tag scheme that uses shorter trailing
+    // numbers won't be silently treated as a dated alias of an older
+    // family. Pin the negative cases so a "make the regex looser" refactor
+    // fails loudly.
+    assert.equal(
+      getModelPricing('claude-opus-4-7-2025'),
+      null,
+      '4-digit year fragment must not trigger date-strip',
+    )
+    assert.equal(
+      getModelPricing('claude-opus-4-7-1234567'),
+      null,
+      '7-digit trailing number must not trigger date-strip',
+    )
+    // Positive control: 9-digit suffix DOES strip (the regex's upper
+    // bound is forgiving for future timestamp formats). Asserted here to
+    // make the boundary explicit alongside the negative cases.
+    assert.deepEqual(
+      getModelPricing('claude-opus-4-7-123456789'),
+      getModelPricing('claude-opus-4-7'),
+      '9-digit trailing number must trigger date-strip (forgiving upper bound)',
+    )
+  })
+
   it('returns null for unknown models (caller falls back to cost=0)', () => {
     assert.equal(getModelPricing('claude-future-model-9-9'), null)
     assert.equal(getModelPricing(''), null)
