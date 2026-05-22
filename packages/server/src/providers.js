@@ -19,14 +19,17 @@ import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { ClaudeTuiSession } from './claude-tui-session.js'
+import { ClaudeByokSession } from './byok-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
+import { resolveAnthropicApiKey } from './byok-credentials.js'
 
 const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
   'claude-tui': ClaudeTuiSession,
+  'claude-byok': ClaudeByokSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
 }
@@ -257,6 +260,32 @@ function getProviderAuthInfo(name, ProviderClass) {
       envVars,
       hint: 'run `claude login` if not yet authed',
       detail,
+    }
+  }
+
+  // BYOK provider checks env var AND the ~/.chroxy/credentials.json file
+  // fallback (mode 0600 enforced). resolveAnthropicApiKey() returns the
+  // source so the UI can show which path is being used. No OAuth at all
+  // — BYOK is per-token API billing only.
+  if (name === 'claude-byok') {
+    const resolved = resolveAnthropicApiKey()
+    if (resolved.key) {
+      return {
+        ready: true,
+        source: resolved.source === 'env' ? 'env' : 'file',
+        envVar: resolved.source === 'env' ? 'ANTHROPIC_API_KEY' : null,
+        envVars,
+        hint: '',
+        detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : 'credentials.json'} — per-token billing)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `Anthropic API (${resolved.reason})`,
     }
   }
 
