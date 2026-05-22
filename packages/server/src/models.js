@@ -74,10 +74,21 @@ const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
 
 // Short-id → fullId so callers can pass either form. The fallback set is
 // the canonical mapping; new short aliases get picked up automatically.
+//
+// Also normalises dated full IDs back to the family head: the Anthropic
+// SDK's `Model` enum returns forms like `claude-opus-4-7-20251201`, which
+// users may pin for reproducibility (#4084). The pricing table is keyed
+// on family heads (`claude-opus-4-7`), so a regex strip of the trailing
+// 8+-digit date suffix lets the lookup succeed for either form.
 function resolvePricingKey(modelId) {
   if (typeof modelId !== 'string' || modelId.length === 0) return null
   const stripped = modelId.endsWith(ONE_M_SUFFIX) ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
   if (CLAUDE_PRICING_USD_PER_MTOK[stripped]) return stripped
+  // Dated full id? Strip the 8-digit date suffix and retry. Guarded on
+  // the prefix `claude-` so a bare `opus-4-7-20251201` doesn't accidentally
+  // resolve via the short-id path with no family resolution.
+  const dateStripped = stripped.replace(/-\d{8,}$/, '')
+  if (CLAUDE_PRICING_USD_PER_MTOK[dateStripped]) return dateStripped
   const fallback = FALLBACK_MODELS.find((m) => m.id === stripped)
   return fallback ? fallback.fullId : null
 }

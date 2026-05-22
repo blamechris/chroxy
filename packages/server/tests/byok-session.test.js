@@ -249,6 +249,67 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('warns at most once per session per unknown model (#4085)', async () => {
+      // Pre-fix: warn fired in every sendMessage. A 10-turn run on an
+      // unknown model spammed 10 identical warns. The Set guard pins
+      // the warn count to exactly 1 across N turns.
+      //
+      // Inspect _pricingWarnedModels directly — the test pattern in
+      // this file doesn't intercept the module-level logger, and Set
+      // membership is a sufficient proxy: the warn-firing site is the
+      // ONLY thing that adds to the set, so set.size === N is
+      // equivalent to "warn fired N times for distinct models."
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-future-model-x-y' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'ok' }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+        },
+      }
+      await session.start()
+      await session.sendMessage('q1')
+      await session.sendMessage('q2')
+      await session.sendMessage('q3')
+      // The set has exactly one entry — the model id — proving the
+      // gate fired exactly once across three turns.
+      assert.equal(session._pricingWarnedModels.size, 1)
+      assert.ok(session._pricingWarnedModels.has('claude-future-model-x-y'))
+      await session.destroy()
+    })
+
+    it('resolves dated full model ids to family pricing (#4084)', async () => {
+      // A user pinning to a dated revision must still get a non-zero
+      // cost, not the silent cost: 0 + warn that pre-fix produced.
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7-20251201' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'hi' }],
+              usage: { input_tokens: 5, output_tokens: 4 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('q')
+      const result = captured.find((e) => e.name === 'result')
+      assert.ok(result)
+      // Same math as the canonical happy-path test (5in/4out on opus-4-7
+      // = 0.000375 USD). Same numeric expectation proves the family
+      // resolution worked.
+      assert.ok(Math.abs(result.payload.cost - 0.000375) < 1e-9,
+        `dated-id pricing must equal family-head pricing; got cost=${result.payload.cost}`)
+      // And no warn fired — pricing was found.
+      assert.equal(session._pricingWarnedModels.size, 0)
+      await session.destroy()
+    })
+
     it('refuses concurrent sendMessage with an error event', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       // Stream that never yields anything until aborted — pretend the

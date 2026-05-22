@@ -176,6 +176,14 @@ export class ClaudeByokSession extends BaseSession {
     // Realpath cache used by the tool executor's path-safety check. One
     // cache per session — fresh sessions don't reuse a stale cwd.
     this._cwdRealCache = new Map()
+
+    // #4085: Per-session set of model ids we've already logged a
+    // "no pricing entry" warn for. Without this, a tool-heavy 50-turn
+    // session on an unknown model logs 50 identical warns — noise that
+    // drowns out signal. The set is reset by destroy() implicitly (the
+    // session goes away). setModel() is the natural place to clear an
+    // entry if a user switches off an unpriced model — handled inline.
+    this._pricingWarnedModels = new Set()
   }
 
   async start() {
@@ -266,9 +274,12 @@ export class ClaudeByokSession extends BaseSession {
     // tool-use turn reports only 1/5th of the actual cost (#4056).
     const turnUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     let turnCost = 0
-    const pricing = getModelPricing(this.model || 'claude-opus-4-7')
-    if (!pricing) {
-      log.warn(`no pricing entry for model=${this.model || '(unset)'}; result.cost will be 0 — update CLAUDE_PRICING_USD_PER_MTOK in models.js`)
+    const pricingModel = this.model || 'claude-opus-4-7'
+    const pricing = getModelPricing(pricingModel)
+    if (!pricing && !this._pricingWarnedModels.has(pricingModel)) {
+      // #4085: warn at most once per (session, model) — not once per turn.
+      this._pricingWarnedModels.add(pricingModel)
+      log.warn(`no pricing entry for model=${pricingModel}; result.cost will be 0 — update CLAUDE_PRICING_USD_PER_MTOK in models.js`)
     }
     let lastStopReason = null
     let rolledBack = false
