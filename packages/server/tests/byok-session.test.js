@@ -487,14 +487,12 @@ describe('ClaudeByokSession', () => {
           },
         },
       }
-      const captured = captureEvents(session)
+      captureEvents(session)
       await session.start()
       await session.sendMessage('first attempt — will fail at round 1')
-      // First call emitted an error event — assertion the captureEvents
-      // sink already collected; suppress before the retry so unhandled
-      // 'error' events from any subsequent failure don't crash the test.
-      void captured.filter((e) => e.name === 'error').length
-      // Now retry. Pre-fix this would create back-to-back user turns.
+      // captureEvents() already attached an 'error' listener, so the
+      // first call's HTTP_502 didn't surface as an unhandled rejection.
+      // Now retry: pre-fix this would have produced back-to-back user turns.
       await session.sendMessage('retry')
       // History after successful retry: [user-prompt, assistant]
       assert.equal(session._history.length, 2, `expected 2 entries, got ${session._history.length}: ${JSON.stringify(session._history)}`)

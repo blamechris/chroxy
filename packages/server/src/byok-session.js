@@ -285,13 +285,16 @@ export class ClaudeByokSession extends BaseSession {
       log.warn(`no pricing entry for model=${pricingModel}; result.cost will be 0 — update CLAUDE_PRICING_USD_PER_MTOK in models.js`)
     }
     let lastStopReason = null
-    // Snapshot history length BEFORE we pushed the user message above so any
-    // stream-init failure (at any round) can rollback the entire turn
-    // atomically. Pre-#4109 the rollback only ran at round 0, leaving a
-    // trailing tool_result `user` turn after a round-1+ failure — the next
-    // sendMessage would then push another `user` turn back-to-back, soft-
-    // breaking the alternation invariant the API may tighten on in future.
-    const historyLengthBeforeSend = this._history.length - 1
+    // Snapshot the pre-turn history length so any stream-init failure (at
+    // any round) can rollback the entire turn atomically. We derive it
+    // from the current length minus the user message we just pushed at
+    // L251 — clamped to 0 so this stays defensive if the trim above ever
+    // collapses history harder than expected. Pre-#4109 the rollback only
+    // ran at round 0, leaving a trailing tool_result `user` turn after a
+    // round-1+ failure — the next sendMessage would then push another
+    // `user` turn back-to-back, soft-breaking the alternation invariant
+    // the API may tighten on in future.
+    const historyLengthBeforeSend = Math.max(0, this._history.length - 1)
 
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
