@@ -17,6 +17,7 @@ import {
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
+import type { BaseSessionState } from '@chroxy/store-core'
 import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode } from './components/Sidebar'
@@ -867,6 +868,24 @@ export function App() {
   )
 
   // Derive sidebar repo tree from sessions
+  // #4120: dedicated selector for the cumulativeUsage slice the sidebar
+  // reads, with shallow equality so this only updates when a value the
+  // sidebar consumes actually changes — NOT on every stream chunk.
+  // Without this slice the sidebarRepos useMemo below depended on the
+  // entire `sessionStates` object, which gets replaced on every WS
+  // event (every stream_delta, every tool_result), forcing the memo
+  // to recompute + allocate a fresh RepoNode[] hundreds of times per
+  // turn (#4119 review followup #4120).
+  const sidebarCumulativeUsage = useConnectionStore(
+    useShallow((s) => {
+      const out: Record<string, BaseSessionState['cumulativeUsage']> = {}
+      for (const [id, st] of Object.entries(s.sessionStates)) {
+        out[id] = st.cumulativeUsage
+      }
+      return out
+    }),
+  )
+
   const sidebarRepos: RepoNode[] = useMemo(() => {
     const repoMap = new Map<string, RepoNode>()
 
@@ -888,11 +907,15 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
-        // #4073: surface per-session running cost. Prefer the
-        // session-state copy (kept live by the session_usage event) and
+        // #4073: surface per-session running cost. Prefer the live
+        // session-state copy (updated by `session_usage` events) and
         // fall back to the session_list snapshot for sessions that
         // haven't received a session_usage tick yet.
-        cumulativeUsage: sessionStates[s.sessionId]?.cumulativeUsage ?? s.cumulativeUsage ?? null,
+        // #4120: read from the shallow-equal selector above instead of
+        // `sessionStates` directly so this memo only recomputes when
+        // a cumulativeUsage value actually changes — not on every
+        // stream chunk.
+        cumulativeUsage: sidebarCumulativeUsage[s.sessionId] ?? s.cumulativeUsage ?? null,
       })
     }
 
@@ -902,7 +925,7 @@ export function App() {
     }
 
     return [...repoMap.values()]
-  }, [sessions, getSessionVisualStatus, sessionStates])
+  }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
