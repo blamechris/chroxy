@@ -17,7 +17,8 @@
  * catches and surfaces them as tool errors to the model.
  */
 
-import { readFile, writeFile, stat } from 'node:fs/promises'
+import { readFile, writeFile, stat, mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
 
 export const DEFAULT_READ_MAX_BYTES = 256_000
 export const DEFAULT_READ_LINE_LIMIT = 2_000
@@ -55,11 +56,18 @@ export async function readFileTool({
   if (!st.isFile()) {
     return { ok: false, code: 'ENOTFILE', message: `not a regular file: ${filePath}` }
   }
-  if (st.size > maxBytes && !Number.isFinite(limit)) {
+  // Always enforce the byte cap, even when a `limit` is provided.
+  // Pre-fix, the cap was skipped when limit was set, so a multi-GB file
+  // could still get fully read into memory if the caller passed a limit
+  // (Copilot review on #4060). The slice-by-line approach below still
+  // reads the whole file via readFile(), so the cap is the only thing
+  // keeping us from OOMing on a giant input. If the file is too big,
+  // refuse — model can re-request with offset to walk it in chunks.
+  if (st.size > maxBytes) {
     return {
       ok: false,
       code: 'TOO_LARGE',
-      message: `file is ${st.size} bytes (cap ${maxBytes}); use offset+limit to read a slice`,
+      message: `file is ${st.size} bytes (cap ${maxBytes}); read a slice with an explicit offset against a smaller file or split it first`,
     }
   }
 
@@ -98,9 +106,14 @@ export async function readFileTool({
 }
 
 /**
- * Write a file, truncating any existing content. Creates the file (and
- * any missing parent directories) if absent. Returns `created: true`
- * when the path did not exist before.
+ * Write a file, truncating any existing content. Creates the file and
+ * any missing parent directories. Returns `created: true` when the
+ * path did not exist before.
+ *
+ * The mkdir-recursive call is necessary because Node's writeFile does
+ * NOT create parent dirs on its own — pre-fix, the doc comment claimed
+ * the behavior but the code would ENOENT on a missing parent (Copilot
+ * review on #4060).
  */
 export async function writeFileTool({ filePath, content, mode = 0o644 } = {}) {
   if (typeof filePath !== 'string' || filePath.length === 0) {
@@ -116,6 +129,15 @@ export async function writeFileTool({ filePath, content, mode = 0o644 } = {}) {
   } catch (err) {
     if (err.code === 'ENOENT') existedBefore = false
     else throw err
+  }
+
+  // Ensure parent directory exists. recursive:true is a no-op when the
+  // directory already exists, so this is safe to call unconditionally.
+  // Path safety was already enforced by the caller (validatePathWithinCwd
+  // in byok-tool-executor.js), so the dirname is guaranteed to be
+  // inside the workspace cwd.
+  if (!existedBefore) {
+    await mkdir(dirname(filePath), { recursive: true })
   }
 
   await writeFile(filePath, content, { mode })

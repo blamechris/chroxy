@@ -530,23 +530,18 @@ export class ClaudeByokSession extends BaseSession {
     if (this._destroying) return
     this._destroying = true
     this.interrupt()
-    // Reject any pending permission Promises so the dashboard doesn't
-    // hang. Same teardown pattern as sdk-session.js.
-    if (typeof this._permissions?.autoAllowPending !== 'function') {
-      // Older PermissionManager API — best-effort: leave pendings to be GC'd.
-    } else {
-      // PR 2: we deny on destroy (not auto-allow) to be defensive when
-      // the user closes the tab mid-prompt. Pending requests get a
-      // rejection so the loop above unblocks cleanly.
-      try {
-        for (const [requestId] of this._permissions._pendingPermissions) {
-          this._permissions.respondToPermission(requestId, { behavior: 'deny', message: 'Session destroyed' })
-        }
-      } catch (err) {
-        log.warn(`pending-permission teardown failed: ${err.message}`)
-      }
+    // Mirror sdk-session.js:1272-1300 teardown: PermissionManager owns
+    // its own destroy (which calls clearAll() and any internal timer
+    // cleanup), and removeAllListeners drops every EventEmitter
+    // subscription we registered on this session. Without these the
+    // process leaks listeners + timers per session destroyed.
+    try {
+      this._permissions?.destroy()
+    } catch (err) {
+      log.warn(`PermissionManager teardown failed: ${err.message}`)
     }
     this._history = []
     this._client = null
+    this.removeAllListeners()
   }
 }

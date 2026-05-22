@@ -56,8 +56,13 @@ export async function executeBash({
   const startedAt = Date.now()
   let stdout = ''
   let stderr = ''
-  let stdoutBytes = 0
-  let stderrBytes = 0
+  // Single counter shared across both streams. Pre-fix, stdout and
+  // stderr each had their own counter so total captured output could
+  // be up to ~2×maxOutputBytes — Copilot review on #4060. Now the cap
+  // is a true total cap, counting actual UTF-8 BYTES of the chunk
+  // buffer (chunk.length), not JS string code units (text.length)
+  // which is UTF-16 and undercounts non-ASCII output.
+  let totalBytes = 0
   let truncated = false
   let timedOut = false
   let aborted = false
@@ -68,36 +73,30 @@ export async function executeBash({
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
-  const appendOut = (chunk) => {
-    if (stdoutBytes >= maxOutputBytes) return
-    const text = chunk.toString('utf8')
-    const remaining = maxOutputBytes - stdoutBytes
-    if (text.length > remaining) {
-      stdout += text.slice(0, remaining)
-      stdoutBytes += remaining
+  const capture = (chunk, which) => {
+    if (totalBytes >= maxOutputBytes) return
+    const chunkBytes = chunk.length
+    const remaining = maxOutputBytes - totalBytes
+    if (chunkBytes > remaining) {
+      // Slice the BUFFER (byte-accurate), then decode. Slicing the
+      // decoded string would be UTF-16 indexed and could split a
+      // surrogate pair, producing replacement chars.
+      const sliced = chunk.subarray(0, remaining).toString('utf8')
+      if (which === 'stdout') stdout += sliced
+      else stderr += sliced
+      totalBytes += remaining
       truncated = true
-      // Soft-kill — output cap is itself a failure mode.
       killChild('SIGTERM', 'output_cap')
     } else {
-      stdout += text
-      stdoutBytes += text.length
+      const text = chunk.toString('utf8')
+      if (which === 'stdout') stdout += text
+      else stderr += text
+      totalBytes += chunkBytes
     }
   }
 
-  const appendErr = (chunk) => {
-    if (stderrBytes >= maxOutputBytes) return
-    const text = chunk.toString('utf8')
-    const remaining = maxOutputBytes - stderrBytes
-    if (text.length > remaining) {
-      stderr += text.slice(0, remaining)
-      stderrBytes += remaining
-      truncated = true
-      killChild('SIGTERM', 'output_cap')
-    } else {
-      stderr += text
-      stderrBytes += text.length
-    }
-  }
+  const appendOut = (chunk) => capture(chunk, 'stdout')
+  const appendErr = (chunk) => capture(chunk, 'stderr')
 
   child.stdout.on('data', appendOut)
   child.stderr.on('data', appendErr)

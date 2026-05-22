@@ -268,11 +268,14 @@ async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   const globArg = typeof input?.glob === 'string' && input.glob.length > 0
     ? ` --glob ${shellQuote(input.glob)}` : ''
 
-  // Try rg first. If it's not installed (command not found, exit 127),
-  // retry with grep -r. Either way the output is `path:lineno:content`.
-  const tryRg = `command -v rg >/dev/null 2>&1 && rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
-  const tryGrep = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
-  const cmd = `(${tryRg}) || (${tryGrep})`
+  // Pick rg if available, else grep -r. Pre-fix this was `rg || grep`
+  // which re-ran the search with grep on the COMMON no-match case
+  // (rg exits 1 on no matches → `||` triggers grep), doubling work
+  // (Copilot review on #4060). Use if/then/else so grep only runs
+  // when rg is truly unavailable.
+  const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
+  const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
+  const cmd = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
 
   const result = await executeBash({
     command: cmd,
