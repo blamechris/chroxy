@@ -44,6 +44,18 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: session_usage (#4072) ----
+
+  describe('session_usage event', () => {
+    it('forwards cumulativeUsage on the wire payload', () => {
+      const usage = { inputTokens: 17, outputTokens: 23, cacheReadTokens: 5, cacheCreationTokens: 2, costUsd: 0.00198, turnsBilled: 2 }
+      const result = normalizer.normalize('session_usage', { cumulativeUsage: usage }, makeCtx())
+      assert.equal(result.messages.length, 1)
+      assert.equal(result.messages[0].msg.type, 'session_usage')
+      assert.deepEqual(result.messages[0].msg.cumulativeUsage, usage)
+    })
+  })
+
   // ---- EVENT_MAP: ready ----
 
   describe('ready event', () => {
@@ -801,6 +813,8 @@ describe('EVENT_MAP', () => {
       plan_ready: { allowedPrompts: [] },
       inactivity_warning: { messageId: 'm1', idleMs: 30_000, prefab: 'Status update?' },
       result: { cost: 0, duration: 0, usage: {} },
+      cost_update: { sessionCost: 0.05, totalCost: 0.5, budget: 1.0 },
+      session_usage: { cumulativeUsage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0.001, turnsBilled: 1 } },
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
       error: { message: 'err' },

@@ -874,7 +874,13 @@ export class ClaudeTuiSession extends BaseSession {
     this.emit('stream_end', { messageId })
 
     this.emit('result', {
-      cost: 0,                       // not exposed by Stop hook in MVP
+      // #4072: `cost: null` (not 0) is the chroxy convention for
+      // "subscription-billed provider, cost not measured". The session-
+      // manager `_trackCost`/`_trackUsage` gate is
+      // `typeof data.cost === 'number'`, so null skips the cumulative
+      // accumulator and keeps `cumulativeUsage` at zero — that's the
+      // signal the dashboard / app uses to suppress the cost badge.
+      cost: null,                    // not exposed by Stop hook in MVP
       duration,
       usage: null,                   // not exposed by Stop hook in MVP
       sessionId: this._sessionId,
@@ -1000,7 +1006,9 @@ export class ClaudeTuiSession extends BaseSession {
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
     if (messageId) this.emit('stream_end', { messageId })
     this.emit('error', { message })
-    this.emit('result', { cost: 0, duration, usage: null, sessionId: this._sessionId })
+    // #4072: subscription-billed → cost: null so SessionManager skips
+    // accumulation. See companion sites above.
+    this.emit('result', { cost: null, duration, usage: null, sessionId: this._sessionId })
     // #4022: drop the per-turn attachment dir on every failure path so
     // a stalled/aborted/PTY-exited turn doesn't leak the materialized
     // files until destroy(). No-op when the turn had no attachments.
@@ -1089,7 +1097,8 @@ export class ClaudeTuiSession extends BaseSession {
     this.emit('error', { message: `Response timed out after ${friendly}` })
     // #4010: emit result so the dashboard receives agent_idle and clears
     // the Stop button. stream_end on its own only clears streamingMessageId.
-    this.emit('result', { cost: 0, duration, usage: null, sessionId: this._sessionId })
+    // #4072: subscription-billed → cost: null. See companion sites above.
+    this.emit('result', { cost: null, duration, usage: null, sessionId: this._sessionId })
   }
 
   /**

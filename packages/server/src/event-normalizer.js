@@ -228,6 +228,16 @@ Object.assign(EVENT_MAP, {
     messages: [{ msg: { type: 'cost_update', sessionCost: data.sessionCost, totalCost: data.totalCost, budget: data.budget } }],
   }),
 
+  // #4072: cumulative per-session usage + cost broadcast on every priced
+  // result. Fires alongside cost_update — the two carry different shapes
+  // (cost_update is budget-oriented; session_usage is the full token
+  // breakdown for the dashboard / app badge). Subscription-only
+  // providers (claude-tui) emit `result` without a numeric `cost` so
+  // their session_usage never fires and `cumulativeUsage` stays zero.
+  session_usage: (data) => ({
+    messages: [{ msg: { type: 'session_usage', cumulativeUsage: data.cumulativeUsage } }],
+  }),
+
   budget_warning: (data) => ({
     messages: [{ msg: { type: 'budget_warning', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
   }),

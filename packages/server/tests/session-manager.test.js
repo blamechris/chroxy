@@ -2253,3 +2253,272 @@ describe('#3697 — shutdown race must not overwrite good state with empty state
     }
   })
 })
+
+describe('SessionManager._trackUsage (#4072)', () => {
+  function makeWiredManager() {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    // Mimic the entry shape `createSession` builds. The new cumulativeUsage
+    // field on the entry is what `_trackUsage` increments.
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s1', session)
+    return { mgr, session }
+  }
+
+  function captureSessionUsage(mgr) {
+    const events = []
+    mgr.on('session_event', (e) => {
+      if (e.event === 'session_usage') events.push(e)
+    })
+    return events
+  }
+
+  it('accumulates usage + cost across multiple result events', () => {
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 10, output_tokens: 5 }, cost: 0.001 })
+    mgr._trackUsage('s1', { usage: { input_tokens: 7, output_tokens: 3 }, cost: 0.0005 })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 17)
+    assert.equal(got.outputTokens, 8)
+    assert.ok(Math.abs(got.costUsd - 0.0015) < 1e-9, `expected 0.0015, got ${got.costUsd}`)
+    assert.equal(got.turnsBilled, 2)
+  })
+
+  it('emits session_usage on every priced result event', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { usage: { input_tokens: 5, output_tokens: 4 }, cost: 0.000375 })
+    assert.equal(events.length, 1)
+    assert.equal(events[0].sessionId, 's1')
+    assert.equal(events[0].data.cumulativeUsage.inputTokens, 5)
+    assert.equal(events[0].data.cumulativeUsage.turnsBilled, 1)
+    assert.ok(Math.abs(events[0].data.cumulativeUsage.costUsd - 0.000375) < 1e-9)
+  })
+
+  it('does NOT accumulate when result has no `cost` (subscription-only providers)', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    // claude-tui-style result — usage may be absent or present, but no cost.
+    session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 } })
+    assert.equal(events.length, 0, 'no session_usage event without cost')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0, 'turnsBilled stays zero')
+    assert.equal(got.inputTokens, 0, 'tokens stay zero')
+  })
+
+  it('does NOT accumulate when result has `cost: null` (claude-tui subscription shape)', () => {
+    // #4072 review: claude-tui emits `cost: null` to mean "subscription-
+    // billed, not measured." The gate is `typeof cost === 'number'` so
+    // null skips (typeof null === 'object'). Locking this down prevents
+    // a regression where someone changes claude-tui back to `cost: 0`,
+    // which would silently tick `turnsBilled` for non-billed sessions.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: null, usage: null })
+    assert.equal(events.length, 0, 'cost: null must not fire session_usage')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0)
+  })
+
+  it('DOES accumulate when result has `cost: 0` (legitimate free turn)', () => {
+    // A genuinely-free turn (all cache-read, output truncated) is still a
+    // billable interaction we want to count in turnsBilled. Distinguishing
+    // semantically: cost: 0 = "tracked, and zero"; cost: null = "not
+    // tracked." This test pins the semantics so a future widening of the
+    // gate to `cost > 0` doesn't accidentally drop these.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1000 } })
+    assert.equal(events.length, 1, 'cost: 0 IS a tracked turn (free, but tracked)')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.cacheReadTokens, 1000)
+    assert.equal(got.costUsd, 0)
+  })
+
+  it('does NOT accumulate when `cost` is NaN (provider bug, #4088 review)', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: NaN, usage: { input_tokens: 100 } })
+    assert.equal(events.length, 0, 'NaN cost must not pass the gate')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0)
+    assert.equal(got.inputTokens, 0)
+  })
+
+  it('does NOT accumulate when `cost` is Infinity (provider bug, #4088 review)', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: Infinity, usage: { input_tokens: 100 } })
+    assert.equal(events.length, 0, 'Infinity cost must not pass the gate')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0)
+    assert.equal(got.inputTokens, 0)
+  })
+
+  it('handles missing usage object on result gracefully (no NaN)', () => {
+    const { mgr, session } = makeWiredManager()
+    session.emit('result', { cost: 0.001 }) // usage missing entirely
+    const got = mgr.getCumulativeUsage('s1')
+    assert.ok(Number.isFinite(got.inputTokens) && got.inputTokens === 0)
+    assert.equal(got.turnsBilled, 1)
+    assert.ok(Math.abs(got.costUsd - 0.001) < 1e-9)
+  })
+
+  it('cache token fields accumulate independently of input/output', () => {
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', {
+      usage: {
+        input_tokens: 0,
+        output_tokens: 100,
+        cache_read_input_tokens: 5000,
+        cache_creation_input_tokens: 2000,
+      },
+      cost: 0.05,
+    })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 0)
+    assert.equal(got.outputTokens, 100)
+    assert.equal(got.cacheReadTokens, 5000)
+    assert.equal(got.cacheCreationTokens, 2000)
+  })
+
+  it('getCumulativeUsage returns a shallow copy (callers cannot mutate the entry)', () => {
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 10 }, cost: 0.001 })
+    const snap = mgr.getCumulativeUsage('s1')
+    snap.inputTokens = 999999
+    snap.turnsBilled = 999999
+    const fresh = mgr.getCumulativeUsage('s1')
+    assert.equal(fresh.inputTokens, 10, 'mutating the snapshot must not corrupt the entry')
+    assert.equal(fresh.turnsBilled, 1)
+  })
+
+  it('session_usage payload is a shallow copy (subscribers cannot mutate the entry)', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { usage: { input_tokens: 10 }, cost: 0.001 })
+    // A subscriber mutates the payload.
+    events[0].data.cumulativeUsage.inputTokens = 0
+    events[0].data.cumulativeUsage.turnsBilled = 0
+    // The entry stays correct.
+    const fresh = mgr.getCumulativeUsage('s1')
+    assert.equal(fresh.inputTokens, 10)
+    assert.equal(fresh.turnsBilled, 1)
+  })
+
+  it('getCumulativeUsage returns null for unknown sessionId', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.getCumulativeUsage('nope'), null)
+  })
+
+  it('listSessions snapshot includes cumulativeUsage (late-subscriber AC)', () => {
+    const { mgr, session } = makeWiredManager()
+    // Make the entry minimally-shaped enough for listSessions() to consume it.
+    const entry = mgr._sessions.get('s1')
+    Object.assign(entry.session, {
+      model: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-7',
+      permissionMode: 'approve',
+      isRunning: false,
+      _stdinForwardingDisabled: false,
+      stdinDroppedTotals: { bytes: 0, count: 0 },
+      promptEvaluator: false,
+      promptEvaluatorSkipPattern: null,
+      resumeSessionId: null,
+    })
+    Object.assign(entry, { provider: 'claude-byok' })
+    // Two turns happen BEFORE the late client connects.
+    session.emit('result', { usage: { input_tokens: 10, output_tokens: 20 }, cost: 0.001 })
+    session.emit('result', { usage: { input_tokens: 5, output_tokens: 3 }, cost: 0.0005 })
+    // The late client calls `listSessions()` and gets the totals immediately.
+    const snap = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.ok(snap)
+    assert.ok(snap.cumulativeUsage, 'listSessions entries must include cumulativeUsage')
+    assert.equal(snap.cumulativeUsage.inputTokens, 15)
+    assert.equal(snap.cumulativeUsage.outputTokens, 23)
+    assert.equal(snap.cumulativeUsage.turnsBilled, 2)
+    assert.ok(Math.abs(snap.cumulativeUsage.costUsd - 0.0015) < 1e-9)
+    // Snapshot is a copy — mutating it must not corrupt future snapshots.
+    snap.cumulativeUsage.inputTokens = 999
+    const second = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.equal(second.cumulativeUsage.inputTokens, 15, 'snapshot must be a fresh copy each call')
+  })
+
+  it('listSessions fills missing keys from the zero template (#4088 review)', () => {
+    // A custom provider builds an entry with a partial cumulativeUsage
+    // object — e.g. only inputTokens is tracked. The snapshot wire shape
+    // must still carry every key (with zero defaults) so consumers can
+    // safely destructure without optional-chaining each field.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    Object.assign(session, {
+      model: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-7',
+      permissionMode: 'approve',
+      _stdinForwardingDisabled: false,
+      stdinDroppedTotals: { bytes: 0, count: 0 },
+      promptEvaluator: false,
+      promptEvaluatorSkipPattern: null,
+      resumeSessionId: null,
+    })
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: { inputTokens: 42 }, // partial object — missing the other 5 fields
+    })
+    const snap = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.ok(snap.cumulativeUsage)
+    assert.equal(snap.cumulativeUsage.inputTokens, 42, 'partial value passes through')
+    // All other fields default to zero — wire shape stays stable.
+    assert.equal(snap.cumulativeUsage.outputTokens, 0)
+    assert.equal(snap.cumulativeUsage.cacheReadTokens, 0)
+    assert.equal(snap.cumulativeUsage.cacheCreationTokens, 0)
+    assert.equal(snap.cumulativeUsage.costUsd, 0)
+    assert.equal(snap.cumulativeUsage.turnsBilled, 0)
+  })
+
+  it('listSessions provides a zero-default for entries built without cumulativeUsage', () => {
+    // Defends against a custom provider building entries directly (without
+    // going through createSession). The shape stays stable on the wire.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    Object.assign(session, {
+      model: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-7',
+      permissionMode: 'approve',
+      _stdinForwardingDisabled: false,
+      stdinDroppedTotals: { bytes: 0, count: 0 },
+      promptEvaluator: false,
+      promptEvaluatorSkipPattern: null,
+      resumeSessionId: null,
+    })
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-byok', createdAt: Date.now() })
+    const snap = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.ok(snap.cumulativeUsage)
+    assert.equal(snap.cumulativeUsage.turnsBilled, 0)
+  })
+})
