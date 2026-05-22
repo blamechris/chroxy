@@ -48,10 +48,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  // 'session_usage' moved to PLATFORM_SPECIFIC as 'dashboard' (#4073) —
-  // dashboard wires the handler + sidebar badge in this PR; mobile app
-  // handler is tracked in #4074. Remove from PLATFORM_SPECIFIC entirely
-  // when #4074 lands.
+  // 'session_usage' removed from PLATFORM_SPECIFIC in #4074 — both
+  // dashboard (#4073) and app (#4074) handlers are now wired.
   // 'evaluator_rewrite' removed — dashboard now handles it (#3188)
   // 'evaluator_clarify' removed — dashboard now handles it (#3188)
   // 'skills_list' removed — dashboard now handles it (#3209)
@@ -96,7 +94,6 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_request': 'dashboard',  // community skill awaiting first-activation grant (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
-  'session_usage': 'dashboard',        // #4073 dashboard wires the cumulative-cost sidebar badge in this PR; mobile app session-header badge tracked in #4074. Remove this entry entirely when #4074 lands.
 }
 
 // ---------------------------------------------------------------------------

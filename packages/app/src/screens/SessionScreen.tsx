@@ -253,6 +253,12 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].sessionCost : null;
   });
+  // #4074: per-session cumulative tokens + cost. Drives the SettingsBar
+  // cost badge + tap-to-expand breakdown sheet.
+  const cumulativeUsage = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].cumulativeUsage : null;
+  });
   const costBudget = useConnectionStore((s) => s.costBudget);
   const devPreviews = useConnectionStore((s) => {
     const id = s.activeSessionId;
@@ -965,6 +971,7 @@ export function SessionScreen() {
           lastResultCost={lastResultCost}
           lastResultDuration={lastResultDuration}
           sessionCost={sessionCost}
+          cumulativeUsage={cumulativeUsage}
           costBudget={costBudget}
           contextUsage={contextUsage}
           sessionCwd={sessionCwd}
