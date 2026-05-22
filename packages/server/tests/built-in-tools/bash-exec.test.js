@@ -76,27 +76,33 @@ describe('executeBash', () => {
     await assert.rejects(() => executeBash({ command: 'echo x', timeoutMs: -5 }), /positive number/)
   })
 
-  it('does NOT send SIGKILL when child exits cleanly during the SIGTERM grace window (#4067)', async () => {
-    // Set a fast 200ms timeout so SIGTERM fires soon after start. The
-    // child script installs a SIGTERM handler that exits 0 cleanly. The
-    // pre-fix guard (`!child.killed`) is always false after we called
-    // child.kill('SIGTERM'), so SIGKILL would always fire after the 2s
-    // grace. With the fixed guard checking actual liveness via
-    // exitCode/signalCode, SIGKILL must NOT escalate.
+  it('SIGKILL DOES escalate when the child ignores SIGTERM past the grace window (#4067)', { timeout: 10_000 }, async () => {
+    // Walk through the pre-fix behavior to see why this is the right
+    // test: at t=200ms timeoutHandle fires → killChild('SIGTERM') sets
+    // `child.killed = true` (node sets this on any signal send). At
+    // t=2200ms hardKillTimer fires. Pre-fix guard:
+    //   if (!child.killed && child.exitCode === null) child.kill('SIGKILL')
+    // `!child.killed` is now `false` (we just signalled), so SIGKILL is
+    // NEVER sent. With a SIGTERM-ignoring child, the await on exit
+    // would hang forever. Post-fix guard:
+    //   if (child.exitCode === null && child.signalCode === null) ...
+    // correctly tests liveness; SIGKILL fires and the child dies.
     //
-    // Note: the trap must propagate through `bash -c`. Use double quotes
-    // for the trap argument so the outer single quotes don't collide.
+    // `trap "" TERM` silently ignores SIGTERM. The test sets a 10s test
+    // timeout to fail loudly (rather than hang) if the regression
+    // re-appears.
+    const t0 = Date.now()
     const r = await executeBash({
-      command: `bash -c 'trap "exit 0" TERM; while true; do sleep 0.1; done'`,
+      command: `bash -c 'trap "" TERM; while true; do sleep 0.5; done'`,
       timeoutMs: 200,
     })
+    const elapsed = Date.now() - t0
     assert.equal(r.timedOut, true, 'timeout MUST fire (precondition for this test)')
-    // Clean exit under SIGTERM: node reports exitCode === 0 because the
-    // trap explicitly `exit 0`'d. If the SIGKILL had escalated, the
-    // signal would be 'SIGKILL' and exitCode null. The fix guarantees
-    // we observe the clean exit instead.
-    assert.equal(r.exitCode, 0,
-      `expected exitCode=0 (clean exit under SIGTERM trap), got exitCode=${r.exitCode} signal=${r.signal} — guard regressed to !child.killed?`)
-    assert.notEqual(r.signal, 'SIGKILL', 'SIGKILL must not escalate when child exits cleanly under SIGTERM')
+    // SIGKILL was the killing signal — proves the guard fired.
+    assert.equal(r.signal, 'SIGKILL',
+      `expected signal=SIGKILL after 2s grace, got signal=${r.signal} exitCode=${r.exitCode} — guard regressed?`)
+    // And it took at least HARD_KILL_GRACE_MS (2s) to escalate.
+    assert.ok(elapsed >= 2000,
+      `SIGKILL must wait HARD_KILL_GRACE_MS=2000ms, escalated after only ${elapsed}ms`)
   })
 })
