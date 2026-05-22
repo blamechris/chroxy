@@ -175,6 +175,7 @@ export class ClaudeByokSession extends BaseSession {
     const messageId = `${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
     this._abortController = new AbortController()
+    const turnStartedAt = Date.now()
 
     // PR 1: attachments are not yet materialised (no Read tool to read them
     // back). Surface a clear error rather than silently dropping content.
@@ -228,6 +229,13 @@ export class ClaudeByokSession extends BaseSession {
         { signal: this._abortController.signal },
       )
     } catch (err) {
+      // Stream init threw synchronously (rare — usually validation errors
+      // from the SDK). Roll back the user message we just pushed onto
+      // _history so the next turn doesn't double-send it and so the
+      // user/assistant alternation invariant the SDK requires holds.
+      if (this._history.length > 0 && this._history[this._history.length - 1].role === 'user') {
+        this._history.pop()
+      }
       this._emitTurnError(messageId, err, 'STREAM_INIT')
       this._finishTurn()
       return
@@ -252,7 +260,11 @@ export class ClaudeByokSession extends BaseSession {
             // enough. Skip.
             break
           case 'stream_delta':
-            this.emit('stream_delta', { messageId, text: t.text })
+            // Canonical chroxy payload shape: { messageId, delta }. The
+            // dashboard + mobile consumers both read `msg.delta`; emitting
+            // `text` here renders empty bubbles (matches sdk-session.js
+            // shape and the ws-server.js protocol comment).
+            this.emit('stream_delta', { messageId, delta: t.text })
             break
           case 'thinking_delta':
             // PR 1: forward as a regular delta. PR 2 will route via a
@@ -291,12 +303,27 @@ export class ClaudeByokSession extends BaseSession {
       // array of blocks) so any future tool_use blocks survive a resume.
       this._history.push({ role: 'assistant', content: final.content })
 
+      // stream_end MUST fire before result — dashboard's message-handler
+      // flushes the debounced delta buffer + clears streamingMessageId on
+      // stream_end. Without it the spinner hangs and trailing deltas may
+      // not flush. Mirrors sdk-session.js:696.
+      this.emit('stream_end', { messageId })
       this.emit('result', {
+        sessionId: null,  // BYOK has no upstream session id (SDK is stateless)
         messageId,
         stopReason: lastStopReason,
+        duration: Date.now() - turnStartedAt,
         usage: lastUsage,
+        // cost intentionally omitted — until #4054 wires a per-model rate
+        // table, session-manager.js gates cost tracking on
+        // `typeof data.cost === 'number'` so undefined is the right
+        // signal for "cost tracking deferred."
       })
     } catch (err) {
+      // Always emit stream_end on the error path too so the dashboard
+      // doesn't strand the spinner. Errors fire AFTER stream_end so
+      // consumers can finalize the bubble before showing the error.
+      this.emit('stream_end', { messageId })
       this._emitTurnError(messageId, err, 'STREAM_ERROR')
     } finally {
       this._finishTurn()

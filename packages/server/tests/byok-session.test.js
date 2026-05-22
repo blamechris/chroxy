@@ -33,7 +33,7 @@ function fakeStream(events, finalMessage) {
 
 function captureEvents(session) {
   const captured = []
-  const known = ['ready', 'stream_start', 'stream_delta', 'result', 'error']
+  const known = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'result', 'error']
   for (const name of known) {
     session.on(name, (payload) => captured.push({ name, payload }))
   }
@@ -115,7 +115,7 @@ describe('ClaudeByokSession', () => {
   })
 
   describe('sendMessage()', () => {
-    it('emits stream_start, stream_delta(s), result for a successful turn', async () => {
+    it('emits stream_start, stream_delta(s), stream_end, result for a successful turn', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session._client = {
         messages: {
@@ -136,14 +136,27 @@ describe('ClaudeByokSession', () => {
       await session.sendMessage('hi')
       const starts = captured.filter((e) => e.name === 'stream_start')
       const deltas = captured.filter((e) => e.name === 'stream_delta')
+      const ends = captured.filter((e) => e.name === 'stream_end')
       const results = captured.filter((e) => e.name === 'result')
       assert.equal(starts.length, 1, 'one stream_start per turn')
       assert.equal(deltas.length, 2, 'two text deltas')
-      assert.equal(deltas[0].payload.text, 'Hello')
-      assert.equal(deltas[1].payload.text, ', world')
+      // Canonical chroxy field name is `delta`, NOT `text` — dashboard +
+      // mobile message-handlers both read `msg.delta`. Emitting `text`
+      // here renders empty bubbles (caught by review on PR #4055).
+      assert.equal(deltas[0].payload.delta, 'Hello')
+      assert.equal(deltas[1].payload.delta, ', world')
+      // stream_end MUST fire before result so the dashboard flushes its
+      // debounced delta buffer + clears streamingMessageId. Order matters.
+      assert.equal(ends.length, 1, 'stream_end fires exactly once per turn')
+      const endIdx = captured.findIndex((e) => e.name === 'stream_end')
+      const resultIdx = captured.findIndex((e) => e.name === 'result')
+      assert.ok(endIdx < resultIdx, 'stream_end must precede result')
+      // result payload carries duration + usage + stopReason.
       assert.equal(results.length, 1)
       assert.equal(results[0].payload.stopReason, 'end_turn')
       assert.equal(results[0].payload.usage.output_tokens, 4)
+      assert.equal(typeof results[0].payload.duration, 'number')
+      assert.ok(results[0].payload.duration >= 0)
       await session.destroy()
     })
 
@@ -204,6 +217,51 @@ describe('ClaudeByokSession', () => {
       assert.equal(session._history[1].role, 'assistant')
       assert.equal(session._history[2].role, 'user')
       assert.equal(session._history[2].content, 'second')
+      await session.destroy()
+    })
+
+    it('rolls back the user message if stream init throws synchronously', async () => {
+      // Without rollback, the orphan user message breaks the next turn's
+      // user/assistant alternation that the SDK requires (review on #4055).
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () => {
+            throw Object.assign(new Error('bad request'), { status: 400 })
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('bad turn')
+      const errors = captured.filter((e) => e.name === 'error')
+      assert.ok(errors.some((e) => e.payload.code === 'HTTP_400'))
+      assert.equal(session._history.length, 0, 'orphan user message must be rolled back')
+      await session.destroy()
+    })
+
+    it('emits stream_end on the error path too (no stranded spinner)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () => ({
+            async *[Symbol.asyncIterator]() {
+              yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } }
+              const err = new Error('upstream went away')
+              err.status = 502
+              throw err
+            },
+            async finalMessage() { return null },
+          }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('hi')
+      const ends = captured.filter((e) => e.name === 'stream_end')
+      const errors = captured.filter((e) => e.name === 'error')
+      assert.equal(ends.length, 1, 'stream_end must fire even when the stream errors mid-flight')
+      assert.ok(errors.length >= 1, 'error event still fires')
       await session.destroy()
     })
 
