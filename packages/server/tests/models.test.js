@@ -639,5 +639,25 @@ describe('computePromptCostUsd()', () => {
       assert.equal(sonnet.longContext, undefined)
       assert.equal(haiku.longContext, undefined)
     })
+
+    it('Sonnet with >200K input uses BASE rates (no premium tier exists — #4104)', () => {
+      // The structural check above pins that no `longContext` block
+      // exists; this behavioural check pins that `computePromptCostUsd`
+      // doesn't accidentally fall back to a doubled rate when usage
+      // exceeds 200K. If a future refactor changes the selection logic
+      // (e.g. computes premium based on usage instead of structure),
+      // this catches it.
+      const sonnet = getModelPricing('claude-sonnet-4-6')
+      const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, sonnet)
+      // 300K * 3/Mtok = 0.9 (Sonnet base input rate, NOT a doubled 1.8)
+      assert.ok(Math.abs(cost - 0.9) < 1e-6, `Sonnet 300K must stay on base, got ${cost}`)
+    })
+
+    it('Haiku with >200K input uses BASE rates (no premium tier exists — #4104)', () => {
+      const haiku = getModelPricing('claude-haiku-4-5')
+      const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, haiku)
+      // 300K * 1/Mtok = 0.3 (Haiku base input rate, NOT a doubled 0.6)
+      assert.ok(Math.abs(cost - 0.3) < 1e-6, `Haiku 300K must stay on base, got ${cost}`)
+    })
   })
 })
