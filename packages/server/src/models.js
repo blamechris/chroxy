@@ -66,14 +66,41 @@ export const FALLBACK_MODELS = Object.freeze([
 // keep this table in sync when prices change. Numbers wrong here mean
 // cumulative-cost displays mislead users (#4054), so revisit on every
 // model addition.
+//
+// #4087 — long-context (>200K input) premium tier: Anthropic charges a
+// higher rate when the total input (input + cache reads + cache writes)
+// exceeds 200K tokens on the `[1m]` long-context variant. The
+// `longContext` block on the `[1m]` entry captures the premium rates;
+// `computePromptCostUsd` selects between base and longContext rates
+// based on the turn's total input tokens.
+//
+// Today, only Opus 4.x has a 1M-context variant in chroxy's model set
+// (resolveClaudeContextWindow above). Sonnet 4.6 and Haiku 4.5 don't
+// have `[1m]` forms, so their entries have no longContext block.
 const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
   'claude-sonnet-4-6': Object.freeze({ input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 }),
   'claude-opus-4-7':   Object.freeze({ input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 }),
+  'claude-opus-4-7[1m]': Object.freeze({
+    // Below the 200K threshold the rates match the default-window entry.
+    input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
+    // Above 200K input, Anthropic's published premium is 2× input + 1.5×
+    // output for the 1M variant. Verify against the pricing page on the
+    // next periodic check — the rate is a public figure but easy to
+    // drift from. Test in `models.test.js` pins the exact numbers.
+    longContext: Object.freeze({
+      thresholdInputTokens: 200_000,
+      input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
+    }),
+  }),
   'claude-haiku-4-5':  Object.freeze({ input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 }),
 })
 
 // Short-id → fullId so callers can pass either form. The fallback set is
 // the canonical mapping; new short aliases get picked up automatically.
+//
+// `[1m]` long-context variant (#4087): try the model id verbatim FIRST
+// so an explicit `claude-opus-4-7[1m]` entry — with its longContext
+// premium block — wins over the suffix-stripped fallback.
 //
 // Also normalises dated full IDs back to the family head: the Anthropic
 // SDK's `Model` enum returns forms like `claude-opus-4-7-20251201`, which
@@ -82,6 +109,7 @@ const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
 // 8+-digit date suffix lets the lookup succeed for either form.
 function resolvePricingKey(modelId) {
   if (typeof modelId !== 'string' || modelId.length === 0) return null
+  if (CLAUDE_PRICING_USD_PER_MTOK[modelId]) return modelId
   const stripped = modelId.endsWith(ONE_M_SUFFIX) ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
   if (CLAUDE_PRICING_USD_PER_MTOK[stripped]) return stripped
   // Dated full id? Strip the 8-digit date suffix and retry against the
@@ -118,6 +146,13 @@ export function getModelPricing(modelId) {
  * missing — never throws, never returns NaN. Cache-read tokens are NOT
  * also billed at the input rate; the SDK already excludes them from
  * `input_tokens`.
+ *
+ * #4087 — long-context premium: when the pricing entry has a
+ * `longContext` block AND the turn's total input (input + cache reads +
+ * cache writes) exceeds the threshold, ALL tokens in the turn are
+ * charged at the premium rate. The threshold-crossing applies to the
+ * whole turn, not just over-threshold tokens — matches Anthropic's
+ * public pricing-table format.
  */
 export function computePromptCostUsd(usage, pricing) {
   if (!pricing || !usage) return 0
@@ -125,11 +160,21 @@ export function computePromptCostUsd(usage, pricing) {
   const outputTokens = Number(usage.output_tokens) || 0
   const cacheReadTokens = Number(usage.cache_read_input_tokens) || 0
   const cacheWriteTokens = Number(usage.cache_creation_input_tokens) || 0
+  // Select base or long-context rates. Only `[1m]`-variant entries carry
+  // a `longContext` block, so default-window models always use the
+  // top-level rates.
+  let rates = pricing
+  if (pricing.longContext) {
+    const totalInput = inputTokens + cacheReadTokens + cacheWriteTokens
+    if (totalInput > pricing.longContext.thresholdInputTokens) {
+      rates = pricing.longContext
+    }
+  }
   const cost =
-      inputTokens      * pricing.input      / 1_000_000
-    + outputTokens     * pricing.output     / 1_000_000
-    + cacheReadTokens  * pricing.cacheRead  / 1_000_000
-    + cacheWriteTokens * pricing.cacheWrite / 1_000_000
+      inputTokens      * rates.input      / 1_000_000
+    + outputTokens     * rates.output     / 1_000_000
+    + cacheReadTokens  * rates.cacheRead  / 1_000_000
+    + cacheWriteTokens * rates.cacheWrite / 1_000_000
   return Number.isFinite(cost) ? cost : 0
 }
 
