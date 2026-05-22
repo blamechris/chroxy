@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels } from '../src/models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd } from '../src/models.js'
 
 describe('FALLBACK_MODELS (default registry)', () => {
   it('is deep-frozen so getModels() callers cannot mutate the constant', () => {
@@ -423,5 +423,86 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
       { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
     ])
     assert.equal(getModels()[0].contextWindow, 1_000_000)
+  })
+})
+
+describe('getModelPricing()', () => {
+  it('returns pricing for known full ids', () => {
+    const p = getModelPricing('claude-sonnet-4-6')
+    assert.ok(p)
+    assert.equal(p.input, 3.00)
+    assert.equal(p.output, 15.00)
+    assert.equal(p.cacheRead, 0.30)
+    assert.equal(p.cacheWrite, 3.75)
+  })
+
+  it('returns pricing for short aliases (sonnet/opus/haiku)', () => {
+    assert.equal(getModelPricing('sonnet').input, 3.00)
+    assert.equal(getModelPricing('opus').output, 75.00)
+    assert.equal(getModelPricing('haiku').input, 1.00)
+  })
+
+  it('returns pricing for the [1m] long-context suffix (same rate as default window)', () => {
+    const base = getModelPricing('claude-opus-4-7')
+    const long = getModelPricing('claude-opus-4-7[1m]')
+    assert.deepEqual(long, base, 'long-context variant must use the same rate; Anthropic charges per token not per window')
+  })
+
+  it('returns null for unknown models (caller falls back to cost=0)', () => {
+    assert.equal(getModelPricing('claude-future-model-9-9'), null)
+    assert.equal(getModelPricing(''), null)
+    assert.equal(getModelPricing(null), null)
+    assert.equal(getModelPricing(undefined), null)
+  })
+
+  it('returned entries are frozen so callers cannot mutate the constant', () => {
+    const p = getModelPricing('claude-sonnet-4-6')
+    assert.ok(Object.isFrozen(p))
+  })
+})
+
+describe('computePromptCostUsd()', () => {
+  const sonnet = getModelPricing('claude-sonnet-4-6')
+  // sonnet rates: input $3, output $15, cacheRead $0.30, cacheWrite $3.75 / Mtok
+
+  it('charges input + output tokens at the model rate', () => {
+    const cost = computePromptCostUsd({ input_tokens: 1_000, output_tokens: 1_000 }, sonnet)
+    // 1000 * 3/1e6 + 1000 * 15/1e6 = 0.003 + 0.015 = 0.018
+    assert.ok(Math.abs(cost - 0.018) < 1e-9, `expected 0.018, got ${cost}`)
+  })
+
+  it('charges cache_read_input_tokens at the cacheRead rate (much lower than input)', () => {
+    const noCache = computePromptCostUsd({ input_tokens: 10_000 }, sonnet)
+    const withCache = computePromptCostUsd({ input_tokens: 0, cache_read_input_tokens: 10_000 }, sonnet)
+    assert.ok(withCache < noCache, 'cache reads must cost less than fresh input')
+    // 10k * 0.30/1e6 = 0.003
+    assert.ok(Math.abs(withCache - 0.003) < 1e-9)
+  })
+
+  it('charges cache_creation_input_tokens at the cacheWrite rate', () => {
+    const cost = computePromptCostUsd({ cache_creation_input_tokens: 1_000 }, sonnet)
+    // 1000 * 3.75/1e6 = 0.00375
+    assert.ok(Math.abs(cost - 0.00375) < 1e-9)
+  })
+
+  it('returns 0 for null pricing (unknown model)', () => {
+    assert.equal(computePromptCostUsd({ input_tokens: 1000 }, null), 0)
+  })
+
+  it('returns 0 for null usage (no API response yet)', () => {
+    assert.equal(computePromptCostUsd(null, sonnet), 0)
+  })
+
+  it('never returns NaN — coerces non-numeric usage fields to 0', () => {
+    const cost = computePromptCostUsd({ input_tokens: 'oops', output_tokens: NaN, cache_read_input_tokens: undefined }, sonnet)
+    assert.equal(cost, 0)
+  })
+
+  it('matches Opus 4.7 rate for the canonical happy-path test in byok-session', () => {
+    const opus = getModelPricing('claude-opus-4-7')
+    // The byok-session test asserts cost = 0.000375 for 5in/4out on opus-4-7.
+    // If the rate ever changes, the byok-session test's literal must change too.
+    const cost = computePromptCostUsd({ input_tokens: 5, output_tokens: 4 }, opus)
+    assert.ok(Math.abs(cost - 0.000375) < 1e-9, `opus 5in/4out reference: expected 0.000375, got ${cost}`)
   })
 })

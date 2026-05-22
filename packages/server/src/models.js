@@ -60,6 +60,65 @@ export const FALLBACK_MODELS = Object.freeze([
   Object.freeze({ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveClaudeContextWindow('claude-haiku-4-5') }),
 ])
 
+// Public Anthropic pricing in USD per million tokens. Cache-write is the
+// 5-minute ephemeral tier (the default; the 1-hour tier costs more but
+// chroxy doesn't opt into it). Source: Anthropic public pricing page —
+// keep this table in sync when prices change. Numbers wrong here mean
+// cumulative-cost displays mislead users (#4054), so revisit on every
+// model addition.
+const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
+  'claude-sonnet-4-6': Object.freeze({ input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 }),
+  'claude-opus-4-7':   Object.freeze({ input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 }),
+  'claude-haiku-4-5':  Object.freeze({ input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 }),
+})
+
+// Short-id → fullId so callers can pass either form. The fallback set is
+// the canonical mapping; new short aliases get picked up automatically.
+function resolvePricingKey(modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return null
+  const stripped = modelId.endsWith(ONE_M_SUFFIX) ? modelId.slice(0, -ONE_M_SUFFIX.length) : modelId
+  if (CLAUDE_PRICING_USD_PER_MTOK[stripped]) return stripped
+  const fallback = FALLBACK_MODELS.find((m) => m.id === stripped)
+  return fallback ? fallback.fullId : null
+}
+
+/**
+ * Returns the pricing rates for a model (USD per million tokens), or null
+ * if pricing is unknown. Callers that can't compute cost should still
+ * function — emit `cost: 0` and log a warn so the gap is visible without
+ * blocking the turn.
+ *
+ * Accepts short ids ('sonnet'), full ids ('claude-sonnet-4-6'), and the
+ * `[1m]` long-context suffix (the rate is the same for both context
+ * windows — Anthropic charges per token, not per window).
+ */
+export function getModelPricing(modelId) {
+  const key = resolvePricingKey(modelId)
+  return key ? CLAUDE_PRICING_USD_PER_MTOK[key] : null
+}
+
+/**
+ * Compute USD cost for a single turn's usage object as returned by the
+ * Anthropic SDK (`{ input_tokens, output_tokens, cache_creation_input_tokens,
+ * cache_read_input_tokens }`). Returns 0 if pricing is unknown OR usage is
+ * missing — never throws, never returns NaN. Cache-read tokens are NOT
+ * also billed at the input rate; the SDK already excludes them from
+ * `input_tokens`.
+ */
+export function computePromptCostUsd(usage, pricing) {
+  if (!pricing || !usage) return 0
+  const inputTokens = Number(usage.input_tokens) || 0
+  const outputTokens = Number(usage.output_tokens) || 0
+  const cacheReadTokens = Number(usage.cache_read_input_tokens) || 0
+  const cacheWriteTokens = Number(usage.cache_creation_input_tokens) || 0
+  const cost =
+      inputTokens      * pricing.input      / 1_000_000
+    + outputTokens     * pricing.output     / 1_000_000
+    + cacheReadTokens  * pricing.cacheRead  / 1_000_000
+    + cacheWriteTokens * pricing.cacheWrite / 1_000_000
+  return Number.isFinite(cost) ? cost : 0
+}
+
 function getDefaultCachePath() {
   const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
   return join(configDir, 'models-cache.json')
