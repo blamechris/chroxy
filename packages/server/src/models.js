@@ -542,9 +542,24 @@ export function createModelsRegistry(hooks = {}) {
           contextWindow: 1_000_000,
         })
         seenFullIds.add(variantFullId)
-        if (!CLAUDE_PRICING_USD_PER_MTOK[variantFullId] && !pricingDriftWarned.has(variantFullId)) {
-          log.warn(`pricing-table drift: synthesized 1M variant ${variantFullId} has no entry in CLAUDE_PRICING_USD_PER_MTOK. Cost reports for >200K input turns will use base rates (no longContext premium). Add an explicit entry in packages/server/src/models.js.`)
-          pricingDriftWarned.add(variantFullId)
+        // Drift detection (#4106 + #4116). Two failure modes both lose
+        // the premium tier in different ways:
+        //   (1) No `[1m]` entry at all → resolvePricingKey may return null
+        //       (cost=0) or fall back to the base family entry (no
+        //       longContext block) depending on the family.
+        //   (2) `[1m]` entry exists but lacks `longContext` → premium
+        //       block silently absent; >200K turns billed at base rates.
+        // Both produce undercounting; warn for either. Gate to `claude-*`
+        // so non-Claude registries don't get a Claude-pricing nag.
+        if (variantFullId.startsWith('claude-')) {
+          const entry = CLAUDE_PRICING_USD_PER_MTOK[variantFullId]
+          if ((!entry || !entry.longContext) && !pricingDriftWarned.has(variantFullId)) {
+            const reason = entry
+              ? `no longContext premium block; >200K turns will bill at base rates`
+              : `no entry in CLAUDE_PRICING_USD_PER_MTOK; cost may be 0 or fall back to base`
+            log.warn(`pricing-table drift: synthesized 1M variant ${variantFullId} ${reason}. Add an explicit entry (with longContext) in packages/server/src/models.js.`)
+            pricingDriftWarned.add(variantFullId)
+          }
         }
       }
       converted.push(...variants)
