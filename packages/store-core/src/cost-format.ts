@@ -36,9 +36,15 @@ export function formatCostBadge(costUsd: number): string {
 
 /**
  * Build the multi-line breakdown shown in the dashboard's native browser
- * tooltip and in the mobile app's tap-to-expand sheet. Six rows in a
- * stable order; token counts use locale formatting so 1234567 reads as
- * "1,234,567" in en-US (or the equivalent in the runtime's locale).
+ * tooltip (the cost-badge hover popover) — one string, six rows separated
+ * by newlines, suitable for a `<span title={...}>` attribute.
+ *
+ * Not currently used by the mobile app: SettingsBar.tsx's tap-to-expand
+ * sheet renders the six rows directly as `<View>` rows with separate
+ * label / value text nodes (#4074), since RN doesn't support multi-line
+ * tooltips. The two surfaces produce the same six pieces of information
+ * in the same order; this helper formats the dashboard's native-tooltip
+ * form.
  */
 export function formatCostBreakdown(usage: CumulativeUsage): string {
   const fmt = (n: number) => n.toLocaleString()
