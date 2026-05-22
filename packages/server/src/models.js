@@ -83,10 +83,11 @@ const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
   'claude-opus-4-7[1m]': Object.freeze({
     // Below the 200K threshold the rates match the default-window entry.
     input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
-    // Above 200K input, Anthropic's published premium is 2× input + 1.5×
-    // output for the 1M variant. Verify against the pricing page on the
-    // next periodic check — the rate is a public figure but easy to
-    // drift from. Test in `models.test.js` pins the exact numbers.
+    // Above 200K input the published premium is a uniform 2× across all
+    // four rates (input, output, cacheRead, cacheWrite). Verify against
+    // the Anthropic pricing page on the next periodic check — the
+    // numbers are public but easy to drift. Test in `models.test.js`
+    // pins the exact literals so a drift fails loudly.
     longContext: Object.freeze({
       thresholdInputTokens: 200_000,
       input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
@@ -131,8 +132,13 @@ function resolvePricingKey(modelId) {
  * blocking the turn.
  *
  * Accepts short ids ('sonnet'), full ids ('claude-sonnet-4-6'), and the
- * `[1m]` long-context suffix (the rate is the same for both context
- * windows — Anthropic charges per token, not per window).
+ * `[1m]` long-context suffix. The returned entry's top-level rates are
+ * the base (≤200K input) tier. `[1m]` variants additionally carry a
+ * `longContext` block with premium rates that `computePromptCostUsd`
+ * selects when the turn's total input exceeds the threshold (#4087).
+ * The selection happens inside computePromptCostUsd — callers should
+ * pass usage to that helper rather than reaching into `.longContext`
+ * directly.
  */
 export function getModelPricing(modelId) {
   const key = resolvePricingKey(modelId)
