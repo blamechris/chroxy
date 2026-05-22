@@ -783,12 +783,16 @@ export class SessionManager extends EventEmitter {
         // #4072: hydrate cumulative token usage + cost so a dashboard /
         // mobile client connecting after a session has already racked up
         // turns sees the running totals immediately instead of waiting
-        // for the next `session_usage` event. Shallow-copy on the wire
-        // so a client that mutates the payload can't corrupt the
-        // canonical accumulator. Subscription-only sessions never emit
-        // `cost` so this stays zero — the UI uses `turnsBilled === 0`
-        // or `costUsd === 0` to suppress the cost badge.
-        cumulativeUsage: entry.cumulativeUsage ? { ...entry.cumulativeUsage } : makeZeroCumulativeUsage(),
+        // for the next `session_usage` event. Overlay the entry's stored
+        // values on top of the zero template so the snapshot ALWAYS has
+        // every key — a custom provider or future restoreState path that
+        // stores a partial object can't produce a wire shape with
+        // missing fields (#4088 review). Shallow-copy on the wire so a
+        // client that mutates the payload can't corrupt the canonical
+        // accumulator. Subscription-only sessions never emit `cost` so
+        // this stays zero — the UI uses `turnsBilled === 0` or
+        // `costUsd === 0` to suppress the cost badge.
+        cumulativeUsage: { ...makeZeroCumulativeUsage(), ...(entry.cumulativeUsage || {}) },
       })
     }
     return list
@@ -1411,14 +1415,18 @@ export class SessionManager extends EventEmitter {
           })
         }
 
-        // Track cumulative cost and check budget on result events
-        if (event === 'result' && typeof data.cost === 'number') {
+        // Track cumulative cost and check budget on result events.
+        // Use Number.isFinite so NaN / Infinity (provider bugs) don't
+        // poison cumulative totals or trigger spurious budget events
+        // (#4088 review).
+        if (event === 'result' && Number.isFinite(data?.cost)) {
           const sessionEntry = this._sessions.get(sessionId)
           const model = session.currentModel || sessionEntry?.model || null
           this._trackCost(sessionId, data.cost, model)
           // #4072: also accumulate token usage for cumulative-display.
-          // Gated on the same `typeof data.cost === 'number'` predicate
-          // so subscription-only providers stay zero (no badge in UI).
+          // Gated on the same `Number.isFinite(data.cost)` predicate so
+          // subscription-only providers (cost: null) stay zero (no badge
+          // in UI) and NaN/Infinity can't poison the accumulator.
           this._trackUsage(sessionId, data)
         }
       })
