@@ -33,7 +33,7 @@ function fakeStream(events, finalMessage) {
 
 function captureEvents(session) {
   const captured = []
-  const known = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'result', 'error']
+  const known = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'result', 'error', 'tool_start', 'tool_result']
   for (const name of known) {
     session.on(name, (payload) => captured.push({ name, payload }))
   }
@@ -70,14 +70,14 @@ describe('ClaudeByokSession', () => {
       assert.equal(ClaudeByokSession.dataDir, null)
     })
 
-    it('PR 1 capabilities: chat only, no tool dispatch yet', () => {
+    it('PR 2 capabilities: tools enabled via in-process permissions', () => {
       const caps = ClaudeByokSession.capabilities
-      assert.equal(caps.permissions, false, 'PR 1 has no permission gating')
-      assert.equal(caps.inProcessPermissions, false, 'flips true when tools land in PR 2')
+      assert.equal(caps.permissions, true, 'PR 2 gates tools through PermissionManager')
+      assert.equal(caps.inProcessPermissions, true)
       assert.equal(caps.modelSwitch, true)
       assert.equal(caps.streaming, true)
       assert.equal(caps.skillToggle, true)
-      assert.equal(caps.resume, false, 'PR 1 history is in-memory only')
+      assert.equal(caps.resume, false, 'in-memory history only')
     })
 
     it('preflight declares ANTHROPIC_API_KEY as required (not optional)', () => {
@@ -128,7 +128,13 @@ describe('ClaudeByokSession', () => {
               { type: 'content_block_stop', index: 0 },
               { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 5, output_tokens: 4 } },
               { type: 'message_stop' },
-            ]),
+            ], {
+              // Realistic finalMessage matches message_delta's usage —
+              // in real streams the two never diverge.
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'Hello, world' }],
+              usage: { input_tokens: 5, output_tokens: 4 },
+            }),
         },
       }
       const captured = captureEvents(session)
@@ -334,11 +340,156 @@ describe('ClaudeByokSession', () => {
       await session.start()
       await session.sendMessage('describe this', [{ type: 'image', data: 'base64...' }])
       const errorEvent = captured.find(
-        (e) => e.name === 'error' && /does not yet support attachments/.test(e.payload.message),
+        (e) => e.name === 'error' && /does not yet materialise attachments/.test(e.payload.message),
       )
       assert.ok(errorEvent, 'should warn about dropped attachments')
       const result = captured.find((e) => e.name === 'result')
       assert.ok(result, 'turn should still complete with text-only prompt')
+      await session.destroy()
+    })
+  })
+
+  describe('tool dispatch (PR 2)', () => {
+    it('executes a tool_use block via the local executor and loops on tool_result', async () => {
+      // Round 1: model emits a Read tool_use, stop_reason=tool_use.
+      // Round 2: model emits text, stop_reason=end_turn.
+      let callCount = 0
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      // Permission mode auto so the test doesn't hang waiting for a user
+      // tap. The point of the test is the agent loop, not the permission UI.
+      session.setPermissionMode('auto')
+      // Force the Read tool through a stub executor by intercepting at
+      // the tool layer. The session's own executor would try to read a
+      // real file — out of scope for this test.
+      const originalExecute = session._executeToolBlock.bind(session)
+      session._executeToolBlock = async function ({ block }) {
+        return {
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: 'mock tool output',
+          is_error: false,
+        }
+      }
+      session._client = {
+        messages: {
+          stream: () => {
+            callCount += 1
+            if (callCount === 1) {
+              return fakeStream(
+                [
+                  { type: 'message_start', message: { id: 'msg', model: 'claude-opus-4-7' } },
+                  { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} } },
+                  { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+                  { type: 'message_stop' },
+                ],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/tmp/x' } }],
+                  usage: { input_tokens: 10, output_tokens: 5 },
+                },
+              )
+            }
+            return fakeStream(
+              [
+                { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } },
+                { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+                { type: 'message_stop' },
+              ],
+              {
+                stop_reason: 'end_turn',
+                content: [{ type: 'text', text: 'done' }],
+                usage: { input_tokens: 12, output_tokens: 8 },
+              },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('please read /tmp/x')
+      // Round 1 + round 2 = 2 stream() calls
+      assert.equal(callCount, 2, 'agent loop should iterate twice (tool round + final)')
+      const results = captured.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'one final result, not one per round')
+      assert.equal(results[0].payload.stopReason, 'end_turn')
+      // History should contain: user prompt, assistant turn 1, user tool_result, assistant turn 2
+      assert.equal(session._history.length, 4)
+      assert.equal(session._history[0].role, 'user')
+      assert.equal(session._history[1].role, 'assistant')
+      assert.equal(session._history[2].role, 'user', 'tool_result rides on a user message')
+      assert.ok(Array.isArray(session._history[2].content))
+      assert.equal(session._history[2].content[0].type, 'tool_result')
+      assert.equal(session._history[3].role, 'assistant')
+      session._executeToolBlock = originalExecute
+      await session.destroy()
+    })
+
+    it('breaks out of the loop after MAX_TOOL_ROUNDS (infinite-loop safety)', async () => {
+      // Model insists on calling a tool on every round — agent loop must
+      // bail at the cap and emit result so the session doesn't hang.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'x', is_error: false }
+      }
+      let callCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            callCount += 1
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+              {
+                stop_reason: 'tool_use',
+                content: [{ type: 'tool_use', id: `toolu_${callCount}`, name: 'Read', input: {} }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('infinite loop please')
+      assert.ok(callCount <= 25, `expected <= MAX_TOOL_ROUNDS, got ${callCount}`)
+      const results = captured.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'must emit result even on safety-cap exit')
+      await session.destroy()
+    })
+
+    it('surfaces a denied permission as an error tool_result', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      // Default 'approve' mode — without a permission response the
+      // promise would hang. Stub the permission manager to deny.
+      session._permissions.handlePermission = async () => ({ behavior: 'deny', message: 'no' })
+      let callCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            callCount += 1
+            if (callCount === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'rm -rf /' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }, { type: 'message_stop' }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: {} },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('try something dangerous')
+      const denied = captured.find((e) => e.name === 'tool_result' && e.payload.isError === true)
+      assert.ok(denied, 'denied tool produces an error tool_result event')
+      assert.match(denied.payload.result, /no/i)
       await session.destroy()
     })
   })
