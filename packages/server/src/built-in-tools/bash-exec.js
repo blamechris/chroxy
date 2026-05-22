@@ -112,7 +112,15 @@ export async function executeBash({
     if (sig === 'SIGTERM' && hardKillTimer === null) {
       hardKillTimer = setTimeout(() => {
         try {
-          if (!child.killed && child.exitCode === null) child.kill('SIGKILL')
+          // #4067: `child.killed` is set when WE called child.kill(SIGTERM)
+          // above — it does NOT indicate process liveness. To actually
+          // skip the redundant SIGKILL when the child cleanly exited
+          // under SIGTERM within the grace window, test for an actual
+          // exit signal: exitCode set (normal exit) or signalCode set
+          // (received a signal). Either means the process is gone.
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill('SIGKILL')
+          }
         } catch {}
       }, HARD_KILL_GRACE_MS)
     }
