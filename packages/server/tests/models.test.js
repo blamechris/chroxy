@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd } from '../src/models.js'
 
@@ -97,6 +97,65 @@ describe('getModels', () => {
 describe('updateModels', () => {
   beforeEach(() => {
     resetModels()
+  })
+
+  describe('pricing-table drift warning (#4106)', () => {
+    let warnings = []
+    let originalWarn
+    beforeEach(() => {
+      warnings = []
+      originalWarn = console.warn
+      console.warn = (...args) => warnings.push(args.join(' '))
+      resetModels()
+    })
+    afterEach(() => {
+      console.warn = originalWarn
+    })
+
+    it('logs warn when a 1M variant is synthesized but no pricing entry exists', () => {
+      // claude-opus-4-6 resolves to 1M context via the heuristic, but
+      // CLAUDE_PRICING_USD_PER_MTOK doesn't carry a `claude-opus-4-6[1m]`
+      // entry (only opus-4-7[1m] exists today). Synthesis emits the chip;
+      // the drift warn fires so operators notice before bills lie when
+      // someone selects the synthesized variant for >200K turns.
+      updateModels([
+        { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' },
+      ])
+      const drift = warnings.filter(w => w.includes('pricing-table drift'))
+      assert.ok(
+        drift.some(w => w.includes('claude-opus-4-6[1m]')),
+        `expected a drift warning for claude-opus-4-6[1m]; got: ${JSON.stringify(warnings)}`,
+      )
+    })
+
+    it('does not warn for the existing claude-opus-4-7[1m] (pricing entry exists)', () => {
+      updateModels([
+        { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      ])
+      const drift = warnings.filter(w => w.includes('pricing-table drift'))
+      assert.equal(drift.length, 0, `unexpected drift warning: ${JSON.stringify(warnings)}`)
+    })
+
+    it('warns only ONCE per variant across repeated updateModels() calls', () => {
+      // updateModels() can fire on every SDK session init. The warn-once
+      // gate prevents log spam — operators see the line on the first
+      // session and not on subsequent ones.
+      const sdkModels = [{ value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' }]
+      updateModels(sdkModels)
+      updateModels(sdkModels)
+      updateModels(sdkModels)
+      const drift = warnings.filter(w => w.includes('pricing-table drift') && w.includes('claude-opus-4-6[1m]'))
+      assert.equal(drift.length, 1, `expected exactly one warn, got ${drift.length}: ${JSON.stringify(drift)}`)
+    })
+
+    it('resetModels clears the warn-once gate (next synthesis re-warns)', () => {
+      const sdkModels = [{ value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' }]
+      updateModels(sdkModels)
+      resetModels()
+      updateModels(sdkModels)
+      const drift = warnings.filter(w => w.includes('pricing-table drift') && w.includes('claude-opus-4-6[1m]'))
+      assert.equal(drift.length, 2, `expected two warns (one per session), got ${drift.length}`)
+    })
   })
 
   it('updates getModels() to return new list (with merged fallbacks + 1m variants)', () => {

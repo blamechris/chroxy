@@ -347,6 +347,13 @@ export function createModelsRegistry(hooks = {}) {
   // SDK session init). Cleared on resetModels().
   const contextWindowOverrides = new Map()
 
+  // #4106: warn-once set for synthesized 1M variants that lack a matching
+  // pricing entry. updateModels() can be called repeatedly across the
+  // server lifetime (every SDK session init); without this guard, an
+  // operator running with a new model family would see the same warn line
+  // for every session. Cleared on resetModels().
+  const pricingDriftWarned = new Set()
+
   // Seed lookups with FALLBACK_MODELS aliases so legacy short ids
   // (`sonnet`/`opus`/`haiku`) remain valid even after the SDK returns a
   // dynamic list whose derived short ids look different
@@ -512,6 +519,15 @@ export function createModelsRegistry(hooks = {}) {
       // accepts `claude-*[1m]` as a separate model id (verified against the
       // claude binary), so the picker should surface it as a distinct chip
       // even though `supportedModels()` doesn't list it (#3075).
+      //
+      // Pricing-table drift guard (#4106): the day Anthropic ships a 1M
+      // variant of Sonnet/Haiku/any-future-model, `updateModels` will
+      // synthesize the `[1m]` chip here, but if the pricing table at the
+      // top of this file doesn't carry a matching entry with a
+      // `longContext` block, `resolvePricingKey` falls back to the base
+      // family entry and silently undercounts >200K turns by whatever the
+      // premium ratio is. Warn-once per variant so an operator notices
+      // before the bills lie. Forward-compat only — no current breakage.
       const variants = []
       for (const m of converted) {
         if (!m.fullId || m.fullId.endsWith(ONE_M_SUFFIX)) continue
@@ -526,6 +542,10 @@ export function createModelsRegistry(hooks = {}) {
           contextWindow: 1_000_000,
         })
         seenFullIds.add(variantFullId)
+        if (!CLAUDE_PRICING_USD_PER_MTOK[variantFullId] && !pricingDriftWarned.has(variantFullId)) {
+          log.warn(`pricing-table drift: synthesized 1M variant ${variantFullId} has no entry in CLAUDE_PRICING_USD_PER_MTOK. Cost reports for >200K input turns will use base rates (no longContext premium). Add an explicit entry in packages/server/src/models.js.`)
+          pricingDriftWarned.add(variantFullId)
+        }
       }
       converted.push(...variants)
 
@@ -559,6 +579,7 @@ export function createModelsRegistry(hooks = {}) {
 
     resetModels() {
       contextWindowOverrides.clear()
+      pricingDriftWarned.clear()
       applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
