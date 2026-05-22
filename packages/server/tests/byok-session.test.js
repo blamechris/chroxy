@@ -502,6 +502,155 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('rolls back the entire turn when for-await rejects mid-iteration at round >= 1 (#4118)', async () => {
+      // Round 0 returns one tool_use; round 1's stream rejects DURING
+      // iteration (not at init). Without the outer-catch rollback,
+      // _history ends on a `user` tool_result turn and the next
+      // sendMessage produces back-to-back user roles.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCallCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCallCount += 1
+            if (streamCallCount === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            // Round 1: stream STARTS (no sync throw at init) but the
+            // for-await rejects mid-iteration.
+            return {
+              async *[Symbol.asyncIterator]() {
+                yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } }
+                const err = new Error('network dropped mid-stream')
+                err.status = 502
+                throw err
+              },
+              async finalMessage() { return null },
+            }
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('round-1-async-failure')
+      assert.equal(streamCallCount, 2)
+      const errors = captured.filter((e) => e.name === 'error')
+      assert.ok(errors.length >= 1, 'turn surfaces an error')
+      assert.equal(
+        session._history.length, 0,
+        `entire turn must roll back on round-1 mid-stream throw; got: ${JSON.stringify(session._history)}`,
+      )
+      await session.destroy()
+    })
+
+    it('rolls back the entire turn when finalMessage() rejects at round >= 1 (#4118)', async () => {
+      // Round 0 returns one tool_use; round 1's stream iterates cleanly
+      // but `await stream.finalMessage()` rejects. Same alternation
+      // soft-break — must be caught by the outer-catch rollback.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCallCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCallCount += 1
+            if (streamCallCount === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            // Round 1: stream iterates cleanly but finalMessage rejects.
+            return {
+              async *[Symbol.asyncIterator]() {
+                yield { type: 'message_stop' }
+              },
+              async finalMessage() {
+                const err = new Error('finalMessage failed')
+                err.status = 500
+                throw err
+              },
+            }
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('finalMessage-rejection')
+      assert.equal(streamCallCount, 2)
+      assert.ok(captured.some((e) => e.name === 'error'), 'turn surfaces an error')
+      assert.equal(
+        session._history.length, 0,
+        `entire turn must roll back when finalMessage rejects; got: ${JSON.stringify(session._history)}`,
+      )
+      await session.destroy()
+    })
+
+    it('rolls back the entire turn when tool execution rejects at round >= 1 (#4118)', async () => {
+      // Round 0 succeeds with a tool_use. Round 1 starts with a fresh
+      // tool_use, but _executeToolBlock rejects synchronously inside the
+      // promise. Same alternation soft-break — outer-catch rollback.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let executeCount = 0
+      session._executeToolBlock = async function ({ block, messageId }) {
+        executeCount += 1
+        if (executeCount === 1) {
+          this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+          return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+        }
+        throw new Error('tool execution exploded')
+      }
+      let streamCallCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCallCount += 1
+            // Both rounds return tool_use so we get a second invocation
+            // of _executeToolBlock which throws.
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+              {
+                stop_reason: 'tool_use',
+                content: [{ type: 'tool_use', id: `tu_${streamCallCount}`, name: 'Read', input: { file_path: '/x' } }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('tool-rejection')
+      assert.equal(executeCount, 2, 'second tool_use invokes the failing executor')
+      assert.ok(captured.some((e) => e.name === 'error'), 'turn surfaces an error')
+      assert.equal(
+        session._history.length, 0,
+        `entire turn must roll back when a tool throws mid-loop; got: ${JSON.stringify(session._history)}`,
+      )
+      await session.destroy()
+    })
+
     it('emits stream_end on the error path too (no stranded spinner)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session._client = {
