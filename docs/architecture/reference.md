@@ -321,7 +321,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
 - `key_exchange` implements ECDH key exchange for end-to-end encryption; after `auth_ok`, client and server exchange public keys, derive a shared secret, and encrypt all subsequent messages; `auth_ok` includes `encryption: 'required'` when encryption is enabled or `encryption: 'disabled'` when turned off; disable with `--no-encrypt`
-- `session_list` includes `provider` (provider name) and `capabilities` (feature flags from the provider adapter interface) per session
+- `session_list` includes `provider` (provider name) and `capabilities` (feature flags from the provider adapter interface) per session. Also carries an optional `cumulativeUsage` snapshot per entry (#4091 / #4072) — same six-field shape as the `session_usage` event payload — so a reconnecting client sees the running cost without waiting for the next live event.
 - `auth` accepts optional `deviceInfo: { deviceId, deviceName, deviceType, platform }` for multi-client awareness
 - `auth_ok` includes `clientId` (assigned ID) and `connectedClients` (list of all connected clients)
 - `client_joined` broadcasts when a new client authenticates; `client_left` on disconnect
