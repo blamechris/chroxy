@@ -391,6 +391,119 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('rolls back the entire turn when stream init throws at round >= 1 (#4109)', async () => {
+      // Round 0 succeeds with a tool_use; round 1 stream init throws.
+      // Without rollback, history ends on a `user` tool_result turn, and
+      // the next sendMessage pushes a plain-text `user` turn — back-to-
+      // back user roles. The SDK accepts this today but the alternation
+      // invariant we comment about elsewhere is now soft, and a future
+      // API tightening could 400 it.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: block.id,
+          toolName: block.name,
+          result: 'ok',
+          isError: false,
+        })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCallCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCallCount += 1
+            if (streamCallCount === 1) {
+              // Round 0: succeed, return one tool_use to push the loop to round 1.
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            // Round 1: throw at stream init (transient 5xx).
+            throw Object.assign(new Error('upstream rate limit'), { status: 429 })
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('round-1-failure')
+      const errors = captured.filter((e) => e.name === 'error')
+      assert.ok(errors.some((e) => e.payload.code === 'HTTP_429'), `expected an HTTP_429 error, got: ${JSON.stringify(errors)}`)
+      assert.equal(streamCallCount, 2, 'stream() should be invoked twice (round 0 + round 1)')
+      // After rollback, history must be EMPTY — the turn never landed.
+      // No back-to-back user turns possible because there is no turn at all.
+      assert.equal(
+        session._history.length, 0,
+        `entire turn must roll back on round-1 stream-init throw; got: ${JSON.stringify(session._history)}`,
+      )
+      await session.destroy()
+    })
+
+    it('round-1 stream-init throw lets the next sendMessage land cleanly (alternation preserved)', async () => {
+      // End-to-end follow-up to the rollback test above. After the
+      // failure, the next sendMessage should produce a valid history:
+      // exactly one user turn (the new prompt), no orphans, no back-to-
+      // back user roles.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCallCount = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCallCount += 1
+            if (streamCallCount === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_a', name: 'Read', input: { file_path: '/a' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            if (streamCallCount === 2) {
+              throw Object.assign(new Error('upstream gone'), { status: 502 })
+            }
+            // Retry: clean text response.
+            return fakeStream(
+              [{ type: 'message_stop' }],
+              {
+                stop_reason: 'end_turn',
+                content: [{ type: 'text', text: 'recovered' }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('first attempt — will fail at round 1')
+      // First call emitted an error event — assertion the captureEvents
+      // sink already collected; suppress before the retry so unhandled
+      // 'error' events from any subsequent failure don't crash the test.
+      void captured.filter((e) => e.name === 'error').length
+      // Now retry. Pre-fix this would create back-to-back user turns.
+      await session.sendMessage('retry')
+      // History after successful retry: [user-prompt, assistant]
+      assert.equal(session._history.length, 2, `expected 2 entries, got ${session._history.length}: ${JSON.stringify(session._history)}`)
+      assert.equal(session._history[0].role, 'user')
+      assert.equal(session._history[0].content, 'retry')
+      assert.equal(session._history[1].role, 'assistant')
+      await session.destroy()
+    })
+
     it('emits stream_end on the error path too (no stranded spinner)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session._client = {
