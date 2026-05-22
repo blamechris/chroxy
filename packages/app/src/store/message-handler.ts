@@ -93,6 +93,7 @@ import {
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
+  handleSessionUsage as sharedSessionUsage,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
@@ -1191,6 +1192,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             updateSession(s.sessionId, (ss) =>
               ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
             );
+          }
+        }
+        // #4074: seed cumulativeUsage from the snapshot so re-opening the
+        // mobile app mid-session shows the running cost in the header
+        // without waiting for the next session_usage event. Same pattern
+        // as the dashboard (#4073).
+        for (const s of sessionList) {
+          if (s.cumulativeUsage && get().sessionStates[s.sessionId]) {
+            const snapshot = s.cumulativeUsage;
+            updateSession(s.sessionId, (ss) => {
+              const current = ss.cumulativeUsage;
+              if (
+                current &&
+                current.inputTokens === snapshot.inputTokens &&
+                current.outputTokens === snapshot.outputTokens &&
+                current.cacheReadTokens === snapshot.cacheReadTokens &&
+                current.cacheCreationTokens === snapshot.cacheCreationTokens &&
+                current.costUsd === snapshot.costUsd &&
+                current.turnsBilled === snapshot.turnsBilled
+              ) {
+                return {};
+              }
+              return { cumulativeUsage: snapshot };
+            });
           }
         }
         // Persist the active session's conversationId for auto-resume on server restart.
@@ -2349,6 +2374,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       set({ totalCost, costBudget: budget });
       // dual-write: remove after consumers migrate to CostStore
       useCostStore.getState().setCostUpdate(totalCost, budget);
+      break;
+    }
+
+    case 'session_usage': {
+      // #4074: per-session cumulative tokens + cost. Drives the
+      // SessionScreen header cost badge + tap-to-expand breakdown.
+      // Emitted after every result event.
+      const result = sharedSessionUsage(msg, get().activeSessionId);
+      if (result.sessionId && get().sessionStates[result.sessionId]) {
+        updateSession(result.sessionId, () => result.patch);
+      }
       break;
     }
 

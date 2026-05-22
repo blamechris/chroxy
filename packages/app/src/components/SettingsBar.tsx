@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
-import type { PendingPermissionConfirm } from '@chroxy/store-core';
+import type { CumulativeUsage, PendingPermissionConfirm } from '@chroxy/store-core';
 import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -27,6 +27,10 @@ export interface SettingsBarProps {
   lastResultCost: number | null;
   lastResultDuration: number | null;
   sessionCost?: number | null;
+  // #4074: per-session running totals. When `costUsd > 0` the summary
+  // row renders a tappable cost badge that opens a Modal with the full
+  // token breakdown.
+  cumulativeUsage?: CumulativeUsage | null;
   costBudget?: number | null;
   contextUsage: ContextUsage | null;
   sessionCwd: string | null;
@@ -85,6 +89,22 @@ function formatTokenCount(tokens: number): string {
   return `${tokens} tokens`;
 }
 
+/**
+ * #4074: Format a USD value for the session-header cost badge. Mirrors
+ * the dashboard's `formatCostBadge` (#4073) so the same number formats
+ * identically on every surface.
+ *
+ * Below $0.01 → 4 decimals ($0.0023) — preserves precision for small turns.
+ * $0.01 to $1 → 3 decimals ($0.070) — sub-dollar accuracy.
+ * >= $1 → 2 decimals ($42.50) — dollars are the unit at this scale.
+ */
+export function formatCostBadge(costUsd: number): string {
+  if (!Number.isFinite(costUsd) || costUsd <= 0) return '$0';
+  if (costUsd >= 1) return `$${costUsd.toFixed(2)}`;
+  if (costUsd < 0.01) return `$${costUsd.toFixed(4)}`;
+  return `$${costUsd.toFixed(3)}`;
+}
+
 // -- Component --
 
 export function SettingsBar({
@@ -98,6 +118,7 @@ export function SettingsBar({
   lastResultCost,
   lastResultDuration,
   sessionCost,
+  cumulativeUsage,
   costBudget,
   contextUsage,
   sessionCwd,
@@ -135,6 +156,28 @@ export function SettingsBar({
     const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
     return () => sub.remove();
   }, []);
+
+  // #4074: tap-to-expand sheet for the cumulative-cost breakdown.
+  // Distinct from the SettingsBar's expand/collapse — this is a Modal
+  // dedicated to the cost details, mirroring the dashboard's hover
+  // popover.
+  const [costBreakdownOpen, setCostBreakdownOpen] = useState(false);
+  const hasCumulativeCost =
+    !!cumulativeUsage && Number.isFinite(cumulativeUsage.costUsd) && cumulativeUsage.costUsd > 0;
+  // Close a stale sheet if the cost predicate flips back to false (e.g.
+  // the session resets or a state restore drops the cumulative block).
+  // Without this guard the badge disappears but the modal stays open on
+  // top, anchored to data that no longer applies (#4121 review).
+  //
+  // Known limitation: switching between two sessions that both have
+  // cumulativeUsage > 0 keeps the sheet open and re-anchors it to the
+  // NEW session's data without an explicit user open. The Sheet is
+  // dismissible (Close button + backdrop tap) so the impact is minor;
+  // a cleaner fix would pass `activeSessionId` through SettingsBar and
+  // useEffect on the id to auto-close on switch — tracked as a follow-up.
+  useEffect(() => {
+    if (!hasCumulativeCost && costBreakdownOpen) setCostBreakdownOpen(false);
+  }, [hasCumulativeCost, costBreakdownOpen]);
 
   // Show confirmation dialog when server challenges auto permission mode
   useEffect(() => {
@@ -188,10 +231,17 @@ export function SettingsBar({
     const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
     summaryParts.push(permInfo?.label || permissionMode);
   }
-  if (sessionCost != null) {
-    summaryParts.push(`$${sessionCost.toFixed(2)}`);
-  } else if (lastResultCost != null) {
-    summaryParts.push(`$${lastResultCost.toFixed(2)}`);
+  // #4074: when cumulativeUsage carries a non-zero cost, the dedicated
+  // badge below the summary takes over. Otherwise fall back to the
+  // pre-existing sessionCost / lastResultCost summary text so older
+  // sessions and subscription-billed sessions (which never populate
+  // cumulativeUsage.costUsd) keep their current display.
+  if (!hasCumulativeCost) {
+    if (sessionCost != null) {
+      summaryParts.push(`$${sessionCost.toFixed(2)}`);
+    } else if (lastResultCost != null) {
+      summaryParts.push(`$${lastResultCost.toFixed(2)}`);
+    }
   }
   if (contextUsage) {
     const total = contextUsage.inputTokens + contextUsage.outputTokens;
@@ -250,6 +300,21 @@ export function SettingsBar({
         <Text style={styles.summaryText} numberOfLines={1}>
           {summaryParts.join(' \u00B7 ') || 'Settings'}
         </Text>
+        {hasCumulativeCost && cumulativeUsage && (
+          // #4074: tappable cost badge in the session header. The badge
+          // intercepts the press inside its own bounds \u2014 the outer
+          // TouchableOpacity (which toggles the SettingsBar expansion)
+          // only fires when the user taps OUTSIDE this Pressable.
+          <Pressable
+            onPress={() => setCostBreakdownOpen(true)}
+            style={({ pressed }) => [styles.costBadge, pressed && styles.costBadgePressed]}
+            accessibilityRole="button"
+            accessibilityLabel={`Session cost ${formatCostBadge(cumulativeUsage.costUsd)}. Tap for breakdown.`}
+            testID="session-cost-badge"
+          >
+            <Text style={styles.costBadgeText}>{formatCostBadge(cumulativeUsage.costUsd)}</Text>
+          </Pressable>
+        )}
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
       </TouchableOpacity>
       {expanded && (
@@ -450,6 +515,68 @@ export function SettingsBar({
             </View>
           )}
         </View>
+      )}
+      {/* #4074: cumulative-cost breakdown sheet. Visible only when a tap
+          on the cost badge has set costBreakdownOpen. Mirrors the
+          dashboard's hover popover (same six fields, same ordering). */}
+      {cumulativeUsage && (
+        <Modal
+          visible={costBreakdownOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCostBreakdownOpen(false)}
+        >
+          <Pressable
+            style={styles.costSheetBackdrop}
+            onPress={() => setCostBreakdownOpen(false)}
+            accessibilityLabel="Dismiss cost breakdown"
+            accessibilityRole="button"
+          >
+            <Pressable
+              style={styles.costSheetCard}
+              // Eat the tap so it doesn't close the modal via the
+              // backdrop. RN Pressable doesn't propagate to ancestor
+              // Pressables when handled inside.
+              onPress={() => {}}
+              testID="session-cost-breakdown-sheet"
+            >
+              <Text style={styles.costSheetTitle}>Session cost</Text>
+              <View style={styles.costSheetRow}>
+                <Text style={styles.costSheetLabel}>Total cost</Text>
+                <Text style={styles.costSheetValue}>${cumulativeUsage.costUsd.toFixed(4)}</Text>
+              </View>
+              <View style={styles.costSheetRow}>
+                <Text style={styles.costSheetLabel}>Turns billed</Text>
+                <Text style={styles.costSheetValue}>{cumulativeUsage.turnsBilled.toLocaleString()}</Text>
+              </View>
+              <View style={styles.costSheetDivider} />
+              <View style={styles.costSheetRow}>
+                <Text style={styles.costSheetLabel}>Input tokens</Text>
+                <Text style={styles.costSheetValue}>{cumulativeUsage.inputTokens.toLocaleString()}</Text>
+              </View>
+              <View style={styles.costSheetRow}>
+                <Text style={styles.costSheetLabel}>Output tokens</Text>
+                <Text style={styles.costSheetValue}>{cumulativeUsage.outputTokens.toLocaleString()}</Text>
+              </View>
+              <View style={styles.costSheetRow}>
+                <Text style={styles.costSheetLabel}>Cache read</Text>
+                <Text style={styles.costSheetValue}>{cumulativeUsage.cacheReadTokens.toLocaleString()}</Text>
+              </View>
+              <View style={styles.costSheetRow}>
+                <Text style={styles.costSheetLabel}>Cache write</Text>
+                <Text style={styles.costSheetValue}>{cumulativeUsage.cacheCreationTokens.toLocaleString()}</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.costSheetDismiss}
+                onPress={() => setCostBreakdownOpen(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close cost breakdown"
+              >
+                <Text style={styles.costSheetDismissText}>Close</Text>
+              </TouchableOpacity>
+            </Pressable>
+          </Pressable>
+        </Modal>
       )}
     </View>
   );
@@ -683,5 +810,82 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginLeft: 8,
+  },
+  // #4074: header cost badge — small, tappable, muted background so it
+  // doesn't compete with the model/permission chips. Uses tabular-nums
+  // via a monospaced font on iOS for stable layout as the cost grows.
+  costBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundTertiary,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    marginLeft: 6,
+  },
+  costBadgePressed: {
+    opacity: 0.7,
+  },
+  costBadgeText: {
+    color: COLORS.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // #4074: breakdown sheet — modal backdrop + card. Renders the same
+  // six rows the dashboard hover popover does (#4073).
+  costSheetBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  costSheetCard: {
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    padding: 20,
+    width: '100%',
+    maxWidth: 360,
+  },
+  costSheetTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  costSheetRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+  },
+  costSheetLabel: {
+    color: COLORS.textMuted,
+    fontSize: 14,
+  },
+  costSheetValue: {
+    color: COLORS.textPrimary,
+    fontSize: 14,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontVariant: ['tabular-nums'],
+  },
+  costSheetDivider: {
+    height: 1,
+    backgroundColor: COLORS.borderPrimary,
+    marginVertical: 8,
+  },
+  costSheetDismiss: {
+    marginTop: 16,
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundTertiary,
+  },
+  costSheetDismissText: {
+    color: COLORS.textPrimary,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
