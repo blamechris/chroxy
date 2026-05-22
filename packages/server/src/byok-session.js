@@ -25,6 +25,8 @@ import {
   ALLOWED_MODEL_IDS,
   claudeDeriveId,
   resolveClaudeContextWindow,
+  getModelPricing,
+  computePromptCostUsd,
 } from './models.js'
 import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { translateSdkEvent } from './byok-event-translator.js'
@@ -257,7 +259,17 @@ export class ClaudeByokSession extends BaseSession {
     //      gating) and push a user message of tool_result blocks.
     //   4. Loop back to (1).
     // Bounded by MAX_TOOL_ROUNDS to catch infinite-loop misbehavior.
-    let lastUsage = null
+
+    // Accumulate usage + cost across every agent-loop round so the result
+    // event reflects the WHOLE turn, not just the last round. Each round is
+    // a separate billable API request; without accumulation a 5-round
+    // tool-use turn reports only 1/5th of the actual cost (#4056).
+    const turnUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    let turnCost = 0
+    const pricing = getModelPricing(this.model || 'claude-opus-4-7')
+    if (!pricing) {
+      log.warn(`no pricing entry for model=${this.model || '(unset)'}; result.cost will be 0 — update CLAUDE_PRICING_USD_PER_MTOK in models.js`)
+    }
     let lastStopReason = null
     let rolledBack = false
 
@@ -315,7 +327,10 @@ export class ClaudeByokSession extends BaseSession {
               break
             case 'message_delta':
               if (t.stopReason) lastStopReason = t.stopReason
-              if (t.usage) lastUsage = t.usage
+              // Don't accumulate from message_delta — it carries the
+              // round's running totals that culminate in final.usage. We
+              // accumulate exactly once per round below, after
+              // finalMessage() resolves.
               break
             case 'unknown':
               log.warn(`unknown SDK event type=${t.sdkType} forwarded as no-op`)
@@ -327,7 +342,12 @@ export class ClaudeByokSession extends BaseSession {
 
         const final = await stream.finalMessage()
         lastStopReason = final.stop_reason
-        lastUsage = final.usage
+        const roundUsage = final.usage || {}
+        turnUsage.input_tokens += Number(roundUsage.input_tokens) || 0
+        turnUsage.output_tokens += Number(roundUsage.output_tokens) || 0
+        turnUsage.cache_read_input_tokens += Number(roundUsage.cache_read_input_tokens) || 0
+        turnUsage.cache_creation_input_tokens += Number(roundUsage.cache_creation_input_tokens) || 0
+        turnCost += computePromptCostUsd(roundUsage, pricing)
 
         // Append the assistant turn — full content array preserves
         // tool_use blocks for the next round of conversation.
@@ -373,7 +393,8 @@ export class ClaudeByokSession extends BaseSession {
         messageId,
         stopReason: lastStopReason,
         duration: Date.now() - turnStartedAt,
-        usage: lastUsage,
+        usage: turnUsage,
+        cost: turnCost,
       })
     } catch (err) {
       this.emit('stream_end', { messageId })

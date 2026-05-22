@@ -157,12 +157,95 @@ describe('ClaudeByokSession', () => {
       const endIdx = captured.findIndex((e) => e.name === 'stream_end')
       const resultIdx = captured.findIndex((e) => e.name === 'result')
       assert.ok(endIdx < resultIdx, 'stream_end must precede result')
-      // result payload carries duration + usage + stopReason.
+      // result payload carries duration + usage + stopReason + cost.
       assert.equal(results.length, 1)
       assert.equal(results[0].payload.stopReason, 'end_turn')
+      assert.equal(results[0].payload.usage.input_tokens, 5)
       assert.equal(results[0].payload.usage.output_tokens, 4)
       assert.equal(typeof results[0].payload.duration, 'number')
       assert.ok(results[0].payload.duration >= 0)
+      // Cost MUST be on the result payload — session-manager.js:_trackCost
+      // (the budget-check + cumulative session-cost feeder) reads it as a
+      // typeof === 'number' gate. Omitting it silently disables BYOK cost
+      // accounting (#4056, blocks #4054).
+      assert.equal(typeof results[0].payload.cost, 'number')
+      // Opus 4.7 default: 5 input * $15/Mtok + 4 output * $75/Mtok
+      //   = 0.000075 + 0.000300 = 0.000375 USD
+      assert.ok(
+        Math.abs(results[0].payload.cost - 0.000375) < 1e-9,
+        `expected cost ~= 0.000375 for 5in/4out on opus-4-7, got ${results[0].payload.cost}`,
+      )
+      await session.destroy()
+    })
+
+    it('accumulates usage + cost across multiple tool-use rounds', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      // Auto-allow so the agent loop executes without prompting.
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      // Two rounds: round 1 ends with stop_reason=tool_use (10in/20out),
+      // round 2 ends with stop_reason=end_turn (7in/3out). Cost MUST
+      // reflect the sum, not just the last round (the bug #4056 fixes).
+      let round = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            round += 1
+            if (round === 1) {
+              return fakeStream([], {
+                stop_reason: 'tool_use',
+                content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/tmp/x' } }],
+                usage: { input_tokens: 10, output_tokens: 20 },
+              })
+            }
+            return fakeStream([], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'done' }],
+              usage: { input_tokens: 7, output_tokens: 3 },
+            })
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+      const results = captured.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'one result per turn even across rounds')
+      // Accumulated usage: 10+7 input, 20+3 output.
+      assert.equal(results[0].payload.usage.input_tokens, 17)
+      assert.equal(results[0].payload.usage.output_tokens, 23)
+      // Accumulated cost (Opus 4.7): (17 * 15 + 23 * 75) / 1e6 = 0.001980
+      assert.ok(
+        Math.abs(results[0].payload.cost - 0.001980) < 1e-9,
+        `expected cost ~= 0.001980, got ${results[0].payload.cost}`,
+      )
+      await session.destroy()
+    })
+
+    it('emits cost: 0 when model has no pricing entry (graceful degradation)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-future-model-9-9' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'hi' }],
+              usage: { input_tokens: 100, output_tokens: 50 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('q')
+      const result = captured.find((e) => e.name === 'result')
+      assert.ok(result)
+      // Usage still propagates even when pricing is unknown — the
+      // cumulative-display story (#4054) can still show token counts.
+      assert.equal(result.payload.usage.input_tokens, 100)
+      // But cost falls back to 0 rather than crashing or emitting NaN.
+      assert.equal(result.payload.cost, 0)
       await session.destroy()
     })
 
