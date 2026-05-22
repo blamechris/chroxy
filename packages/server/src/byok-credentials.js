@@ -90,13 +90,21 @@ export function resolveAnthropicApiKey() {
 
 /**
  * Mask an API key for display in logs / UI / errors. Returns a string with
- * the prefix and a redaction marker. Never returns the full key.
+ * a short prefix and a redaction marker. Never returns the full key —
+ * even for unexpectedly short inputs, where slice(0, 12) would otherwise
+ * echo the whole thing (caught by Copilot review on #4055).
  *
  * @param {string} key
  * @returns {string}
  */
 export function maskApiKey(key) {
   if (typeof key !== 'string' || key.length === 0) return '<missing>'
-  const visible = key.slice(0, 12)
-  return `${visible}...[${key.length - 12} chars redacted]`
+  // For a normal Anthropic key (sk-ant-api03-… ~108 chars), show 12 + redact
+  // the rest. For an unexpectedly short input, show no more than the first
+  // 1/3 (rounded down) so we never echo more than a third of the secret,
+  // and always emit a redaction tail so the format stays consistent.
+  const visibleLen = Math.min(12, Math.floor(key.length / 3))
+  const visible = key.slice(0, visibleLen)
+  const redacted = key.length - visibleLen
+  return `${visible}...[${redacted} chars redacted]`
 }

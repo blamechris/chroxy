@@ -125,5 +125,28 @@ describe('byok-credentials', () => {
       assert.equal(maskApiKey(undefined), '<missing>')
       assert.equal(maskApiKey(42), '<missing>')
     })
+
+    it('never echoes the full key — even for unexpectedly short inputs', () => {
+      // Pre-fix, slice(0, 12) returned the entire string for any input
+      // shorter than 12 chars, leaking the whole secret into logs.
+      // Caught by Copilot review on PR #4055.
+      const short = 'sk-ant-x'  // 8 chars
+      const masked = maskApiKey(short)
+      assert.equal(masked.includes(short), false, 'must not contain the full short key')
+      assert.match(masked, /\[\d+ chars redacted\]$/)
+      // The visible prefix should be at most one-third of the input.
+      const visibleSegment = masked.split('...')[0]
+      assert.ok(visibleSegment.length <= Math.floor(short.length / 3),
+        `visible prefix (${visibleSegment.length}) must be <= 1/3 of input (${Math.floor(short.length / 3)})`)
+    })
+
+    it('still produces a useful prefix for normal-length keys', () => {
+      const real = 'sk-ant-api03-' + 'a'.repeat(95)  // ~108 chars, claude length
+      const masked = maskApiKey(real)
+      // Still 12 chars of useful prefix for grepping logs.
+      assert.match(masked, /^sk-ant-api03/)
+      assert.match(masked, /\[\d+ chars redacted\]$/)
+      assert.equal(masked.includes(real.slice(15)), false)
+    })
   })
 })

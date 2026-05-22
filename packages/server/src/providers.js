@@ -264,19 +264,22 @@ function getProviderAuthInfo(name, ProviderClass) {
   }
 
   // BYOK provider checks env var AND the ~/.chroxy/credentials.json file
-  // fallback (mode 0600 enforced). resolveAnthropicApiKey() returns the
-  // source so the UI can show which path is being used. No OAuth at all
-  // — BYOK is per-token API billing only.
+  // fallback (mode 0600 enforced). Both paths are semantically "API key
+  // auth" from the dashboard's perspective — the SettingsPanel legend
+  // only knows about 'oauth' | 'env' | 'missing' | 'none' tones (see
+  // SettingsPanel.tsx:316-320), so we return 'env' for both env-var and
+  // file paths. The `detail` string carries the diagnostic of *which*
+  // file/var supplied the key.
   if (name === 'claude-byok') {
     const resolved = resolveAnthropicApiKey()
     if (resolved.key) {
       return {
         ready: true,
-        source: resolved.source === 'env' ? 'env' : 'file',
+        source: 'env',
         envVar: resolved.source === 'env' ? 'ANTHROPIC_API_KEY' : null,
         envVars,
         hint: '',
-        detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : 'credentials.json'} — per-token billing)`,
+        detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
       }
     }
     return {
