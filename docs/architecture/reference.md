@@ -284,8 +284,10 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `session_error` | Session operation error |
 | `session_list` | All available sessions |
 | `session_switched` | Switched to active session |
+| `session_cost_threshold_crossed` | Soft warning when cumulative cost crosses a configured threshold (default $5); fires once per session |
 | `session_timeout` | Session destroyed due to idle timeout |
 | `session_updated` | Session metadata changed (e.g., rename) |
+| `session_usage` | Per-session cumulative token + cost totals (inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled) emitted after each priced `result` event |
 | `session_warning` | Session about to timeout (with remainingMs) |
 | `slash_commands` | Available slash command definitions |
 | `status` | Connection status (connected: true/false) |
@@ -327,6 +329,8 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 - `set_permission_mode` accepts optional `confirmed: true` (required for `auto` mode); without it, server responds with `confirm_permission_mode` challenge containing a `warning` string
 - `set_permission_rules` accepts `{ rules: [{ tool, decision }], sessionId? }` where `tool` must be one of the eligible tools (`Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`) and `decision` is `'allow'` or `'deny'`; tools in `NEVER_AUTO_ALLOW` (`Bash`, `Task`, `WebFetch`, `WebSearch`) are rejected; sending an empty array clears all rules; server broadcasts `permission_rules_updated` with the current rules to all session clients
 - `cost_update` sent after each query with `{ sessionCost, totalCost, budget }` where budget is null if no cost budget configured
+- `session_usage` (#4072) sent after each priced `result` event with `{ sessionId, cumulativeUsage: { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled } }`; drives the dashboard sidebar cost badge (#4073) and mobile session-header badge (#4074); subscription-billed providers (cost: null) do not emit
+- `session_cost_threshold_crossed` (#4075) fires ONCE per session when cumulativeUsage.costUsd >= the configured `costThresholdUsd` (default $5; set to 0 to disable); payload `{ sessionId, costUsd, thresholdUsd }`; dashboard renders a dismissible toast and mobile renders a CostThresholdBanner
 - `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause; `budget_resumed` broadcast by server after successful resume
 - `session_updated` payload: `{ type: 'session_updated', sessionId, name }` — broadcast globally when a session is renamed (user-initiated or auto-label)
 - `session_warning` sent before session timeout with `{ sessionId, name, reason, message, remainingMs }`; `session_timeout` when session is destroyed

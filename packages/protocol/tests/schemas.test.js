@@ -1270,4 +1270,98 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(result.data.someFutureField, undefined, 'Zod default strips unknown fields from the parsed output')
     })
   })
+
+  describe('CumulativeUsage + session_usage + session_cost_threshold_crossed (#4091)', () => {
+    it('CumulativeUsageSchema validates a full block', async () => {
+      const { CumulativeUsageSchema } = await import('../src/schemas/server.ts')
+      const result = CumulativeUsageSchema.safeParse({
+        inputTokens: 1234,
+        outputTokens: 567,
+        cacheReadTokens: 8000,
+        cacheCreationTokens: 200,
+        costUsd: 0.0345,
+        turnsBilled: 3,
+      })
+      assert.ok(result.success)
+    })
+
+    it('CumulativeUsageSchema rejects when a numeric field is missing', async () => {
+      const { CumulativeUsageSchema } = await import('../src/schemas/server.ts')
+      const result = CumulativeUsageSchema.safeParse({
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        // costUsd intentionally missing
+        turnsBilled: 0,
+      })
+      assert.ok(!result.success, 'all six fields are required by the schema')
+    })
+
+    it('ServerSessionUsageSchema validates with sessionId injected by broadcaster', async () => {
+      const { ServerSessionUsageSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionUsageSchema.safeParse({
+        type: 'session_usage',
+        sessionId: 'sess-1',
+        cumulativeUsage: {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0.001,
+          turnsBilled: 1,
+        },
+      })
+      assert.ok(result.success)
+    })
+
+    it('ServerSessionUsageSchema permits omitting sessionId (pre-broadcast shape)', async () => {
+      // _broadcastToSession injects sessionId via spread; the EventNormalizer
+      // emits without it. Schema must accept both shapes.
+      const { ServerSessionUsageSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionUsageSchema.safeParse({
+        type: 'session_usage',
+        cumulativeUsage: {
+          inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+          cacheCreationTokens: 0, costUsd: 0, turnsBilled: 0,
+        },
+      })
+      assert.ok(result.success)
+    })
+
+    it('ServerSessionCostThresholdCrossedSchema validates the threshold-crossed payload', async () => {
+      const { ServerSessionCostThresholdCrossedSchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionCostThresholdCrossedSchema.safeParse({
+        type: 'session_cost_threshold_crossed',
+        sessionId: 'sess-1',
+        costUsd: 5.23,
+        thresholdUsd: 5.00,
+      })
+      assert.ok(result.success)
+    })
+
+    it('ServerSessionListEntrySchema accepts an entry with cumulativeUsage', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+        cumulativeUsage: {
+          inputTokens: 100, outputTokens: 50, cacheReadTokens: 0,
+          cacheCreationTokens: 0, costUsd: 0.001, turnsBilled: 1,
+        },
+      })
+      assert.ok(result.success)
+      assert.equal(result.data.cumulativeUsage?.costUsd, 0.001)
+    })
+
+    it('ServerSessionListEntrySchema accepts an entry without cumulativeUsage (older servers)', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      const result = ServerSessionListEntrySchema.safeParse({
+        sessionId: 'sess-1',
+        name: 'Session 1',
+      })
+      assert.ok(result.success)
+      assert.equal(result.data.cumulativeUsage, undefined)
+    })
+  })
 })
