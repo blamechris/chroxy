@@ -448,6 +448,33 @@ describe('getModelPricing()', () => {
     assert.deepEqual(long, base, 'long-context variant must use the same rate; Anthropic charges per token not per window')
   })
 
+  it('returns family-head pricing for dated full ids (Anthropic SDK Model enum form, #4084)', () => {
+    // The SDK's Model enum surfaces forms like claude-opus-4-7-20251201
+    // that users may pin for reproducibility. Without this, a pinned user
+    // silently emits cost: 0.
+    const base = getModelPricing('claude-opus-4-7')
+    assert.deepEqual(
+      getModelPricing('claude-opus-4-7-20251201'),
+      base,
+      'dated full id must resolve to its family head pricing',
+    )
+    assert.deepEqual(getModelPricing('claude-sonnet-4-6-20250514'), getModelPricing('claude-sonnet-4-6'))
+    assert.deepEqual(getModelPricing('claude-haiku-4-5-20251001'), getModelPricing('claude-haiku-4-5'))
+  })
+
+  it('combines dated suffix + [1m] long-context (still returns family pricing)', () => {
+    // Belt-and-braces: a user pinning to a dated long-context variant.
+    const base = getModelPricing('claude-opus-4-7')
+    assert.deepEqual(getModelPricing('claude-opus-4-7-20251201[1m]'), base)
+  })
+
+  it('still returns null for genuinely unknown dated families (no false-positive resolution)', () => {
+    // claude-future-model-1-0-20260615 — strip date → claude-future-
+    // model-1-0 — not in table → null. Important: the dated-strip must
+    // NOT accidentally match an unrelated family.
+    assert.equal(getModelPricing('claude-future-model-1-0-20260615'), null)
+  })
+
   it('returns null for unknown models (caller falls back to cost=0)', () => {
     assert.equal(getModelPricing('claude-future-model-9-9'), null)
     assert.equal(getModelPricing(''), null)
