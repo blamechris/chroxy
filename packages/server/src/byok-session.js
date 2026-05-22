@@ -377,11 +377,25 @@ export class ClaudeByokSession extends BaseSession {
             // User pressed Stop mid-tool-loop. Fill synthetic
             // tool_result blocks for every remaining tool_use so the
             // history invariant holds — N tool_use → N tool_result.
+            // Emit a matching `tool_result` event for each synthetic so
+            // the dashboard / mobile tool-call bubble closes out (the
+            // `tool_start` event already fired when the SDK streamed
+            // the block; without a closing tool_result, the bubble
+            // would hang in 'running…' state forever — #4108 review).
+            const interrupted = 'Interrupted by user before execution'
             for (let j = i + 1; j < toolBlocks.length; j++) {
+              const remaining = toolBlocks[j]
+              this.emit('tool_result', {
+                messageId,
+                toolUseId: remaining.id,
+                toolName: remaining.name,
+                result: interrupted,
+                isError: true,
+              })
               toolResults.push({
                 type: 'tool_result',
-                tool_use_id: toolBlocks[j].id,
-                content: 'Interrupted by user before execution',
+                tool_use_id: remaining.id,
+                content: interrupted,
                 is_error: true,
               })
             }

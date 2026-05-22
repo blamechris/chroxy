@@ -508,21 +508,34 @@ describe('ClaudeByokSession', () => {
     })
 
     it('fills synthetic tool_result blocks for unexecuted tool_use on mid-loop abort (#4061)', async () => {
-      // Three tool_use blocks. The executor stub aborts the session
-      // controller right after the FIRST block returns. Without the
-      // fix, history.push would land 1 tool_result for 3 tool_use
-      // blocks and the next sendMessage would 400. With the fix, two
-      // synthetic is_error: true tool_results fill the gap.
+      // Three tool_use blocks. Inside block 1's executor stub we abort
+      // the session's AbortController and then return a normal
+      // tool_result. The agent loop's next iteration sees signal.aborted
+      // and runs the synthetic-fill for blocks 2 and 3. Without the
+      // fix, history.push would land 1 tool_result for 3 tool_use ids
+      // and the next sendMessage would 400. With the fix:
+      //   - History carries N=3 tool_result blocks (1 real + 2 synthetic)
+      //   - The dashboard receives N=3 tool_result events too, so the
+      //     tool-call bubbles for blocks 2 and 3 don't hang on 'running…'
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       let executeCalls = 0
-      session._executeToolBlock = async function ({ block }) {
+      session._executeToolBlock = async function ({ block, messageId }) {
         executeCalls += 1
-        // After block 1 completes, fire the abort so the loop breaks
-        // when it re-checks signal.aborted.
+        // On block 1, abort the controller so the next loop iteration
+        // observes signal.aborted and triggers the synthetic-fill.
         if (executeCalls === 1) {
           this._abortController.abort()
         }
+        // Mirror real _executeToolBlock's event emission so we can
+        // assert end-to-end event counts.
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: block.id,
+          toolName: block.name,
+          result: 'ok',
+          isError: false,
+        })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       session._client = {
@@ -542,6 +555,7 @@ describe('ClaudeByokSession', () => {
             ),
         },
       }
+      const captured = captureEvents(session)
       await session.start()
       await session.sendMessage('go')
       // Only the first block executed — the abort fired during its
@@ -560,8 +574,22 @@ describe('ClaudeByokSession', () => {
       const synthetic = toolResultTurn.content.filter((b) => b.tool_use_id !== 'tu_1')
       assert.equal(synthetic.length, 2)
       for (const s of synthetic) {
+        assert.equal(s.type, 'tool_result', 'synthetic block must carry the tool_result type tag')
         assert.equal(s.is_error, true, 'synthetic tool_result must mark is_error')
         assert.match(s.content, /[Ii]nterrupted/, 'synthetic content should reference the abort')
+      }
+      // The dashboard / mobile tool-call bubble closes on `tool_result`
+      // events — without one per synthetic, blocks 2 and 3 would stay
+      // in 'running…' forever (#4108 review). Assert all three fire.
+      const toolResultEvents = captured.filter((e) => e.name === 'tool_result')
+      const eventIds = toolResultEvents.map((e) => e.payload.toolUseId).sort()
+      assert.deepEqual(eventIds, ['tu_1', 'tu_2', 'tu_3'])
+      const syntheticEvents = toolResultEvents.filter((e) => e.payload.toolUseId !== 'tu_1')
+      assert.equal(syntheticEvents.length, 2)
+      for (const ev of syntheticEvents) {
+        assert.equal(ev.payload.isError, true)
+        assert.match(ev.payload.result, /[Ii]nterrupted/)
+        assert.equal(ev.payload.toolName, 'Read', 'synthetic event carries the original tool name')
       }
       await session.destroy()
     })
