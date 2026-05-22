@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
 
 /**
@@ -387,9 +388,11 @@ describe('ClaudeByokSession', () => {
           stream: () => ({
             async *[Symbol.asyncIterator]() {
               await new Promise((r) => setTimeout(r, 80))
-              const err = new Error('aborted')
-              err.name = 'AbortError'
-              throw err
+              // #4057: real SDK throws APIUserAbortError on aborted
+              // signals — not the generic 'AbortError'. Use the real
+              // class so the test asserts the primary `instanceof`
+              // detection path, not just the name-string fallback.
+              throw new APIUserAbortError({ message: 'Request was aborted.' })
             },
             async finalMessage() {
               return null
@@ -405,6 +408,38 @@ describe('ClaudeByokSession', () => {
       const errorEvent = captured.find((e) => e.name === 'error')
       assert.ok(errorEvent, 'interrupt should produce an error event')
       assert.equal(errorEvent.payload.code, 'ABORT')
+      await session.destroy()
+    })
+
+    it('detects APIUserAbortError WITHOUT relying on the signal.aborted fallback (#4057)', async () => {
+      // The other abort test still works under the name-string fallback
+      // because interrupt() sets signal.aborted = true. This test
+      // isolates the primary `instanceof APIUserAbortError` path by
+      // throwing without ever aborting the controller — only the SDK
+      // class identity should match.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () => ({
+            async *[Symbol.asyncIterator]() {
+              throw new APIUserAbortError({ message: 'Request was aborted.' })
+            },
+            async finalMessage() {
+              return null
+            },
+          }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      // NOTE: no session.interrupt() call — signal.aborted stays false.
+      // The only way `aborted` can be true in _emitTurnError is the
+      // instanceof check matching the thrown class.
+      await session.sendMessage('hi')
+      const errorEvent = captured.find((e) => e.name === 'error')
+      assert.ok(errorEvent)
+      assert.equal(errorEvent.payload.code, 'ABORT',
+        'APIUserAbortError instance must map to code=ABORT via instanceof, not via signal.aborted')
       await session.destroy()
     })
 
