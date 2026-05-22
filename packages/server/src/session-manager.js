@@ -186,7 +186,9 @@ export class SessionManager extends EventEmitter {
     // `costBudget` (which hard-blocks at the cap). Fires once per session
     // per crossing; subscription-billed providers never trigger it
     // because their cumulativeUsage.costUsd stays at 0.
-    // Default: 5.00 (USD). Set to 0 / null to disable.
+    // Default: 5.00 (USD). Set to 0 to DISABLE. Omitting the field, or
+    // passing null/undefined/NaN/Infinity/negative, falls back to the
+    // 5.00 default (see _normalizeCostThreshold).
     costThresholdUsd,
     maxSkillBytes,
     maxTotalSkillBytes,
