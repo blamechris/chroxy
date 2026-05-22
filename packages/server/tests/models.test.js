@@ -517,13 +517,13 @@ describe('getModelPricing()', () => {
       null,
       '7-digit trailing number must not trigger date-strip',
     )
-    // Positive control: 9-digit suffix DOES strip (the regex is forgiving
-    // up-bound for future timestamp formats). Asserted here to make the
-    // boundary explicit alongside the negative cases.
+    // Positive control: 9-digit suffix DOES strip (the regex's upper
+    // bound is forgiving for future timestamp formats). Asserted here to
+    // make the boundary explicit alongside the negative cases.
     assert.deepEqual(
       getModelPricing('claude-opus-4-7-123456789'),
       getModelPricing('claude-opus-4-7'),
-      '9-digit trailing number must trigger date-strip (forgiving up-bound)',
+      '9-digit trailing number must trigger date-strip (forgiving upper bound)',
     )
   })
 
