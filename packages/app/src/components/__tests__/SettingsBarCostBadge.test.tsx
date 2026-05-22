@@ -145,9 +145,14 @@ describe('SettingsBar cost badge rendering (#4074)', () => {
     // forward testID through its outer wrapper).
     const sheet = root.findByProps({ testID: 'session-cost-breakdown-sheet' });
     const sheetText = collectVisibleText(sheet);
+    // Locale-agnostic — derive expected token strings via the runtime's
+    // own `toLocaleString()` so the test passes on any system locale
+    // (#4121 review).
+    const localeNum = (n: number) => n.toLocaleString();
     expect(sheetText).toContain('$0.0345');
-    expect(sheetText).toContain('1,234');
-    expect(sheetText).toContain('8,000');
+    expect(sheetText).toContain(localeNum(1234));
+    expect(sheetText).toContain(localeNum(8000));
+    expect(sheetText).toContain('Total cost');
     expect(sheetText).toContain('Turns billed');
   });
 });

@@ -164,6 +164,13 @@ export function SettingsBar({
   const [costBreakdownOpen, setCostBreakdownOpen] = useState(false);
   const hasCumulativeCost =
     !!cumulativeUsage && Number.isFinite(cumulativeUsage.costUsd) && cumulativeUsage.costUsd > 0;
+  // Close a stale sheet if the cost predicate flips back to false (e.g.
+  // the session resets or a state restore drops the cumulative block).
+  // Without this guard the badge disappears but the modal stays open on
+  // top, anchored to data that no longer applies (#4121 review).
+  useEffect(() => {
+    if (!hasCumulativeCost && costBreakdownOpen) setCostBreakdownOpen(false);
+  }, [hasCumulativeCost, costBreakdownOpen]);
 
   // Show confirmation dialog when server challenges auto permission mode
   useEffect(() => {
@@ -528,7 +535,7 @@ export function SettingsBar({
             >
               <Text style={styles.costSheetTitle}>Session cost</Text>
               <View style={styles.costSheetRow}>
-                <Text style={styles.costSheetLabel}>Total</Text>
+                <Text style={styles.costSheetLabel}>Total cost</Text>
                 <Text style={styles.costSheetValue}>${cumulativeUsage.costUsd.toFixed(4)}</Text>
               </View>
               <View style={styles.costSheetRow}>
