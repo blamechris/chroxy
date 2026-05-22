@@ -5,7 +5,7 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback, useRef } from 'react'
-import type { SessionVisualStatus } from '@chroxy/store-core'
+import type { CumulativeUsage, SessionVisualStatus } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import type { SearchResult } from '../store/types'
@@ -21,6 +21,10 @@ export interface ActiveSessionNode {
   // metadata. Surfaces a small badge on the sidebar row so the user
   // can spot disabled sessions without switching to them.
   stdinForwardingDisabled?: boolean
+  // #4073: per-session running token + cost totals. The badge renders
+  // only when `costUsd > 0` to avoid decoration on subscription-billed
+  // sessions (where cost stays at 0 because result events emit null).
+  cumulativeUsage?: CumulativeUsage | null
 }
 
 export interface ResumableSessionNode {
@@ -74,6 +78,48 @@ function abbreviateTunnel(url: string): string {
   } catch {
     return url
   }
+}
+
+/**
+ * Format a USD value for the cost badge. Three tiers of fixed-decimal
+ * precision based on magnitude — sub-dollar accuracy matters for spotting
+ * whether a session ran one tiny test or dozens of expensive turns; at
+ * dollar scale, fractional cents are noise.
+ *
+ *   `< $0.01`  → 4 decimals (`$0.0023`) — very small turns stay readable
+ *   `$0.01–$1` → 3 decimals (`$0.070`, `$0.420`) — sub-dollar accuracy
+ *   `>= $1`    → 2 decimals (`$1.23`, `$42.50`) — dollars are the unit
+ *
+ * Returns `'$0'` for zero / negative / non-finite input (defensive — the
+ * Sidebar still guards on `> 0` before rendering, but a corrupted
+ * upstream payload must not poison the renderer with `$NaN`).
+ *
+ * #4073.
+ */
+export function formatCostBadge(costUsd: number): string {
+  if (!Number.isFinite(costUsd) || costUsd <= 0) return '$0'
+  if (costUsd >= 1) return `$${costUsd.toFixed(2)}`
+  if (costUsd < 0.01) return `$${costUsd.toFixed(4)}`
+  return `$${costUsd.toFixed(3)}`
+}
+
+/**
+ * Build the multi-line breakdown shown in the native browser tooltip on
+ * hover. Token counts use locale formatting so 1234567 reads as
+ * "1,234,567". Dashboard already standardises on native `title` for
+ * popovers (see worktree, provider, stdin badges above) — keep that
+ * pattern instead of inventing a custom hover layer for one badge.
+ */
+export function formatCostBreakdown(usage: CumulativeUsage): string {
+  const fmt = (n: number) => n.toLocaleString()
+  return [
+    `Total cost: $${usage.costUsd.toFixed(4)}`,
+    `Turns billed: ${fmt(usage.turnsBilled)}`,
+    `Input tokens: ${fmt(usage.inputTokens)}`,
+    `Output tokens: ${fmt(usage.outputTokens)}`,
+    `Cache read: ${fmt(usage.cacheReadTokens)}`,
+    `Cache write: ${fmt(usage.cacheCreationTokens)}`,
+  ].join('\n')
 }
 
 export function Sidebar({
@@ -378,6 +424,22 @@ export function Sidebar({
                                 aria-label="Stdin forwarding disabled"
                               >
                                 !
+                              </span>
+                            )}
+                            {session.cumulativeUsage && session.cumulativeUsage.costUsd > 0 && (
+                              // #4073: cost badge. Only render when
+                              // costUsd > 0 — subscription-billed sessions
+                              // (claude-tui) leave it at 0 and shouldn't
+                              // get decoration. Hover shows the full
+                              // breakdown via the dashboard's standard
+                              // native-title popover pattern.
+                              <span
+                                className="sidebar-cost-badge"
+                                data-testid={`sidebar-cost-badge-${session.sessionId}`}
+                                title={formatCostBreakdown(session.cumulativeUsage)}
+                                aria-label={`Session cost ${formatCostBadge(session.cumulativeUsage.costUsd)}`}
+                              >
+                                {formatCostBadge(session.cumulativeUsage.costUsd)}
                               </span>
                             )}
                           </div>

@@ -100,6 +100,24 @@ export interface ModelInfo {
   contextWindow?: number;
 }
 
+/**
+ * Per-session running totals of token usage and USD cost across every
+ * `result` event the server has seen for the session. Emitted as part of
+ * the `session_list` snapshot (PR #4088) and updated incrementally via
+ * the `session_usage` event (#4072). Subscription-billed providers
+ * (claude-tui) leave `costUsd` at 0 since their result events emit
+ * `cost: null`. Renderers should treat `costUsd === 0` as "don't render
+ * a cost badge" (avoids decoration on subscription sessions).
+ */
+export interface CumulativeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number;
+  turnsBilled: number;
+}
+
 export interface SessionInfo {
   sessionId: string;
   name: string;
@@ -138,6 +156,10 @@ export interface SessionInfo {
   // type so older servers and non-SDK providers that omit the field
   // still parse cleanly; renderers should treat `undefined` as `false`.
   stdinForwardingDisabled?: boolean;
+  // #4073 / #4074: cumulative per-session token + cost totals. Optional
+  // because older servers don't include the field; renderers should
+  // treat `undefined` as "no data, hide the badge."
+  cumulativeUsage?: CumulativeUsage;
 }
 
 export interface AgentInfo {
@@ -373,6 +395,10 @@ export interface BaseSessionState {
   lastResultCost: number | null;
   lastResultDuration: number | null;
   sessionCost: number | null;
+  // #4073 / #4074: rolling per-session totals updated via the
+  // `session_usage` event and seeded from the `session_list` snapshot.
+  // Null until the first result event lands.
+  cumulativeUsage: CumulativeUsage | null;
   isIdle: boolean;
   /**
    * Wall-clock timestamp (Date.now()) of the most recent activity-bearing

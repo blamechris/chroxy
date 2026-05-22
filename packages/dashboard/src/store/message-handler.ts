@@ -78,6 +78,7 @@ import {
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
+  handleSessionUsage as sharedSessionUsage,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
@@ -2038,6 +2039,32 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             );
           }
         }
+        // #4073: seed cumulativeUsage from the snapshot so refreshing the
+        // dashboard mid-session shows the running total without waiting
+        // for the next session_usage event to land. listSessions on the
+        // server emits the field with zero defaults when no result has
+        // landed yet — `cumulativeUsage` is undefined only when an older
+        // server omits it entirely.
+        for (const s of sessionList) {
+          if (s.cumulativeUsage && get().sessionStates[s.sessionId]) {
+            const snapshot = s.cumulativeUsage;
+            updateSession(s.sessionId, (ss) => {
+              const current = ss.cumulativeUsage;
+              if (
+                current &&
+                current.inputTokens === snapshot.inputTokens &&
+                current.outputTokens === snapshot.outputTokens &&
+                current.cacheReadTokens === snapshot.cacheReadTokens &&
+                current.cacheCreationTokens === snapshot.cacheCreationTokens &&
+                current.costUsd === snapshot.costUsd &&
+                current.turnsBilled === snapshot.turnsBilled
+              ) {
+                return {};
+              }
+              return { cumulativeUsage: snapshot };
+            });
+          }
+        }
       }
       break;
     }
@@ -2655,6 +2682,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'cost_update': {
       const result = sharedCostUpdate(msg, get().activeSessionId);
+      if (result.sessionId && get().sessionStates[result.sessionId]) {
+        updateSession(result.sessionId, () => result.patch);
+      }
+      break;
+    }
+
+    case 'session_usage': {
+      // #4073: per-session cumulative tokens + cost. Drives the sidebar
+      // badge + hover breakdown. Emitted after every result event.
+      const result = sharedSessionUsage(msg, get().activeSessionId);
       if (result.sessionId && get().sessionStates[result.sessionId]) {
         updateSession(result.sessionId, () => result.patch);
       }

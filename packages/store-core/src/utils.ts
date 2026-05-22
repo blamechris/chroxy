@@ -74,6 +74,7 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     lastResultCost: null,
     lastResultDuration: null,
     sessionCost: null,
+    cumulativeUsage: null,
     isIdle: true,
     lastClientActivityAt: null,
     health: 'healthy',

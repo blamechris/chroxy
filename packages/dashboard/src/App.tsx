@@ -888,6 +888,11 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
+        // #4073: surface per-session running cost. Prefer the
+        // session-state copy (kept live by the session_usage event) and
+        // fall back to the session_list snapshot for sessions that
+        // haven't received a session_usage tick yet.
+        cumulativeUsage: sessionStates[s.sessionId]?.cumulativeUsage ?? s.cumulativeUsage ?? null,
       })
     }
 
@@ -897,7 +902,7 @@ export function App() {
     }
 
     return [...repoMap.values()]
-  }, [sessions, getSessionVisualStatus])
+  }, [sessions, getSessionVisualStatus, sessionStates])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(

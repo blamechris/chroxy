@@ -456,6 +456,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultCost: get().lastResultCost,
       lastResultDuration: get().lastResultDuration,
       sessionCost: null,
+      cumulativeUsage: null,
       isIdle: true,
       lastClientActivityAt: null,
       health: 'healthy' as const,
