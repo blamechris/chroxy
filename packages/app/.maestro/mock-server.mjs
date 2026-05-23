@@ -203,8 +203,13 @@ wss.on('connection', (ws) => {
         // tool-only turns from the server elide stream_* entirely.
         if (text.trim() === 'show-todos') {
           send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
-          const toolUseId = `tu-${Date.now()}`
-          const toolMessageId = `tool-${Date.now()}`
+          // #4201: fixed ids so the Maestro flow can match
+          // `activity-entry-tool-todowrite-mock` by exact testID, not
+          // a regex. Each `show-todos` invocation overwrites the same
+          // message id, which is fine for the test (the previous bubble
+          // gets replaced rather than appended).
+          const toolUseId = 'tu-todowrite-mock'
+          const toolMessageId = 'tool-todowrite-mock'
           send(ws, {
             type: 'tool_start',
             sessionId: 'mock-sess-1',

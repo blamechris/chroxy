@@ -12,6 +12,7 @@ import type { ChatMessage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { ThinkingIndicator } from './ThinkingIndicator';
+import { TodoList, parseTodoList } from './TodoList';
 import {
   summarizeToolCounts,
   formatToolBreakdown,
@@ -30,13 +31,26 @@ function ActivityEntry({
   onToggleSelection: (id: string) => void;
 }) {
   const longPressedRef = useRef(false);
+  // #4201: per-entry expand state so each tool row can independently reveal
+  // its structured renderer (TodoList for TodoWrite, future MCP tools,
+  // etc.) without expanding every sibling. The pre-#4201 row was a static
+  // truncated-text preview — ToolBubble's structured renderer was dead
+  // code for chat because ChatView never routes tool_use through
+  // MessageBubble → ToolBubble (groupMessages always wraps in activity
+  // groups).
+  const [expanded, setExpanded] = useState(false);
 
   const handlePress = () => {
     if (longPressedRef.current) {
       longPressedRef.current = false;
       return;
     }
-    if (isSelecting) onToggleSelection(message.id);
+    if (isSelecting) {
+      onToggleSelection(message.id);
+      return;
+    }
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpanded((prev) => !prev);
   };
 
   const handleLongPress = () => {
@@ -58,21 +72,42 @@ function ActivityEntry({
   // routed through an MCP server still surface that origin (#3794 review).
   const displayTool = formatToolName(message.tool ?? 'Tool', message.serverName);
 
+  // #4201: parse the TodoWrite tool_result only when the entry is
+  // expanded and the tool name matches. Mirrors ToolBubble's call site
+  // — `message.toolResult` (executor output), not `message.content`
+  // (JSON-stringified tool input). Falls back to plain text when the
+  // parser returns null, so unparseable results don't blank the entry.
+  const todoParsed = expanded && message.tool === 'TodoWrite' && message.toolResult
+    ? parseTodoList(message.toolResult)
+    : null;
+
   return (
     <TouchableOpacity
       activeOpacity={0.7}
       onLongPress={isSelecting ? undefined : handleLongPress}
       onPress={handlePress}
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
+      testID={`activity-entry-${message.id}`}
     >
-      {hasResult ? <Icon name="check" size={12} color={COLORS.accentGreen} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
-      <Text style={styles.activityEntryTool}>{displayTool}</Text>
-      {imageCount > 0 && (
-        <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
+      <View style={styles.activityEntryRow}>
+        {hasResult ? <Icon name="check" size={12} color={COLORS.accentGreen} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        <Text style={styles.activityEntryTool}>{displayTool}</Text>
+        {imageCount > 0 && (
+          <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
+        )}
+        <Text style={styles.activityEntryPreview} numberOfLines={1}>
+          {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
+        </Text>
+      </View>
+      {expanded && (
+        todoParsed ? (
+          <TodoList parsed={todoParsed} />
+        ) : (
+          <Text selectable style={styles.activityEntryExpanded}>
+            {hasResult ? (message.toolResult || '') : (message.content || '')}
+          </Text>
+        )
       )}
-      <Text style={styles.activityEntryPreview} numberOfLines={1}>
-        {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
-      </Text>
     </TouchableOpacity>
   );
 }
@@ -133,18 +168,21 @@ export function ActivityGroup({
     : `${toolCount} tool${toolCount !== 1 ? 's' : ''} used`;
   const summary = toolBreakdown ? `${baseSummary} — ${toolBreakdown}` : baseSummary;
 
+  // #4201: outer container is a View, not a TouchableOpacity, so each
+  // ActivityEntry's own TouchableOpacity owns its tap region without
+  // iOS accessibility merging the children into a single element. The
+  // header row stays tappable via its own dedicated TouchableOpacity.
   return (
-    <TouchableOpacity
-      activeOpacity={0.7}
-      onPress={handlePress}
-      style={styles.activityGroup}
-      testID="activity-group"
-    >
-      <View style={styles.activityHeader}>
+    <View style={styles.activityGroup} testID="activity-group">
+      <TouchableOpacity
+        activeOpacity={0.7}
+        onPress={handlePress}
+        style={styles.activityHeader}
+      >
         {isActive && <View style={styles.activityPulse} />}
         <Text style={styles.activitySummary}>{summary}</Text>
         {expanded ? <Icon name="chevronDown" size={14} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={14} color={COLORS.textMuted} />}
-      </View>
+      </TouchableOpacity>
       {isThinking && <ThinkingIndicator />}
       {expanded && (
         <ScrollView style={styles.activityList} nestedScrollEnabled>
@@ -159,7 +197,7 @@ export function ActivityGroup({
           ))}
         </ScrollView>
       )}
-    </TouchableOpacity>
+    </View>
   );
 }
 
@@ -196,11 +234,20 @@ const styles = StyleSheet.create({
     maxHeight: 200,
   },
   activityEntry: {
+    minHeight: 44,
+    paddingVertical: 10,
+  },
+  activityEntryRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    minHeight: 44,
-    paddingVertical: 10,
+  },
+  activityEntryExpanded: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 6,
+    lineHeight: 18,
   },
   activityEntryTool: {
     color: COLORS.accentPurple,
