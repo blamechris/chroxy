@@ -184,8 +184,62 @@ wss.on('connection', (ws) => {
       case 'input': {
         const text = msg.data || ''
         console.log(`[mock] Input: "${text}"`)
+
+        // #4195: trigger-phrase 'show-todos' emits a synthetic TodoWrite
+        // tool_use + tool_result so the Maestro chat-todolist flow can
+        // exercise the structured TodoList renderer end-to-end. This
+        // uses the existing WS protocol (no app-side debug menu needed)
+        // — same path production tool messages take, so the test pins
+        // the real render path. Future structured renderers can add a
+        // sibling trigger here (e.g. 'show-readlines' for the planned
+        // tool_input_delta work in #4081).
+        //
+        // Tool-only turn — no stream_start/stream_delta/stream_end pair.
+        // Pre-#4195-Copilot-fix this branch wrapped the tool events with
+        // a stream_start/stream_end on a SEPARATE messageId from the
+        // tool_start's, which left a phantom empty assistant bubble in
+        // the chat history (the stream_start handler creates an empty
+        // `response` ChatMessage regardless of subsequent content). Real
+        // tool-only turns from the server elide stream_* entirely.
+        if (text.trim() === 'show-todos') {
+          send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+          const toolUseId = `tu-${Date.now()}`
+          const toolMessageId = `tool-${Date.now()}`
+          send(ws, {
+            type: 'tool_start',
+            sessionId: 'mock-sess-1',
+            tool: 'TodoWrite',
+            input: { todos: [
+              { id: 't1', content: 'Wrote helper', status: 'completed' },
+              { id: 't2', content: 'Running tests', status: 'in_progress' },
+              { id: 't3', content: 'Address review', status: 'pending' },
+            ] },
+            messageId: toolMessageId,
+            toolUseId,
+          })
+          // Canonical TodoWrite executor format from
+          // packages/server/src/byok-tool-executor.js runTodoWrite —
+          // see #4179 / #4194 (mobile renderer). Matched by
+          // packages/app/src/components/chat/TodoList.tsx parseTodoList.
+          const todoResult = [
+            'Todo list (3 items): 1 in progress, 1 pending, 1 completed',
+            '  [x] Wrote helper (t1)',
+            '  [~] Running tests (t2)',
+            '  [ ] Address review (t3)',
+          ].join('\n')
+          send(ws, {
+            type: 'tool_result',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            result: todoResult,
+          })
+          send(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+          send(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          break
+        }
+
+        // Default: simulate a normal text-only assistant response.
         const messageId = `msg-${Date.now()}`
-        // Simulate a streamed response
         send(ws, { type: 'stream_start', messageId, sessionId: 'mock-sess-1' })
         send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
         const response = `I received your message: "${text}". This is a mock response for E2E testing.`

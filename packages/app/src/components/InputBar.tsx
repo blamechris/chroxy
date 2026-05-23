@@ -265,6 +265,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           autoCorrect={viewMode === 'chat'}
           editable={!disabled}
           accessibilityState={a11yDisabled}
+          testID="chat-message-input"
         />
         {showCameraButton && (
           <TouchableOpacity
@@ -333,6 +334,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             accessibilityRole="button"
             accessibilityLabel="Send message"
             accessibilityState={a11yDisabled}
+            testID="chat-send-button"
           >
             <Icon name="arrowUp" size={20} color={COLORS.textPrimary} />
           </TouchableOpacity>

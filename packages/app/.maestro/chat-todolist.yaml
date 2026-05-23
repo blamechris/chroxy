@@ -1,0 +1,147 @@
+appId: com.blamechris.chroxy
+name: ChatView TodoWrite tool rendering
+---
+
+# #4195 — End-to-end coverage for TodoWrite tool rendering in the chat
+# flow. Discovered while running this flow: the structured TodoList
+# renderer that #4194 added to ToolBubble is unreachable from the chat
+# flow on mobile today — `groupMessages` always bundles tool_use into
+# an activity group, and ActivityEntry only renders a truncated text
+# preview (no expand-to-ToolBubble path). Tracked as a CRITICAL bug
+# in #4201; this flow asserts against the current (truncated-text)
+# behaviour as a regression net until #4201 lands the wiring fix,
+# at which point the assertions get re-pointed at todo-list-header
+# / todo-list-item-<id> testIDs.
+#
+# Trigger: 'show-todos' user input → mock-server.mjs emits a synthetic
+# tool_start (TodoWrite) + tool_result (canonical executor text). The
+# fixture seeding pattern is documented in CLAUDE.md → "Fixture Seeding
+# for Structured Renderers".
+#
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17),
+# iPhone 17 Pro Max (iOS 26.1), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Note: this flow is self-contained (no `runFlow: setup/...`) because
+# the existing setup/ flows target Expo Go (appId host.exp.Exponent),
+# whereas this needs the chroxy dev client (com.blamechris.chroxy).
+# When the other flows migrate to the dev client they can share a new
+# `setup/ensure-session-screen-dev.yaml`.
+
+# Launch via the dev client's deep link so we skip the
+# "Development Build / pick a dev server" screen and load the
+# chroxy bundle directly. `clearState: true` resets app data but NOT
+# the SecureStore Keychain entry that holds saved connections, so the
+# app may auto-connect to a previously-used server — the conditional
+# below handles both fresh and warm starts.
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet that shows on first launch of a dev build.
+# Two forms: (a) intro sheet with a "Continue" button, (b) main dev
+# menu (Reload/Go home/Toggle...) with an X close icon. Tapping the
+# top of the screen (outside the sheet) dismisses either by iOS
+# convention — works regardless of which form is up.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip the onboarding carousel if it's showing (post-clearState the
+# `onboarding_complete` SecureStore flag is gone, so it always shows).
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands — extended timeout
+# because Metro may need to bundle on first launch.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form. If the
+# Keychain already had our mock connection (warm start from a prior
+# run), this block is skipped and we jump straight to Chat.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      # Expand manual entry form. Use testIDs (added to ConnectScreen
+      # in this PR) — Maestro's text matcher has regex quirks with the
+      # leading U+25B6 glyph on the toggle button, so testIDs are the
+      # stable selector.
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      # Hide keyboard before tapping Connect (keyboard can cover it)
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      # Wait for SessionScreen
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Make sure Chat tab is selected
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Find the input area and type the trigger phrase that makes the
+# mock server emit a TodoWrite tool_use + tool_result pair.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-todos"
+
+# Send the message — testID added in InputBar.tsx (the ↑ icon button
+# isn't text-matchable in Maestro on iOS).
+- tapOn:
+    id: "chat-send-button"
+
+# Wait for the activity group to land. testID set on the outer
+# TouchableOpacity in ActivityGroup.tsx.
+- extendedWaitUntil:
+    visible:
+      id: "activity-group"
+    timeout: 10000
+
+# Screenshot the collapsed activity group ("1 tool used — 1 TodoWrite")
+- takeScreenshot: chat-todolist-activity-group-collapsed
+
+# Expand the activity group → reveals the per-tool ActivityEntry rows
+# inside (NOT a ToolBubble — that's a wiring gap tracked in #4201).
+- tapOn:
+    id: "activity-group"
+- waitForAnimationToEnd
+
+# Regression net for today's behaviour: ActivityEntry shows a
+# truncated text preview of the result (clipped to ~60 chars). When
+# #4201 lands the wiring fix, these assertions get replaced with
+# `id: todo-list-header` + `id: todo-list-item-t1/t2/t3` against the
+# structured TodoList renderer. Maestro `text:` requires full-string
+# match unless wrapped in `.*` — use regex anchors.
+- assertVisible:
+    text: ".*TodoWrite.*"
+- assertVisible:
+    text: ".*Todo list \\(3 items\\).*"
+
+# Screenshot the expanded state so reviewers can spot regression in
+# the activity-entry row styling.
+- takeScreenshot: chat-todolist-activity-group-expanded

@@ -274,7 +274,26 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 | `connect-screen.yaml` | ConnectScreen elements: title, QR button, LAN scan, manual entry, port |
 | `manual-connect.yaml` | Manual entry form expansion, URL input, Connect button, SessionScreen transition |
 | `lan-scan.yaml` | LAN scan trigger, scanning state with spinner |
+| `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, ToolBubble expands, structured TodoList renders with testIDs) |
 | `run-all.yaml` | Runs all flows sequentially |
+
+### Fixture Seeding for Structured Renderers
+
+Tests for chat message renderers (TodoList, future MCP tools, `tool_input_delta`, etc.) seed fixtures via **mock-server trigger phrases** rather than an in-app debug menu. The pattern:
+
+1. The Maestro flow types a trigger phrase (e.g. `show-todos`) into the chat input.
+2. `mock-server.mjs` detects the phrase in its `case 'input'` handler and emits the corresponding `tool_start` + `tool_result` pair on the WebSocket.
+3. The app processes these through `store-core/handlers/{handleToolStart,handleToolResult}` — the production wire path — and lights up the renderer.
+4. The flow taps the bubble to expand and asserts on `testID` props (`todo-list-header`, `todo-list-item-<id>`, etc.).
+
+Adding a new renderer to the suite:
+
+- Add a `text.includes('<phrase>')` branch alongside the `show-todos` block in `mock-server.mjs` that emits the right `tool_start`/`tool_result` for the renderer.
+- Add `testID` props to the renderer's key elements if not already present.
+- Add `<renderer>.yaml` using `setup/ensure-session-screen.yaml`, the input + send sequence, an `extendedWaitUntil` for the bubble header, tap-to-expand, and `assertVisible: id:` checks.
+- Add the new flow to `run-all.yaml`.
+
+This keeps the app dependency-free (no debug menu, no URL scheme handler) and tests the same path production tool messages take.
 
 ### Gotchas
 

@@ -138,6 +138,7 @@ export function ActivityGroup({
       activeOpacity={0.7}
       onPress={handlePress}
       style={styles.activityGroup}
+      testID="activity-group"
     >
       <View style={styles.activityHeader}>
         {isActive && <View style={styles.activityPulse} />}
