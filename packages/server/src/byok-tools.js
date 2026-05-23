@@ -10,7 +10,6 @@
  * the SDK consumes them as Anthropic API tool definitions.
  *
  * Deferred to follow-up issues (see #4047 epic):
- *   - WebFetch — #4050
  *   - TodoWrite — #4051
  *   - Task (subagent) — #4049
  *   - MCP — #4048
@@ -92,6 +91,25 @@ export const BUILTIN_TOOLS = [
         path: { type: 'string', description: 'Optional search root. Defaults to workspace cwd.' },
       },
       required: ['pattern'],
+    },
+  },
+  {
+    name: 'WebFetch',
+    description:
+      'Fetch a public web URL and return readable text. HTML pages are stripped of <script>/<style> ' +
+      'and tags, with entities decoded. JSON and plaintext are returned as-is. Binary content-types ' +
+      '(images, octet-stream, etc.) are refused. Response body is capped — overflow is marked ' +
+      '`[truncated …]` so the model knows it saw a slice. Only http(s) URLs are allowed; file://, ' +
+      'ftp://, javascript: are refused. Always permission-gated (treated like Bash — outbound ' +
+      'network call the user must approve).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Absolute http(s) URL to fetch.' },
+        prompt: { type: 'string', description: 'What the model wants out of the page (passed back verbatim in the result header so the model retains intent).' },
+        timeout: { type: 'number', description: 'Optional fetch timeout in milliseconds. Max 120000 (2 min).' },
+      },
+      required: ['url', 'prompt'],
     },
   },
   {

@@ -93,6 +93,8 @@ export async function executeBuiltinTool({
         return await runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal })
       case 'Grep':
         return await runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal })
+      case 'WebFetch':
+        return await runWebFetch({ input, signal })
       default:
         return {
           content: `Unknown tool: ${toolName}. The claude-byok provider ships with: Read, Write, Edit, Bash, Glob, Grep. MCP and other tools land in follow-up issues.`,
@@ -332,4 +334,187 @@ async function safeResolveRoot(p, cwd, cwdRealCache, cwdCacheTtl) {
 function shellQuote(s) {
   if (typeof s !== 'string') return "''"
   return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+const WEBFETCH_DEFAULT_TIMEOUT_MS = 30_000
+const WEBFETCH_TIMEOUT_CEILING_MS = 120_000
+const WEBFETCH_MAX_RAW_BYTES = 1_048_576       // 1 MB cap on body read from socket
+const WEBFETCH_MAX_OUTPUT_CHARS = 100_000      // 100 KB cap on text returned to model
+
+async function runWebFetch({ input, signal }) {
+  const rawUrl = input?.url
+  if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
+    return { content: 'EINVAL: url is required', isError: true }
+  }
+  const rawPrompt = input?.prompt
+  if (typeof rawPrompt !== 'string' || rawPrompt.length === 0) {
+    return { content: 'EINVAL: prompt is required', isError: true }
+  }
+  let parsed
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return { content: `EINVAL: malformed url: ${rawUrl}`, isError: true }
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return {
+      content: `EINVAL: only http(s) URLs are supported (got ${parsed.protocol})`,
+      isError: true,
+    }
+  }
+
+  const requested = Number(input?.timeout)
+  const timeoutMs = Number.isFinite(requested) && requested > 0
+    ? Math.min(requested, WEBFETCH_TIMEOUT_CEILING_MS)
+    : WEBFETCH_DEFAULT_TIMEOUT_MS
+
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(new Error('timeout')), timeoutMs)
+  // Forward an external abort signal (session destroy) into our local
+  // controller. If the signal is ALREADY aborted at entry, the listener
+  // wouldn't fire — short-circuit so a destroyed session doesn't make an
+  // outbound request.
+  const onExternalAbort = () => ac.abort(signal.reason)
+  if (signal) {
+    if (signal.aborted) ac.abort(signal.reason)
+    else signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
+
+  try {
+    const res = await fetch(parsed.toString(), {
+      signal: ac.signal,
+      redirect: 'follow',
+      headers: { 'user-agent': 'chroxy-webfetch/1.0' },
+    })
+
+    if (!res.ok) {
+      return {
+        content: `HTTP ${res.status} ${res.statusText} from ${parsed.toString()}`,
+        isError: true,
+      }
+    }
+
+    const ctype = (res.headers.get('content-type') || '').toLowerCase()
+    if (isBinaryContentType(ctype)) {
+      return {
+        content: `Unsupported content-type for WebFetch: ${ctype || 'unknown'} (binary content is not extracted to text).`,
+        isError: true,
+      }
+    }
+
+    const raw = await readBodyCapped(res, WEBFETCH_MAX_RAW_BYTES)
+    const isHtml = ctype.includes('text/html') || ctype.includes('application/xhtml')
+    const text = isHtml ? stripHtmlToText(raw.text) : raw.text
+    const { output, outputTruncated } = capOutput(text, WEBFETCH_MAX_OUTPUT_CHARS)
+
+    // Distinct markers so the model can tell whether it lost data at the
+    // socket (raw cap) or after HTML extraction (output cap). Output cap
+    // takes precedence in the marker because that's the final visible cut.
+    let marker = ''
+    if (outputTruncated) {
+      marker = `\n\n[truncated at output cap: ${WEBFETCH_MAX_OUTPUT_CHARS} chars]`
+    } else if (raw.truncated) {
+      marker = `\n\n[truncated at raw body cap: ${WEBFETCH_MAX_RAW_BYTES} bytes]`
+    }
+
+    return {
+      content: `Prompt: ${rawPrompt}\nURL: ${parsed.toString()}\n\n${output}${marker}`,
+      isError: false,
+    }
+  } catch (err) {
+    // ac.abort(reason) surfaces `reason` as the thrown error rather than
+    // wrapping it in AbortError. The most reliable signal that we aborted
+    // is the controller's signal.aborted state — message-string matching
+    // misses arbitrary user-supplied reasons (e.g. "session destroyed").
+    if (ac.signal.aborted) {
+      return { content: `WebFetch timed out or aborted after ${timeoutMs}ms`, isError: true }
+    }
+    return { content: `WebFetch failed: ${err?.message || String(err)}`, isError: true }
+  } finally {
+    clearTimeout(timer)
+    if (signal) signal.removeEventListener('abort', onExternalAbort)
+  }
+}
+
+function isBinaryContentType(ctype) {
+  if (!ctype) return false
+  if (ctype.startsWith('text/')) return false
+  if (ctype.includes('json') || ctype.includes('xml') || ctype.includes('javascript')
+      || ctype.includes('yaml') || ctype.includes('+text')) return false
+  return true
+}
+
+async function readBodyCapped(res, maxBytes) {
+  const reader = res.body?.getReader()
+  if (!reader) {
+    const text = await res.text()
+    if (text.length > maxBytes) return { text: text.slice(0, maxBytes), truncated: true }
+    return { text, truncated: false }
+  }
+  const chunks = []
+  let total = 0
+  let truncated = false
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    total += value.byteLength
+    if (total > maxBytes) {
+      const overflow = total - maxBytes
+      chunks.push(value.subarray(0, value.byteLength - overflow))
+      truncated = true
+      try { await reader.cancel() } catch { /* fetch already winding down */ }
+      break
+    }
+    chunks.push(value)
+  }
+  const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)))
+  return { text: buf.toString('utf8'), truncated }
+}
+
+const HTML_ENTITY_MAP = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&apos;': "'",
+  '&#39;': "'",
+  '&nbsp;': ' ',
+}
+
+function stripHtmlToText(html) {
+  // 1. Drop <script> and <style> blocks completely (body and all).
+  let s = html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+  // 2. Treat block-level tags as line breaks so paragraphs don't merge.
+  s = s.replace(/<\/?(p|div|h[1-6]|li|tr|br|hr|section|article|header|footer|nav|aside)\b[^>]*>/gi, '\n')
+  // 3. Strip remaining tags.
+  s = s.replace(/<[^>]+>/g, '')
+  // 4. Decode named entities + numeric (decimal + hex) entities.
+  s = s.replace(/&(?:amp|lt|gt|quot|apos|#39|nbsp);/g, (m) => HTML_ENTITY_MAP[m])
+  s = s.replace(/&#(\d+);/g, (_, n) => safeFromCodePoint(Number(n)))
+  s = s.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => safeFromCodePoint(parseInt(h, 16)))
+  // 5. Collapse whitespace per line + trim aggressive blank-line runs.
+  s = s.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()).join('\n')
+  s = s.replace(/\n{3,}/g, '\n\n').trim()
+  return s
+}
+
+// Unicode code points are 0..0x10FFFF and the surrogate range 0xD800..0xDFFF
+// is reserved (passing those to fromCodePoint also throws). Return empty
+// string for out-of-range values so a malicious entity like &#9999999999;
+// can't crash the entire WebFetch.
+function safeFromCodePoint(code) {
+  if (!Number.isFinite(code) || code < 0 || code > 0x10FFFF) return ''
+  if (code >= 0xD800 && code <= 0xDFFF) return ''
+  return String.fromCodePoint(code)
+}
+
+function capOutput(text, maxChars) {
+  if (text.length <= maxChars) {
+    return { output: text, outputTruncated: false }
+  }
+  return { output: text.slice(0, maxChars), outputTruncated: true }
 }
