@@ -48,6 +48,12 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
   const [expanded, setExpanded] = useState(false)
   const summary = getInputSummary(input)
   const resultId = `tool-result-${toolUseId}`
+  // #4139: parse the TodoWrite result once and pass the result down,
+  // rather than re-parsing inside TodoList (Copilot review on #4179).
+  // Non-TodoWrite tools skip the parse entirely.
+  const todoParsed = expanded && result && toolName === 'TodoWrite'
+    ? parseTodoList(result)
+    : null
 
   const toggle = () => setExpanded(prev => !prev)
 
@@ -88,8 +94,8 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
           id={resultId}
           onClick={(e) => e.stopPropagation()}
         >
-          {toolName === 'TodoWrite' && parseTodoList(result) ? (
-            <TodoList text={result} />
+          {todoParsed ? (
+            <TodoList parsed={todoParsed} />
           ) : (
             <pre>{result}</pre>
           )}

@@ -11,10 +11,18 @@
  *
  * Rather than render that verbatim in a <pre> (the default `ToolBubble`
  * treatment) we parse it back into structured items and show a real
- * checklist with status-coloured checkboxes. The parser is conservative —
- * any line that doesn't match the expected shape falls back to plain
- * text, so a future format change degrades gracefully rather than
- * silently dropping content.
+ * checklist with status-coloured checkboxes.
+ *
+ * Failure modes:
+ *   - If the FIRST line doesn't match the "Todo list (N items)..."
+ *     header, `parseTodoList` returns null — the caller (ToolBubble)
+ *     falls back to <pre>{result}</pre> so nothing is lost.
+ *   - Within a parsed list, lines that don't match the line-item shape
+ *     are silently skipped (well-formed items continue to render). This
+ *     is the right trade-off for partially-malformed output: better to
+ *     render what we can than reject the whole list. Future executor
+ *     changes that add new line shapes should update the parser, not
+ *     rely on the dropped lines surviving the round-trip.
  *
  * #4139 (closes): tool-only enhancement, no server or protocol changes.
  */
@@ -87,9 +95,15 @@ export function parseTodoList(text: string): ParsedTodoList | null {
 }
 
 export interface TodoListProps {
-  /** Raw text from the TodoWrite tool_result. */
-  text: string
-  /** If parsing fails, callers receive a signal to render fallback. */
+  /**
+   * Raw text from the TodoWrite tool_result, OR a pre-parsed list.
+   * Pass `parsed` when the caller has already invoked `parseTodoList`
+   * to avoid a second parse pass.
+   */
+  text?: string
+  parsed?: ParsedTodoList | null
+  /** If parsing fails (only relevant when `text` is provided), callers
+   * receive a signal to render fallback content. */
   onParseFail?: () => void
 }
 
@@ -105,8 +119,11 @@ const STATUS_LABEL: Record<TodoStatus, string> = {
   pending: 'pending',
 }
 
-export function TodoList({ text, onParseFail }: TodoListProps) {
-  const parsed = parseTodoList(text)
+export function TodoList({ text, parsed: parsedProp, onParseFail }: TodoListProps) {
+  // Prefer the caller-supplied parsed value to avoid double-parsing
+  // (#4139 Copilot review). When `text` is given without `parsed` we
+  // fall back to parsing here — preserves the simple one-arg call site.
+  const parsed = parsedProp !== undefined ? parsedProp : parseTodoList(text ?? '')
   if (!parsed) {
     onParseFail?.()
     return null
