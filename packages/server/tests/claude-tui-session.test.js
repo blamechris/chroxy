@@ -1497,4 +1497,116 @@ describe('ClaudeTuiSession', () => {
       session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash' }, 'msg-1')
     })
   })
+
+  // #4044: per-session option that spawns claude TUI with the literal
+  // --dangerously-skip-permissions flag and elides chroxy's permission
+  // hook entirely. Distinct from `permissionMode: 'auto'`, which still
+  // routes every tool call through chroxy's hook script.
+  describe('skipPermissions (#4044)', () => {
+    let fakeHome
+    let origSpawnPty
+    let capturedPermissionsEnabled
+    let capturedArgs
+    let session
+
+    beforeEach(() => {
+      fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-skip-perm-home-'))
+      writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
+      process.env._ORIG_HOME = process.env.HOME
+      process.env.HOME = fakeHome
+
+      capturedPermissionsEnabled = null
+      capturedArgs = null
+      origSpawnPty = ClaudeTuiSession.prototype._spawnPty
+      ClaudeTuiSession.prototype._spawnPty = async function (permissionsEnabled) {
+        capturedPermissionsEnabled = permissionsEnabled
+        // Mirror the production arg list (lines 499-523 of
+        // claude-tui-session.js) so the test stays honest about what
+        // node-pty would actually receive.
+        const args = [
+          '--session-id', this._sessionId,
+          '--settings', this._settingsPath,
+        ]
+        if (this.skipPermissions) args.push('--dangerously-skip-permissions')
+        if (this.model) args.push('--model', this.model)
+        capturedArgs = args
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
+      }
+    })
+
+    afterEach(async () => {
+      if (session) {
+        try { await session.destroy() } catch { /* ignore */ }
+        session = null
+      }
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      if (process.env._ORIG_HOME) {
+        process.env.HOME = process.env._ORIG_HOME
+        delete process.env._ORIG_HOME
+      }
+      if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+    })
+
+    it('default (skipPermissions undefined): permissionsEnabled=true when port is set, no flag in args', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345,
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      await session.start()
+      assert.equal(capturedPermissionsEnabled, true, 'hook enabled by default when port given')
+      assert.equal(capturedArgs.includes('--dangerously-skip-permissions'), false,
+        '--dangerously-skip-permissions must NOT appear unless skipPermissions is set')
+    })
+
+    it('skipPermissions=true overrides port: permissionsEnabled=false, flag in args', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345, skipPermissions: true,
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      await session.start()
+      // permissionsEnabled is the gate for hook install + sidecar write.
+      assert.equal(capturedPermissionsEnabled, false,
+        'skipPermissions must beat port — the whole point is to elide chroxy permissions')
+      assert.ok(capturedArgs.includes('--dangerously-skip-permissions'),
+        '--dangerously-skip-permissions must be in claude TUI args')
+    })
+
+    it('skipPermissions=true: PreToolUse settings does NOT include the permission hook script', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345, skipPermissions: true,
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      await session.start()
+      // The settings.json on disk (written by writeHookSettings) must
+      // only contain the per-event capture command — not the chroxy
+      // permission gate. Otherwise the hook would still gate every call.
+      const settings = JSON.parse(readFileSync(session._settingsPath, 'utf8'))
+      const preToolUseCommands = settings.hooks.PreToolUse[0].hooks.map((h) => h.command)
+      assert.equal(preToolUseCommands.length, 1,
+        'expected only the capture command, not capture + permission hook')
+      assert.match(preToolUseCommands[0], /cat > .*pre-/,
+        'remaining hook is the observability capture')
+      // Sidecar write also gated on permissionsEnabled → no permission-mode
+      // file written.
+      assert.equal(session._permissionModeFile, null,
+        'permission-mode sidecar not written when skipPermissions is on')
+    })
+
+    it('skipPermissions defaults to false when omitted (constructor coercion)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      assert.equal(session.skipPermissions, false)
+    })
+
+    it('skipPermissions=true coerces truthy non-booleans (defensive constructor)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skipPermissions: 'yes',
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      assert.equal(session.skipPermissions, true,
+        '!!"yes" === true — the constructor accepts truthy passthrough cleanly')
+    })
+  })
 })

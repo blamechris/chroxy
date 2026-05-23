@@ -275,10 +275,17 @@ export class ClaudeTuiSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
-  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs } = {}) {
+  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, skipPermissions } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs })
 
     this._port = port || null
+    // #4044: when true, spawn `claude` with --dangerously-skip-permissions
+    // and skip chroxy's permission-hook + sidecar entirely. The user wants
+    // unmediated Claude TUI behaviour, not chroxy's `auto` mode (which still
+    // routes every call through the hook). Distinct from `permissionMode`:
+    // skipPermissions disables the whole permission system; permissionMode
+    // selects between approve/auto/acceptEdits/plan WITHIN it.
+    this.skipPermissions = !!skipPermissions
     // Per-session hook secret — picked up by WsServer's session_created handler
     // (ws-server.js:_registerSessionHookSecretIfMissing reads
     // `entry.session._hookSecret` duck-typed). Mirrors the same name CliSession
@@ -422,7 +429,11 @@ export class ClaudeTuiSession extends BaseSession {
     // predictable + so claude resumes the same conversation across turns.
     this._sessionId = randomUUID()
 
-    const permissionsEnabled = !!(this._port && this._hookSecret)
+    // #4044: skipPermissions wins over port — when the user opts in to
+    // unmediated TUI behaviour, the hook installation + sidecar write must
+    // both be elided. Otherwise we'd run two competing permission systems
+    // (chroxy's hook + claude's own --dangerously-skip-permissions flag).
+    const permissionsEnabled = !!(this._port && this._hookSecret) && !this.skipPermissions
     this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled })
 
     // #4013: write the initial permission mode to a sidecar file so the
@@ -500,6 +511,12 @@ export class ClaudeTuiSession extends BaseSession {
       '--session-id', this._sessionId,
       '--settings', this._settingsPath,
     ]
+    if (this.skipPermissions) {
+      // #4044: bypass chroxy's hook + claude's per-tool prompt entirely.
+      // Caller opted in explicitly; the warning copy that surfaces the
+      // trade-off lives in the dashboard CreateSessionModal.
+      args.push('--dangerously-skip-permissions')
+    }
     if (this.model) {
       // claude TUI accepts --model (verified against `claude --help`). Without
       // this the requested model was silently dropped, leaving ready.model
