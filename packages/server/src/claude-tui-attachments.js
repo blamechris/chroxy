@@ -247,8 +247,30 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
  * @param {Array<{path: string, name: string, mediaType: string, size: number}>} files
  * @returns {string}
  */
+/**
+ * @typedef {Object} AttachmentSuffixResult
+ * @property {string}  suffix         The prompt suffix to append (empty for no files).
+ * @property {boolean} truncated      True when at least one file was dropped from the list.
+ * @property {number}  omitted        Number of files dropped from the list (0 when not truncated).
+ * @property {boolean} bareFallback   True when even the single-entry suffix didn't fit and we
+ *                                    fell back to the size-cap marker (the worst, most-lossy path).
+ * @property {number}  byteLength     Final UTF-8 byte length of the suffix string.
+ * @property {number}  cap            The byte cap (MAX_ATTACHMENT_SUFFIX_BYTES) that triggered truncation.
+ */
+
+/**
+ * #4026: structured result with truncation metadata so the caller
+ * (claude-tui-session.js) can log a warn when the cap fires. Pre-#4026
+ * this returned just the suffix string and the truncation was silent —
+ * ops had no signal for a pathological path-generation regression
+ * except by sampling transcripts. The whole point of MAX_ATTACHMENT_SUFFIX_BYTES
+ * is to catch such regressions before users notice, so quiet truncation
+ * defeated the cap's purpose.
+ */
 export function buildAttachmentsPromptSuffix(files) {
-  if (!Array.isArray(files) || files.length === 0) return ''
+  if (!Array.isArray(files) || files.length === 0) {
+    return { suffix: '', truncated: false, omitted: 0, bareFallback: false, byteLength: 0, cap: MAX_ATTACHMENT_SUFFIX_BYTES }
+  }
   const items = files.map((f) => {
     const meta = [f.name, f.mediaType, formatBytes(f.size)].filter(Boolean).join(', ')
     return meta ? `${f.path} (${meta})` : f.path
@@ -265,22 +287,44 @@ export function buildAttachmentsPromptSuffix(files) {
   // truncation so the agent (and a human reading the transcript)
   // knows files were omitted.
   if (Buffer.byteLength(fullSuffix, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
-    return fullSuffix
+    return {
+      suffix: fullSuffix,
+      truncated: false,
+      omitted: 0,
+      bareFallback: false,
+      byteLength: Buffer.byteLength(fullSuffix, 'utf8'),
+      cap: MAX_ATTACHMENT_SUFFIX_BYTES,
+    }
   }
   // Drop one entry at a time from the end, re-checking the rebuilt
   // suffix each iteration. A more efficient binary search isn't worth
   // the complexity for N≤5 in normal usage; even at N=20 this is fine.
-  const truncated = items.slice()
-  while (truncated.length > 0) {
-    const omitted = files.length - truncated.length
-    const candidate = ` [I attached the following file(s) for you to read: ${truncated.join('; ')}; ...and ${omitted} more file(s) omitted from this list due to size]`
+  const truncatedItems = items.slice()
+  while (truncatedItems.length > 0) {
+    const omitted = files.length - truncatedItems.length
+    const candidate = ` [I attached the following file(s) for you to read: ${truncatedItems.join('; ')}; ...and ${omitted} more file(s) omitted from this list due to size]`
     if (Buffer.byteLength(candidate, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
-      return candidate
+      return {
+        suffix: candidate,
+        truncated: true,
+        omitted,
+        bareFallback: false,
+        byteLength: Buffer.byteLength(candidate, 'utf8'),
+        cap: MAX_ATTACHMENT_SUFFIX_BYTES,
+      }
     }
-    truncated.pop()
+    truncatedItems.pop()
   }
   // Even the single-entry fallback didn't fit (one path > 8KB —
   // pathological). Return the bare marker; the files are still on disk
   // and the agent will at least know attachments were intended.
-  return ` [Attachment list omitted: ${files.length} file(s) exceeded the suffix size cap of ${MAX_ATTACHMENT_SUFFIX_BYTES}B]`
+  const bare = ` [Attachment list omitted: ${files.length} file(s) exceeded the suffix size cap of ${MAX_ATTACHMENT_SUFFIX_BYTES}B]`
+  return {
+    suffix: bare,
+    truncated: true,
+    omitted: files.length,
+    bareFallback: true,
+    byteLength: Buffer.byteLength(bare, 'utf8'),
+    cap: MAX_ATTACHMENT_SUFFIX_BYTES,
+  }
 }
