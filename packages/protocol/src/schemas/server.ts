@@ -588,13 +588,24 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
 // the shared store-core `handleError` parser. `fatal` defaults unset
 // (treated as `true` by consumers) so omitting it preserves the
 // pre-#4145 contract.
+//
+// `correlationId` + `details` are emitted by the server's INVALID_MESSAGE
+// schema-rejection path (`ws-server.js:1314`) and any handler that calls
+// `handler-utils.sendError(ws, requestId, code, message, data)` — the
+// `data` arg is merged onto the envelope (`handler-utils.js:420-435`)
+// after a reserved-field guard. `.passthrough()` matches the wire and
+// preserves code-specific fields (e.g. `actualAuthor` on INVALID_AUTHOR,
+// `boundSessionId` on SESSION_TOKEN_MISMATCH) so future consumers parsing
+// against this generic schema don't silently lose context.
 export const ServerErrorEnvelopeSchema = z.object({
   type: z.literal('error'),
   requestId: z.string().nullable().optional(),
   code: z.string().optional(),
   message: z.string(),
   fatal: z.boolean().optional(),
-})
+  correlationId: z.string().optional(),
+  details: z.string().optional(),
+}).passthrough()
 
 // #3544: cumulative stdin_dropped totals broadcast to clients bound to the
 // session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
