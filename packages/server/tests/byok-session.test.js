@@ -41,6 +41,57 @@ function captureEvents(session) {
   return captured
 }
 
+/**
+ * Drives one round of tool dispatch against the unstubbed executor and
+ * returns the tool_result block the model would have seen on the next
+ * round. Pre-#4172 every e2e test re-wrote ~25 lines of identical
+ * two-round stream stub scaffolding; this helper collapses each test to
+ * just its meaningful inputs (tool id/name/input) and assertions.
+ *
+ * The caller is responsible for permission setup BEFORE calling this —
+ * setPermissionMode, _permissions.setRules, _permissions.handlePermission
+ * override, etc. The helper only owns the round-1 tool_use emit and the
+ * round-2 tool_result capture.
+ *
+ * @param {object} session  ClaudeByokSession instance (already constructed)
+ * @param {object} call     { id, name, input } — the tool_use the model emits
+ * @param {object} [opts]
+ * @param {string} [opts.prompt='go']  Text passed to sendMessage
+ * @returns {Promise<object|null>}  The tool_result content block, or null
+ *                                  if the agent loop never reached round 2.
+ */
+async function runOneToolRound(session, { id, name, input }, opts = {}) {
+  const prompt = opts.prompt ?? 'go'
+  let round = 0
+  let toolResultBlock = null
+  session._client = {
+    messages: {
+      stream: ({ messages }) => {
+        round += 1
+        if (round === 1) {
+          return fakeStream(
+            [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+            {
+              stop_reason: 'tool_use',
+              content: [{ type: 'tool_use', id, name, input }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          )
+        }
+        const lastTurn = messages[messages.length - 1]
+        toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+        return fakeStream(
+          [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        )
+      },
+    },
+  }
+  await session.start()
+  await session.sendMessage(prompt)
+  return toolResultBlock
+}
+
 describe('ClaudeByokSession', () => {
   let tmpHome
   let originalHome
@@ -1385,38 +1436,9 @@ describe('ClaudeByokSession', () => {
         session.setPermissionMode('auto') // auto-allow so no UI handshake
         // IMPORTANT: do NOT stub session._executeToolBlock. We want the
         // real dispatch + permission gate + executor + tool_result return.
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{ type: 'tool_use', id: 'toolu_a', name: 'Read', input: { file_path: targetPath } }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              // Round 2: capture the tool_result the agent loop fed back.
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                {
-                  stop_reason: 'end_turn',
-                  content: [{ type: 'text', text: 'I read the file.' }],
-                  usage: { input_tokens: 1, output_tokens: 1 },
-                },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('please read note.txt')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_a', name: 'Read', input: { file_path: targetPath },
+        }, { prompt: 'please read note.txt' })
 
         // Assert the tool_result the model received on the next round
         // contains the REAL file content from disk (not a stubbed value).
@@ -1431,40 +1453,10 @@ describe('ClaudeByokSession', () => {
       it('propagates is_error: true to the next round when the real Read fails (nonexistent file)', async () => {
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_b', name: 'Read',
-                      input: { file_path: join(workspace, 'does-not-exist.txt') },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                {
-                  stop_reason: 'end_turn',
-                  content: [{ type: 'text', text: 'Read failed, noted.' }],
-                  usage: { input_tokens: 1, output_tokens: 1 },
-                },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('please read a missing file')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_b', name: 'Read',
+          input: { file_path: join(workspace, 'does-not-exist.txt') },
+        }, { prompt: 'please read a missing file' })
 
         assert.ok(toolResultBlock, 'failure tool_result must propagate to next round')
         assert.equal(toolResultBlock.is_error, true, 'a missing-file Read must surface as is_error: true')
@@ -1475,36 +1467,10 @@ describe('ClaudeByokSession', () => {
         const targetPath = join(workspace, 'fresh.txt')
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_w', name: 'Write',
-                      input: { file_path: targetPath, content: 'planted on disk' },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('write a note')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_w', name: 'Write',
+          input: { file_path: targetPath, content: 'planted on disk' },
+        }, { prompt: 'write a note' })
         assert.ok(toolResultBlock, 'Write must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /Wrote 15 bytes/)
@@ -1519,36 +1485,10 @@ describe('ClaudeByokSession', () => {
         writeFileSync(targetPath, 'before:keep:after')
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_e', name: 'Edit',
-                      input: { file_path: targetPath, old_string: 'keep', new_string: 'KEPT' },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('do the edit')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_e', name: 'Edit',
+          input: { file_path: targetPath, old_string: 'keep', new_string: 'KEPT' },
+        }, { prompt: 'do the edit' })
         assert.ok(toolResultBlock, 'Edit must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /Replaced 1 occurrence/)
@@ -1559,36 +1499,9 @@ describe('ClaudeByokSession', () => {
       it('runs a Bash command via the unstubbed executor and feeds stdout back (#4150)', async () => {
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_b', name: 'Bash',
-                      input: { command: 'echo bash-seam-ok' },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('run echo')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_b', name: 'Bash', input: { command: 'echo bash-seam-ok' },
+        }, { prompt: 'run echo' })
         assert.ok(toolResultBlock, 'Bash must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /bash-seam-ok/)
@@ -1603,36 +1516,9 @@ describe('ClaudeByokSession', () => {
         // spawning so `env` inside Bash never sees it.
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_secret', name: 'Bash',
-                      input: { command: 'env' },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('dump env')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_secret', name: 'Bash', input: { command: 'env' },
+        }, { prompt: 'dump env' })
         assert.ok(toolResultBlock, 'Bash env dump must produce a tool_result')
         // The fixture key MUST NOT appear in stdout — the safe-env builder
         // drops it before spawn.
@@ -1647,36 +1533,9 @@ describe('ClaudeByokSession', () => {
         writeFileSync(join(workspace, 'c.md'), '3')
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_g', name: 'Glob',
-                      input: { pattern: '*.txt' },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('find txt files')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_g', name: 'Glob', input: { pattern: '*.txt' },
+        }, { prompt: 'find txt files' })
         assert.ok(toolResultBlock, 'Glob must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /a\.txt/)
@@ -1689,36 +1548,9 @@ describe('ClaudeByokSession', () => {
         writeFileSync(join(workspace, 'haystack.txt'), 'alpha\nNEEDLE-here\ngamma\n')
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_grep', name: 'Grep',
-                      input: { pattern: 'NEEDLE' },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('grep for it')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_grep', name: 'Grep', input: { pattern: 'NEEDLE' },
+        }, { prompt: 'grep for it' })
         assert.ok(toolResultBlock, 'Grep must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /haystack\.txt/)
@@ -1734,40 +1566,14 @@ describe('ClaudeByokSession', () => {
         // and assert the next round sees that shape.
         const session = new ClaudeByokSession({ cwd: workspace })
         // Override after construction — _permissions was wired in the
-        // constructor; we replace it before sendMessage runs.
+        // constructor; we replace it before runOneToolRound() starts.
         session._permissions.handlePermission = async () => {
           throw new Error('simulated gate failure')
         }
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_pg', name: 'Read',
-                      input: { file_path: join(workspace, 'whatever.txt') },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('try a read')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_pg', name: 'Read',
+          input: { file_path: join(workspace, 'whatever.txt') },
+        }, { prompt: 'try a read' })
         assert.ok(toolResultBlock, 'permission-gate throw must still produce a tool_result')
         assert.equal(toolResultBlock.is_error, true)
         assert.match(toolResultBlock.content, /Permission gate error/)
@@ -1784,36 +1590,9 @@ describe('ClaudeByokSession', () => {
         writeFileSync(targetPath, 'accept-edits-content')
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('acceptEdits')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_ae', name: 'Read',
-                      input: { file_path: targetPath },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('read it')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_ae', name: 'Read', input: { file_path: targetPath },
+        }, { prompt: 'read it' })
         assert.ok(toolResultBlock, 'acceptEdits Read must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /accept-edits-content/)
@@ -1828,36 +1607,9 @@ describe('ClaudeByokSession', () => {
         writeFileSync(targetPath, 'rule-allow-content')
         const session = new ClaudeByokSession({ cwd: workspace })
         session._permissions.setRules([{ tool: 'Read', decision: 'allow' }])
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_ra', name: 'Read',
-                      input: { file_path: targetPath },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('read via rule')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_ra', name: 'Read', input: { file_path: targetPath },
+        }, { prompt: 'read via rule' })
         assert.ok(toolResultBlock, 'allow-rule Read must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /rule-allow-content/)
@@ -1872,36 +1624,9 @@ describe('ClaudeByokSession', () => {
         writeFileSync(targetPath, 'should-not-appear')
         const session = new ClaudeByokSession({ cwd: workspace })
         session._permissions.setRules([{ tool: 'Read', decision: 'deny' }])
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{
-                      type: 'tool_use', id: 'toolu_rd', name: 'Read',
-                      input: { file_path: targetPath },
-                    }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('read via deny rule')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_rd', name: 'Read', input: { file_path: targetPath },
+        }, { prompt: 'read via deny rule' })
         assert.ok(toolResultBlock, 'deny-rule must still produce a tool_result')
         assert.equal(toolResultBlock.is_error, true)
         assert.equal(toolResultBlock.content.includes('should-not-appear'), false,
@@ -1915,37 +1640,9 @@ describe('ClaudeByokSession', () => {
         // message, even with permission set to auto-allow.
         const session = new ClaudeByokSession({ cwd: workspace })
         session.setPermissionMode('auto')
-        let round = 0
-        let toolResultBlock = null
-        session._client = {
-          messages: {
-            stream: ({ messages }) => {
-              round += 1
-              if (round === 1) {
-                return fakeStream(
-                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
-                  {
-                    stop_reason: 'tool_use',
-                    content: [{ type: 'tool_use', id: 'toolu_c', name: 'Read', input: { file_path: '/etc/passwd' } }],
-                    usage: { input_tokens: 1, output_tokens: 1 },
-                  },
-                )
-              }
-              const lastTurn = messages[messages.length - 1]
-              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
-              return fakeStream(
-                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
-                {
-                  stop_reason: 'end_turn',
-                  content: [{ type: 'text', text: 'Denied, noted.' }],
-                  usage: { input_tokens: 1, output_tokens: 1 },
-                },
-              )
-            },
-          },
-        }
-        await session.start()
-        await session.sendMessage('try to escape')
+        const toolResultBlock = await runOneToolRound(session, {
+          id: 'toolu_c', name: 'Read', input: { file_path: '/etc/passwd' },
+        }, { prompt: 'try to escape' })
 
         assert.ok(toolResultBlock)
         assert.equal(toolResultBlock.is_error, true, 'path-outside-workspace must be is_error')
