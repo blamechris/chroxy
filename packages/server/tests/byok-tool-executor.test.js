@@ -577,9 +577,17 @@ describe('executeBuiltinTool', () => {
   describe('WebFetch (#4050)', () => {
     let server
     let baseUrl
+    let priorAllowPrivate
     const routes = new Map()
 
     before(async () => {
+      // #4132: WebFetch now blocks private/loopback/link-local hosts by
+      // default. The test server runs on 127.0.0.1, so set the opt-in
+      // env flag for the WebFetch suite. Individual SSRF-defense tests
+      // unset it locally and restore it after.
+      priorAllowPrivate = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = '1'
+
       server = createServer((req, res) => {
         const handler = routes.get(req.url)
         if (!handler) {
@@ -595,6 +603,8 @@ describe('executeBuiltinTool', () => {
     })
 
     after(async () => {
+      if (priorAllowPrivate === undefined) delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      else process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = priorAllowPrivate
       await new Promise((resolve) => server.close(resolve))
     })
 
@@ -931,6 +941,129 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, false)
       assert.match(r.content, /café/)
+    })
+
+    it('follows redirects (302 → 200) when scheme + host are allowed (#4132)', async () => {
+      routes.set('/r1', (_req, res) => {
+        res.writeHead(302, { Location: `${baseUrl}/r2` })
+        res.end()
+      })
+      routes.set('/r2', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('redirected ok')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /redirected ok/)
+    })
+
+    it('refuses redirect to file:// scheme (#4132)', async () => {
+      routes.set('/r-evil', (_req, res) => {
+        res.writeHead(302, { Location: 'file:///etc/passwd' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-evil`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
+      // The denied target's full path leaks if echoed verbatim — should
+      // be present only enough to make the model understand WHY, but the
+      // scheme is the key signal.
+      assert.match(r.content, /file:/)
+    })
+
+    it('refuses redirect to javascript: scheme (#4132)', async () => {
+      routes.set('/r-js', (_req, res) => {
+        res.writeHead(302, { Location: 'javascript:alert(1)' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-js`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
+    })
+
+    it('refuses initial private/loopback host when env opt-out is unset (#4132 SSRF)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          // 169.254.169.254 is the cloud-instance metadata service —
+          // the canonical SSRF target. Doesn't need a real server; the
+          // pre-fetch check should refuse it.
+          input: { url: 'http://169.254.169.254/latest/meta-data/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+        assert.match(r.content, /CHROXY_WEBFETCH_ALLOW_PRIVATE/, 'error must point at the opt-out flag')
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses initial loopback (127.0.0.1) when env opt-out unset (#4132 SSRF)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        // Use a port unlikely to bind to anything so even a stale local
+        // service can't accidentally answer; the SSRF refusal happens
+        // BEFORE any network attempt.
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://127.0.0.1:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses redirect to a non-http(s) scheme even when host check is bypassed (#4132)', async () => {
+      // Confirms the scheme check fires independent of the host check —
+      // a file:// redirect target has no host, so the host check is
+      // moot but scheme refusal must fire.
+      routes.set('/r-ftp', (_req, res) => {
+        res.writeHead(302, { Location: 'ftp://example.com/secret' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-ftp`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
+    })
+
+    it('refuses excessive redirect chain (#4132)', async () => {
+      // Chain redirect 1→2→3→... and assert refusal at the cap.
+      for (let i = 1; i <= 20; i++) {
+        routes.set(`/chain-${i}`, (_req, res) => {
+          res.writeHead(302, { Location: `${baseUrl}/chain-${i + 1}` })
+          res.end()
+        })
+      }
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/chain-1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*cap|too many redirects/i)
     })
 
     it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {

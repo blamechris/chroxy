@@ -17,6 +17,8 @@
  */
 
 import { resolve, isAbsolute } from 'node:path'
+import { isIP } from 'node:net'
+import { lookup as dnsLookup } from 'node:dns/promises'
 import { validatePathWithinCwd } from './ws-file-ops/common.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
@@ -349,6 +351,63 @@ const WEBFETCH_DEFAULT_TIMEOUT_MS = 30_000
 const WEBFETCH_TIMEOUT_CEILING_MS = 120_000
 const WEBFETCH_MAX_RAW_BYTES = 1_048_576       // 1 MB cap on body read from socket
 const WEBFETCH_MAX_OUTPUT_CHARS = 100_000      // 100 KB cap on text returned to model
+// #4132: undici's default redirect cap is 20. Ours is tighter so the
+// model can't burn its turn on a redirect-loop honeypot — and we
+// re-validate scheme + host on every hop, so the loop is also a
+// per-hop SSRF gate, not just a count.
+const WEBFETCH_MAX_REDIRECT_HOPS = 10
+
+/**
+ * #4132 SSRF defense. By default WebFetch refuses targets in
+ * private / loopback / link-local ranges so a model induced into
+ * fetching `http://169.254.169.254/`, `http://127.0.0.1:<port>`, or
+ * an RFC1918 address can't hit the user's local / cloud-instance
+ * environment. Set `CHROXY_WEBFETCH_ALLOW_PRIVATE=1` to opt back in
+ * (local dev fetching the project's own dev server, etc.).
+ */
+function isPrivateOrSpecialIp(ipStr) {
+  const v = isIP(ipStr)
+  if (v === 4) {
+    // ipStr is dotted-quad.
+    const [a, b] = ipStr.split('.').map((p) => parseInt(p, 10))
+    if (a === 127) return true                 // loopback 127.0.0.0/8
+    if (a === 10) return true                  // RFC1918 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true  // RFC1918 172.16.0.0/12
+    if (a === 192 && b === 168) return true    // RFC1918 192.168.0.0/16
+    if (a === 169 && b === 254) return true    // link-local 169.254.0.0/16
+    if (a === 0) return true                   // 0.0.0.0/8 (this network)
+    if (a >= 224) return true                  // multicast + reserved
+    return false
+  }
+  if (v === 6) {
+    const lower = ipStr.toLowerCase()
+    if (lower === '::1' || lower === '::') return true        // loopback / unspecified
+    if (lower.startsWith('fe8') || lower.startsWith('fe9') ||
+        lower.startsWith('fea') || lower.startsWith('feb')) return true  // link-local fe80::/10
+    if (lower.startsWith('fc') || lower.startsWith('fd')) return true   // ULA fc00::/7
+    if (lower.startsWith('ff')) return true                              // multicast
+    // IPv4-mapped IPv6 (::ffff:1.2.3.4) — extract the v4 portion.
+    const m = lower.match(/^::ffff:([0-9.]+)$/)
+    if (m && isIP(m[1]) === 4) return isPrivateOrSpecialIp(m[1])
+    return false
+  }
+  // Not an IP literal; caller should resolve first.
+  return false
+}
+
+async function isHostAllowed(hostname) {
+  if (process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE === '1') return true
+  if (typeof hostname !== 'string' || hostname.length === 0) return false
+  // IPv6 literals come from URL.hostname without the brackets — pass through.
+  if (isIP(hostname)) return !isPrivateOrSpecialIp(hostname)
+  try {
+    const { address } = await dnsLookup(hostname)
+    return !isPrivateOrSpecialIp(address)
+  } catch {
+    // Unresolvable host — refuse rather than letting fetch try.
+    return false
+  }
+}
 
 async function runWebFetch({ input, signal }) {
   const rawUrl = input?.url
@@ -407,15 +466,70 @@ async function runWebFetch({ input, signal }) {
   }
 
   try {
-    const res = await fetch(parsed.toString(), {
-      signal: ac.signal,
-      redirect: 'follow',
-      headers: { 'user-agent': 'chroxy-webfetch/1.0' },
-    })
+    // #4132: SSRF check on the initial URL. Done before any network
+    // attempt so an attacker can't even confirm a private host is
+    // listening on the chroxy host.
+    if (!(await isHostAllowed(parsed.hostname))) {
+      return {
+        content:
+          `EACCES: refusing to fetch private/loopback/link-local host (${parsed.hostname}). ` +
+          'Set CHROXY_WEBFETCH_ALLOW_PRIVATE=1 to opt in (local dev only — this is an SSRF guard).',
+        isError: true,
+      }
+    }
+
+    // #4132: manual redirect handling so we can re-validate scheme +
+    // host on every hop. `redirect: 'follow'` would otherwise honour an
+    // attacker's redirect to file:// (well, undici would refuse it
+    // with a vague network error) or to a private IP (which undici
+    // happily follows).
+    let res
+    let currentUrl = parsed
+    for (let hop = 0; hop <= WEBFETCH_MAX_REDIRECT_HOPS; hop++) {
+      res = await fetch(currentUrl.toString(), {
+        signal: ac.signal,
+        redirect: 'manual',
+        headers: { 'user-agent': 'chroxy-webfetch/1.0' },
+      })
+      if (res.status < 300 || res.status >= 400) break
+      const loc = res.headers.get('location')
+      // Drain the body so the connection can return to the pool.
+      try { await res.body?.cancel() } catch { /* connection already torn down */ }
+      if (!loc) {
+        return { content: `WebFetch redirect ${res.status} with no Location header`, isError: true }
+      }
+      let nextUrl
+      try {
+        nextUrl = new URL(loc, currentUrl)
+      } catch {
+        return { content: `WebFetch refused redirect: malformed Location header`, isError: true }
+      }
+      if (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') {
+        return {
+          content: `WebFetch refused redirect scheme: only http(s) allowed (got ${nextUrl.protocol} via ${loc})`,
+          isError: true,
+        }
+      }
+      if (!(await isHostAllowed(nextUrl.hostname))) {
+        return {
+          content:
+            `WebFetch refused redirect to private/loopback/link-local host (${nextUrl.hostname}). ` +
+            'Set CHROXY_WEBFETCH_ALLOW_PRIVATE=1 to opt in.',
+          isError: true,
+        }
+      }
+      if (hop === WEBFETCH_MAX_REDIRECT_HOPS) {
+        return {
+          content: `WebFetch hit redirect cap: too many redirects (>${WEBFETCH_MAX_REDIRECT_HOPS} hops)`,
+          isError: true,
+        }
+      }
+      currentUrl = nextUrl
+    }
 
     if (!res.ok) {
       return {
-        content: `HTTP ${res.status} ${res.statusText} from ${parsed.toString()}`,
+        content: `HTTP ${res.status} ${res.statusText} from ${currentUrl.toString()}`,
         isError: true,
       }
     }
@@ -450,7 +564,7 @@ async function runWebFetch({ input, signal }) {
     }
 
     return {
-      content: `Prompt: ${rawPrompt}\nURL: ${parsed.toString()}\n\n${output}${marker}`,
+      content: `Prompt: ${rawPrompt}\nURL: ${currentUrl.toString()}\n\n${output}${marker}`,
       isError: false,
     }
   } catch (err) {
