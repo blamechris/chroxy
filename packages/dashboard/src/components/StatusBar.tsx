@@ -18,8 +18,19 @@ export interface StatusBarProps {
   provider?: string
 }
 
+// #4204 Copilot review: explicit non-breaking-space escape so the
+// placeholder isn't a literal NBSP character in the source (easy to
+// miss / get auto-reformatted).
+const NBSP = '\u00A0'
+
 export function StatusBar({ cost, context, contextPercent, isBusy, agentCount, provider }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
+  // #4204 Copilot review: compute each chip's tooltip once so the
+  // `title` + `aria-label` mirror pair can't drift if the formatter
+  // ever takes a code path with side effects.
+  const costTip = costTooltip({ cost, provider })
+  const contextTip = contextTooltip({ percent: contextPercent ?? null, contextSummary: context })
+  const agentTip = agentCountTooltip(agentCount)
   return (
     <div className="status-bar" data-testid="status-bar">
       {isBusy && (
@@ -30,6 +41,7 @@ export function StatusBar({ cost, context, contextPercent, isBusy, agentCount, p
           className="status-provider"
           data-provider={prov.type}
           title={prov.tooltip}
+          aria-label={prov.tooltip}
           data-testid="status-provider"
         >
           {prov.short}
@@ -37,24 +49,24 @@ export function StatusBar({ cost, context, contextPercent, isBusy, agentCount, p
       )}
       <span
         className="status-cost"
-        title={costTooltip({ cost, provider })}
-        aria-label={costTooltip({ cost, provider })}
+        title={costTip}
+        aria-label={costTip}
       >
-        {cost != null ? `$${cost.toFixed(4)}` : ' '}
+        {cost != null ? `$${cost.toFixed(4)}` : NBSP}
       </span>
       <span
         className="status-context"
-        title={contextTooltip({ percent: contextPercent ?? null, contextSummary: context })}
-        aria-label={contextTooltip({ percent: contextPercent ?? null, contextSummary: context })}
+        title={contextTip}
+        aria-label={contextTip}
       >
-        {context || ' '}
+        {context || NBSP}
       </span>
       {agentCount != null && agentCount > 0 && (
         <span
           className="agent-badge"
           data-testid="agent-badge"
-          title={agentCountTooltip(agentCount)}
-          aria-label={agentCountTooltip(agentCount)}
+          title={agentTip}
+          aria-label={agentTip}
         >
           {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
         </span>

@@ -14,7 +14,6 @@ import {
   contextTooltip,
   modelTooltip,
   agentCountTooltip,
-  tokenChipTooltip,
 } from './status-tooltips'
 
 describe('costTooltip (#3858)', () => {
@@ -99,24 +98,28 @@ describe('agentCountTooltip (#3858)', () => {
     expect(agentCountTooltip(3)).toMatch(/3 background agents/i)
   })
 
-  it('returns empty string for 0 / undefined (no chip is rendered anyway)', () => {
+  it('returns empty string for 0 / undefined / null (no chip is rendered anyway)', () => {
+    // Loosened signature (Copilot review on #4204) — callers naturally
+    // have `agentCount?: number`, so accept null/undefined without casts.
     expect(agentCountTooltip(0)).toBe('')
-    expect(agentCountTooltip(undefined as unknown as number)).toBe('')
+    expect(agentCountTooltip(undefined)).toBe('')
+    expect(agentCountTooltip(null)).toBe('')
   })
 })
 
-describe('tokenChipTooltip (#3858)', () => {
-  it('breaks down input + output + total for the most recent turn', () => {
-    const t = tokenChipTooltip({ inputTokens: 12_000, outputTokens: 3_000 })
-    expect(t).toContain('12k')
-    expect(t).toContain('3k')
-    expect(t).toContain('15k')
-    expect(t).toMatch(/most recent turn|last turn/i)
-    expect(t).toMatch(/not cumulative/i)
+describe('contextTooltip rounding (#4204 Copilot review)', () => {
+  it('rounds a long float percent to 1 decimal', () => {
+    const t = contextTooltip({ percent: 12.3456789, contextSummary: '24k / 200k' })
+    // App.tsx computes percent as (total/contextWindow)*100 which is a
+    // float. Without rounding the tooltip showed "12.3456789%" in
+    // production. Round to 1 decimal.
+    expect(t).not.toContain('12.3456789')
+    expect(t).toContain('12.3%')
   })
 
-  it('returns a sensible default when no usage data yet', () => {
-    const t = tokenChipTooltip(null)
-    expect(t).toMatch(/no usage yet|first turn/i)
+  it('trims trailing .0 for clean round numbers', () => {
+    const t = contextTooltip({ percent: 45, contextSummary: '90k / 200k' })
+    expect(t).toContain('45%')
+    expect(t).not.toContain('45.0%')
   })
 })

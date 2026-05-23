@@ -85,6 +85,13 @@ export function FooterBar({
   }
   const dotClass = settingUpTunnel ? 'connecting' : connectionPhase
 
+  // #4204 Copilot review: compute each chip's tooltip once so the
+  // `title` + `aria-label` mirror pair stays in lockstep.
+  const costTip = costTooltip({ cost: cost ?? undefined, provider })
+  const contextTip = contextTooltip({ percent: contextPercent ?? null, contextSummary: context })
+  const modelTip = modelTooltip({ model, contextWindow })
+  const agentTip = agentCountTooltip(agentCount)
+
   return (
     <footer className="footer-bar" data-testid="footer-bar">
       <div className="footer-left">
@@ -119,8 +126,8 @@ export function FooterBar({
         {agentCount != null && agentCount > 0 && (
           <span
             className="footer-agents"
-            title={agentCountTooltip(agentCount)}
-            aria-label={agentCountTooltip(agentCount)}
+            title={agentTip}
+            aria-label={agentTip}
           >
             {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
           </span>
@@ -128,8 +135,8 @@ export function FooterBar({
         {model && (
           <span
             className="footer-model"
-            title={modelTooltip({ model, contextWindow })}
-            aria-label={modelTooltip({ model, contextWindow })}
+            title={modelTip}
+            aria-label={modelTip}
           >
             {model}
           </span>
@@ -137,8 +144,8 @@ export function FooterBar({
         {cost != null && (
           <span
             className="footer-cost"
-            title={costTooltip({ cost, provider })}
-            aria-label={costTooltip({ cost, provider })}
+            title={costTip}
+            aria-label={costTip}
           >
             ${cost.toFixed(4)}
           </span>
@@ -146,8 +153,8 @@ export function FooterBar({
         {context && (
           <span
             className="footer-context"
-            title={contextTooltip({ percent: contextPercent ?? null, contextSummary: context })}
-            aria-label={contextTooltip({ percent: contextPercent ?? null, contextSummary: context })}
+            title={contextTip}
+            aria-label={contextTip}
           >
             {contextPercent != null ? (
               <>

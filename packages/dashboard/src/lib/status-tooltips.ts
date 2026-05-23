@@ -55,11 +55,20 @@ export function contextTooltip({ percent, contextSummary }: ContextTooltipArgs):
   // KEY: clarify per-turn vs cumulative. The #3858 issue calls this out
   // as the most confusing one because 100% red looks alarming but the
   // value is the LAST TURN's prompt size, not a cumulative spend.
+  // Percent rounds to 1 decimal — App.tsx computes it as a float
+  // ((total/contextWindow)*100) so without rounding we'd get
+  // "12.3456789%" in the tooltip (Copilot review on #4204).
   const lead = percent != null
-    ? `Most recent turn used ${percent}% of the model's context window.`
+    ? `Most recent turn used ${roundPercent(percent)}% of the model's context window.`
     : 'Most recent turn context usage.'
   const detail = contextSummary ? ` (${contextSummary})` : ''
-  return `${lead}${detail} This is per-turn — the bar resets each turn and the visible width caps at 100%.`
+  return `${lead}${detail} This is per-turn — resets each turn and the visible width caps at 100%.`
+}
+
+function roundPercent(n: number): string {
+  // 1-decimal precision is enough; trim trailing .0 for clean rounds.
+  const r = Math.round(n * 10) / 10
+  return Number.isInteger(r) ? String(r) : r.toFixed(1)
 }
 
 export interface ModelTooltipArgs {
@@ -76,24 +85,9 @@ export function modelTooltip({ model, contextWindow }: ModelTooltipArgs): string
   return `Active model: ${model}.${winSuffix}`
 }
 
-export function agentCountTooltip(count: number): string {
+export function agentCountTooltip(count?: number | null): string {
   if (!count || count <= 0) return ''
   const noun = count === 1 ? 'agent' : 'agents'
   return `${count} background ${noun} currently active in this session.`
 }
 
-export interface TokenChipTooltipArgs {
-  inputTokens: number
-  outputTokens: number
-}
-
-export function tokenChipTooltip(args: TokenChipTooltipArgs | null): string {
-  if (!args) {
-    return 'No usage yet — token count appears after the first turn completes.'
-  }
-  const { inputTokens, outputTokens } = args
-  const inK = Math.round(inputTokens / 1000)
-  const outK = Math.round(outputTokens / 1000)
-  const totalK = Math.round((inputTokens + outputTokens) / 1000)
-  return `Most recent turn: ${inK}k input + ${outK}k output = ${totalK}k tokens sent to the model. Not cumulative.`
-}
