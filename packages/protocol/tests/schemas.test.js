@@ -1365,6 +1365,65 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 
+  // #4192: ServerErrorEnvelopeMessage type alias — exported alongside the
+  // schema so downstream consumers (mobile/dashboard/future tools) can write
+  // `import type { ServerErrorEnvelopeMessage }` instead of re-running
+  // `z.infer<typeof ServerErrorEnvelopeSchema>` at every call site. The
+  // type itself is erased at runtime; these tests pin the schema shape that
+  // the type represents so any future schema edit (renamed field, dropped
+  // optional, narrowed enum) surfaces here before silently breaking typed
+  // consumers.
+  describe('ServerErrorEnvelopeMessage type alias (#4192)', () => {
+    it('exports a type alias importable as TS-only re-export', async () => {
+      // The export is type-only and erased at runtime, so we verify the
+      // schema this alias is derived from is present and importable.
+      // CI's Store Core Type Check / Dashboard Type Check perform the
+      // actual type-level verification when consumers import the alias.
+      const mod = await import('../src/schemas/server.ts')
+      assert.ok(mod.ServerErrorEnvelopeSchema, 'ServerErrorEnvelopeSchema must remain exported')
+    })
+
+    it('schema shape accepts all fields the type alias surfaces', async () => {
+      const { ServerErrorEnvelopeSchema } = await import('../src/schemas/server.ts')
+      const result = ServerErrorEnvelopeSchema.safeParse({
+        type: 'error',
+        requestId: 'req-1',
+        code: 'STREAM_ERROR',
+        message: 'boom',
+        fatal: false,
+        correlationId: 'c-1',
+        details: 'stack trace',
+      })
+      assert.ok(result.success, 'must accept the full documented envelope shape')
+      // Pin the inferred shape — if any of these fields are dropped/renamed,
+      // typed consumers break. Asserting at runtime catches the schema edit
+      // before it reaches downstream type-checks.
+      assert.equal(result.data.type, 'error')
+      assert.equal(result.data.code, 'STREAM_ERROR')
+      assert.equal(result.data.fatal, false)
+      assert.equal(result.data.correlationId, 'c-1')
+      assert.equal(result.data.details, 'stack trace')
+    })
+
+    it('schema preserves passthrough fields the type alias inherits', async () => {
+      const { ServerErrorEnvelopeSchema } = await import('../src/schemas/server.ts')
+      // .passthrough() lets code-specific extension fields (e.g.
+      // actualAuthor on INVALID_AUTHOR, boundSessionId on SESSION_TOKEN_MISMATCH)
+      // pass through the generic envelope. The type alias inherits this —
+      // consumers can narrow on `code` and treat extras as `unknown`.
+      const result = ServerErrorEnvelopeSchema.safeParse({
+        type: 'error',
+        message: 'mismatch',
+        code: 'SESSION_TOKEN_MISMATCH',
+        boundSessionId: 'sess-abc',
+        actualAuthor: 'someone-else',
+      })
+      assert.ok(result.success)
+      assert.equal(result.data.boundSessionId, 'sess-abc')
+      assert.equal(result.data.actualAuthor, 'someone-else')
+    })
+  })
+
   describe('BYOK credential client messages (#4052)', () => {
     it('ByokGetCredentialsStatusSchema accepts type only', async () => {
       const { ByokGetCredentialsStatusSchema } = await import('../src/schemas/client.ts')
