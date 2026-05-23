@@ -192,6 +192,50 @@ describe('handleAvailablePermissionModes', () => {
   it('returns empty array when no modes are valid', () => {
     expect(handleAvailablePermissionModes({ modes: [null, 42, 'str'] })).toEqual([])
   })
+
+  // #4019: description passes through when present + string-typed; non-strings
+  // get dropped so the typed shape downstream consumers see stays clean.
+  it('preserves the optional description field when present', () => {
+    const msg = {
+      modes: [
+        { id: 'default', label: 'Default', description: 'Prompt for each tool call' },
+        { id: 'auto', label: 'Auto Approve', description: 'Skip all prompts' },
+      ],
+    }
+    expect(handleAvailablePermissionModes(msg)).toEqual([
+      { id: 'default', label: 'Default', description: 'Prompt for each tool call' },
+      { id: 'auto', label: 'Auto Approve', description: 'Skip all prompts' },
+    ])
+  })
+
+  it('omits description when missing — preserves back-compat with old servers', () => {
+    // Pre-#4018 servers didn't ship the field at all. Result must not
+    // synthesise an empty string.
+    const result = handleAvailablePermissionModes({
+      modes: [{ id: 'default', label: 'Default' }],
+    })
+    expect(result).toEqual([{ id: 'default', label: 'Default' }])
+    expect(result?.[0]).not.toHaveProperty('description')
+  })
+
+  it('drops non-string descriptions at the type boundary', () => {
+    const msg = {
+      modes: [
+        { id: 'a', label: 'A', description: 42 },          // number
+        { id: 'b', label: 'B', description: { x: 1 } },    // object
+        { id: 'c', label: 'C', description: null },        // null
+      ],
+    }
+    const result = handleAvailablePermissionModes(msg)
+    // All three should pass the validity gate (have id + label) but their
+    // description gets stripped because it's not a string.
+    expect(result).toEqual([
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+      { id: 'c', label: 'C' },
+    ])
+    expect(result?.[0]).not.toHaveProperty('description')
+  })
 })
 
 // ---------------------------------------------------------------------------
