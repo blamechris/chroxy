@@ -1013,6 +1013,28 @@ describe('executeBuiltinTool', () => {
       }
     })
 
+    it('refuses initial IPv6 loopback [::1] when env opt-out unset (#4166 bracket handling)', async () => {
+      // URL.hostname returns IPv6 literals with brackets ('[::1]') and
+      // net.isIP() doesn't accept brackets. Pre-fix the probe fell
+      // through to dnsLookup which failed, so the refusal still fired
+      // (fail-closed) — but the path was broken for public IPv6 too.
+      // After the fix, the bracket is stripped and the loopback is
+      // recognised as such and refused via the IP branch.
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://[::1]:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
     it('refuses initial loopback (127.0.0.1) when env opt-out unset (#4132 SSRF)', async () => {
       const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
       delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE

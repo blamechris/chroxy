@@ -398,10 +398,16 @@ function isPrivateOrSpecialIp(ipStr) {
 async function isHostAllowed(hostname) {
   if (process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE === '1') return true
   if (typeof hostname !== 'string' || hostname.length === 0) return false
-  // IPv6 literals come from URL.hostname without the brackets — pass through.
-  if (isIP(hostname)) return !isPrivateOrSpecialIp(hostname)
+  // URL.hostname returns IPv6 literals WITH square brackets ('[::1]'),
+  // and node:net isIP doesn't accept brackets. Strip them before the
+  // isIP probe so legitimate public IPv6 URLs aren't all rejected as
+  // unresolvable hostnames. (Caught by /agent-review on #4165 — #4166.)
+  const probe = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname
+  if (isIP(probe)) return !isPrivateOrSpecialIp(probe)
   try {
-    const { address } = await dnsLookup(hostname)
+    const { address } = await dnsLookup(probe)
     return !isPrivateOrSpecialIp(address)
   } catch {
     // Unresolvable host — refuse rather than letting fetch try.
