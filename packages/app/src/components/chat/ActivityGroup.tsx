@@ -67,7 +67,7 @@ function ActivityEntry({
   const imageCount = message.toolResultImages?.length || 0;
 
   // Use the shared formatter so per-row labels match the header breakdown
-  // produced by `summarizeToolCounts` (e.g. "Github: List Repos" appears
+  // produced by `summarizeToolCounts` (e.g. "GitHub: List Repos" appears
   // in both places). Passing `serverName` ensures non-MCP-prefixed tools
   // routed through an MCP server still surface that origin (#3794 review).
   const displayTool = formatToolName(message.tool ?? 'Tool', message.serverName);
@@ -84,7 +84,12 @@ function ActivityEntry({
   return (
     <TouchableOpacity
       activeOpacity={0.7}
-      onLongPress={isSelecting ? undefined : handleLongPress}
+      // #4201: long-press is for entering selection mode; once the entry
+      // is expanded the user expects long-press to trigger the system
+      // text-selection on the expanded body (mirrors ToolBubble's
+      // `!expanded && !isSelecting ? handleLongPress : undefined`
+      // pattern at ToolBubble.tsx:74).
+      onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
       onPress={handlePress}
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
       testID={`activity-entry-${message.id}`}
@@ -178,6 +183,7 @@ export function ActivityGroup({
         activeOpacity={0.7}
         onPress={handlePress}
         style={styles.activityHeader}
+        testID="activity-group-header"
       >
         {isActive && <View style={styles.activityPulse} />}
         <Text style={styles.activitySummary}>{summary}</Text>

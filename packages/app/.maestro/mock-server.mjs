@@ -11,6 +11,10 @@ import { WebSocketServer } from 'ws'
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') || '9876', 10)
 const API_TOKEN = 'test-token-maestro'
 let seqCounter = 0
+// #4201: per-trigger counter so repeated `show-todos` inputs don't collide
+// on a single fixed id (which would cause React-key duplicates + stuck
+// pending tool_use rows because tool_result only patches the first match).
+let showTodosCounter = 0
 
 function send(ws, msg) {
   seqCounter++
@@ -203,13 +207,15 @@ wss.on('connection', (ws) => {
         // tool-only turns from the server elide stream_* entirely.
         if (text.trim() === 'show-todos') {
           send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
-          // #4201: fixed ids so the Maestro flow can match
-          // `activity-entry-tool-todowrite-mock` by exact testID, not
-          // a regex. Each `show-todos` invocation overwrites the same
-          // message id, which is fine for the test (the previous bubble
-          // gets replaced rather than appended).
-          const toolUseId = 'tu-todowrite-mock'
-          const toolMessageId = 'tool-todowrite-mock'
+          // #4201: ids are stable within the test but unique per trigger
+          // so repeated `show-todos` invocations don't collide on React
+          // keys (handleToolStart appends, doesn't replace, outside
+          // history replay) and tool_result patches each tool_use
+          // independently. Maestro's selector uses the "tool-todowrite-mock-"
+          // prefix with a regex so it still matches the latest entry.
+          showTodosCounter += 1
+          const toolUseId = `tu-todowrite-mock-${showTodosCounter}`
+          const toolMessageId = `tool-todowrite-mock-${showTodosCounter}`
           send(ws, {
             type: 'tool_start',
             sessionId: 'mock-sess-1',

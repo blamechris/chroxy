@@ -65,12 +65,11 @@ function findByTestId(root: renderer.ReactTestRenderer, id: string) {
 }
 
 function expandGroup(root: renderer.ReactTestRenderer) {
-  // ActivityGroup is now a View with testID "activity-group"; the header
-  // row inside is a TouchableOpacity that toggles expansion. Find the
-  // first TouchableOpacity in the group subtree (it's the header).
-  const group = findByTestId(root, 'activity-group')[0];
-  expect(group).toBeTruthy();
-  const header = group!.findAllByProps({ activeOpacity: 0.7 })[0];
+  // ActivityGroup is a View with testID "activity-group"; the header row
+  // inside is a TouchableOpacity with testID "activity-group-header".
+  // Match by testID rather than activeOpacity so the test isn't order-
+  // dependent on the TouchableOpacity tree (per #4202 Copilot review).
+  const header = findByTestId(root, 'activity-group-header')[0];
   expect(header).toBeTruthy();
   act(() => {
     header!.props.onPress();
@@ -221,6 +220,27 @@ describe('ActivityGroup / ActivityEntry — structured-renderer wiring (#4201)',
     // selection, not expand).
     expect(findByTestId(root, 'todo-list-header')).toHaveLength(0);
     expect(selected).toEqual(['m1']);
+  });
+
+  it('disables onLongPress once expanded so the user can select text in the body (#4202 Copilot review)', () => {
+    // When the entry is collapsed, long-press routes into selection
+    // mode. When expanded the user expects long-press on the visible
+    // expanded text to trigger iOS text selection (the `<Text selectable>`).
+    // If onLongPress is still wired, the gesture is consumed before text
+    // selection can fire. Mirrors ToolBubble's pattern (ToolBubble.tsx:74).
+    const root = renderGroup([makeToolMessage({ id: 'm1' })]);
+    expandGroup(root);
+    const collapsedEntry = findByTestId(root, 'activity-entry-m1')[0];
+    // Before expanding the entry: onLongPress is present.
+    expect(typeof collapsedEntry!.props.onLongPress).toBe('function');
+    // Expand the entry.
+    act(() => {
+      collapsedEntry!.props.onPress();
+    });
+    const expandedEntry = findByTestId(root, 'activity-entry-m1')[0];
+    // After expanding: onLongPress is undefined → iOS text selection on
+    // the expanded body's <Text selectable> isn't pre-empted.
+    expect(expandedEntry!.props.onLongPress).toBeUndefined();
   });
 
   it('each entry expands independently in a multi-tool activity group', () => {

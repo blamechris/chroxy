@@ -111,8 +111,13 @@ name: ChatView TodoWrite tool rendering
 - tapOn:
     id: "chat-send-button"
 
-# Wait for the activity group to land. testID set on the outer
-# TouchableOpacity in ActivityGroup.tsx.
+# Dismiss the keyboard so the activity group's bounds line up with the
+# unscrolled screen — the keyboard pushes content up by ~50% and would
+# move the entry row out from under our point-tap.
+- hideKeyboard
+
+# Wait for the activity group to land. testID set on the outer View
+# in ActivityGroup.tsx (the View wraps the header + body).
 - extendedWaitUntil:
     visible:
       id: "activity-group"
@@ -121,27 +126,25 @@ name: ChatView TodoWrite tool rendering
 # Screenshot the collapsed activity group ("1 tool used — 1 TodoWrite")
 - takeScreenshot: chat-todolist-activity-group-collapsed
 
-# Expand the activity group → reveals the per-tool ActivityEntry rows.
+# Expand the activity group by tapping its header. The outer
+# `activity-group` is a View — its testID is for assertion only; the
+# onPress handler is on the inner `activity-group-header` TouchableOpacity.
 - tapOn:
-    id: "activity-group"
+    id: "activity-group-header"
 - waitForAnimationToEnd
 
 # Screenshot the collapsed-entry state (group expanded, entry not).
 - takeScreenshot: chat-todolist-entry-collapsed
 
 # Tap the TodoWrite entry to expand it → parseTodoList(message.toolResult)
-# runs and renders <TodoList /> inline. Two-stage tap: first an id-based
-# tap that addresses the correct element semantically (and shows up in
-# Maestro hierarchy artefacts), then a fallback point-based tap. The
-# point fallback is needed because Maestro's iOS XCUITest tap-by-id on
-# a nested TouchableOpacity doesn't always propagate to React Native's
-# touch responder system — addressed in upstream Maestro #1234 but
-# unreleased; meanwhile the point-tap reliably routes through the RN
-# bridge. 50%,55% targets the entry's bounds (~y=492-536 on iPhone 17
-# Pro Max), which is below the group header and inside the entry row.
-- tapOn:
-    id: "activity-entry-tool-todowrite-mock"
-    optional: true
+# runs and renders <TodoList /> inline. The mock server emits entries
+# with id `tool-todowrite-mock-<counter>` so we tap by regex prefix.
+# Stays a point-tap (50%,55% targets the entry row at ~y=492-536 on
+# iPhone 17 Pro Max) because Maestro's iOS XCUITest tap-by-id on a
+# nested TouchableOpacity doesn't always propagate to React Native's
+# touch responder system. We do NOT double-tap with both id and point
+# because if BOTH succeed they toggle the state twice and collapse the
+# entry — flaky. Point-tap is the production path.
 - tapOn:
     point: "50%,55%"
 - waitForAnimationToEnd
