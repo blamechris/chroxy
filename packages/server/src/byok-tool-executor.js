@@ -386,13 +386,68 @@ function isPrivateOrSpecialIp(ipStr) {
         lower.startsWith('fea') || lower.startsWith('feb')) return true  // link-local fe80::/10
     if (lower.startsWith('fc') || lower.startsWith('fd')) return true   // ULA fc00::/7
     if (lower.startsWith('ff')) return true                              // multicast
-    // IPv4-mapped IPv6 (::ffff:1.2.3.4) — extract the v4 portion.
-    const m = lower.match(/^::ffff:([0-9.]+)$/)
-    if (m && isIP(m[1]) === 4) return isPrivateOrSpecialIp(m[1])
+    // IPv4-mapped IPv6: ::ffff:0:0/96 — the last 32 bits are the IPv4
+    // address. Two textual forms exist:
+    //   ::ffff:1.2.3.4         (dotted-quad tail)
+    //   ::ffff:0102:0304       (hex tail — same address)
+    // Pre-fix only the dotted form was caught; ::ffff:7f00:1 (= 127.0.0.1)
+    // would have bypassed the SSRF guard. Now we expand the address into
+    // 8 hex groups, then if it's IPv4-mapped we materialise the v4
+    // dotted form and recurse. (Copilot review on #4165.)
+    const v4 = mappedV6ToV4(lower)
+    if (v4) return isPrivateOrSpecialIp(v4)
     return false
   }
   // Not an IP literal; caller should resolve first.
   return false
+}
+
+/**
+ * If `lower` is an IPv4-mapped IPv6 address (::ffff:0:0/96), return the
+ * embedded IPv4 in dotted-quad form. Returns null for any other v6.
+ * Handles both textual forms (dotted-quad tail and hex tail).
+ */
+function mappedV6ToV4(lower) {
+  // Expand `::` so we have exactly 8 hex groups (or 6 hex + 1 dotted v4).
+  // node:net has already accepted this as a valid IPv6 so the shape is sane.
+  let groups
+  if (lower.includes('.')) {
+    // Dotted-quad tail. Replace the trailing v4 with two hex groups.
+    const lastColon = lower.lastIndexOf(':')
+    const head = lower.slice(0, lastColon)
+    const v4 = lower.slice(lastColon + 1)
+    if (isIP(v4) !== 4) return null
+    const [a, b, c, d] = v4.split('.').map((p) => parseInt(p, 10))
+    const hex = `${((a << 8) | b).toString(16).padStart(4, '0')}:${((c << 8) | d).toString(16).padStart(4, '0')}`
+    groups = expandV6Groups(`${head}:${hex}`)
+  } else {
+    groups = expandV6Groups(lower)
+  }
+  if (!groups || groups.length !== 8) return null
+  // IPv4-mapped means groups[0..4] are 0 and groups[5] is ffff.
+  for (let i = 0; i < 5; i++) if (groups[i] !== 0) return null
+  if (groups[5] !== 0xffff) return null
+  const g6 = groups[6]
+  const g7 = groups[7]
+  return `${(g6 >> 8) & 0xff}.${g6 & 0xff}.${(g7 >> 8) & 0xff}.${g7 & 0xff}`
+}
+
+function expandV6Groups(addr) {
+  const parts = addr.split('::')
+  if (parts.length > 2) return null
+  const left = parts[0] ? parts[0].split(':') : []
+  const right = parts.length === 2 && parts[1] ? parts[1].split(':') : []
+  const missing = 8 - (left.length + right.length)
+  if (missing < 0) return null
+  const middle = parts.length === 2 ? new Array(missing).fill('0') : []
+  const all = [...left, ...middle, ...right]
+  if (all.length !== 8) return null
+  const out = []
+  for (const g of all) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null
+    out.push(parseInt(g, 16))
+  }
+  return out
 }
 
 async function isHostAllowed(hostname) {
@@ -407,8 +462,17 @@ async function isHostAllowed(hostname) {
     : hostname
   if (isIP(probe)) return !isPrivateOrSpecialIp(probe)
   try {
-    const { address } = await dnsLookup(probe)
-    return !isPrivateOrSpecialIp(address)
+    // Resolve ALL addresses (both families). A multi-A host that returns
+    // a public IP plus a private IP would otherwise slip past with the
+    // single-address default — `fetch` may then pick the private one.
+    // Refuse if ANY resolved address is private/special. (Copilot review
+    // on #4165.)
+    const addresses = await dnsLookup(probe, { all: true })
+    if (!Array.isArray(addresses) || addresses.length === 0) return false
+    for (const { address } of addresses) {
+      if (isPrivateOrSpecialIp(address)) return false
+    }
+    return true
   } catch {
     // Unresolvable host — refuse rather than letting fetch try.
     return false
@@ -511,8 +575,12 @@ async function runWebFetch({ input, signal }) {
         return { content: `WebFetch refused redirect: malformed Location header`, isError: true }
       }
       if (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') {
+        // The Location header is attacker-controlled, so don't echo it
+        // verbatim — that's a prompt-injection surface AND would leak
+        // sensitive paths (e.g. file:///etc/passwd). Just report the
+        // scheme. (Copilot review on #4165.)
         return {
-          content: `WebFetch refused redirect scheme: only http(s) allowed (got ${nextUrl.protocol} via ${loc})`,
+          content: `WebFetch refused redirect scheme: only http(s) allowed (got ${nextUrl.protocol})`,
           isError: true,
         }
       }

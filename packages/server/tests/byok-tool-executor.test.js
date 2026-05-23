@@ -961,7 +961,7 @@ describe('executeBuiltinTool', () => {
       assert.match(r.content, /redirected ok/)
     })
 
-    it('refuses redirect to file:// scheme (#4132)', async () => {
+    it('refuses redirect to file:// scheme without leaking the Location path (#4132 + Copilot review)', async () => {
       routes.set('/r-evil', (_req, res) => {
         res.writeHead(302, { Location: 'file:///etc/passwd' })
         res.end()
@@ -973,10 +973,12 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, true)
       assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
-      // The denied target's full path leaks if echoed verbatim — should
-      // be present only enough to make the model understand WHY, but the
-      // scheme is the key signal.
+      // The scheme IS the diagnostic — but Location is attacker-controlled,
+      // so the message must NOT echo the path/query verbatim (prompt
+      // injection + sensitive-path leak surface).
       assert.match(r.content, /file:/)
+      assert.equal(r.content.includes('/etc/passwd'), false,
+        'attacker-controlled Location path must not be reflected in error')
     })
 
     it('refuses redirect to javascript: scheme (#4132)', async () => {
@@ -1026,6 +1028,43 @@ describe('executeBuiltinTool', () => {
         const r = await executeBuiltinTool({
           toolName: 'WebFetch',
           input: { url: 'http://[::1]:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses IPv4-mapped IPv6 hex form (::ffff:7f00:1) (Copilot review on #4165)', async () => {
+      // ::ffff:7f00:1 expands to ::ffff:127.0.0.1 — the SAME loopback
+      // address in IPv4-mapped IPv6 hex form. Pre-fix this bypassed
+      // the SSRF check because only the dotted-quad tail form was
+      // recognised. The mappedV6ToV4 helper now expands the v6 groups
+      // and recognises the IPv4-mapped prefix.
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://[::ffff:7f00:1]:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses IPv4-mapped IPv6 dotted form (::ffff:127.0.0.1) (#4132)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://[::ffff:127.0.0.1]:1/', prompt: 'x' },
           ...ctx(),
         })
         assert.equal(r.isError, true)
