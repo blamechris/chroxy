@@ -363,13 +363,30 @@ async function runWebFetch({ input, signal }) {
   try {
     parsed = new URL(rawUrl)
   } catch {
-    return { content: `EINVAL: malformed url: ${rawUrl}`, isError: true }
+    // #4159: do NOT echo rawUrl here — a URL that fails to parse can
+    // still contain userinfo (e.g. `http://alice:hunter2@` fails the
+    // host check) and any echo lands in conversation history.
+    return { content: 'EINVAL: malformed url (could not be parsed as http(s))', isError: true }
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return {
       content: `EINVAL: only http(s) URLs are supported (got ${parsed.protocol})`,
       isError: true,
     }
+  }
+  // #4133: strip user:pass@ userinfo before either echoing the URL back
+  // to the model OR passing it to fetch(). Two reasons:
+  //   1. The model's tool_result lands in conversation history and gets
+  //      resent to the Anthropic API on the next turn — userinfo in the
+  //      URL is a credential exfiltration path.
+  //   2. Node fetch refuses URLs containing credentials outright with
+  //      an error that itself echoes the credentialed URL, so even the
+  //      failure path leaks. Stripping here turns the fetch into an
+  //      unauthenticated request — the server may 401 / 403, which is
+  //      surfaced cleanly without exposing the creds.
+  if (parsed.username || parsed.password) {
+    parsed.username = ''
+    parsed.password = ''
   }
 
   const requested = Number(input?.timeout)

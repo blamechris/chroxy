@@ -799,6 +799,63 @@ describe('executeBuiltinTool', () => {
       assert.match(r.content, /beforemiddleafter/)
     })
 
+    it('strips user:pass@ credentials from URL echoed in result header (#4133)', async () => {
+      // Pre-fix the URL was echoed verbatim from parsed.toString(), leaking
+      // any embedded credentials into the model's view and (via history)
+      // back to the Anthropic API. Strip userinfo before display.
+      routes.set('/creds-ok', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('body content')
+      })
+      const { port } = server.address()
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/creds-ok`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.equal(r.content.includes('alice'), false, 'username must not leak')
+      assert.equal(r.content.includes('hunter2'), false, 'password must not leak')
+      assert.equal(r.content.includes('alice:hunter2@'), false, 'userinfo must not leak')
+      // The sanitized URL is still useful — host + path are preserved.
+      assert.match(r.content, new RegExp(`URL: http://127\\.0\\.0\\.1:${port}/creds-ok`))
+    })
+
+    it('malformed-url EINVAL does not echo raw input (no creds leak) (#4159)', async () => {
+      // A URL like `http://alice:hunter2@` fails new URL() AND contains
+      // userinfo — the EINVAL must NOT echo the raw input back to the
+      // model (which lands in conversation history). Pre-fix it did.
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: 'http://alice:hunter2@', prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /malformed/i)
+      assert.equal(r.content.includes('alice'), false, 'username must not leak')
+      assert.equal(r.content.includes('hunter2'), false, 'password must not leak')
+    })
+
+    it('also strips credentials from the 4xx/5xx error path (#4133)', async () => {
+      const { port } = server.address()
+      // /missing is not registered → 404
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/missing`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /404/)
+      assert.equal(r.content.includes('alice'), false)
+      assert.equal(r.content.includes('hunter2'), false)
+    })
+
     it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {
       routes.set('/entities', (_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html' })
