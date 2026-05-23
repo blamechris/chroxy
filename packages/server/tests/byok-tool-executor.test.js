@@ -366,7 +366,28 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, true)
       assert.match(r.content, /duplicate/i)
       assert.match(r.content, /'a'/)
+      // Pin the index so the error template can't drift to a different
+      // shape unnoticed.
+      assert.match(r.content, /todos\[1\]/)
       assert.equal(store.size, 0, 'duplicate-id call must not mutate the store (atomic)')
+    })
+
+    it('treats ids as case-sensitive (dup check matches storage semantics)', async () => {
+      // The Map storage uses raw string keys, so 'a' and 'A' are distinct.
+      // Pin that contract — a future "normalize for user friendliness"
+      // refactor would silently merge what the model intended as separate
+      // todos.
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'lower', status: 'pending' },
+          { id: 'A', content: 'upper', status: 'pending' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 2)
     })
 
     it('duplicate-id rejection preserves prior store entries (#4138 atomic)', async () => {
