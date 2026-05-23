@@ -426,14 +426,21 @@ async function runWebFetch({ input, signal }) {
   //      unauthenticated request — the server may 401 / 403, which is
   //      surfaced cleanly without exposing the creds.
   // #4160: remember whether userinfo was present so the result header
-  // can surface a `[userinfo stripped]` marker — a silent strip turns
-  // a downstream 401 into a mysterious failure that the model can't
+  // can surface a `[userinfo stripped from ...]` marker — a silent strip
+  // turns a downstream 401 into a mysterious failure that the model can't
   // diagnose. The marker is the design trade-off worth flagging.
-  // Tracked as `let` because a redirect Location can introduce userinfo
-  // on a later hop; we OR into this flag so the marker reflects stripping
-  // at ANY hop (Copilot review on #4182).
-  let hadUserinfo = Boolean(parsed.username || parsed.password)
-  if (hadUserinfo) {
+  //
+  // #4183: track input-URL strip and redirect-hop strip as SEPARATE flags
+  // so the marker can say exactly where the credentials came from. The
+  // pre-#4183 single `hadUserinfo` flag produced a marker adjacent to
+  // `currentUrl` (which may be a redirect destination), so a reader
+  // could plausibly think the marker referred to the displayed URL
+  // even when the strip happened on the input or on an earlier hop.
+  // Distinguishing the two sources keeps the marker honest in the
+  // redirect-chain case without changing where it sits in the result.
+  const inputHadUserinfo = Boolean(parsed.username || parsed.password)
+  let redirectHadUserinfo = false
+  if (inputHadUserinfo) {
     parsed.username = ''
     parsed.password = ''
   }
@@ -498,11 +505,13 @@ async function runWebFetch({ input, signal }) {
       // `user:pass@` userinfo on any hop. Strip it BEFORE the next fetch
       // — Node fetch refuses credentialed URLs with an error that echoes
       // the credentialed URL, which would then leak via the catch-all
-      // `WebFetch failed: ${err.message}` path. OR into `hadUserinfo`
-      // so the result marker reflects stripping at any hop, not just
-      // the initial URL.
+      // `WebFetch failed: ${err.message}` path.
+      // #4183: set `redirectHadUserinfo` (separate from `inputHadUserinfo`)
+      // so the result marker can name where the credentials came from
+      // rather than ambiguously claiming "userinfo stripped" next to a
+      // URL that may not itself have carried any.
       if (nextUrl.username || nextUrl.password) {
-        hadUserinfo = true
+        redirectHadUserinfo = true
         nextUrl.username = ''
         nextUrl.password = ''
       }
@@ -534,8 +543,20 @@ async function runWebFetch({ input, signal }) {
     }
 
     // Compute the marker AFTER the redirect loop so it reflects any
-    // userinfo stripped on a hop (#4182 Copilot review).
-    const userinfoMarker = hadUserinfo ? ' [userinfo stripped]' : ''
+    // userinfo stripped on a hop (#4182 Copilot review). #4183: name the
+    // SOURCE of the stripped credentials so the marker is unambiguous
+    // when `currentUrl` is a redirect destination that didn't itself
+    // carry userinfo. The four arms are mutually exclusive at the
+    // boolean level; the cross case is a single combined message rather
+    // than two stacked markers.
+    const userinfoMarker = (() => {
+      if (inputHadUserinfo && redirectHadUserinfo) {
+        return ' [userinfo stripped from input URL and redirect Location]'
+      }
+      if (inputHadUserinfo) return ' [userinfo stripped from input URL]'
+      if (redirectHadUserinfo) return ' [userinfo stripped from redirect Location]'
+      return ''
+    })()
 
     if (!res.ok) {
       return {

@@ -884,7 +884,11 @@ describe('executeBuiltinTool', () => {
         ...ctx(),
       })
       assert.equal(r.isError, false)
-      assert.match(r.content, /\[userinfo stripped\]/)
+      // #4183: the marker must name `input URL` as the source, not just
+      // a bare `[userinfo stripped]` — otherwise a reader could plausibly
+      // read it as referring to the URL it sits next to (which after a
+      // redirect could be a destination URL that carried no userinfo).
+      assert.match(r.content, /\[userinfo stripped from input URL\]/)
       // Credentials still must not leak alongside the marker.
       assert.equal(r.content.includes('alice'), false)
       assert.equal(r.content.includes('hunter2'), false)
@@ -902,7 +906,9 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, true)
       assert.match(r.content, /404/)
-      assert.match(r.content, /\[userinfo stripped\]/)
+      // #4183: explicit source naming — input URL was where the creds came
+      // from (no redirect on this 404 path).
+      assert.match(r.content, /\[userinfo stripped from input URL\]/)
     })
 
     it('does NOT mark the URL line when input had no userinfo (#4160)', async () => {
@@ -918,7 +924,7 @@ describe('executeBuiltinTool', () => {
         ...ctx(),
       })
       assert.equal(r.isError, false)
-      assert.equal(r.content.includes('[userinfo stripped]'), false,
+      assert.equal(r.content.includes('[userinfo stripped'), false,
         'marker must not appear when input had no userinfo')
     })
 
@@ -944,11 +950,54 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, false, 'redirect with userinfo must not leak via WebFetch failed:')
       assert.match(r.content, /landed/, 'must follow the redirect to the final page')
-      assert.match(r.content, /\[userinfo stripped\]/,
-        'marker must reflect userinfo stripped on a redirect hop')
+      // #4183: the marker must NAME the redirect Location as the source —
+      // a bare `[userinfo stripped]` would be misleading because the
+      // initial URL had no userinfo and the displayed `currentUrl` is the
+      // final destination, not the credentialed Location header.
+      assert.match(r.content, /\[userinfo stripped from redirect Location\]/,
+        'marker must attribute the strip to the redirect Location, not the displayed URL')
+      // Per #4183 acceptance criteria: the input-URL phrasing must NOT
+      // appear here — only the redirect carried userinfo so claiming the
+      // input did would be wrong.
+      assert.equal(r.content.includes('[userinfo stripped from input URL'), false,
+        'marker must not claim input URL had userinfo when only the redirect did')
       assert.equal(r.content.includes('bob'), false, 'username must not leak')
       assert.equal(r.content.includes('s3cr3t'), false, 'password must not leak')
       assert.equal(r.content.includes('bob:s3cr3t@'), false, 'userinfo must not leak verbatim')
+    })
+
+    it('names both sources when input AND redirect each carry userinfo (#4183)', async () => {
+      // The cross-product case: input URL carries `alice:hunter2@` AND the
+      // 302 Location header carries `bob:s3cr3t@`. Both get stripped; the
+      // single combined marker tells the reader where each came from.
+      // Without source-naming, the bare marker is doubly ambiguous here.
+      const { port } = server.address()
+      routes.set('/both-creds', (_req, res) => {
+        res.writeHead(302, { Location: `http://bob:s3cr3t@127.0.0.1:${port}/both-creds-final` })
+        res.end()
+      })
+      routes.set('/both-creds-final', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('landed-both')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/both-creds`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /landed-both/)
+      assert.match(r.content,
+        /\[userinfo stripped from input URL and redirect Location\]/,
+        'combined marker must name both sources')
+      // Belt-and-braces: no credential leak from either hop.
+      assert.equal(r.content.includes('alice'), false, 'input username must not leak')
+      assert.equal(r.content.includes('hunter2'), false, 'input password must not leak')
+      assert.equal(r.content.includes('bob'), false, 'redirect username must not leak')
+      assert.equal(r.content.includes('s3cr3t'), false, 'redirect password must not leak')
     })
 
     it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
