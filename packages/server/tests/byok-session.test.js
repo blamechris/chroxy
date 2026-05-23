@@ -1318,10 +1318,12 @@ describe('ClaudeByokSession', () => {
       await session.sendMessage('go')
 
       const errs = captured.filter((e) => e.name === 'error')
-      assert.ok(errs.some((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED'),
-        'cap-hit error must fire before the finalMessage rejection')
-      assert.ok(errs.some((e) => e.payload?.code === 'STREAM_ERROR'),
-        'finalMessage non-abort rejection must escalate to STREAM_ERROR')
+      const capIdx = errs.findIndex((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      const streamErrIdx = errs.findIndex((e) => e.payload?.code === 'STREAM_ERROR')
+      assert.notEqual(capIdx, -1, 'cap-hit error must fire')
+      assert.notEqual(streamErrIdx, -1, 'finalMessage non-abort rejection must escalate to STREAM_ERROR')
+      assert.ok(capIdx < streamErrIdx,
+        'cap-hit error must fire BEFORE the finalMessage rejection (order matters)')
       assert.equal(errs.filter((e) => e.payload?.code === 'ABORT').length, 0,
         'non-abort rejection must NOT route to ABORT')
       assert.equal(session._history.length, historyBefore,
@@ -1368,10 +1370,12 @@ describe('ClaudeByokSession', () => {
       await session.sendMessage('go')
 
       const errs = captured.filter((e) => e.name === 'error')
-      assert.ok(errs.some((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED'),
-        'cap-hit error fires before the abort')
-      assert.ok(errs.some((e) => e.payload?.code === 'ABORT'),
-        'finalMessage APIUserAbortError must route to ABORT')
+      const capIdx = errs.findIndex((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      const abortIdx = errs.findIndex((e) => e.payload?.code === 'ABORT')
+      assert.notEqual(capIdx, -1, 'cap-hit error must fire')
+      assert.notEqual(abortIdx, -1, 'finalMessage APIUserAbortError must route to ABORT')
+      assert.ok(capIdx < abortIdx,
+        'cap-hit error must fire BEFORE the ABORT from finalMessage (order matters)')
       assert.equal(errs.filter((e) => e.payload?.code === 'STREAM_ERROR').length, 0,
         'abort path on finalMessage must NOT escalate to STREAM_ERROR')
       assert.equal(session._history.length, historyBefore,
