@@ -34,6 +34,17 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, true)
       assert.match(r.content, /Unknown tool: NotARealTool/)
     })
+
+    it('error message lists every BUILTIN_TOOL name (drift guard — review #4136)', async () => {
+      // Pre-fix the list was hardcoded and could drift from BUILTIN_TOOLS.
+      // Now it's derived from BUILTIN_TOOL_NAMES — adding a tool here is
+      // automatically reflected in the error message.
+      const { BUILTIN_TOOL_NAMES } = await import('../src/byok-tools.js')
+      const r = await executeBuiltinTool({ toolName: 'X', input: {}, ...ctx() })
+      for (const name of BUILTIN_TOOL_NAMES) {
+        assert.ok(r.content.includes(name), `error must list ${name}`)
+      }
+    })
   })
 
   describe('Read', () => {
@@ -238,6 +249,197 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, true)
       assert.match(r.content, /outside workspace/)
+    })
+  })
+
+  describe('TodoWrite (#4051)', () => {
+    function todoCtx() {
+      return { cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: new Map() }
+    }
+
+    it('adds new items to an empty store', async () => {
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'task one', status: 'pending' },
+          { id: 'b', content: 'task two', status: 'in_progress', activeForm: 'Working on two' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 2)
+      assert.match(r.content, /2 items/)
+      assert.match(r.content, /1 in progress/)
+      assert.match(r.content, /1 pending/)
+      assert.match(r.content, /task one/)
+      assert.match(r.content, /task two/)
+    })
+
+    it('merges partial updates without dropping unrelated items', async () => {
+      const store = new Map()
+      // Seed with 3 items.
+      await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'task one', status: 'pending' },
+          { id: 'b', content: 'task two', status: 'pending' },
+          { id: 'c', content: 'task three', status: 'pending' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(store.size, 3)
+
+      // Update ONLY item 'b' — items 'a' and 'c' must remain in the store.
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'b', content: 'task two', status: 'in_progress' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 3, 'partial update must not drop unrelated items')
+      assert.equal(store.get('a').status, 'pending')
+      assert.equal(store.get('b').status, 'in_progress')
+      assert.equal(store.get('c').status, 'pending')
+    })
+
+    it('replaces fields per item id on subsequent calls', async () => {
+      const store = new Map()
+      await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'x', content: 'old name', status: 'pending' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'x', content: 'new name', status: 'completed' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(store.size, 1)
+      assert.equal(store.get('x').content, 'new name')
+      assert.equal(store.get('x').status, 'completed')
+    })
+
+    it('rejects items without an id', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ content: 'no id', status: 'pending' }] },
+        ...todoCtx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /id is required/)
+    })
+
+    it('rejects items without content', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', status: 'pending' }] },
+        ...todoCtx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /content is required/)
+    })
+
+    it('rejects invalid status values', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: 'x', status: 'banana' }] },
+        ...todoCtx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /status must be one of/)
+    })
+
+    it('does not half-apply when a later item is invalid (atomic merge)', async () => {
+      const store = new Map()
+      // Seed.
+      await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: 'first', status: 'pending' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      // Try a 2-item call where the second is invalid — neither item
+      // should be applied; the store should still contain only 'a' with
+      // its original state.
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'mutated', status: 'completed' },
+          { id: 'b', content: 'bad', status: 'banana' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      assert.equal(store.size, 1, 'invalid item must not apply earlier items in the same call')
+      assert.equal(store.get('a').content, 'first')
+      assert.equal(store.get('a').status, 'pending')
+    })
+
+    it('rejects when todos is not an array', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: 'not-an-array' },
+        ...todoCtx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /must be an array/)
+    })
+
+    it('accepts an empty todos array (no-op confirmation)', async () => {
+      const store = new Map([['a', { id: 'a', content: 'x', status: 'pending' }]])
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 1, 'empty input must not clear the store')
+      assert.match(r.content, /1 items/)
+    })
+
+    it('caps rendered output at 100 items with a "showing first X of Y" marker (review #4136)', async () => {
+      const store = new Map()
+      const lots = []
+      for (let i = 0; i < 150; i++) {
+        lots.push({ id: `t${i}`, content: `task ${i}`, status: 'pending' })
+      }
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: lots },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 150, 'full list retained server-side')
+      assert.match(r.content, /150 items/)
+      assert.match(r.content, /showing first 100 of 150/)
+      // Item 0 should appear, item 149 should NOT (cap is 100).
+      assert.match(r.content, /task 0 \(t0\)/)
+      assert.equal(r.content.includes('task 149 (t149)'), false)
+    })
+
+    it('truncates long content strings with an ellipsis marker (review #4136)', async () => {
+      const store = new Map()
+      const longText = 'x'.repeat(500)
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: longText, status: 'pending' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.ok(r.content.length < longText.length + 200, 'output must be capped')
+      assert.match(r.content, /…/)
+    })
+
+    it('returns EINTERNAL when the executor is called without a todoStore', async () => {
+      // This guards against forgetting to wire the session's Map through
+      // — the executor should fail loudly rather than silently dropping.
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: 'x', status: 'pending' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000,
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /EINTERNAL/)
     })
   })
 

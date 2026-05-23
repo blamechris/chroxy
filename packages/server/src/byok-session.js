@@ -177,6 +177,12 @@ export class ClaudeByokSession extends BaseSession {
     // cache per session — fresh sessions don't reuse a stale cwd.
     this._cwdRealCache = new Map()
 
+    // #4051: Per-session TodoWrite list. Keyed by todo id; the executor
+    // merges partial updates into this map so the model can update one
+    // item without re-listing the rest. Resets implicitly on destroy
+    // (the session goes away; the Map gets garbage-collected).
+    this._todos = new Map()
+
     // #4085: Per-session set of model ids we've already logged a
     // "no pricing entry" warn for. Without this, a tool-heavy 50-turn
     // session on an unknown model logs 50 identical warns — noise that
@@ -535,6 +541,7 @@ export class ClaudeByokSession extends BaseSession {
       cwdRealCache: this._cwdRealCache,
       cwdCacheTtl: CWD_CACHE_TTL_MS,
       signal,
+      todoStore: this._todos,
     })
 
     this.emit('tool_result', {

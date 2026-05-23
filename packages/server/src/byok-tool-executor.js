@@ -20,6 +20,7 @@ import { resolve, isAbsolute } from 'node:path'
 import { validatePathWithinCwd } from './ws-file-ops/common.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
+import { TODO_STATUSES, BUILTIN_TOOL_NAMES } from './byok-tools.js'
 
 /**
  * Cap on Bash timeout the model can request. 10 minutes is the same
@@ -69,6 +70,7 @@ function buildSafeBashEnv() {
  * @param {Map} args.cwdRealCache      Per-session cache of resolved real paths
  * @param {number} args.cwdCacheTtl    Cache TTL in ms
  * @param {AbortSignal} [args.signal]  Optional abort signal — Bash exec listens
+ * @param {Map}         [args.todoStore]  Per-session TodoWrite list (id → item)
  * @returns {Promise<{ content: string, isError: boolean }>}
  */
 export async function executeBuiltinTool({
@@ -78,6 +80,7 @@ export async function executeBuiltinTool({
   cwdRealCache,
   cwdCacheTtl,
   signal,
+  todoStore,
 }) {
   try {
     switch (toolName) {
@@ -95,11 +98,17 @@ export async function executeBuiltinTool({
         return await runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal })
       case 'WebFetch':
         return await runWebFetch({ input, signal })
-      default:
+      case 'TodoWrite':
+        return runTodoWrite({ input, todoStore })
+      default: {
+        // Derive the list from BUILTIN_TOOL_NAMES so adding a tool only
+        // requires updating byok-tools.js — this message can't drift.
+        const known = [...BUILTIN_TOOL_NAMES].sort().join(', ')
         return {
-          content: `Unknown tool: ${toolName}. The claude-byok provider ships with: Read, Write, Edit, Bash, Glob, Grep. MCP and other tools land in follow-up issues.`,
+          content: `Unknown tool: ${toolName}. The claude-byok provider ships with: ${known}. MCP and other tools land in follow-up issues.`,
           isError: true,
         }
+      }
     }
   } catch (err) {
     // Anything that escapes the per-tool runner becomes an error
@@ -518,3 +527,82 @@ function capOutput(text, maxChars) {
   }
   return { output: text.slice(0, maxChars), outputTruncated: true }
 }
+
+/**
+ * Merge a partial todo list into the session's `todoStore` (Map keyed by
+ * id). Items in the call replace existing entries with the same id;
+ * items not mentioned in the call are preserved (merge semantics — see
+ * #4051 acceptance criteria). Validates each item before mutating so a
+ * mid-list invalid entry doesn't half-apply the update.
+ */
+function runTodoWrite({ input, todoStore }) {
+  if (!todoStore || !(todoStore instanceof Map)) {
+    return {
+      content: 'EINTERNAL: TodoWrite requires a session-scoped store (byok-session.js wires this).',
+      isError: true,
+    }
+  }
+  const todos = input?.todos
+  if (!Array.isArray(todos)) {
+    return { content: 'EINVAL: todos must be an array', isError: true }
+  }
+
+  // Validate every item BEFORE mutating so a bad item halfway through
+  // doesn't leave the store in a partially-applied state.
+  for (let i = 0; i < todos.length; i++) {
+    const t = todos[i]
+    if (!t || typeof t !== 'object') {
+      return { content: `EINVAL: todos[${i}] must be an object`, isError: true }
+    }
+    if (typeof t.id !== 'string' || t.id.length === 0) {
+      return { content: `EINVAL: todos[${i}].id is required (string)`, isError: true }
+    }
+    if (typeof t.content !== 'string' || t.content.length === 0) {
+      return { content: `EINVAL: todos[${i}].content is required (string)`, isError: true }
+    }
+    if (typeof t.status !== 'string' || !TODO_STATUSES.has(t.status)) {
+      return {
+        content: `EINVAL: todos[${i}].status must be one of pending|in_progress|completed (got ${JSON.stringify(t.status)})`,
+        isError: true,
+      }
+    }
+    if (t.activeForm !== undefined && typeof t.activeForm !== 'string') {
+      return { content: `EINVAL: todos[${i}].activeForm must be a string when present`, isError: true }
+    }
+  }
+
+  // Apply the merge.
+  for (const t of todos) {
+    const entry = { id: t.id, content: t.content, status: t.status }
+    if (typeof t.activeForm === 'string') entry.activeForm = t.activeForm
+    todoStore.set(t.id, entry)
+  }
+
+  // Build a readable summary from the FULL current list (post-merge).
+  // The model already sees the call in its history; this confirmation
+  // exists so a partial call still surfaces unrelated items. The output
+  // is capped so a runaway list (or pathologically long `content`)
+  // doesn't balloon conversation history toward token-limit cliffs —
+  // the full Map stays server-side; only the rendered summary is capped.
+  const all = [...todoStore.values()]
+  const counts = { pending: 0, in_progress: 0, completed: 0 }
+  for (const t of all) counts[t.status]++
+
+  const header = `Todo list (${all.length} items): ${counts.in_progress} in progress, ${counts.pending} pending, ${counts.completed} completed`
+  const visible = all.slice(0, TODOWRITE_MAX_ITEMS_RENDERED)
+  const lines = [header]
+  for (const t of visible) {
+    const marker = t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'
+    const content = t.content.length > TODOWRITE_MAX_CONTENT_RENDERED
+      ? t.content.slice(0, TODOWRITE_MAX_CONTENT_RENDERED) + '…'
+      : t.content
+    lines.push(`  ${marker} ${content} (${t.id})`)
+  }
+  if (all.length > visible.length) {
+    lines.push(`  … (showing first ${visible.length} of ${all.length}; full list retained server-side)`)
+  }
+  return { content: lines.join('\n'), isError: false }
+}
+
+const TODOWRITE_MAX_ITEMS_RENDERED = 100
+const TODOWRITE_MAX_CONTENT_RENDERED = 200
