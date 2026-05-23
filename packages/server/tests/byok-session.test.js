@@ -1391,6 +1391,7 @@ describe('ClaudeByokSession', () => {
         }
         await session.start()
         await session.sendMessage('write a note')
+        assert.ok(toolResultBlock, 'Write must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /Wrote 15 bytes/)
         assert.match(toolResultBlock.content, /\(created\)/)
@@ -1434,6 +1435,7 @@ describe('ClaudeByokSession', () => {
         }
         await session.start()
         await session.sendMessage('do the edit')
+        assert.ok(toolResultBlock, 'Edit must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /Replaced 1 occurrence/)
         assert.equal(readFileSync(targetPath, 'utf8'), 'before:KEPT:after')
@@ -1473,6 +1475,7 @@ describe('ClaudeByokSession', () => {
         }
         await session.start()
         await session.sendMessage('run echo')
+        assert.ok(toolResultBlock, 'Bash must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /bash-seam-ok/)
         // Bash result includes the exit-footer the model relies on.
@@ -1560,6 +1563,7 @@ describe('ClaudeByokSession', () => {
         }
         await session.start()
         await session.sendMessage('find txt files')
+        assert.ok(toolResultBlock, 'Glob must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /a\.txt/)
         assert.match(toolResultBlock.content, /b\.txt/)
@@ -1601,6 +1605,7 @@ describe('ClaudeByokSession', () => {
         }
         await session.start()
         await session.sendMessage('grep for it')
+        assert.ok(toolResultBlock, 'Grep must produce a tool_result')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /haystack\.txt/)
         assert.match(toolResultBlock.content, /NEEDLE-here/)
