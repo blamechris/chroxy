@@ -11,6 +11,7 @@ import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { formatToolName } from './chat-utils';
+import { TodoList, parseTodoList } from './TodoList';
 
 export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpenDetail }: {
   message: ChatMessage;
@@ -51,6 +52,15 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
 
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
+  // #4180: TodoWrite tool_result is rendered as a structured checklist
+  // when expanded. Parse once (only when expanded + tool matches) and
+  // fall back to plain text on parse failure. Collapsed preview stays
+  // the existing text snippet so the bubble's compact height is
+  // preserved.
+  const todoParsed = expanded && message.tool === 'TodoWrite'
+    ? parseTodoList(content)
+    : null;
+
   return (
     <TouchableOpacity
       activeOpacity={0.7}
@@ -72,7 +82,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
         </Text>
       </View>
       {expanded ? (
-        <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+        todoParsed ? (
+          <TodoList parsed={todoParsed} />
+        ) : (
+          <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+        )
       ) : (
         <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
       )}
