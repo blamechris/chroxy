@@ -922,6 +922,35 @@ describe('executeBuiltinTool', () => {
         'marker must not appear when input had no userinfo')
     })
 
+    it('strips userinfo introduced by a redirect Location header (#4182 Copilot review)', async () => {
+      // A Location header can carry `user:pass@` userinfo even when the
+      // initial URL had none. Without per-hop stripping, that URL would
+      // be passed to fetch(), which refuses credentialed URLs with an
+      // error message that echoes the credentialed URL — leaking the
+      // creds via the catch-all `WebFetch failed: ${err.message}` path.
+      const { port } = server.address()
+      routes.set('/r-creds', (_req, res) => {
+        res.writeHead(302, { Location: `http://bob:s3cr3t@127.0.0.1:${port}/r-creds-final` })
+        res.end()
+      })
+      routes.set('/r-creds-final', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('landed')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `http://127.0.0.1:${port}/r-creds`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false, 'redirect with userinfo must not leak via WebFetch failed:')
+      assert.match(r.content, /landed/, 'must follow the redirect to the final page')
+      assert.match(r.content, /\[userinfo stripped\]/,
+        'marker must reflect userinfo stripped on a redirect hop')
+      assert.equal(r.content.includes('bob'), false, 'username must not leak')
+      assert.equal(r.content.includes('s3cr3t'), false, 'password must not leak')
+      assert.equal(r.content.includes('bob:s3cr3t@'), false, 'userinfo must not leak verbatim')
+    })
+
     it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
       // ISO-8859-1: 0xE9 is 'é', 0xF6 is 'ö'. Decoded as utf-8 those
       // bytes are invalid continuations and become replacement

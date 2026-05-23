@@ -517,12 +517,14 @@ async function runWebFetch({ input, signal }) {
   // can surface a `[userinfo stripped]` marker — a silent strip turns
   // a downstream 401 into a mysterious failure that the model can't
   // diagnose. The marker is the design trade-off worth flagging.
-  const hadUserinfo = Boolean(parsed.username || parsed.password)
+  // Tracked as `let` because a redirect Location can introduce userinfo
+  // on a later hop; we OR into this flag so the marker reflects stripping
+  // at ANY hop (Copilot review on #4182).
+  let hadUserinfo = Boolean(parsed.username || parsed.password)
   if (hadUserinfo) {
     parsed.username = ''
     parsed.password = ''
   }
-  const userinfoMarker = hadUserinfo ? ' [userinfo stripped]' : ''
 
   const requested = Number(input?.timeout)
   const timeoutMs = Number.isFinite(requested) && requested > 0
@@ -580,6 +582,18 @@ async function runWebFetch({ input, signal }) {
       } catch {
         return { content: `WebFetch refused redirect: malformed Location header`, isError: true }
       }
+      // #4182 (Copilot review): a Location header can introduce
+      // `user:pass@` userinfo on any hop. Strip it BEFORE the next fetch
+      // — Node fetch refuses credentialed URLs with an error that echoes
+      // the credentialed URL, which would then leak via the catch-all
+      // `WebFetch failed: ${err.message}` path. OR into `hadUserinfo`
+      // so the result marker reflects stripping at any hop, not just
+      // the initial URL.
+      if (nextUrl.username || nextUrl.password) {
+        hadUserinfo = true
+        nextUrl.username = ''
+        nextUrl.password = ''
+      }
       if (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') {
         // The Location header is attacker-controlled, so don't echo it
         // verbatim — that's a prompt-injection surface AND would leak
@@ -606,6 +620,10 @@ async function runWebFetch({ input, signal }) {
       }
       currentUrl = nextUrl
     }
+
+    // Compute the marker AFTER the redirect loop so it reflects any
+    // userinfo stripped on a hop (#4182 Copilot review).
+    const userinfoMarker = hadUserinfo ? ' [userinfo stripped]' : ''
 
     if (!res.ok) {
       return {
