@@ -1216,7 +1216,12 @@ describe('ClaudeByokSession', () => {
         'history must roll back to pre-send length on abort')
       assert.equal(session._isBusy, false, 'session must be released so the user can send again')
 
-      // Session usable after: stub a clean next-turn stream and send another message.
+      // Session usable after: the real bug this guards against is
+      // _isBusy left true / _abortController not nulled after abort
+      // (then the next sendMessage short-circuits with 'Already
+      // processing' per byok-session.js:_finishTurn). Swap the stream
+      // stub so the assertion isolates session reusability, not the
+      // cap-hit path's stub behaviour.
       session._client.messages.stream = () => fakeStream(
         [
           { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
