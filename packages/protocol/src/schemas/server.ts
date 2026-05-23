@@ -882,6 +882,11 @@ export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
+// #4192: typed alias for the generic `type: 'error'` envelope added in #4178.
+// Downstream consumers (store-core handleError, dashboard message-handler,
+// future mobile dispatch) can import this directly instead of re-running
+// `z.infer<typeof ServerErrorEnvelopeSchema>` at each call site.
+export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchema>
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
 export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>
 export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>
