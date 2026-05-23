@@ -1261,6 +1261,73 @@ describe('dashboard message-handler dispatch', () => {
       )
       expect(calls.map((c) => c.severity)).toEqual(['error', 'error'])
     })
+
+    // #4193 — cross-layer regression guard for the typo-degrade contract.
+    //
+    // The parser-level test in store-core (`handlers.test.ts:776-795`) pins
+    // that `handleError` returns `fatal: undefined` for a wire-side typo
+    // like `fatal: 'false'` (string, not boolean). The dashboard's `case
+    // 'error'` branch then evaluates `errFatal === false` which is false
+    // for `undefined`, so the typo falls through to code-table
+    // classification — `severity=error` (red toast), NOT the warning the
+    // typo'd value tried to claim.
+    //
+    // The risk this test guards against: a future refactor splits the
+    // strict-boolean check out of `handleError` (or relaxes it to
+    // truthy/falsy), severs the parser → dispatch contract, and silently
+    // downgrades a real error to a warning toast in the UI. The
+    // parser-level test wouldn't notice because it only sees the parser
+    // output; this one is the dispatch-level mirror.
+    it('rejects fatal: "false" string (typo) and falls back to severity=error (#4178/#4193)', () => {
+      const calls: Array<{ severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ severity })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'SOMETHING_UNKNOWN',
+          message: 'oops',
+          fatal: 'false', // typo: string not boolean — must not downgrade
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.severity).toBe('error')
+    })
+
+    // Companion case: `fatal: 1` (truthy non-boolean) is ALSO a typo and
+    // must not be treated as `true` (which would just match the default
+    // fatal path anyway) — the parser strict-boolean check should still
+    // surface `fatal: undefined`, so dispatch lands on code-table
+    // classification. Result is the same `severity=error` as above; this
+    // pins that the strict-boolean check rejects non-boolean truthy
+    // values too, not just non-boolean falsy ones.
+    it('rejects fatal: 1 (non-boolean truthy) the same way as the string typo (#4193)', () => {
+      const calls: Array<{ severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ severity })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'SOMETHING_UNKNOWN',
+          message: 'oops',
+          fatal: 1,
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.severity).toBe('error')
+    })
   })
 
   describe('pairing_refreshed dispatch (#2916)', () => {
