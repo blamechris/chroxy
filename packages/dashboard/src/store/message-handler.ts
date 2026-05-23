@@ -2641,12 +2641,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // #4052: server replies after refresh / set / clear. The masked
       // form is intentionally the only key-shaped string we ever store —
       // never the raw value, even transiently.
+      // #4144: fileExists must flow through too — the stale-file notice
+      // and the Remove button are both gated on it. Hand-picking fields
+      // here silently dropped it before (caught by agent-review on
+      // PR #4174).
+      const payload = msg as Record<string, unknown>;
       set({
         byokCredentialsStatus: {
-          status: (msg as Record<string, unknown>).status as 'set' | 'missing',
-          source: (msg as Record<string, unknown>).source as 'env' | 'file' | 'none',
-          masked: (msg as Record<string, unknown>).masked as string | undefined,
-          reason: (msg as Record<string, unknown>).reason as string | undefined,
+          status: payload.status as 'set' | 'missing',
+          source: payload.source as 'env' | 'file' | 'none',
+          masked: payload.masked as string | undefined,
+          reason: payload.reason as string | undefined,
+          fileExists: payload.fileExists as boolean | undefined,
         },
       });
       break;
