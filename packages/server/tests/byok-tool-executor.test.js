@@ -866,6 +866,62 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.content.includes('hunter2'), false)
     })
 
+    it('marks the URL line when userinfo was stripped on success (#4160)', async () => {
+      // Without a marker, the silent strip looks like a vanilla unauthed
+      // request — a downstream 401 is mysterious. The marker lets the
+      // model explain the situation and suggest fixes.
+      routes.set('/creds-marker-ok', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('ok')
+      })
+      const { port } = server.address()
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/creds-marker-ok`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /\[userinfo stripped\]/)
+      // Credentials still must not leak alongside the marker.
+      assert.equal(r.content.includes('alice'), false)
+      assert.equal(r.content.includes('hunter2'), false)
+    })
+
+    it('marks the URL line when userinfo was stripped on error path (#4160)', async () => {
+      const { port } = server.address()
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/missing`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /404/)
+      assert.match(r.content, /\[userinfo stripped\]/)
+    })
+
+    it('does NOT mark the URL line when input had no userinfo (#4160)', async () => {
+      // Regress-guard: the marker must only appear when userinfo was
+      // actually stripped, otherwise it would tag every URL.
+      routes.set('/no-creds', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('plain')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/no-creds`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.equal(r.content.includes('[userinfo stripped]'), false,
+        'marker must not appear when input had no userinfo')
+    })
+
     it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
       // ISO-8859-1: 0xE9 is 'é', 0xF6 is 'ö'. Decoded as utf-8 those
       // bytes are invalid continuations and become replacement

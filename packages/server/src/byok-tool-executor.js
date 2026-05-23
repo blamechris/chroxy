@@ -513,10 +513,16 @@ async function runWebFetch({ input, signal }) {
   //      failure path leaks. Stripping here turns the fetch into an
   //      unauthenticated request — the server may 401 / 403, which is
   //      surfaced cleanly without exposing the creds.
-  if (parsed.username || parsed.password) {
+  // #4160: remember whether userinfo was present so the result header
+  // can surface a `[userinfo stripped]` marker — a silent strip turns
+  // a downstream 401 into a mysterious failure that the model can't
+  // diagnose. The marker is the design trade-off worth flagging.
+  const hadUserinfo = Boolean(parsed.username || parsed.password)
+  if (hadUserinfo) {
     parsed.username = ''
     parsed.password = ''
   }
+  const userinfoMarker = hadUserinfo ? ' [userinfo stripped]' : ''
 
   const requested = Number(input?.timeout)
   const timeoutMs = Number.isFinite(requested) && requested > 0
@@ -603,7 +609,7 @@ async function runWebFetch({ input, signal }) {
 
     if (!res.ok) {
       return {
-        content: `HTTP ${res.status} ${res.statusText} from ${currentUrl.toString()}`,
+        content: `HTTP ${res.status} ${res.statusText} from ${currentUrl.toString()}${userinfoMarker}`,
         isError: true,
       }
     }
@@ -638,7 +644,7 @@ async function runWebFetch({ input, signal }) {
     }
 
     return {
-      content: `Prompt: ${rawPrompt}\nURL: ${currentUrl.toString()}\n\n${output}${marker}`,
+      content: `Prompt: ${rawPrompt}\nURL: ${currentUrl.toString()}${userinfoMarker}\n\n${output}${marker}`,
       isError: false,
     }
   } catch (err) {
