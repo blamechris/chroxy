@@ -369,7 +369,7 @@ function isPrivateOrSpecialIp(ipStr) {
   const v = isIP(ipStr)
   if (v === 4) {
     // ipStr is dotted-quad.
-    const [a, b] = ipStr.split('.').map((p) => parseInt(p, 10))
+    const [a, b, c] = ipStr.split('.').map((p) => parseInt(p, 10))
     if (a === 127) return true                 // loopback 127.0.0.0/8
     if (a === 10) return true                  // RFC1918 10.0.0.0/8
     if (a === 172 && b >= 16 && b <= 31) return true  // RFC1918 172.16.0.0/12
@@ -377,6 +377,14 @@ function isPrivateOrSpecialIp(ipStr) {
     if (a === 169 && b === 254) return true    // link-local 169.254.0.0/16
     if (a === 0) return true                   // 0.0.0.0/8 (this network)
     if (a >= 224) return true                  // multicast + reserved
+    // #4167: defense-in-depth — also block ranges that aren't routable on
+    // the public internet and that have a history of colliding with
+    // internal infra.
+    if (a === 100 && b >= 64 && b <= 127) return true  // CGNAT 100.64.0.0/10 (RFC 6598)
+    if (a === 192 && b === 0 && c === 2) return true   // TEST-NET-1 192.0.2.0/24 (RFC 5737)
+    if (a === 198 && b === 51 && c === 100) return true // TEST-NET-2 198.51.100.0/24
+    if (a === 203 && b === 0 && c === 113) return true // TEST-NET-3 203.0.113.0/24
+    if (a === 198 && (b === 18 || b === 19)) return true // benchmark 198.18.0.0/15 (RFC 2544)
     return false
   }
   if (v === 6) {
