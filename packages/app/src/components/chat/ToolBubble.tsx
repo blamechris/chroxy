@@ -53,12 +53,18 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
   // #4180: TodoWrite tool_result is rendered as a structured checklist
-  // when expanded. Parse once (only when expanded + tool matches) and
-  // fall back to plain text on parse failure. Collapsed preview stays
-  // the existing text snippet so the bubble's compact height is
-  // preserved.
-  const todoParsed = expanded && message.tool === 'TodoWrite'
-    ? parseTodoList(content)
+  // when expanded. Parse once (only when expanded + tool matches + the
+  // tool result has arrived) and fall back to plain text on parse
+  // failure or before the result lands. Collapsed preview stays the
+  // existing text snippet so the bubble's compact height is preserved.
+  //
+  // Important: parse `message.toolResult` (the executor's output text),
+  // NOT `message.content` — `content` is the JSON-stringified tool
+  // *input* set by `handleToolStart` in store-core, so it never matches
+  // the "Todo list (N items)..." header. Mirrors the dashboard's
+  // `parseTodoList(result)` call site.
+  const todoParsed = expanded && message.tool === 'TodoWrite' && message.toolResult
+    ? parseTodoList(message.toolResult)
     : null;
 
   return (
