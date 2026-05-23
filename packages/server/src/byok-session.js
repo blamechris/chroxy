@@ -745,6 +745,7 @@ export class ClaudeByokSession extends BaseSession {
       log.warn(`PermissionManager teardown failed: ${err.message}`)
     }
     this._history = []
+    this._todos.clear()
     this._client = null
     this.removeAllListeners()
   }

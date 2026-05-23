@@ -1414,6 +1414,17 @@ describe('ClaudeByokSession', () => {
       await session.destroy()  // second call must not throw
     })
 
+    it('destroy() clears the todo Map (#4137)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      await session.start()
+      session._todos.set('t1', { id: 't1', content: 'work', status: 'pending' })
+      session._todos.set('t2', { id: 't2', content: 'more work', status: 'in_progress' })
+      assert.equal(session._todos.size, 2)
+      await session.destroy()
+      assert.equal(session._todos.size, 0)
+    })
+
     it('setModel updates without restart (stateless SDK client)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
       session._client = { messages: { stream: () => fakeStream([]) } }
