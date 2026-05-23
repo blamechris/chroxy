@@ -1093,6 +1093,159 @@ describe('executeBuiltinTool', () => {
       }
     })
 
+    it('refuses initial RFC1918 10.0.0.0/8 host when env opt-out unset (#4167 coverage)', async () => {
+      // Pre-#4167 the SSRF tests covered 169.254 + 127.0.0.1 but skipped
+      // the two most common LAN ranges. Adding 10.0.0.x and 192.168.x
+      // explicitly so a regression in the RFC1918 branches is caught.
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://10.0.0.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses initial RFC1918 192.168.0.0/16 host when env opt-out unset (#4167 coverage)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://192.168.1.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses CGNAT 100.64.0.0/10 host (RFC 6598, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          // 100.64.0.1 is at the bottom of the CGNAT range.
+          input: { url: 'http://100.64.0.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses TEST-NET-1 192.0.2.0/24 host (RFC 5737, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://192.0.2.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses TEST-NET-2 198.51.100.0/24 host (RFC 5737, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://198.51.100.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses TEST-NET-3 203.0.113.0/24 host (RFC 5737, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://203.0.113.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses benchmark range 198.18.0.0/15 host (RFC 2544, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          // 198.19.x is the top half of the /15.
+          input: { url: 'http://198.19.0.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('follows relative Location header (#4167 coverage)', async () => {
+      // `new URL(loc, currentUrl)` should resolve `/login` against the
+      // base. Pre-fix this was uncovered by tests even though it works.
+      routes.set('/r-rel', (_req, res) => {
+        res.writeHead(302, { Location: '/login' })
+        res.end()
+      })
+      routes.set('/login', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('relative-redirect-target')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-rel`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /relative-redirect-target/)
+    })
+
+    it('refuses 3xx with empty Location header (#4167 coverage)', async () => {
+      // A 302 with no Location is malformed; pre-fix code handled it but
+      // there was no test pinning the behaviour.
+      routes.set('/r-empty', (_req, res) => {
+        res.writeHead(302, { Location: '' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-empty`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /no Location header/)
+    })
+
     it('refuses redirect to a non-http(s) scheme even when host check is bypassed (#4132)', async () => {
       // Confirms the scheme check fires independent of the host check —
       // a file:// redirect target has no host, so the host check is
