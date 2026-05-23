@@ -1278,6 +1278,112 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('rolls back the turn when summary finalMessage() rejects non-abort async (#4169)', async () => {
+      // Parallels the for-await async-rejection test, but exercises the
+      // distinct branch where for-await drains cleanly and only
+      // `await summaryStream.finalMessage()` rejects (e.g. network drop
+      // after the last event, JSON parse failure on the final frame).
+      // The outer catch must still truncate history + emit STREAM_ERROR.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              // Summary round: for-await drains a delta cleanly, then
+              // finalMessage() rejects with a non-abort error.
+              return {
+                async *[Symbol.asyncIterator]() {
+                  yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } }
+                  yield { type: 'message_delta', delta: { stop_reason: 'end_turn' } }
+                },
+                async finalMessage() {
+                  throw new Error('finalMessage network drop')
+                },
+              }
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_fm', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      const historyBefore = session._history.length
+      const captured = captureEvents(session)
+      await session.sendMessage('go')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      const capIdx = errs.findIndex((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      const streamErrIdx = errs.findIndex((e) => e.payload?.code === 'STREAM_ERROR')
+      assert.notEqual(capIdx, -1, 'cap-hit error must fire')
+      assert.notEqual(streamErrIdx, -1, 'finalMessage non-abort rejection must escalate to STREAM_ERROR')
+      assert.ok(capIdx < streamErrIdx,
+        'cap-hit error must fire BEFORE the finalMessage rejection (order matters)')
+      assert.equal(errs.filter((e) => e.payload?.code === 'ABORT').length, 0,
+        'non-abort rejection must NOT route to ABORT')
+      assert.equal(session._history.length, historyBefore,
+        'history must roll back to pre-send length when finalMessage rejects async')
+      assert.equal(session._isBusy, false, 'session must be released after rollback')
+      await session.destroy()
+    })
+
+    it('routes summary finalMessage() APIUserAbortError to ABORT, not STREAM_ERROR (#4169)', async () => {
+      // The mirror of the for-await abort test (#4147), but on the
+      // finalMessage() branch. Real SDKs can reject finalMessage with
+      // APIUserAbortError if the user pressed Stop after the last event
+      // streamed in but before the final frame parsed. _emitTurnError's
+      // instanceof check must still route to ABORT.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              return {
+                async *[Symbol.asyncIterator]() {
+                  yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } }
+                  yield { type: 'message_delta', delta: { stop_reason: 'end_turn' } }
+                },
+                async finalMessage() {
+                  throw new APIUserAbortError({ message: 'Request was aborted.' })
+                },
+              }
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_fma', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      const historyBefore = session._history.length
+      const captured = captureEvents(session)
+      await session.sendMessage('go')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      const capIdx = errs.findIndex((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      const abortIdx = errs.findIndex((e) => e.payload?.code === 'ABORT')
+      assert.notEqual(capIdx, -1, 'cap-hit error must fire')
+      assert.notEqual(abortIdx, -1, 'finalMessage APIUserAbortError must route to ABORT')
+      assert.ok(capIdx < abortIdx,
+        'cap-hit error must fire BEFORE the ABORT from finalMessage (order matters)')
+      assert.equal(errs.filter((e) => e.payload?.code === 'STREAM_ERROR').length, 0,
+        'abort path on finalMessage must NOT escalate to STREAM_ERROR')
+      assert.equal(session._history.length, historyBefore,
+        'history must roll back on abort')
+      assert.equal(session._isBusy, false, 'session must be released')
+      await session.destroy()
+    })
+
     it('streams summary text from the post-cap round so the user sees what was accomplished (#4063)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
