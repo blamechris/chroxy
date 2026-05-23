@@ -483,8 +483,11 @@ function isBinaryContentType(ctype) {
  */
 function pickCharset(ctype) {
   if (!ctype) return 'utf-8'
-  // Match `charset=foo` allowing quoted values per RFC 7231.
-  const m = ctype.match(/charset\s*=\s*"?([\w.:+-]+)"?/i)
+  // Match `charset=foo` allowing quoted values per RFC 7231. Anchor on
+  // a parameter-boundary (start-of-string or `;`) so a contrived header
+  // like `text/html; xcharset=fakeout` can't have its tail matched and
+  // mistaken for the real `charset` parameter. (#4162)
+  const m = ctype.match(/(?:^|;)\s*charset\s*=\s*"?([\w.:+-]+)"?/i)
   if (!m) return 'utf-8'
   const label = m[1]
   try {
@@ -501,8 +504,11 @@ function pickCharset(ctype) {
 async function readBodyCapped(res, maxBytes, charset = 'utf-8') {
   const reader = res.body?.getReader()
   if (!reader) {
-    // res.text() already respects the Content-Type charset internally,
-    // so we don't override here.
+    // Defensive fallback only — for real fetch results res.body is
+    // always present, so this branch is effectively unreachable. We
+    // can't honour `charset` here without re-reading the body, so we
+    // accept whatever res.text() yields (undici hard-wires utf-8;
+    // #4163 tracks if we ever need to fix this for the body-less path).
     const text = await res.text()
     if (text.length > maxBytes) return { text: text.slice(0, maxBytes), truncated: true }
     return { text, truncated: false }
