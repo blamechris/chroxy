@@ -9,10 +9,13 @@
  * IPv6 form of the same can't hit the user's local / cloud-instance
  * environment.
  *
- * Pure module — no fs, no net, no DNS. Caller (WebFetch / isHostAllowed
- * in byok-tool-executor) does the DNS resolution and `process.env`
- * opt-out check. Keeping this file dependency-free lets the test suite
- * walk a large (ip, expected) table without any HTTP server spin-up.
+ * Pure module — no fs, no network I/O, no DNS, no `process.env` reads.
+ * The `node:net` import is only used for `isIP()` (a synchronous string
+ * classifier that does not open sockets). Caller (WebFetch /
+ * isHostAllowed in byok-tool-executor) does the DNS resolution and the
+ * `CHROXY_WEBFETCH_ALLOW_PRIVATE` opt-out check. Keeping this file side-
+ * effect free lets the test suite walk a large (ip, expected) table
+ * without any HTTP server spin-up.
  *
  * Background: #4132 introduced the original v4 blocklist; #4165 added the
  * v6 path and IPv4-mapped IPv6 recursion; #4167 / #4184 expanded the v4
