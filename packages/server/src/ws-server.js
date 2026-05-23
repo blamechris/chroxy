@@ -356,6 +356,7 @@ function _isSecureRequest(req) {
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
  *   { type: 'provider_list', providers }                — available providers
+ *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)
  *   { type: 'skills_list', skills }                     — active skills (name, description, activation, active per entry)
  *   { type: 'skill_changed', skillName, sessionId, oldHashPrefix, newHashPrefix, mode } — skill content-hash mismatch (#3234, transient)
  *   { type: 'skill_activated', sessionId, skillName }   — manual skill toggled on at runtime (#3209)

@@ -415,7 +415,10 @@ function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
 }
 
 function handleByokSetCredentials(ws, client, msg, ctx) {
-  const key = msg?.anthropicApiKey
+  // Trim leading/trailing whitespace — pastes often carry surrounding
+  // spaces/newlines that would otherwise be persisted into the credentials
+  // file and silently fail when the SDK tries to use the key.
+  const key = typeof msg?.anthropicApiKey === 'string' ? msg.anthropicApiKey.trim() : msg?.anthropicApiKey
   if (typeof key !== 'string' || key.length === 0) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'anthropicApiKey is required')
     return
@@ -436,7 +439,14 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
     return
   }
   const status = getAnthropicApiKeyStatus()
+  // Reply to the originating client with the requestId for await-resolution.
   ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+  // Broadcast without requestId so other dashboards / clients update too.
+  // Without this, a second dashboard would keep showing stale state until
+  // the user re-opened Settings.
+  if (typeof ctx.broadcast === 'function') {
+    ctx.broadcast({ type: 'byok_credentials_status', ...status })
+  }
 }
 
 function handleByokClearCredentials(ws, client, msg, ctx) {
@@ -448,6 +458,9 @@ function handleByokClearCredentials(ws, client, msg, ctx) {
   }
   const status = getAnthropicApiKeyStatus()
   ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+  if (typeof ctx.broadcast === 'function') {
+    ctx.broadcast({ type: 'byok_credentials_status', ...status })
+  }
 }
 
 /**

@@ -126,6 +126,53 @@ describe('byok credentials handlers (#4052)', () => {
     })
   })
 
+  describe('byok_set_credentials trim + broadcast (review #4140)', () => {
+    it('trims surrounding whitespace before persisting (review #4143)', () => {
+      const longKey = 'sk-ant-api03-' + 'f'.repeat(95)
+      const ctx = makeCtx()
+      settingsHandlers.byok_set_credentials(
+        makeWs(),
+        { id: 'c1' },
+        { requestId: 'r1', anthropicApiKey: `  ${longKey}\n` },
+        ctx,
+      )
+      // The reply should be a success status, not an error.
+      const reply = ctx._sent.find((m) => m.type === 'byok_credentials_status')
+      assert.ok(reply, 'expected a success status reply')
+      assert.equal(reply.status, 'set')
+    })
+
+    it('broadcasts the new status to all clients on set (review #4142)', () => {
+      const longKey = 'sk-ant-api03-' + 'g'.repeat(95)
+      const broadcasts = []
+      const ctx = makeCtx()
+      ctx.broadcast = (msg) => { broadcasts.push(msg) }
+      settingsHandlers.byok_set_credentials(
+        makeWs(),
+        { id: 'c1' },
+        { requestId: 'r1', anthropicApiKey: longKey },
+        ctx,
+      )
+      assert.equal(broadcasts.length, 1)
+      assert.equal(broadcasts[0].type, 'byok_credentials_status')
+      assert.equal(broadcasts[0].status, 'set')
+      // Broadcasts don't carry requestId — they're not a reply to a specific call.
+      assert.equal(broadcasts[0].requestId, undefined)
+    })
+
+    it('broadcasts the new status to all clients on clear (review #4142)', () => {
+      const longKey = 'sk-ant-api03-' + 'h'.repeat(95)
+      settingsHandlers.byok_set_credentials(makeWs(), { id: 'c1' }, { anthropicApiKey: longKey }, makeCtx())
+
+      const broadcasts = []
+      const ctx = makeCtx()
+      ctx.broadcast = (msg) => { broadcasts.push(msg) }
+      settingsHandlers.byok_clear_credentials(makeWs(), { id: 'c1' }, { requestId: 'r2' }, ctx)
+      assert.equal(broadcasts.length, 1)
+      assert.equal(broadcasts[0].status, 'missing')
+    })
+  })
+
   describe('byok_clear_credentials', () => {
     it('removes the credentials file and returns missing status', () => {
       // Seed via set, then clear.
