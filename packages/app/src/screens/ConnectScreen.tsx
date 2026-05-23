@@ -492,6 +492,7 @@ export function ConnectScreen() {
         onPress={() => setShowManual(!showManual)}
         accessibilityRole="button"
         accessibilityLabel="Enter server address manually"
+        testID="connect-manual-toggle"
       >
         <Text style={styles.manualToggleText}>
           {showManual ? `${ICON_TRIANGLE_DOWN} Hide manual entry` : `${ICON_TRIANGLE_RIGHT} Enter manually`}
@@ -511,6 +512,7 @@ export function ConnectScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             accessibilityLabel="Server URL"
+            testID="connect-server-url"
           />
 
           <Text style={styles.label}>
@@ -528,6 +530,7 @@ export function ConnectScreen() {
               autoCorrect={false}
               secureTextEntry={!showToken}
               accessibilityLabel="API Token"
+              testID="connect-api-token"
             />
             <TouchableOpacity
               style={styles.tokenEyeButton}
@@ -539,7 +542,7 @@ export function ConnectScreen() {
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect to server">
+          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect to server" testID="connect-submit">
             <Text style={styles.connectButtonText}>Connect</Text>
           </TouchableOpacity>
         </View>
