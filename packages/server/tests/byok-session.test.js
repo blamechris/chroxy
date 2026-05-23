@@ -1121,6 +1121,120 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('emits exactly one result + no STREAM_ERROR on summary stream-init failure (#4147)', async () => {
+      // Pre-#4147 we tested that the synthetic instruction was popped,
+      // but didn't pin the event sequence. After the cap-hit break the
+      // outer try-block still reaches `emit('result', ...)`, so the
+      // turn ends cleanly: ONE non-fatal MAX_TOOL_ROUNDS_REACHED error
+      // (fatal: false), ONE result event with the cap-hit round's
+      // stop_reason (tool_use), and NO STREAM_ERROR event. Pin both
+      // shape and count so a future refactor that accidentally double-
+      // emits or escalates to STREAM_ERROR fails loudly.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              throw new Error('summary-init failed')
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_x', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      const capErrs = errs.filter((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      const streamErrs = errs.filter((e) => e.payload?.code === 'STREAM_ERROR')
+      const aborts = errs.filter((e) => e.payload?.code === 'ABORT')
+      const results = captured.filter((e) => e.name === 'result')
+      assert.equal(capErrs.length, 1, 'exactly one MAX_TOOL_ROUNDS_REACHED error must fire')
+      assert.equal(capErrs[0].payload.fatal, false, 'cap-hit error must be non-fatal')
+      assert.equal(streamErrs.length, 0, 'init failure must NOT escalate to STREAM_ERROR')
+      assert.equal(aborts.length, 0, 'init failure is not an abort')
+      assert.equal(results.length, 1, 'turn must still emit exactly one result event after the break')
+      assert.equal(results[0].payload.stopReason, 'tool_use',
+        'result reflects the cap-hit round (no summary ran)')
+      assert.equal(session._isBusy, false, 'session must be released after the break')
+      await session.destroy()
+    })
+
+    it('treats abort during summary for-await as ABORT, not STREAM_ERROR (#4147)', async () => {
+      // The existing async-rejection test throws a plain Error and
+      // asserts STREAM_ERROR. #4147 asks us to also pin the abort
+      // path: when the user interrupts mid-summary the for-await
+      // throws APIUserAbortError, which _emitTurnError must route to
+      // ABORT (instanceof check). Both MAX_TOOL_ROUNDS_REACHED and
+      // ABORT fire, history is truncated, and the session is reusable.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              // Summary round: simulate the user pressing Stop —
+              // for-await throws APIUserAbortError.
+              return {
+                async *[Symbol.asyncIterator]() {
+                  throw new APIUserAbortError({ message: 'Request was aborted.' })
+                },
+                async finalMessage() { throw new Error('never reached') },
+              }
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_y', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      const historyBefore = session._history.length
+      const captured = captureEvents(session)
+      await session.sendMessage('go')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      assert.ok(errs.some((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED'),
+        'cap-hit error fires before the abort')
+      assert.ok(errs.some((e) => e.payload?.code === 'ABORT'),
+        'APIUserAbortError must route to ABORT, not STREAM_ERROR')
+      assert.equal(errs.filter((e) => e.payload?.code === 'STREAM_ERROR').length, 0,
+        'abort path must not also fire STREAM_ERROR')
+      assert.equal(session._history.length, historyBefore,
+        'history must roll back to pre-send length on abort')
+      assert.equal(session._isBusy, false, 'session must be released so the user can send again')
+
+      // Session usable after: the real bug this guards against is
+      // _isBusy left true / _abortController not nulled after abort
+      // (then the next sendMessage short-circuits with 'Already
+      // processing' per byok-session.js:_finishTurn). Swap the stream
+      // stub so the assertion isolates session reusability, not the
+      // cap-hit path's stub behaviour.
+      session._client.messages.stream = () => fakeStream(
+        [
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        ],
+        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+      )
+      const captured2 = captureEvents(session)
+      await session.sendMessage('still here?')
+      assert.ok(captured2.some((e) => e.name === 'result'), 'next turn after abort must succeed')
+      await session.destroy()
+    })
+
     it('rolls back the entire turn when the summary stream rejects async (outer catch — review)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
