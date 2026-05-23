@@ -1364,4 +1364,24 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(result.data.cumulativeUsage, undefined)
     })
   })
+
+  describe('BYOK credential client messages (#4052)', () => {
+    it('ByokGetCredentialsStatusSchema accepts type only', async () => {
+      const { ByokGetCredentialsStatusSchema } = await import('../src/schemas/client.ts')
+      assert.ok(ByokGetCredentialsStatusSchema.safeParse({ type: 'byok_get_credentials_status' }).success)
+      assert.ok(ByokGetCredentialsStatusSchema.safeParse({ type: 'byok_get_credentials_status', requestId: 'r1' }).success)
+    })
+
+    it('ByokSetCredentialsSchema requires anthropicApiKey', async () => {
+      const { ByokSetCredentialsSchema } = await import('../src/schemas/client.ts')
+      assert.equal(ByokSetCredentialsSchema.safeParse({ type: 'byok_set_credentials' }).success, false)
+      assert.equal(ByokSetCredentialsSchema.safeParse({ type: 'byok_set_credentials', anthropicApiKey: '' }).success, false)
+      assert.ok(ByokSetCredentialsSchema.safeParse({ type: 'byok_set_credentials', anthropicApiKey: 'sk-ant-test' }).success)
+    })
+
+    it('ByokClearCredentialsSchema accepts type only', async () => {
+      const { ByokClearCredentialsSchema } = await import('../src/schemas/client.ts')
+      assert.ok(ByokClearCredentialsSchema.safeParse({ type: 'byok_clear_credentials' }).success)
+    })
+  })
 })

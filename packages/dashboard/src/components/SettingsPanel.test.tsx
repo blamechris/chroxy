@@ -60,6 +60,12 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     activeSessionId: null,
     sessions: [],
     setPromptEvaluator: vi.fn(),
+    // #4052: BYOK credentials defaults — refresh is a no-op spy by
+    // default; individual tests override status / actions as needed.
+    byokCredentialsStatus: null,
+    refreshByokCredentialsStatus: vi.fn(),
+    setByokCredentials: vi.fn(),
+    clearByokCredentials: vi.fn(),
     ...extra,
   }
 }
@@ -422,6 +428,89 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const section = screen.getByTestId('active-session-section')
       expect(section.textContent).toContain('this session')
+    })
+  })
+
+  describe('BYOK credentials (#4052)', () => {
+    it('renders Missing status when no key configured', () => {
+      setMockState({ byokCredentialsStatus: { status: 'missing', source: 'none', reason: 'not configured' } })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('byok-credentials-section')).toBeInTheDocument()
+      expect(screen.getByTestId('byok-status').textContent).toContain('Missing')
+      expect(screen.getByTestId('byok-reason').textContent).toContain('not configured')
+    })
+
+    it('renders Set + masked preview when key is set via file', () => {
+      setMockState({
+        byokCredentialsStatus: { status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]' },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('byok-status').textContent).toContain('Set (file)')
+      expect(screen.getByTestId('byok-status').textContent).toContain('sk-ant-api03...[95 chars redacted]')
+      // Remove button only visible when source = file (env key is owned outside).
+      expect(screen.getByTestId('byok-clear-button')).toBeInTheDocument()
+    })
+
+    it('hides the Remove button when source is env (chroxy did not write the key)', () => {
+      setMockState({
+        byokCredentialsStatus: { status: 'set', source: 'env', masked: 'sk-ant-api03...[95 chars redacted]' },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('byok-clear-button')).not.toBeInTheDocument()
+    })
+
+    it('disables Save until the input has content', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const save = screen.getByTestId('byok-save-button') as HTMLButtonElement
+      expect(save.disabled).toBe(true)
+      fireEvent.change(screen.getByTestId('byok-key-input'), { target: { value: 'sk-ant-paste-test' } })
+      expect(save.disabled).toBe(false)
+    })
+
+    it('calls setByokCredentials with the trimmed key and clears the input on Save', () => {
+      const setByokCredentials = vi.fn()
+      setMockState({ setByokCredentials })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = screen.getByTestId('byok-key-input') as HTMLInputElement
+      fireEvent.change(input, { target: { value: '   sk-ant-from-user   ' } })
+      fireEvent.click(screen.getByTestId('byok-save-button'))
+      expect(setByokCredentials).toHaveBeenCalledWith('sk-ant-from-user')
+      expect(input.value).toBe('')
+    })
+
+    it('refuses keys not starting with sk-ant- without calling setByokCredentials', () => {
+      const setByokCredentials = vi.fn()
+      setMockState({ setByokCredentials })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.change(screen.getByTestId('byok-key-input'), { target: { value: 'sk-openai-bogus' } })
+      fireEvent.click(screen.getByTestId('byok-save-button'))
+      expect(setByokCredentials).not.toHaveBeenCalled()
+      expect(screen.getByTestId('byok-error').textContent).toContain('sk-ant-')
+    })
+
+    it('calls refreshByokCredentialsStatus when the panel opens', () => {
+      const refreshByokCredentialsStatus = vi.fn()
+      setMockState({ refreshByokCredentialsStatus })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshByokCredentialsStatus).toHaveBeenCalled()
+    })
+
+    it('calls clearByokCredentials when Remove is clicked', () => {
+      const clearByokCredentials = vi.fn()
+      setMockState({
+        byokCredentialsStatus: { status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]' },
+        clearByokCredentials,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('byok-clear-button'))
+      expect(clearByokCredentials).toHaveBeenCalled()
+    })
+
+    it('uses type=password on the input so the key never echoes to screen', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = screen.getByTestId('byok-key-input')
+      expect(input.getAttribute('type')).toBe('password')
+      expect(input.getAttribute('autocomplete')).toBe('off')
     })
   })
 })

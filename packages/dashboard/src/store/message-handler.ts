@@ -2637,6 +2637,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'byok_credentials_status': {
+      // #4052: server replies after refresh / set / clear. The masked
+      // form is intentionally the only key-shaped string we ever store —
+      // never the raw value, even transiently.
+      set({
+        byokCredentialsStatus: {
+          status: (msg as Record<string, unknown>).status as 'set' | 'missing',
+          source: (msg as Record<string, unknown>).source as 'env' | 'file' | 'none',
+          masked: (msg as Record<string, unknown>).masked as string | undefined,
+          reason: (msg as Record<string, unknown>).reason as string | undefined,
+        },
+      });
+      break;
+    }
+
     case 'checkpoint_created': {
       const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
       if (next) set({ checkpoints: next });

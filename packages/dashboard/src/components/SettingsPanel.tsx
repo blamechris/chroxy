@@ -71,6 +71,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const sessions = useConnectionStore(s => s.sessions)
   const setPromptEvaluator = useConnectionStore(s => s.setPromptEvaluator)
+  // #4052: BYOK credentials state + actions. Status arrives via the WS
+  // byok_credentials_status message; the raw key is never stored — only
+  // the masked preview.
+  const byokCredentialsStatus = useConnectionStore(s => s.byokCredentialsStatus)
+  const refreshByokCredentialsStatus = useConnectionStore(s => s.refreshByokCredentialsStatus)
+  const setByokCredentials = useConnectionStore(s => s.setByokCredentials)
+  const clearByokCredentials = useConnectionStore(s => s.clearByokCredentials)
   const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
   const themes = getAvailableThemes()
   const inTauri = isTauri()
@@ -78,6 +85,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
   const [restarting, setRestarting] = useState(false)
+  // #4052: paste-API-key form state. Lives in the component (not the
+  // store) so the raw key is never observable beyond this one render.
+  const [byokKeyInput, setByokKeyInput] = useState('')
+  const [byokError, setByokError] = useState<string | null>(null)
   const [allowAutoPerm, setAllowAutoPerm] = useState<boolean>(false)
   const [autoPermError, setAutoPermError] = useState<string | null>(null)
   const [autoPermDirty, setAutoPermDirty] = useState<boolean>(false)
@@ -106,6 +117,30 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
       setAutoPermError(err instanceof Error ? err.message : String(err))
     })
   }, [isOpen, inTauri])
+
+  // #4052: Pull the latest credentials status whenever the panel opens so
+  // it's accurate even after an out-of-band change (e.g. the user edited
+  // ~/.chroxy/credentials.json directly in another terminal).
+  useEffect(() => {
+    if (!isOpen) return
+    refreshByokCredentialsStatus()
+  }, [isOpen, refreshByokCredentialsStatus])
+
+  const handleSaveByokKey = useCallback(() => {
+    setByokError(null)
+    const trimmed = byokKeyInput.trim()
+    if (!trimmed.startsWith('sk-ant-')) {
+      setByokError('Anthropic API keys start with "sk-ant-".')
+      return
+    }
+    setByokCredentials(trimmed)
+    setByokKeyInput('')
+  }, [byokKeyInput, setByokCredentials])
+
+  const handleClearByokKey = useCallback(() => {
+    setByokError(null)
+    clearByokCredentials()
+  }, [clearByokCredentials])
 
   const handleToggleAutoPerm = useCallback(async (next: boolean) => {
     setAutoPermError(null)
@@ -343,6 +378,70 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               </ul>
             </section>
           )}
+
+          {/* #4052: BYOK credentials. Lets the user paste their Anthropic
+              API key into the daemon's ~/.chroxy/credentials.json (0600)
+              without dropping to a terminal. The full key is never echoed
+              back — only the masked preview from the server. */}
+          <section className="settings-section" data-testid="byok-credentials-section">
+            <h3>BYOK credentials</h3>
+            <p className="settings-hint">
+              Paste an Anthropic API key for the <code>claude-byok</code> provider.
+              Saved to <code>~/.chroxy/credentials.json</code> with mode 0600.
+              An <code>ANTHROPIC_API_KEY</code> environment variable takes precedence
+              if set.
+            </p>
+            <div className="settings-field" data-testid="byok-status">
+              <span>
+                Status:{' '}
+                {byokCredentialsStatus?.status === 'set'
+                  ? `Set (${byokCredentialsStatus.source}) — ${byokCredentialsStatus.masked}`
+                  : 'Missing'}
+              </span>
+            </div>
+            {byokCredentialsStatus?.status === 'missing' && byokCredentialsStatus.reason && (
+              <p className="settings-hint" data-testid="byok-reason">
+                {byokCredentialsStatus.reason}
+              </p>
+            )}
+            <div className="settings-field">
+              <label htmlFor="byok-key-input">API key</label>
+              <input
+                id="byok-key-input"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="sk-ant-..."
+                value={byokKeyInput}
+                onChange={(e) => setByokKeyInput(e.target.value)}
+                data-testid="byok-key-input"
+              />
+            </div>
+            {byokError && (
+              <p className="settings-hint" data-testid="byok-error" style={{ color: 'var(--error, #f00)' }}>
+                {byokError}
+              </p>
+            )}
+            <div className="settings-field">
+              <button
+                type="button"
+                onClick={handleSaveByokKey}
+                disabled={byokKeyInput.trim().length === 0}
+                data-testid="byok-save-button"
+              >
+                Save
+              </button>
+              {byokCredentialsStatus?.status === 'set' && byokCredentialsStatus.source === 'file' && (
+                <button
+                  type="button"
+                  onClick={handleClearByokKey}
+                  data-testid="byok-clear-button"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </section>
 
           {onToggleConsoleTab && (
             <section className="settings-section">

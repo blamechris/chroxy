@@ -745,6 +745,18 @@ export interface ConnectionState {
   defaultModel: string;
   setDefaultModel: (model: string) => void;
 
+  // #4052: BYOK credentials state + actions. The raw key is NEVER stored
+  // here — only the masked preview from the server's reply.
+  byokCredentialsStatus: {
+    status: 'set' | 'missing';
+    source: 'env' | 'file' | 'none';
+    masked?: string;
+    reason?: string;
+  } | null;
+  refreshByokCredentialsStatus: () => void;
+  setByokCredentials: (anthropicApiKey: string) => void;
+  clearByokCredentials: () => void;
+
   // Multi-server registry actions
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
   removeServer: (serverId: string) => void;

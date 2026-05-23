@@ -95,6 +95,7 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_request': 'dashboard',  // community skill awaiting first-activation grant (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
+  'byok_credentials_status': 'dashboard', // paste-API-key form is dashboard-only (#4052); mobile app exposure tracked under the BYOK epic #4047
 }
 
 // ---------------------------------------------------------------------------

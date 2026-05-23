@@ -322,6 +322,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
   defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-sdk'),
   defaultModel: loadPersistedSetting('chroxy_default_model', ''),
+  // #4052: BYOK credentials state. Server-of-truth lives in
+  // ~/.chroxy/credentials.json or ANTHROPIC_API_KEY env var; the dashboard
+  // mirrors the resolved status (set/missing) + a masked preview. Updates
+  // arrive via byok_credentials_status WS messages.
+  byokCredentialsStatus: null,
   connectionError: null,
   connectionRetryCount: 0,
   serverStartupLogs: null,
@@ -436,6 +441,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setDefaultModel: (model: string) => {
     set({ defaultModel: model });
     try { localStorage.setItem('chroxy_default_model', model); } catch { /* noop */ }
+  },
+
+  // #4052: BYOK credentials actions. The full key is never stored in the
+  // store — only the masked preview from the server's reply. We never
+  // round-trip the raw value back to the UI.
+  refreshByokCredentialsStatus: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'byok_get_credentials_status' });
+    }
+  },
+
+  setByokCredentials: (anthropicApiKey: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'byok_set_credentials', anthropicApiKey });
+    }
+  },
+
+  clearByokCredentials: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'byok_clear_credentials' });
+    }
   },
 
   getActiveSessionState: () => {
