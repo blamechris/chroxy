@@ -241,13 +241,13 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
  * attachment list is per-turn user content, not session-level system
  * prompt. So: keep it one line, semicolon-separated.
  *
- * Empty input → empty string (caller appends, so an empty suffix
- * produces the original prompt unchanged).
+ * Empty input → empty-suffix result (caller appends, so an empty
+ * suffix produces the original prompt unchanged).
  *
- * @param {Array<{path: string, name: string, mediaType: string, size: number}>} files
- * @returns {string}
- */
-/**
+ * #4026: returns an AttachmentSuffixResult shape (not a string) so the
+ * caller can log a warn when the cap fires. Pre-#4026 this returned
+ * just the string and the truncation was silent.
+ *
  * @typedef {Object} AttachmentSuffixResult
  * @property {string}  suffix         The prompt suffix to append (empty for no files).
  * @property {boolean} truncated      True when at least one file was dropped from the list.
@@ -256,17 +256,11 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
  *                                    fell back to the size-cap marker (the worst, most-lossy path).
  * @property {number}  byteLength     Final UTF-8 byte length of the suffix string.
  * @property {number}  cap            The byte cap (MAX_ATTACHMENT_SUFFIX_BYTES) that triggered truncation.
+ *
+ * @param {Array<{path: string, name: string, mediaType: string, size: number}>} files
+ * @returns {AttachmentSuffixResult}
  */
 
-/**
- * #4026: structured result with truncation metadata so the caller
- * (claude-tui-session.js) can log a warn when the cap fires. Pre-#4026
- * this returned just the suffix string and the truncation was silent —
- * ops had no signal for a pathological path-generation regression
- * except by sampling transcripts. The whole point of MAX_ATTACHMENT_SUFFIX_BYTES
- * is to catch such regressions before users notice, so quiet truncation
- * defeated the cap's purpose.
- */
 export function buildAttachmentsPromptSuffix(files) {
   if (!Array.isArray(files) || files.length === 0) {
     return { suffix: '', truncated: false, omitted: 0, bareFallback: false, byteLength: 0, cap: MAX_ATTACHMENT_SUFFIX_BYTES }
@@ -286,13 +280,17 @@ export function buildAttachmentsPromptSuffix(files) {
   // We drop trailing entries until the suffix fits, then mark the
   // truncation so the agent (and a human reading the transcript)
   // knows files were omitted.
-  if (Buffer.byteLength(fullSuffix, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
+  // Compute once: the cap-check below and the return-shape's byteLength
+  // both consume this. Pre-#4215 nit: it was computed twice on the
+  // happy path.
+  const fullSuffixBytes = Buffer.byteLength(fullSuffix, 'utf8')
+  if (fullSuffixBytes <= MAX_ATTACHMENT_SUFFIX_BYTES) {
     return {
       suffix: fullSuffix,
       truncated: false,
       omitted: 0,
       bareFallback: false,
-      byteLength: Buffer.byteLength(fullSuffix, 'utf8'),
+      byteLength: fullSuffixBytes,
       cap: MAX_ATTACHMENT_SUFFIX_BYTES,
     }
   }
