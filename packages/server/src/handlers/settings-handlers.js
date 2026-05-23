@@ -7,6 +7,11 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
+import {
+  getAnthropicApiKeyStatus,
+  writeAnthropicApiKey,
+  clearAnthropicApiKey,
+} from '../byok-credentials.js'
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
 import { createLogger } from '../logger.js'
@@ -390,6 +395,59 @@ function handleQueryPermissionAudit(ws, client, msg, ctx) {
 
 function handleListProviders(ws, client, msg, ctx) {
   ctx.send(ws, { type: 'provider_list', providers: listProviders() })
+}
+
+/**
+ * BYOK credentials handlers (#4052).
+ *
+ * Three message types: get status, set the key, clear the key. The full
+ * key is never sent back over the wire — only its masked form via
+ * `getAnthropicApiKeyStatus`. Errors are surfaced via sendError + a
+ * status broadcast so the dashboard can keep its UI in sync.
+ *
+ * Auth posture: any authenticated WS client can call these. chroxy isn't
+ * multi-tenant — the user controls their own credentials file. The
+ * existing WS auth gate is sufficient.
+ */
+function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
+  const status = getAnthropicApiKeyStatus()
+  ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+}
+
+function handleByokSetCredentials(ws, client, msg, ctx) {
+  const key = msg?.anthropicApiKey
+  if (typeof key !== 'string' || key.length === 0) {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'anthropicApiKey is required')
+    return
+  }
+  // Reject anything that doesn't even look like a key. The Anthropic key
+  // format starts with `sk-ant-`. We don't validate further — formats can
+  // evolve — but the prefix check catches obvious pastes-of-the-wrong-
+  // thing (e.g. OpenAI keys, OAuth tokens) before we persist them.
+  if (!key.startsWith('sk-ant-')) {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'API key must start with sk-ant-')
+    return
+  }
+  try {
+    writeAnthropicApiKey(key)
+  } catch (err) {
+    log.warn(`byok_set_credentials write failed: ${err?.message}`)
+    sendError(ws, msg?.requestId, 'CREDENTIALS_WRITE_FAILED', err?.message || 'write failed')
+    return
+  }
+  const status = getAnthropicApiKeyStatus()
+  ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+}
+
+function handleByokClearCredentials(ws, client, msg, ctx) {
+  try {
+    clearAnthropicApiKey()
+  } catch (err) {
+    sendError(ws, msg?.requestId, 'CREDENTIALS_CLEAR_FAILED', err?.message || 'clear failed')
+    return
+  }
+  const status = getAnthropicApiKeyStatus()
+  ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
 }
 
 /**
@@ -1259,6 +1317,9 @@ export const settingsHandlers = {
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,
   skill_trust_grant: handleSkillTrustGrant,
+  byok_get_credentials_status: handleByokGetCredentialsStatus,
+  byok_set_credentials: handleByokSetCredentials,
+  byok_clear_credentials: handleByokClearCredentials,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }
