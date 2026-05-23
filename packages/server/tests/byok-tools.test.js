@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES } from '../src/byok-tools.js'
+import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES } from '../src/byok-tools.js'
 
 /**
  * BUILTIN_TOOLS is the array passed verbatim into the SDK's
@@ -65,5 +65,17 @@ describe('BUILTIN_TOOLS', () => {
     assert.equal(tw.input_schema.properties.todos.type, 'array')
     const itemReq = tw.input_schema.properties.todos.items.required.sort()
     assert.deepEqual(itemReq, ['content', 'id', 'status'])
+  })
+
+  it('TodoWrite status enum and TODO_STATUSES Set share one source of truth (review #4136)', () => {
+    // Pre-fix the schema enum was a duplicate literal of the Set entries.
+    // Now both derive from TODO_STATUS_LIST so they cannot drift.
+    const tw = BUILTIN_TOOLS.find((t) => t.name === 'TodoWrite')
+    const schemaEnum = tw.input_schema.properties.todos.items.properties.status.enum
+    assert.deepEqual([...schemaEnum].sort(), [...TODO_STATUS_LIST].sort())
+    for (const status of TODO_STATUS_LIST) {
+      assert.ok(TODO_STATUSES.has(status), `TODO_STATUSES Set must include ${status}`)
+    }
+    assert.equal(TODO_STATUSES.size, TODO_STATUS_LIST.length)
   })
 })

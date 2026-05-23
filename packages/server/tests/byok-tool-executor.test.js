@@ -34,6 +34,17 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, true)
       assert.match(r.content, /Unknown tool: NotARealTool/)
     })
+
+    it('error message lists every BUILTIN_TOOL name (drift guard — review #4136)', async () => {
+      // Pre-fix the list was hardcoded and could drift from BUILTIN_TOOLS.
+      // Now it's derived from BUILTIN_TOOL_NAMES — adding a tool here is
+      // automatically reflected in the error message.
+      const { BUILTIN_TOOL_NAMES } = await import('../src/byok-tools.js')
+      const r = await executeBuiltinTool({ toolName: 'X', input: {}, ...ctx() })
+      for (const name of BUILTIN_TOOL_NAMES) {
+        assert.ok(r.content.includes(name), `error must list ${name}`)
+      }
+    })
   })
 
   describe('Read', () => {
@@ -384,6 +395,39 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, false)
       assert.equal(store.size, 1, 'empty input must not clear the store')
       assert.match(r.content, /1 items/)
+    })
+
+    it('caps rendered output at 100 items with a "showing first X of Y" marker (review #4136)', async () => {
+      const store = new Map()
+      const lots = []
+      for (let i = 0; i < 150; i++) {
+        lots.push({ id: `t${i}`, content: `task ${i}`, status: 'pending' })
+      }
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: lots },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 150, 'full list retained server-side')
+      assert.match(r.content, /150 items/)
+      assert.match(r.content, /showing first 100 of 150/)
+      // Item 0 should appear, item 149 should NOT (cap is 100).
+      assert.match(r.content, /task 0 \(t0\)/)
+      assert.equal(r.content.includes('task 149 (t149)'), false)
+    })
+
+    it('truncates long content strings with an ellipsis marker (review #4136)', async () => {
+      const store = new Map()
+      const longText = 'x'.repeat(500)
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: longText, status: 'pending' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.ok(r.content.length < longText.length + 200, 'output must be capped')
+      assert.match(r.content, /…/)
     })
 
     it('returns EINTERNAL when the executor is called without a todoStore', async () => {

@@ -580,15 +580,29 @@ function runTodoWrite({ input, todoStore }) {
 
   // Build a readable summary from the FULL current list (post-merge).
   // The model already sees the call in its history; this confirmation
-  // exists so a partial call still surfaces unrelated items.
+  // exists so a partial call still surfaces unrelated items. The output
+  // is capped so a runaway list (or pathologically long `content`)
+  // doesn't balloon conversation history toward token-limit cliffs —
+  // the full Map stays server-side; only the rendered summary is capped.
   const all = [...todoStore.values()]
   const counts = { pending: 0, in_progress: 0, completed: 0 }
   for (const t of all) counts[t.status]++
 
-  const lines = [`Todo list (${all.length} items): ${counts.in_progress} in progress, ${counts.pending} pending, ${counts.completed} completed`]
-  for (const t of all) {
+  const header = `Todo list (${all.length} items): ${counts.in_progress} in progress, ${counts.pending} pending, ${counts.completed} completed`
+  const visible = all.slice(0, TODOWRITE_MAX_ITEMS_RENDERED)
+  const lines = [header]
+  for (const t of visible) {
     const marker = t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'
-    lines.push(`  ${marker} ${t.content} (${t.id})`)
+    const content = t.content.length > TODOWRITE_MAX_CONTENT_RENDERED
+      ? t.content.slice(0, TODOWRITE_MAX_CONTENT_RENDERED) + '…'
+      : t.content
+    lines.push(`  ${marker} ${content} (${t.id})`)
+  }
+  if (all.length > visible.length) {
+    lines.push(`  … (showing first ${visible.length} of ${all.length}; full list retained server-side)`)
   }
   return { content: lines.join('\n'), isError: false }
 }
+
+const TODOWRITE_MAX_ITEMS_RENDERED = 100
+const TODOWRITE_MAX_CONTENT_RENDERED = 200
