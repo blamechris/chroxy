@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
@@ -1395,7 +1395,6 @@ describe('ClaudeByokSession', () => {
         assert.match(toolResultBlock.content, /Wrote 15 bytes/)
         assert.match(toolResultBlock.content, /\(created\)/)
         // The file must actually exist on disk with the planted content.
-        const { readFileSync } = await import('node:fs')
         assert.equal(readFileSync(targetPath, 'utf8'), 'planted on disk')
         await session.destroy()
       })
@@ -1437,7 +1436,6 @@ describe('ClaudeByokSession', () => {
         await session.sendMessage('do the edit')
         assert.equal(toolResultBlock.is_error, false)
         assert.match(toolResultBlock.content, /Replaced 1 occurrence/)
-        const { readFileSync } = await import('node:fs')
         assert.equal(readFileSync(targetPath, 'utf8'), 'before:KEPT:after')
         await session.destroy()
       })
