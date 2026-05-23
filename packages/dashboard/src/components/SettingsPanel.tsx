@@ -411,11 +411,12 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               <p
                 className="settings-hint"
                 data-testid="byok-stale-file-notice"
-                style={{ color: 'var(--warning, #b45309)' }}
+                style={{ color: 'var(--warning-fg, #fbbf24)' }}
               >
-                A saved <code>credentials.json</code> file exists on disk but is shadowed by
-                the <code>ANTHROPIC_API_KEY</code> env var. The file will be used again the
-                moment you unset the env var. Use Remove to clear it.
+                Your <code>ANTHROPIC_API_KEY</code> environment variable is currently being
+                used. But a saved <code>credentials.json</code> file is still on disk and
+                will be used again the moment the env var is unset.
+                Click Remove to delete the file.
               </p>
             )}
             <div className="settings-field">

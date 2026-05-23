@@ -185,6 +185,12 @@ export function getAnthropicApiKeyStatus() {
   // the env var is set, the file is shadowed by env precedence; the
   // dashboard uses this to surface "stale file on disk" UX and to keep
   // the Remove button enabled even when source is 'env'.
+  //
+  // Theoretical race: the file could be (un)linked between
+  // resolveAnthropicApiKey() and hasStoredCredentials(). Acceptable for
+  // a status query — the dashboard polls on open and after every
+  // set/clear, so any transient inconsistency self-heals on the next
+  // refresh. We're not making security decisions on this flag.
   const fileExists = hasStoredCredentials()
   if (r.key) {
     return { status: 'set', source: r.source, masked: maskApiKey(r.key), fileExists }

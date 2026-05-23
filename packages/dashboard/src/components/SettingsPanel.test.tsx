@@ -478,7 +478,10 @@ describe('SettingsPanel', () => {
       // Stale-file notice surfaces — env wins, file is shadowed.
       const notice = screen.getByTestId('byok-stale-file-notice')
       expect(notice).toBeInTheDocument()
-      expect(notice.textContent).toMatch(/shadowed/)
+      // Notice references both the env var and the file so the user
+      // knows what's currently active and what's persisted.
+      expect(notice.textContent).toMatch(/ANTHROPIC_API_KEY/)
+      expect(notice.textContent).toMatch(/credentials\.json/)
       // Remove button is offered so the user can clear the shadowed file.
       expect(screen.getByTestId('byok-clear-button')).toBeInTheDocument()
     })
