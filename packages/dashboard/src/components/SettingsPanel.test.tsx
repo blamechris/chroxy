@@ -442,21 +442,45 @@ describe('SettingsPanel', () => {
 
     it('renders Set + masked preview when key is set via file', () => {
       setMockState({
-        byokCredentialsStatus: { status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]' },
+        byokCredentialsStatus: {
+          status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: true,
+        },
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.getByTestId('byok-status').textContent).toContain('Set (file)')
       expect(screen.getByTestId('byok-status').textContent).toContain('sk-ant-api03...[95 chars redacted]')
-      // Remove button only visible when source = file (env key is owned outside).
+      // Remove button is keyed on fileExists (#4144) — file present here.
       expect(screen.getByTestId('byok-clear-button')).toBeInTheDocument()
     })
 
-    it('hides the Remove button when source is env (chroxy did not write the key)', () => {
+    it('hides the Remove button when source is env AND no file on disk (#4144)', () => {
       setMockState({
-        byokCredentialsStatus: { status: 'set', source: 'env', masked: 'sk-ant-api03...[95 chars redacted]' },
+        byokCredentialsStatus: {
+          status: 'set', source: 'env', masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: false,
+        },
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.queryByTestId('byok-clear-button')).not.toBeInTheDocument()
+      // Also no stale-file notice when there's actually no file.
+      expect(screen.queryByTestId('byok-stale-file-notice')).not.toBeInTheDocument()
+    })
+
+    it('shows Remove + stale-file notice when env wins but a file is shadowed on disk (#4144)', () => {
+      setMockState({
+        byokCredentialsStatus: {
+          status: 'set', source: 'env', masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: true,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Stale-file notice surfaces — env wins, file is shadowed.
+      const notice = screen.getByTestId('byok-stale-file-notice')
+      expect(notice).toBeInTheDocument()
+      expect(notice.textContent).toMatch(/shadowed/)
+      // Remove button is offered so the user can clear the shadowed file.
+      expect(screen.getByTestId('byok-clear-button')).toBeInTheDocument()
     })
 
     it('disables Save until the input has content', () => {
@@ -498,7 +522,10 @@ describe('SettingsPanel', () => {
     it('calls clearByokCredentials when Remove is clicked', () => {
       const clearByokCredentials = vi.fn()
       setMockState({
-        byokCredentialsStatus: { status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]' },
+        byokCredentialsStatus: {
+          status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: true,
+        },
         clearByokCredentials,
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)

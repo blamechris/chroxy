@@ -404,6 +404,20 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 {byokCredentialsStatus.reason}
               </p>
             )}
+            {/* #4144: stale-file notice. When the env var wins precedence
+                a previously-saved file is shadowed but still on disk —
+                show it so the user can clear it if they don't want it. */}
+            {byokCredentialsStatus?.source === 'env' && byokCredentialsStatus.fileExists && (
+              <p
+                className="settings-hint"
+                data-testid="byok-stale-file-notice"
+                style={{ color: 'var(--warning, #b45309)' }}
+              >
+                A saved <code>credentials.json</code> file exists on disk but is shadowed by
+                the <code>ANTHROPIC_API_KEY</code> env var. The file will be used again the
+                moment you unset the env var. Use Remove to clear it.
+              </p>
+            )}
             <div className="settings-field">
               <label htmlFor="byok-key-input">API key</label>
               <input
@@ -431,7 +445,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               >
                 Save
               </button>
-              {byokCredentialsStatus?.status === 'set' && byokCredentialsStatus.source === 'file' && (
+              {/* #4144: Remove is now keyed on file presence, not source.
+                  When the env var wins precedence, the saved file is
+                  shadowed but the user should still be able to clear it. */}
+              {byokCredentialsStatus?.fileExists && (
                 <button
                   type="button"
                   onClick={handleClearByokKey}
