@@ -513,8 +513,10 @@ export class ClaudeTuiSession extends BaseSession {
     ]
     if (this.skipPermissions) {
       // #4044: bypass chroxy's hook + claude's per-tool prompt entirely.
-      // Caller opted in explicitly; the warning copy that surfaces the
-      // trade-off lives in the dashboard CreateSessionModal.
+      // Caller is expected to opt in explicitly via the session option.
+      // The dashboard CreateSessionModal surface + warning copy + WS
+      // protocol plumbing are tracked separately in #4208 — until then
+      // this option is only reachable via direct programmatic construction.
       args.push('--dangerously-skip-permissions')
     }
     if (this.model) {

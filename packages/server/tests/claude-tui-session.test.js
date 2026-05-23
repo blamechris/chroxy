@@ -1608,5 +1608,56 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session.skipPermissions, true,
         '!!"yes" === true — the constructor accepts truthy passthrough cleanly')
     })
+
+    it('skipPermissions=true: spawn env omits CHROXY_PORT/HOOK_SECRET/PERMISSION_MODE_FILE (#4207 agent-review)', async () => {
+      // The env gate at claude-tui-session.js:498-508 is a distinct site
+      // from settings.json — both have to be off or the hook script can
+      // still phone home. Mirror the production env-build in the stub.
+      let capturedEnv = null
+      ClaudeTuiSession.prototype._spawnPty = async function (permissionsEnabled) {
+        const env = { ...process.env }
+        delete env.ANTHROPIC_API_KEY
+        env.TERM = 'xterm-256color'
+        if (permissionsEnabled) {
+          env.CHROXY_PORT = String(this._port)
+          env.CHROXY_HOOK_SECRET = this._hookSecret
+          env.CHROXY_PERMISSION_MODE = this.permissionMode || 'approve'
+          if (this._permissionModeFile) {
+            env.CHROXY_PERMISSION_MODE_FILE = this._permissionModeFile
+          }
+        }
+        capturedEnv = env
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
+      }
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345, skipPermissions: true,
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      await session.start()
+      assert.equal(capturedEnv.CHROXY_PORT, undefined,
+        'CHROXY_PORT must not leak to TUI env when permissions are skipped')
+      assert.equal(capturedEnv.CHROXY_HOOK_SECRET, undefined)
+      assert.equal(capturedEnv.CHROXY_PERMISSION_MODE, undefined)
+      assert.equal(capturedEnv.CHROXY_PERMISSION_MODE_FILE, undefined)
+    })
+
+    it('skipPermissions=true: post-start setPermissionMode() is a safe no-op for the sidecar (#4207 agent-review)', async () => {
+      // start() with skipPermissions doesn't create the sidecar, so
+      // _permissionModeFile is null. setPermissionMode walks the same
+      // early-return guard (`if (!this._permissionModeFile)`), so the
+      // call must be a no-op rather than crash/leak.
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345, skipPermissions: true,
+        skillsDir: emptySkillsDir, repoSkillsDir: null,
+      })
+      await session.start()
+      assert.equal(session._permissionModeFile, null)
+      // Must not throw + must not retroactively create a sidecar.
+      session.setPermissionMode('auto')
+      assert.equal(session._permissionModeFile, null,
+        'setPermissionMode must NOT lazy-create the sidecar after skipPermissions start')
+      assert.equal(session.permissionMode, 'auto',
+        'in-process bookkeeping still updates so capabilities checks stay coherent')
+    })
   })
 })
