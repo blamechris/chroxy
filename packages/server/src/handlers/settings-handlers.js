@@ -402,8 +402,9 @@ function handleListProviders(ws, client, msg, ctx) {
  *
  * Three message types: get status, set the key, clear the key. The full
  * key is never sent back over the wire — only its masked form via
- * `getAnthropicApiKeyStatus`. Errors are surfaced via sendError + a
- * status broadcast so the dashboard can keep its UI in sync.
+ * `getAnthropicApiKeyStatus`. Errors are surfaced via sendError;
+ * success replies go back to the calling ws AND broadcast to all
+ * authenticated clients so additional dashboards / tabs stay in sync.
  *
  * Auth posture: any authenticated WS client can call these. chroxy isn't
  * multi-tenant — the user controls their own credentials file. The

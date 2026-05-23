@@ -96,13 +96,17 @@ export function resolveAnthropicApiKey() {
  * fsync isn't strictly needed for this size, then rename over the
  * target. A crash between write and rename leaves the old file intact.
  *
- * Post-write the mode is re-stat'd and we throw if it didn't take —
- * this guards against an unexpected umask making the file world-
- * readable even after chmod (rare, but the security boundary is
- * "refuse silently bad state, not "log a warning and continue").
+ * Post-write the mode is re-stat'd and we throw if it didn't take. This
+ * guards against an unexpected umask making the file world-readable even
+ * after chmod (rare). The security boundary is: refuse a bad state, do
+ * not log a warning and continue.
+ *
+ * Windows note: chmod / 0600 don't map cleanly to NTFS ACLs, so the mode
+ * verification is POSIX-only. On win32 the rename and chmod still run
+ * (best-effort) but the strict 0o600 assertion is skipped — see #4144.
  *
  * @param {string} key  the `sk-ant-...` API key
- * @throws if key is missing/non-string, or if the post-write mode != 0600
+ * @throws if key is missing/non-string, or if the post-write mode != 0600 on POSIX
  */
 export function writeAnthropicApiKey(key) {
   if (typeof key !== 'string' || key.length === 0) {
@@ -113,8 +117,10 @@ export function writeAnthropicApiKey(key) {
   // 0o700 on the dir so creds aren't enumerable to other local users.
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   // Existing dir may have a more-permissive mode from before this code
-  // existed — tighten it.
-  try { chmodSync(dir, 0o700) } catch { /* best-effort */ }
+  // existed — tighten it. POSIX-only (Windows ACLs handle differently).
+  if (process.platform !== 'win32') {
+    try { chmodSync(dir, 0o700) } catch { /* best-effort */ }
+  }
 
   const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`
   let renamed = false
@@ -122,15 +128,27 @@ export function writeAnthropicApiKey(key) {
     // Open with mode 0600 directly so the brief window before chmod
     // doesn't expose the key as 0644 (umask-dependent default).
     writeFileSync(tmp, JSON.stringify({ anthropicApiKey: key }, null, 2), { mode: 0o600 })
-    chmodSync(tmp, 0o600)
+    if (process.platform !== 'win32') {
+      chmodSync(tmp, 0o600)
+    }
+    // win32 renameSync can't atomically replace an existing destination —
+    // unlink the target first so the move semantics match POSIX. The
+    // window between unlink and rename is tiny; an OS-level crash there
+    // can leave the file missing but never world-readable.
+    if (process.platform === 'win32' && existsSync(target)) {
+      try { unlinkSync(target) } catch { /* */ }
+    }
     renameSync(tmp, target)
     renamed = true
-    // Verify the mode survived the rename. If it didn't, refuse to leave
-    // a world-readable creds file behind: unlink it and throw.
-    const perms = statSync(target).mode & 0o777
-    if (perms !== 0o600) {
-      try { unlinkSync(target) } catch { /* */ }
-      throw new Error(`credentials file ended up with mode ${perms.toString(8)} after write; refused`)
+    // Verify the mode survived the rename. POSIX-only: on win32 the mode
+    // bits don't reflect NTFS ACLs, so a strict 0o600 check would always
+    // fail and refuse to write valid credentials.
+    if (process.platform !== 'win32') {
+      const perms = statSync(target).mode & 0o777
+      if (perms !== 0o600) {
+        try { unlinkSync(target) } catch { /* */ }
+        throw new Error(`credentials file ended up with mode ${perms.toString(8)} after write; refused`)
+      }
     }
   } finally {
     if (!renamed && existsSync(tmp)) {

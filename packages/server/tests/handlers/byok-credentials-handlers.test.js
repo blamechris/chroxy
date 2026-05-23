@@ -79,6 +79,8 @@ describe('byok credentials handlers (#4052)', () => {
     })
   })
 
+  const isPosix = process.platform !== 'win32'
+
   describe('byok_set_credentials', () => {
     it('writes the key with mode 0600 and returns set/file status', () => {
       const longKey = 'sk-ant-api03-' + 'b'.repeat(95)
@@ -86,7 +88,9 @@ describe('byok credentials handlers (#4052)', () => {
       settingsHandlers.byok_set_credentials(makeWs(), { id: 'c1' }, { requestId: 'r1', anthropicApiKey: longKey }, ctx)
       const credPath = join(tmpHome, '.chroxy', 'credentials.json')
       assert.ok(existsSync(credPath))
-      assert.equal(statSync(credPath).mode & 0o777, 0o600)
+      if (isPosix) {
+        assert.equal(statSync(credPath).mode & 0o777, 0o600)
+      }
 
       const payload = ctx._sent[0]
       assert.equal(payload.type, 'byok_credentials_status')

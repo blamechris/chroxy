@@ -156,8 +156,13 @@ describe('byok-credentials', () => {
     })
   })
 
+  // POSIX-only: chmod / 0o600 don't map cleanly to NTFS ACLs, so the file
+  // mode assertions are skipped on win32. The behavior under test still
+  // runs there (the rename + write); only the strict 0o600 check is POSIX.
+  const isPosix = process.platform !== 'win32'
+
   describe('writeAnthropicApiKey (#4052)', () => {
-    it('writes the key to ~/.chroxy/credentials.json with mode 0600', () => {
+    it('writes the key to ~/.chroxy/credentials.json with mode 0600 (POSIX only)', { skip: !isPosix }, () => {
       const credPath = join(tmpHome, '.chroxy', 'credentials.json')
       writeAnthropicApiKey('sk-ant-paste-test')
       assert.ok(existsSync(credPath), 'file must exist after write')
@@ -167,12 +172,22 @@ describe('byok-credentials', () => {
       assert.equal(parsed.anthropicApiKey, 'sk-ant-paste-test')
     })
 
+    it('writes the key file regardless of platform (cross-platform)', () => {
+      const credPath = join(tmpHome, '.chroxy', 'credentials.json')
+      writeAnthropicApiKey('sk-ant-cross-platform')
+      assert.ok(existsSync(credPath))
+      const parsed = JSON.parse(readFileSync(credPath, 'utf8'))
+      assert.equal(parsed.anthropicApiKey, 'sk-ant-cross-platform')
+    })
+
     it('creates the ~/.chroxy directory if missing', () => {
       assert.equal(existsSync(join(tmpHome, '.chroxy')), false)
       writeAnthropicApiKey('sk-ant-mkdir-test')
       assert.ok(existsSync(join(tmpHome, '.chroxy')))
-      assert.equal(statSync(join(tmpHome, '.chroxy')).mode & 0o777, 0o700,
-        '.chroxy dir should be 0700 so creds aren\'t enumerable')
+      if (isPosix) {
+        assert.equal(statSync(join(tmpHome, '.chroxy')).mode & 0o777, 0o700,
+          '.chroxy dir should be 0700 so creds aren\'t enumerable')
+      }
     })
 
     it('overwrites an existing credentials file atomically', () => {
@@ -180,8 +195,10 @@ describe('byok-credentials', () => {
       writeAnthropicApiKey('sk-ant-second')
       const parsed = JSON.parse(readFileSync(join(tmpHome, '.chroxy', 'credentials.json'), 'utf8'))
       assert.equal(parsed.anthropicApiKey, 'sk-ant-second')
-      const mode = statSync(join(tmpHome, '.chroxy', 'credentials.json')).mode & 0o777
-      assert.equal(mode, 0o600, 'mode must remain 0600 on overwrite')
+      if (isPosix) {
+        const mode = statSync(join(tmpHome, '.chroxy', 'credentials.json')).mode & 0o777
+        assert.equal(mode, 0o600, 'mode must remain 0600 on overwrite')
+      }
     })
 
     it('rejects empty / non-string keys', () => {
