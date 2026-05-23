@@ -1726,6 +1726,189 @@ describe('ClaudeByokSession', () => {
         await session.destroy()
       })
 
+      it('surfaces a Permission gate error tool_result when handlePermission throws (#4151)', async () => {
+        // byok-session._executeToolBlock wraps handlePermission in
+        // try/catch and converts thrown errors to is_error: true with
+        // 'Permission gate error: ...' content. Inject a permission
+        // manager whose handlePermission rejects (e.g. timeout/abort)
+        // and assert the next round sees that shape.
+        const session = new ClaudeByokSession({ cwd: workspace })
+        // Override after construction — _permissions was wired in the
+        // constructor; we replace it before sendMessage runs.
+        session._permissions.handlePermission = async () => {
+          throw new Error('simulated gate failure')
+        }
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_pg', name: 'Read',
+                      input: { file_path: join(workspace, 'whatever.txt') },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('try a read')
+        assert.ok(toolResultBlock, 'permission-gate throw must still produce a tool_result')
+        assert.equal(toolResultBlock.is_error, true)
+        assert.match(toolResultBlock.content, /Permission gate error/)
+        assert.match(toolResultBlock.content, /simulated gate failure/)
+        await session.destroy()
+      })
+
+      it('acceptEdits mode auto-approves Read through the real executor (#4151)', async () => {
+        // acceptEdits is one of four permission modes (#3729); for tools
+        // in ACCEPT_EDITS_TOOLS it short-circuits the prompt path and
+        // auto-allows. Exercising the seam end-to-end proves the
+        // mode-to-decision-to-executor flow works.
+        const targetPath = join(workspace, 'accept-edits.txt')
+        writeFileSync(targetPath, 'accept-edits-content')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('acceptEdits')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_ae', name: 'Read',
+                      input: { file_path: targetPath },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('read it')
+        assert.ok(toolResultBlock, 'acceptEdits Read must produce a tool_result')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /accept-edits-content/)
+        await session.destroy()
+      })
+
+      it('session rule decision=allow auto-approves Read through the real executor (#4151)', async () => {
+        // Default permission mode (approve) requires a prompt unless a
+        // session rule matches. Setting a rule for Read should short-
+        // circuit the prompt path and let the real executor run.
+        const targetPath = join(workspace, 'rule-allow.txt')
+        writeFileSync(targetPath, 'rule-allow-content')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session._permissions.setRules([{ tool: 'Read', decision: 'allow' }])
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_ra', name: 'Read',
+                      input: { file_path: targetPath },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('read via rule')
+        assert.ok(toolResultBlock, 'allow-rule Read must produce a tool_result')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /rule-allow-content/)
+        await session.destroy()
+      })
+
+      it('session rule decision=deny refuses Read with a deny tool_result (#4151)', async () => {
+        // The mirror of the allow case: a deny rule short-circuits to a
+        // denied tool_result without invoking the executor at all. The
+        // file content must NOT be in the result.
+        const targetPath = join(workspace, 'rule-deny.txt')
+        writeFileSync(targetPath, 'should-not-appear')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session._permissions.setRules([{ tool: 'Read', decision: 'deny' }])
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_rd', name: 'Read',
+                      input: { file_path: targetPath },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('read via deny rule')
+        assert.ok(toolResultBlock, 'deny-rule must still produce a tool_result')
+        assert.equal(toolResultBlock.is_error, true)
+        assert.equal(toolResultBlock.content.includes('should-not-appear'), false,
+          'deny rule must short-circuit BEFORE the executor reads the file')
+        await session.destroy()
+      })
+
       it('refuses a path-traversal attempt via the real path-safety check', async () => {
         // Real executor enforces validatePathWithinCwd. Asking for
         // /etc/passwd should produce is_error: true with a recognisable
