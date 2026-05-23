@@ -502,16 +502,21 @@ function pickCharset(ctype) {
 }
 
 async function readBodyCapped(res, maxBytes, charset = 'utf-8') {
+  // pickCharset has already validated the label, so this can't throw.
+  const decoder = new TextDecoder(charset)
   const reader = res.body?.getReader()
   if (!reader) {
-    // Defensive fallback only — for real fetch results res.body is
-    // always present, so this branch is effectively unreachable. We
-    // can't honour `charset` here without re-reading the body, so we
-    // accept whatever res.text() yields (undici hard-wires utf-8;
-    // #4163 tracks if we ever need to fix this for the body-less path).
-    const text = await res.text()
-    if (text.length > maxBytes) return { text: text.slice(0, maxBytes), truncated: true }
-    return { text, truncated: false }
+    // Defensive fallback for the (unreachable in practice) case where
+    // fetch returns no body stream. Use arrayBuffer + TextDecoder so
+    // both paths apply the same charset AND the same byte-based cap —
+    // res.text() would (a) hard-wire utf-8 in undici and (b) measure
+    // the cap in chars, not bytes. Keeps the contract consistent.
+    const ab = await res.arrayBuffer()
+    const bytes = Buffer.from(ab)
+    if (bytes.byteLength > maxBytes) {
+      return { text: decoder.decode(bytes.subarray(0, maxBytes)), truncated: true }
+    }
+    return { text: decoder.decode(bytes), truncated: false }
   }
   const chunks = []
   let total = 0
@@ -531,8 +536,6 @@ async function readBodyCapped(res, maxBytes, charset = 'utf-8') {
     chunks.push(value)
   }
   const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)))
-  // pickCharset has already validated the label, so this can't throw.
-  const decoder = new TextDecoder(charset)
   return { text: decoder.decode(buf), truncated }
 }
 
