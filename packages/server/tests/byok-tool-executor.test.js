@@ -741,6 +741,21 @@ describe('executeBuiltinTool', () => {
       assert.match(r.content, new RegExp(`URL: http://127\\.0\\.0\\.1:${port}/creds-ok`))
     })
 
+    it('malformed-url EINVAL does not echo raw input (no creds leak) (#4159)', async () => {
+      // A URL like `http://alice:hunter2@` fails new URL() AND contains
+      // userinfo — the EINVAL must NOT echo the raw input back to the
+      // model (which lands in conversation history). Pre-fix it did.
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: 'http://alice:hunter2@', prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /malformed/i)
+      assert.equal(r.content.includes('alice'), false, 'username must not leak')
+      assert.equal(r.content.includes('hunter2'), false, 'password must not leak')
+    })
+
     it('also strips credentials from the 4xx/5xx error path (#4133)', async () => {
       const { port } = server.address()
       // /missing is not registered → 404

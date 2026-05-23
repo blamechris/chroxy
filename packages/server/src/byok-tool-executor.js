@@ -363,7 +363,10 @@ async function runWebFetch({ input, signal }) {
   try {
     parsed = new URL(rawUrl)
   } catch {
-    return { content: `EINVAL: malformed url: ${rawUrl}`, isError: true }
+    // #4159: do NOT echo rawUrl here — a URL that fails to parse can
+    // still contain userinfo (e.g. `http://alice:hunter2@` fails the
+    // host check) and any echo lands in conversation history.
+    return { content: 'EINVAL: malformed url (could not be parsed as http(s))', isError: true }
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return {
