@@ -350,6 +350,89 @@ describe('executeBuiltinTool', () => {
       assert.match(r.content, /status must be one of/)
     })
 
+    it('rejects duplicate ids within a single call (#4138)', async () => {
+      // Per #4138: a duplicate id in one call is almost certainly a
+      // model bug. Surface it as EINVAL so the model self-corrects
+      // rather than letting the last write silently win.
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'first', status: 'pending' },
+          { id: 'a', content: 'second', status: 'completed' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /duplicate/i)
+      // Id is JSON-quoted for parseability (so embedded quotes / newlines /
+      // control chars don't mangle the message). Pin both the JSON-quoted
+      // id and the array index so the template can't drift unnoticed.
+      assert.match(r.content, /"a"/)
+      assert.match(r.content, /todos\[1\]/)
+      assert.equal(store.size, 0, 'duplicate-id call must not mutate the store (atomic)')
+    })
+
+    it('JSON-quotes the id in the dup-rejection error (Copilot review on #4155)', async () => {
+      // An id containing a quote or newline must not mangle the error
+      // string. JSON.stringify yields a parseable representation.
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a"b', content: 'first', status: 'pending' },
+          { id: 'a"b', content: 'second', status: 'completed' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      // JSON.stringify('a"b') === '"a\\"b"' — the escaped quote survives.
+      assert.match(r.content, /"a\\"b"/)
+    })
+
+    it('treats ids as case-sensitive (dup check matches storage semantics)', async () => {
+      // The Map storage uses raw string keys, so 'a' and 'A' are distinct.
+      // Pin that contract — a future "normalize for user friendliness"
+      // refactor would silently merge what the model intended as separate
+      // todos.
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'lower', status: 'pending' },
+          { id: 'A', content: 'upper', status: 'pending' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, false)
+      assert.equal(store.size, 2)
+    })
+
+    it('duplicate-id rejection preserves prior store entries (#4138 atomic)', async () => {
+      const store = new Map()
+      // Seed a prior entry under id 'a'.
+      await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: 'prior', status: 'in_progress' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      // A call with a dup must not mutate 'a' (even though both dups carry id 'a').
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'one', status: 'pending' },
+          { id: 'a', content: 'two', status: 'completed' },
+          { id: 'b', content: 'new', status: 'pending' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      assert.equal(store.size, 1, 'prior store untouched on dup rejection')
+      assert.equal(store.get('a').content, 'prior')
+      assert.equal(store.get('a').status, 'in_progress')
+      assert.equal(store.has('b'), false, 'valid item from same call also not applied')
+    })
+
     it('does not half-apply when a later item is invalid (atomic merge)', async () => {
       const store = new Map()
       // Seed.
@@ -494,9 +577,17 @@ describe('executeBuiltinTool', () => {
   describe('WebFetch (#4050)', () => {
     let server
     let baseUrl
+    let priorAllowPrivate
     const routes = new Map()
 
     before(async () => {
+      // #4132: WebFetch now blocks private/loopback/link-local hosts by
+      // default. The test server runs on 127.0.0.1, so set the opt-in
+      // env flag for the WebFetch suite. Individual SSRF-defense tests
+      // unset it locally and restore it after.
+      priorAllowPrivate = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = '1'
+
       server = createServer((req, res) => {
         const handler = routes.get(req.url)
         if (!handler) {
@@ -512,6 +603,8 @@ describe('executeBuiltinTool', () => {
     })
 
     after(async () => {
+      if (priorAllowPrivate === undefined) delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      else process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = priorAllowPrivate
       await new Promise((resolve) => server.close(resolve))
     })
 
@@ -714,6 +807,324 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, false, 'out-of-range numeric entities must not throw')
       assert.match(r.content, /beforemiddleafter/)
+    })
+
+    it('strips user:pass@ credentials from URL echoed in result header (#4133)', async () => {
+      // Pre-fix the URL was echoed verbatim from parsed.toString(), leaking
+      // any embedded credentials into the model's view and (via history)
+      // back to the Anthropic API. Strip userinfo before display.
+      routes.set('/creds-ok', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('body content')
+      })
+      const { port } = server.address()
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/creds-ok`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.equal(r.content.includes('alice'), false, 'username must not leak')
+      assert.equal(r.content.includes('hunter2'), false, 'password must not leak')
+      assert.equal(r.content.includes('alice:hunter2@'), false, 'userinfo must not leak')
+      // The sanitized URL is still useful — host + path are preserved.
+      assert.match(r.content, new RegExp(`URL: http://127\\.0\\.0\\.1:${port}/creds-ok`))
+    })
+
+    it('malformed-url EINVAL does not echo raw input (no creds leak) (#4159)', async () => {
+      // A URL like `http://alice:hunter2@` fails new URL() AND contains
+      // userinfo — the EINVAL must NOT echo the raw input back to the
+      // model (which lands in conversation history). Pre-fix it did.
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: 'http://alice:hunter2@', prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /malformed/i)
+      assert.equal(r.content.includes('alice'), false, 'username must not leak')
+      assert.equal(r.content.includes('hunter2'), false, 'password must not leak')
+    })
+
+    it('also strips credentials from the 4xx/5xx error path (#4133)', async () => {
+      const { port } = server.address()
+      // /missing is not registered → 404
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/missing`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /404/)
+      assert.equal(r.content.includes('alice'), false)
+      assert.equal(r.content.includes('hunter2'), false)
+    })
+
+    it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
+      // ISO-8859-1: 0xE9 is 'é', 0xF6 is 'ö'. Decoded as utf-8 those
+      // bytes are invalid continuations and become replacement
+      // characters (mojibake). Pre-fix readBodyCapped used utf-8 always.
+      routes.set('/latin1', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=ISO-8859-1' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xE9, 0x20, 0x66, 0xF6, 0x6F])) // "café föo"
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/latin1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café föo/)
+    })
+
+    it('falls back to utf-8 when charset is unrecognised (#4134)', async () => {
+      // Use a sequence that is valid utf-8 but would decode differently
+      // under Latin-1 — proves the fallback is utf-8, not "whatever the
+      // bogus label happens to alias to". The bytes "café" in utf-8
+      // are 0x63 0x61 0x66 0xC3 0xA9. As Latin-1 those last two would
+      // be "Ã©". Asserting "café" appears means we used utf-8.
+      routes.set('/weirdcharset', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=not-a-real-charset' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xC3, 0xA9]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/weirdcharset`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café/)
+      assert.equal(r.content.includes('Ã©'), false, 'must NOT be Latin-1 decoded')
+    })
+
+    it('falls back to utf-8 when Content-Type omits charset (#4134)', async () => {
+      // Same payload as the unknown-charset test — bytes that decode
+      // distinctly under utf-8 vs Latin-1 — but with no charset
+      // declared. The model gets utf-8 (the default), not raw bytes.
+      routes.set('/nocharset', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xC3, 0xA9]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/nocharset`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café/)
+      assert.equal(r.content.includes('Ã©'), false)
+    })
+
+    it('charset parameter boundary anchoring — xcharset=fakeout is not matched (#4162)', async () => {
+      // Pre-fix the regex matched `xcharset=` substring → label "fakeout"
+      // → TextDecoder rejects it → fallback to utf-8. That's the right
+      // outcome by accident; the parameter-boundary anchor makes the
+      // regex correct on principle. Pin it with a header that contains
+      // a real `charset` parameter AFTER a fake one, so a non-anchored
+      // regex would grab the wrong value.
+      routes.set('/boundary', (_req, res) => {
+        // "xcharset=ISO-8859-1; charset=utf-8" — the real charset is utf-8.
+        // utf-8 bytes for "café" must decode as utf-8, not Latin-1.
+        res.writeHead(200, { 'Content-Type': 'text/plain; xcharset=ISO-8859-1; charset=utf-8' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xC3, 0xA9]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/boundary`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café/)
+    })
+
+    it('follows redirects (302 → 200) when scheme + host are allowed (#4132)', async () => {
+      routes.set('/r1', (_req, res) => {
+        res.writeHead(302, { Location: `${baseUrl}/r2` })
+        res.end()
+      })
+      routes.set('/r2', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('redirected ok')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /redirected ok/)
+    })
+
+    it('refuses redirect to file:// scheme without leaking the Location path (#4132 + Copilot review)', async () => {
+      routes.set('/r-evil', (_req, res) => {
+        res.writeHead(302, { Location: 'file:///etc/passwd' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-evil`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
+      // The scheme IS the diagnostic — but Location is attacker-controlled,
+      // so the message must NOT echo the path/query verbatim (prompt
+      // injection + sensitive-path leak surface).
+      assert.match(r.content, /file:/)
+      assert.equal(r.content.includes('/etc/passwd'), false,
+        'attacker-controlled Location path must not be reflected in error')
+    })
+
+    it('refuses redirect to javascript: scheme (#4132)', async () => {
+      routes.set('/r-js', (_req, res) => {
+        res.writeHead(302, { Location: 'javascript:alert(1)' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-js`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
+    })
+
+    it('refuses initial private/loopback host when env opt-out is unset (#4132 SSRF)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          // 169.254.169.254 is the cloud-instance metadata service —
+          // the canonical SSRF target. Doesn't need a real server; the
+          // pre-fetch check should refuse it.
+          input: { url: 'http://169.254.169.254/latest/meta-data/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+        assert.match(r.content, /CHROXY_WEBFETCH_ALLOW_PRIVATE/, 'error must point at the opt-out flag')
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses initial IPv6 loopback [::1] when env opt-out unset (#4166 bracket handling)', async () => {
+      // URL.hostname returns IPv6 literals with brackets ('[::1]') and
+      // net.isIP() doesn't accept brackets. Pre-fix the probe fell
+      // through to dnsLookup which failed, so the refusal still fired
+      // (fail-closed) — but the path was broken for public IPv6 too.
+      // After the fix, the bracket is stripped and the loopback is
+      // recognised as such and refused via the IP branch.
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://[::1]:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses IPv4-mapped IPv6 hex form (::ffff:7f00:1) (Copilot review on #4165)', async () => {
+      // ::ffff:7f00:1 expands to ::ffff:127.0.0.1 — the SAME loopback
+      // address in IPv4-mapped IPv6 hex form. Pre-fix this bypassed
+      // the SSRF check because only the dotted-quad tail form was
+      // recognised. The mappedV6ToV4 helper now expands the v6 groups
+      // and recognises the IPv4-mapped prefix.
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://[::ffff:7f00:1]:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses IPv4-mapped IPv6 dotted form (::ffff:127.0.0.1) (#4132)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://[::ffff:127.0.0.1]:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses initial loopback (127.0.0.1) when env opt-out unset (#4132 SSRF)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        // Use a port unlikely to bind to anything so even a stale local
+        // service can't accidentally answer; the SSRF refusal happens
+        // BEFORE any network attempt.
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://127.0.0.1:1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses redirect to a non-http(s) scheme even when host check is bypassed (#4132)', async () => {
+      // Confirms the scheme check fires independent of the host check —
+      // a file:// redirect target has no host, so the host check is
+      // moot but scheme refusal must fire.
+      routes.set('/r-ftp', (_req, res) => {
+        res.writeHead(302, { Location: 'ftp://example.com/secret' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-ftp`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*scheme|only http\(s\)/i)
+    })
+
+    it('refuses excessive redirect chain (#4132)', async () => {
+      // Chain redirect 1→2→3→... and assert refusal at the cap.
+      for (let i = 1; i <= 20; i++) {
+        routes.set(`/chain-${i}`, (_req, res) => {
+          res.writeHead(302, { Location: `${baseUrl}/chain-${i + 1}` })
+          res.end()
+        })
+      }
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/chain-1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /redirect.*cap|too many redirects/i)
     })
 
     it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {
