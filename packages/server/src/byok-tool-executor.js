@@ -549,6 +549,7 @@ function runTodoWrite({ input, todoStore }) {
 
   // Validate every item BEFORE mutating so a bad item halfway through
   // doesn't leave the store in a partially-applied state.
+  const seenIds = new Set()
   for (let i = 0; i < todos.length; i++) {
     const t = todos[i]
     if (!t || typeof t !== 'object') {
@@ -557,6 +558,17 @@ function runTodoWrite({ input, todoStore }) {
     if (typeof t.id !== 'string' || t.id.length === 0) {
       return { content: `EINVAL: todos[${i}].id is required (string)`, isError: true }
     }
+    // #4138: reject duplicate ids within a single call. A duplicate is
+    // almost certainly a model bug; rejecting it lets the model see the
+    // mistake and self-correct rather than letting the last write win
+    // silently. Across separate calls, merge-by-id is unchanged.
+    if (seenIds.has(t.id)) {
+      return {
+        content: `EINVAL: todos[${i}].id '${t.id}' duplicates an earlier entry in this call`,
+        isError: true,
+      }
+    }
+    seenIds.add(t.id)
     if (typeof t.content !== 'string' || t.content.length === 0) {
       return { content: `EINVAL: todos[${i}].content is required (string)`, isError: true }
     }

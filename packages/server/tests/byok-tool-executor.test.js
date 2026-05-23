@@ -350,6 +350,50 @@ describe('executeBuiltinTool', () => {
       assert.match(r.content, /status must be one of/)
     })
 
+    it('rejects duplicate ids within a single call (#4138)', async () => {
+      // Per #4138: a duplicate id in one call is almost certainly a
+      // model bug. Surface it as EINVAL so the model self-corrects
+      // rather than letting the last write silently win.
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'first', status: 'pending' },
+          { id: 'a', content: 'second', status: 'completed' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /duplicate/i)
+      assert.match(r.content, /'a'/)
+      assert.equal(store.size, 0, 'duplicate-id call must not mutate the store (atomic)')
+    })
+
+    it('duplicate-id rejection preserves prior store entries (#4138 atomic)', async () => {
+      const store = new Map()
+      // Seed a prior entry under id 'a'.
+      await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [{ id: 'a', content: 'prior', status: 'in_progress' }] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      // A call with a dup must not mutate 'a' (even though both dups carry id 'a').
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a', content: 'one', status: 'pending' },
+          { id: 'a', content: 'two', status: 'completed' },
+          { id: 'b', content: 'new', status: 'pending' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      assert.equal(store.size, 1, 'prior store untouched on dup rejection')
+      assert.equal(store.get('a').content, 'prior')
+      assert.equal(store.get('a').status, 'in_progress')
+      assert.equal(store.has('b'), false, 'valid item from same call also not applied')
+    })
+
     it('does not half-apply when a later item is invalid (atomic merge)', async () => {
       const store = new Map()
       // Seed.
