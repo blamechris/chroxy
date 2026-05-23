@@ -107,8 +107,9 @@ export const BUILTIN_TOOLS = [
       'and tags, with entities decoded. JSON and plaintext are returned as-is. Binary content-types ' +
       '(images, octet-stream, etc.) are refused. Response body is capped — overflow is marked ' +
       '`[truncated …]` so the model knows it saw a slice. Only http(s) URLs are allowed; file://, ' +
-      'ftp://, javascript: are refused. Always permission-gated (treated like Bash — outbound ' +
-      'network call the user must approve).',
+      'ftp://, javascript: are refused. Permission-gated like Bash (outbound network call the user ' +
+      'must approve) — except when the session is in `auto` mode, which bypasses permission prompts ' +
+      'for every tool. In `auto` mode the user has opted out of per-call approval system-wide.',
     input_schema: {
       type: 'object',
       properties: {

@@ -58,6 +58,19 @@ describe('BUILTIN_TOOLS', () => {
     assert.deepEqual(wf.input_schema.required.sort(), ['prompt', 'url'])
   })
 
+  it('WebFetch description discloses the auto-mode bypass (#4135)', () => {
+    // Pre-fix the description claimed "Always permission-gated" which
+    // contradicts the auto-mode short-circuit in PermissionManager. The
+    // model now sees an honest description: permission-gated except in
+    // auto mode. Pinning this prevents future doc drift from
+    // reintroducing the contradiction.
+    const wf = BUILTIN_TOOLS.find((t) => t.name === 'WebFetch')
+    assert.ok(wf, 'WebFetch must be registered')
+    assert.equal(/always permission-gated/i.test(wf.description), false,
+      'description must not promise "always" gating when auto mode bypasses it')
+    assert.match(wf.description, /auto/i)
+  })
+
   it('TodoWrite requires todos array with id/content/status per item (#4051)', () => {
     const tw = BUILTIN_TOOLS.find((t) => t.name === 'TodoWrite')
     assert.ok(tw, 'TodoWrite must be registered')
