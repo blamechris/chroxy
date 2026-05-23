@@ -107,8 +107,10 @@ export const BUILTIN_TOOLS = [
       'and tags, with entities decoded. JSON and plaintext are returned as-is. Binary content-types ' +
       '(images, octet-stream, etc.) are refused. Response body is capped — overflow is marked ' +
       '`[truncated …]` so the model knows it saw a slice. Only http(s) URLs are allowed; file://, ' +
-      'ftp://, javascript: are refused. Always permission-gated (treated like Bash — outbound ' +
-      'network call the user must approve).',
+      'ftp://, javascript: are refused. Outbound network call: by default the user must approve ' +
+      'each call via a permission prompt. Exception: when the session is in `auto` permission mode ' +
+      'the prompt is bypassed and the call runs immediately — auto mode is a system-wide opt-out ' +
+      'of per-call approval.',
     input_schema: {
       type: 'object',
       properties: {
@@ -125,8 +127,11 @@ export const BUILTIN_TOOLS = [
       'Update the session-scoped todo list. Items are merged by `id` — a call that ' +
       'omits an item leaves that item unchanged (partial updates are supported). ' +
       'Each item: `{ id, content, status, activeForm? }`. Status must be one of ' +
-      '`pending`, `in_progress`, `completed`. The list is in-memory only — it resets ' +
-      'when the session is destroyed. Returns a short summary of the current list.',
+      '`pending`, `in_progress`, `completed`. Within a single call each `id` must ' +
+      'be unique — duplicates are rejected as EINVAL so the model sees the mistake ' +
+      'and can self-correct rather than have the last write silently win. ' +
+      'The list is in-memory only — it resets when the session is destroyed. ' +
+      'Returns a short summary of the current list.',
     input_schema: {
       type: 'object',
       properties: {

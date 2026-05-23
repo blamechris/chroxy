@@ -1197,6 +1197,72 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('error dispatch — non-fatal severity routing (#4148)', () => {
+    it('routes MAX_TOOL_ROUNDS_REACHED to severity=warning (yellow toast)', () => {
+      const calls: Array<{ message: unknown; severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ message, severity })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'MAX_TOOL_ROUNDS_REACHED',
+          message: 'tool cap reached',
+          fatal: false,
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.severity).toBe('warning')
+    })
+
+    it('routes any error with fatal: false to severity=warning, regardless of code', () => {
+      const calls: Array<{ severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ severity })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'SOME_FUTURE_NON_FATAL_CODE',
+          message: 'recoverable',
+          fatal: false,
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.severity).toBe('warning')
+    })
+
+    it('routes STREAM_ERROR / ABORT and other unmarked codes to severity=error (red toast)', () => {
+      const calls: Array<{ severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ severity })
+      }
+      handleMessage(
+        { type: 'error', code: 'STREAM_ERROR', message: 'stream failed' } as any,
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'error', code: 'ABORT', message: 'aborted' } as any,
+        ctx() as any,
+      )
+      expect(calls.map((c) => c.severity)).toEqual(['error', 'error'])
+    })
+  })
+
   describe('pairing_refreshed dispatch (#2916)', () => {
     it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
       store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))
@@ -1213,6 +1279,48 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+
+  describe('byok_credentials_status dispatch (#4144 fileExists propagation)', () => {
+    it('propagates the fileExists field to the store', () => {
+      // Pre-fix the reducer hand-picked fields and silently dropped
+      // fileExists, so the stale-file notice + Remove button were
+      // both effectively dead in production. Pin the field flows
+      // through the message-handler layer.
+      handleMessage(
+        {
+          type: 'byok_credentials_status',
+          status: 'set',
+          source: 'env',
+          masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: true,
+        } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.byokCredentialsStatus).toEqual({
+        status: 'set',
+        source: 'env',
+        masked: 'sk-ant-api03...[95 chars redacted]',
+        reason: undefined,
+        fileExists: true,
+      })
+    })
+
+    it('preserves fileExists=false when the server omits or sets it explicitly false', () => {
+      handleMessage(
+        {
+          type: 'byok_credentials_status',
+          status: 'missing',
+          source: 'none',
+          reason: 'no key',
+          fileExists: false,
+        } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.byokCredentialsStatus.fileExists).toBe(false)
+    })
+  })
 
   describe('result — cost calculation for Codex/Gemini (cost: null from server)', () => {
     function seedWithModel(sessionId: string, model: string) {

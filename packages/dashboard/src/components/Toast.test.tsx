@@ -86,6 +86,23 @@ describe('Toast', () => {
     expect(toast?.classList.contains('toast-info')).toBe(false)
   })
 
+  it('applies toast-warning class for warning-level items (#4148)', () => {
+    const items: ToastItem[] = [{ id: 'w1', message: 'Tool round cap reached', level: 'warning' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toast = container.querySelector('.toast')
+    expect(toast?.classList.contains('toast-warning')).toBe(true)
+    expect(toast?.classList.contains('toast-error')).toBe(false)
+    expect(toast?.classList.contains('toast-info')).toBe(false)
+  })
+
+  it('uses status role + polite aria-live for warning-level items (not assertive alert) (#4148)', () => {
+    const items: ToastItem[] = [{ id: 'w2', message: 'Recoverable warning', level: 'warning' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toast = container.querySelector('.toast')
+    expect(toast?.getAttribute('role')).toBe('status')
+    expect(toast?.getAttribute('aria-live')).toBe('polite')
+  })
+
   describe('timer behaviour', () => {
     beforeEach(() => { vi.useFakeTimers() })
     afterEach(() => { vi.runOnlyPendingTimers(); vi.useRealTimers() })

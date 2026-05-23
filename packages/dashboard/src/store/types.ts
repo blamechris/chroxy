@@ -710,7 +710,7 @@ export interface ConnectionState {
   // recovery button to the toast. Existing call sites that pass only
   // `message` keep working — `action` is undefined and the toast renders
   // message-only as before.
-  addServerError: (message: string, action?: ServerErrorAction) => void;
+  addServerError: (message: string, action?: ServerErrorAction, severity?: ServerError['severity']) => void;
   dismissServerError: (id: string) => void;
 
   // Info notification actions
@@ -752,6 +752,11 @@ export interface ConnectionState {
     source: 'env' | 'file' | 'none';
     masked?: string;
     reason?: string;
+    // #4144: surface stale-file state. true when ~/.chroxy/credentials.json
+    // exists on disk, regardless of which source wins precedence. Lets the
+    // Remove button stay enabled even when source is 'env' (the file is
+    // shadowed but the user can still want it cleared).
+    fileExists?: boolean;
   } | null;
   refreshByokCredentialsStatus: () => void;
   setByokCredentials: (anthropicApiKey: string) => void;

@@ -586,6 +586,15 @@ const QUEUE_TTLS: Record<string, number> = {
 };
 const QUEUE_MAX_SIZE = 10;
 const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
+
+/**
+ * #4148: server error codes whose envelopes are NON-fatal even when the
+ * server forgot to set `fatal: false`. Routed to severity='warning'
+ * (yellow toast) instead of the destructive red error treatment.
+ * Hoisted to module scope so the 'error' case doesn't reallocate the
+ * Set every message.
+ */
+const NON_FATAL_ERROR_CODES = new Set(['MAX_TOOL_ROUNDS_REACHED']);
 const messageQueue: QueuedMessage[] = [];
 
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
@@ -2641,12 +2650,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // #4052: server replies after refresh / set / clear. The masked
       // form is intentionally the only key-shaped string we ever store —
       // never the raw value, even transiently.
+      // #4144: fileExists must flow through too — the stale-file notice
+      // and the Remove button are both gated on it. Hand-picking fields
+      // here silently dropped it before (caught by agent-review on
+      // PR #4174).
+      const payload = msg as Record<string, unknown>;
       set({
         byokCredentialsStatus: {
-          status: (msg as Record<string, unknown>).status as 'set' | 'missing',
-          source: (msg as Record<string, unknown>).source as 'env' | 'file' | 'none',
-          masked: (msg as Record<string, unknown>).masked as string | undefined,
-          reason: (msg as Record<string, unknown>).reason as string | undefined,
+          status: payload.status as 'set' | 'missing',
+          source: payload.source as 'env' | 'file' | 'none',
+          masked: payload.masked as string | undefined,
+          reason: payload.reason as string | undefined,
+          fileExists: payload.fileExists as boolean | undefined,
         },
       });
       break;
@@ -2964,7 +2979,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         surfaced = errMsg;
       }
-      get().addServerError(surfaced, action);
+      // #4148: non-fatal server signals (MAX_TOOL_ROUNDS_REACHED and any
+      // future error envelope that sets fatal: false) render as warnings
+      // — yellow toast, role=status, less alarming — instead of the
+      // destructive red toast used for STREAM_ERROR / ABORT. The session
+      // remains usable; the toast is informational. errCode-list lets us
+      // keep the fatal: false check for future-proofing while still
+      // catching codes that don't carry the flag.
+      const isNonFatal = msg.fatal === false || NON_FATAL_ERROR_CODES.has(errCode);
+      const severity: 'error' | 'warning' = isNonFatal ? 'warning' : 'error';
+      get().addServerError(surfaced, action, severity);
       break;
     }
 

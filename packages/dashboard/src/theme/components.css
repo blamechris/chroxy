@@ -3061,6 +3061,10 @@
 
 .toast-error { background: #dc2626; }
 .toast-info { background: #2563eb; }
+/* #4148: non-destructive warning toast (MAX_TOOL_ROUNDS_REACHED and any
+   future fatal:false server signal). Amber matches the dashboard's
+   established warning hue. */
+.toast-warning { background: #b45309; }
 
 /* ---- Modal ---- */
 .modal-overlay {
