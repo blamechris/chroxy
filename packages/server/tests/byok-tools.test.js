@@ -69,6 +69,11 @@ describe('BUILTIN_TOOLS', () => {
     assert.equal(/always permission-gated/i.test(wf.description), false,
       'description must not promise "always" gating when auto mode bypasses it')
     assert.match(wf.description, /auto/i)
+    // Pin the disclosure intent so a future rewording that mentions "auto"
+    // in passing (e.g. "auto-redirects") but loses the bypass-disclosure
+    // doesn't silently regress.
+    assert.match(wf.description, /bypass|opt(ed)? out/i,
+      'description must disclose that auto mode bypasses / opts out of the prompt')
   })
 
   it('TodoWrite requires todos array with id/content/status per item (#4051)', () => {
