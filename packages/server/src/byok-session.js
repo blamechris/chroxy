@@ -179,8 +179,9 @@ export class ClaudeByokSession extends BaseSession {
 
     // #4051: Per-session TodoWrite list. Keyed by todo id; the executor
     // merges partial updates into this map so the model can update one
-    // item without re-listing the rest. Resets implicitly on destroy
-    // (the session goes away; the Map gets garbage-collected).
+    // item without re-listing the rest. Explicitly cleared in destroy()
+    // (#4137) so the Map doesn't survive if anything outside the session
+    // holds a closure capturing it.
     this._todos = new Map()
 
     // #4085: Per-session set of model ids we've already logged a
@@ -745,6 +746,7 @@ export class ClaudeByokSession extends BaseSession {
       log.warn(`PermissionManager teardown failed: ${err.message}`)
     }
     this._history = []
+    this._todos.clear()
     this._client = null
     this.removeAllListeners()
   }
