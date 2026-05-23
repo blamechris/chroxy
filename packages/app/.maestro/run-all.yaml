@@ -34,3 +34,7 @@ name: All E2E flows
 
 # Flow 8: Send message and receive response
 - runFlow: session-messages.yaml
+
+# Flow 9: Chat TodoList renderer (#4195) — end-to-end exercise of the
+# #4180 mobile TodoList via mock-server tool_start + tool_result.
+- runFlow: chat-todolist.yaml

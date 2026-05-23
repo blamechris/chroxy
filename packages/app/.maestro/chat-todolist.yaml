@@ -1,0 +1,80 @@
+appId: host.exp.Exponent
+name: ChatView TodoList renderer
+---
+
+# #4195 — End-to-end coverage for the mobile TodoList renderer (#4180).
+#
+# Unit tests in packages/app/src/components/__tests__/TodoList.test.tsx
+# cover the parser and render shape; this flow proves the production
+# wire path actually lights up the renderer:
+#
+#   user input  →  mock server  →  tool_start (TodoWrite)
+#               +  tool_result (canonical executor text)
+#               →  store-core handleToolStart / handleToolResult
+#               →  ChatMessage with toolResult set
+#               →  ToolBubble taps to expand
+#               →  parseTodoList(message.toolResult)
+#               →  <TodoList /> with testIDs
+#
+# The trigger phrase 'show-todos' is handled in mock-server.mjs to
+# emit a synthetic tool_use+tool_result pair — see #4195 block there.
+#
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17), portrait.
+# Requires: mock server running on port 9876
+#   bash .maestro/scripts/start-mock-server.sh
+
+# Connect to mock server and land on SessionScreen
+- runFlow: setup/ensure-session-screen.yaml
+
+# Ensure we're in Chat mode (in case the previous flow left us elsewhere)
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Find the input area and type the trigger phrase that makes the
+# mock server emit a TodoWrite tool_use + tool_result pair.
+- tapOn:
+    text: ".*Message.*"
+    optional: true
+- inputText: "show-todos"
+
+# Send the message
+- tapOn:
+    text: ".*↑.*"
+
+# Wait for the tool bubble to land. The collapsed preview shows the
+# JSON-stringified tool input ('Tool: TodoWrite' header + truncated
+# JSON), so we wait on the header text rather than the result body.
+- extendedWaitUntil:
+    visible:
+      text: ".*Tool: TodoWrite.*"
+    timeout: 10000
+
+# Screenshot the collapsed state so reviewers can spot regression in
+# the bubble's compact height / header styling.
+- takeScreenshot: chat-todolist-collapsed
+
+# Tap the bubble to expand. On expand the ToolBubble parses
+# message.toolResult through parseTodoList and renders <TodoList />
+# when it matches the canonical 'Todo list (N items)...' header.
+- tapOn:
+    text: ".*Tool: TodoWrite.*"
+- waitForAnimationToEnd
+
+# Assert the structured renderer is present, not just the raw text
+# fallback. Each of these testIDs is set by TodoList.tsx — if the
+# parser missed the canonical header (regression in TODO_LINE_RE) or
+# the ToolBubble parses the wrong field (regression on the #4194
+# Copilot fix that switched content → toolResult), these would not
+# render and the assertions would fail.
+- assertVisible:
+    id: "todo-list-header"
+- assertVisible:
+    id: "todo-list-item-t1"
+- assertVisible:
+    id: "todo-list-item-t2"
+- assertVisible:
+    id: "todo-list-item-t3"
+
+# Screenshot the expanded view for visual diff review — header,
+# status markers (✓ ⋯ ○), completed-strikethrough, color cues.
+- takeScreenshot: chat-todolist-expanded
