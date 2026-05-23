@@ -2605,6 +2605,27 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     // The wire broadcasts the cost_update.
     assert.equal(costUpdates.length, 1, 'one cost_update per priced result')
     assert.ok(Math.abs(costUpdates[0].data.sessionCost - 0.025) < 1e-9)
+    // #4098: the cost_update payload also carries totalCost (multi-session
+    // aggregator the dashboard reads) and budget (the gauge denominator).
+    // Both fields are unpinned by sessionCost alone — a refactor that
+    // drops either passes the sessionCost assertion silently.
+    const payload = costUpdates[0].data
+    assert.ok(Math.abs(payload.totalCost - 0.025) < 1e-9,
+      `totalCost should match sessionCost when only one session is priced; got ${payload.totalCost}`)
+    // No budget configured → budget field is null (CostBudgetManager.getBudget()).
+    assert.equal(payload.budget, null)
+  })
+
+  it('cost_update payload carries the configured budget when one is set (#4098)', () => {
+    // Pin that the gauge denominator (budget) actually arrives on the
+    // wire when configured. Without this, a future refactor that drops
+    // the budget field would break the dashboard's progress-bar render
+    // with no test failure.
+    const { mgr, session } = makeWired({ budget: 5.00 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    assert.equal(costUpdates.length, 1, 'wire must emit one cost_update per priced result')
+    assert.equal(costUpdates[0].data.budget, 5.00)
   })
 
   it('multiple result events accumulate via _trackCost', () => {
@@ -2637,6 +2658,48 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     session.emit('result', { cost: 1.05, usage: { input_tokens: 1 } })
     assert.equal(exceeded.length, 1)
     assert.equal(exceeded[0].data.percent, 105)
+  })
+
+  it('budget_exceeded fires only once per session, not on every subsequent priced turn (#4100)', () => {
+    // CostBudgetManager._budgetExceeded uses a Set as a one-shot guard.
+    // Without this, every priced turn over budget would push a duplicate
+    // notification to the dashboard + mobile app — a notification storm.
+    // Pin the dedupe so a refactor that drops the Set fails loudly.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('result', { cost: 1.05, usage: { input_tokens: 1 } })
+    session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    assert.equal(exceeded.length, 1, 'dedupe via _budgetExceeded Set — one notification per session')
+  })
+
+  it('budget_warning fires only once per session between 80% and 100% (#4100)', () => {
+    // Same dedupe semantics as budget_exceeded, but for the 80%-100%
+    // band. _budgetWarned Set should prevent a notification storm during
+    // a tool-heavy session approaching the budget.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('result', { cost: 0.85, usage: { input_tokens: 1 } }) // 85% — fires
+    session.emit('result', { cost: 0.05, usage: { input_tokens: 1 } }) // 90% — should NOT re-fire
+    session.emit('result', { cost: 0.04, usage: { input_tokens: 1 } }) // 94% — should NOT re-fire
+    assert.equal(warnings.length, 1, 'dedupe via _budgetWarned Set — one notification per session in the warn band')
+  })
+
+  it('allows negative cost (refund / credit-adjustment flows through, does not bypass gate) (#4099)', () => {
+    // Per #4083 review: a weird-provider edge case (refund, credit
+    // adjustment) could legitimately produce a negative cost. The gate
+    // at session-manager.js (`Number.isFinite(data.cost)`) accepts
+    // negative numbers and CostBudgetManager subtracts them from the
+    // cumulative. Pin this so a future "tighten to cost >= 0" refactor
+    // doesn't silently drop refunds.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: 0.05, usage: { input_tokens: 100 } })
+    session.emit('result', { cost: -0.01, usage: { input_tokens: 0 } })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.04) < 1e-9,
+      `cumulative after refund should be 0.04, got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 2, 'both priced events emit cost_update (the negative is not silently dropped)')
+    assert.ok(Math.abs(costUpdates[1].data.sessionCost - 0.04) < 1e-9)
   })
 
   it('refuses to trackCost when `cost` is a string (gate is Number.isFinite, not typeof)', () => {

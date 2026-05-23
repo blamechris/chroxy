@@ -585,6 +585,17 @@ describe('getModelPricing()', () => {
     assert.equal(getModelPricing('claude-future-model-1-0-20260615'), null)
   })
 
+  it('returns null for unknown family + [1m] suffix (#4117)', () => {
+    // The [1m] re-attach logic (#4105/#4107) promotes a family head to
+    // its `[1m]` variant when one exists in the pricing table. For an
+    // unknown family, no fallback applies and the walk lands on null:
+    //   verbatim miss → strip [1m] → 'claude-future-1-0' miss →
+    //   dateStrip no-op → no FALLBACK_MODELS match → null.
+    // Pin this so a future refactor of resolvePricingKey can't silently
+    // promote an unknown family's [1m] form to a resolved key.
+    assert.equal(getModelPricing('claude-future-1-0[1m]'), null)
+  })
+
   it('does not strip trailing suffixes shorter than 8 digits (#4102 regex guard)', () => {
     // The date-strip regex is `-\d{8,}$` — the 8-digit lower bound exists
     // so a future Anthropic version-tag scheme that uses shorter trailing
