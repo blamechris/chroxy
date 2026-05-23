@@ -6,6 +6,13 @@
  * Spans full width across sidebar + main content (grid-column: 1 / -1).
  */
 
+import {
+  costTooltip,
+  contextTooltip,
+  modelTooltip,
+  agentCountTooltip,
+} from '../lib/status-tooltips'
+
 declare const __APP_VERSION__: string
 
 export interface FooterBarProps {
@@ -24,6 +31,10 @@ export interface FooterBarProps {
   onShowQr?: () => void
   /** #3070: per-session "Share this session" QR. Undefined hides the button. */
   onShareSession?: () => void
+  /** #3858: provider id so the cost tooltip can flag client-estimated values. */
+  provider?: string
+  /** #3858: model context window in tokens for the model tooltip. */
+  contextWindow?: number
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -55,6 +66,8 @@ export function FooterBar({
   agentCount,
   onShowQr,
   onShareSession,
+  provider,
+  contextWindow,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -104,16 +117,38 @@ export function FooterBar({
         )}
         {isBusy && <span className="footer-busy" />}
         {agentCount != null && agentCount > 0 && (
-          <span className="footer-agents">
+          <span
+            className="footer-agents"
+            title={agentCountTooltip(agentCount)}
+            aria-label={agentCountTooltip(agentCount)}
+          >
             {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
           </span>
         )}
-        {model && <span className="footer-model">{model}</span>}
+        {model && (
+          <span
+            className="footer-model"
+            title={modelTooltip({ model, contextWindow })}
+            aria-label={modelTooltip({ model, contextWindow })}
+          >
+            {model}
+          </span>
+        )}
         {cost != null && (
-          <span className="footer-cost">${cost.toFixed(4)}</span>
+          <span
+            className="footer-cost"
+            title={costTooltip({ cost, provider })}
+            aria-label={costTooltip({ cost, provider })}
+          >
+            ${cost.toFixed(4)}
+          </span>
         )}
         {context && (
-          <span className="footer-context" title={context}>
+          <span
+            className="footer-context"
+            title={contextTooltip({ percent: contextPercent ?? null, contextSummary: context })}
+            aria-label={contextTooltip({ percent: contextPercent ?? null, contextSummary: context })}
+          >
             {contextPercent != null ? (
               <>
                 <span
