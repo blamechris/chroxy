@@ -544,13 +544,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <option value="">Server default</option>
               {/* #4019: options driven by availablePermissionModes from the
                   store so the labels stay in sync with the server's
-                  PERMISSION_MODES table. Falls back to a static list when
-                  the server hasn't sent the message yet (cold start). */}
+                  PERMISSION_MODES table. Cold-start fallback labels match
+                  server PERMISSION_MODES (handler-utils.js:19-22) exactly
+                  — so the selected option text doesn't flicker mid-init
+                  when the available_permission_modes message lands.
+                  (#4211 Copilot review.) */}
               {(availablePermissionModes.length > 0 ? availablePermissionModes : [
-                { id: 'approve', label: 'Approve — gate every tool call' },
-                { id: 'acceptEdits', label: 'Accept Edits — auto-approve file ops' },
-                { id: 'auto', label: 'Auto — skip all prompts (`--dangerously-skip-permissions`)' },
-                { id: 'plan', label: 'Plan — Claude plans before acting; each tool gates on approval' },
+                { id: 'approve', label: 'Approve' },
+                { id: 'acceptEdits', label: 'Accept Edits' },
+                { id: 'auto', label: 'Auto (skip all prompts)' },
+                { id: 'plan', label: 'Plan' },
               ]).map((m) => (
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
