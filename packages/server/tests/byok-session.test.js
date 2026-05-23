@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
@@ -1242,6 +1242,164 @@ describe('ClaudeByokSession', () => {
       assert.ok(denied, 'denied tool produces an error tool_result event')
       assert.match(denied.payload.result, /no/i)
       await session.destroy()
+    })
+
+    describe('end-to-end real executor coverage (#4065)', () => {
+      // These tests prove the seam between byok-session._executeToolBlock
+      // and the real executeBuiltinTool in byok-tool-executor.js. Prior
+      // tests in this file stub _executeToolBlock entirely — they would
+      // pass even if the dispatch / permission-gate / result-shape
+      // contract between the two modules broke. Here, we DON'T stub
+      // anything below the agent loop: real cwd, real permission flow
+      // (auto-allow), real Read tool, real file ops.
+
+      let workspace
+      beforeEach(() => {
+        workspace = mkdtempSync(join(tmpdir(), 'chroxy-byok-e2e-'))
+      })
+      afterEach(() => {
+        rmSync(workspace, { recursive: true, force: true })
+      })
+
+      it('reads a real file via the unstubbed executor and feeds its content to the next round', async () => {
+        // Plant a known file in a real workspace dir.
+        const targetPath = join(workspace, 'note.txt')
+        const fileBody = 'this came from a real file on disk\nline two'
+        writeFileSync(targetPath, fileBody)
+
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto') // auto-allow so no UI handshake
+        // IMPORTANT: do NOT stub session._executeToolBlock. We want the
+        // real dispatch + permission gate + executor + tool_result return.
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{ type: 'tool_use', id: 'toolu_a', name: 'Read', input: { file_path: targetPath } }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              // Round 2: capture the tool_result the agent loop fed back.
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'I read the file.' }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('please read note.txt')
+
+        // Assert the tool_result the model received on the next round
+        // contains the REAL file content from disk (not a stubbed value).
+        assert.ok(toolResultBlock, 'round 2 must include a tool_result content block')
+        assert.equal(toolResultBlock.tool_use_id, 'toolu_a')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /this came from a real file on disk/)
+        assert.match(toolResultBlock.content, /line two/)
+        await session.destroy()
+      })
+
+      it('propagates is_error: true to the next round when the real Read fails (nonexistent file)', async () => {
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_b', name: 'Read',
+                      input: { file_path: join(workspace, 'does-not-exist.txt') },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'Read failed, noted.' }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('please read a missing file')
+
+        assert.ok(toolResultBlock, 'failure tool_result must propagate to next round')
+        assert.equal(toolResultBlock.is_error, true, 'a missing-file Read must surface as is_error: true')
+        await session.destroy()
+      })
+
+      it('refuses a path-traversal attempt via the real path-safety check', async () => {
+        // Real executor enforces validatePathWithinCwd. Asking for
+        // /etc/passwd should produce is_error: true with a recognisable
+        // message, even with permission set to auto-allow.
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{ type: 'tool_use', id: 'toolu_c', name: 'Read', input: { file_path: '/etc/passwd' } }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'Denied, noted.' }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('try to escape')
+
+        assert.ok(toolResultBlock)
+        assert.equal(toolResultBlock.is_error, true, 'path-outside-workspace must be is_error')
+        assert.match(toolResultBlock.content, /outside workspace/i)
+        await session.destroy()
+      })
     })
   })
 
