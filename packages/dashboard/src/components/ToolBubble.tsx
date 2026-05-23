@@ -2,8 +2,15 @@
  * ToolBubble component — collapsible tool use card.
  *
  * Shows tool name + input summary. Clicking expands to show full result.
+ *
+ * #4139: TodoWrite results are surfaced as a structured checklist rather
+ * than raw text. The TodoList component parses the executor's
+ * `[ ] / [~] / [x] ... (id)` format back into items; on parse failure
+ * (unknown format / future schema change) we fall back to the original
+ * `<pre>` treatment so nothing is lost.
  */
 import { useState } from 'react'
+import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
   toolName: string
@@ -74,7 +81,11 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
       )}
       {expanded && result && (
         <div className="tool-result" id={resultId}>
-          <pre>{result}</pre>
+          {toolName === 'TodoWrite' && parseTodoList(result) ? (
+            <TodoList text={result} />
+          ) : (
+            <pre>{result}</pre>
+          )}
         </div>
       )}
     </div>

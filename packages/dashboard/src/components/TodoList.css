@@ -1,0 +1,70 @@
+/* TodoList renderer for TodoWrite tool_result content (#4139). */
+
+.todo-list {
+  font-family: var(--font-family, system-ui, sans-serif);
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent-blue, #4a9eff);
+  background: var(--bg-secondary, rgba(255, 255, 255, 0.04));
+  border-radius: 4px;
+  margin: 4px 0;
+}
+
+.todo-list-header {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text-secondary, #aaa);
+  font-size: 0.9em;
+}
+
+.todo-list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.todo-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 0.95em;
+}
+
+.todo-list-marker {
+  display: inline-block;
+  width: 1.25em;
+  text-align: center;
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.todo-list-item--completed .todo-list-marker {
+  color: var(--success-fg, #4ade80);
+}
+
+.todo-list-item--in_progress .todo-list-marker {
+  color: var(--warning-fg, #fbbf24);
+}
+
+.todo-list-item--pending .todo-list-marker {
+  color: var(--text-muted, #888);
+}
+
+.todo-list-item--completed .todo-list-content {
+  color: var(--text-muted, #888);
+  text-decoration: line-through;
+}
+
+.todo-list-content {
+  flex: 1;
+  word-break: break-word;
+}
+
+.todo-list-empty,
+.todo-list-truncated {
+  font-style: italic;
+  color: var(--text-muted, #888);
+  font-size: 0.85em;
+  margin-top: 4px;
+}
