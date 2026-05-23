@@ -1,7 +1,7 @@
 /* TodoList renderer for TodoWrite tool_result content (#4139). */
 
 .todo-list {
-  font-family: var(--font-family, system-ui, sans-serif);
+  font-family: var(--font-ui, system-ui, sans-serif);
   padding: 8px 12px;
   border-left: 3px solid var(--accent-blue, #4a9eff);
   background: var(--bg-secondary, rgba(255, 255, 255, 0.04));
@@ -40,7 +40,9 @@
 }
 
 .todo-list-item--completed .todo-list-marker {
-  color: var(--success-fg, #4ade80);
+  /* #4181: --status-connected is the canonical green token in
+     theme.css; --success-fg wasn't part of the warning-fg migration. */
+  color: var(--status-connected, #22c55e);
 }
 
 .todo-list-item--in_progress .todo-list-marker {

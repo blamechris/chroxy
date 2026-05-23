@@ -80,7 +80,14 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
         </span>
       )}
       {expanded && result && (
-        <div className="tool-result" id={resultId}>
+        // #4139: click inside the result area must not bubble up to the
+        // outer onClick that collapses the bubble — otherwise selecting
+        // text or interacting with the checklist accidentally re-toggles.
+        <div
+          className="tool-result"
+          id={resultId}
+          onClick={(e) => e.stopPropagation()}
+        >
           {toolName === 'TodoWrite' && parseTodoList(result) ? (
             <TodoList text={result} />
           ) : (
