@@ -1197,6 +1197,72 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('error dispatch — non-fatal severity routing (#4148)', () => {
+    it('routes MAX_TOOL_ROUNDS_REACHED to severity=warning (yellow toast)', () => {
+      const calls: Array<{ message: unknown; severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ message, severity })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'MAX_TOOL_ROUNDS_REACHED',
+          message: 'tool cap reached',
+          fatal: false,
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.severity).toBe('warning')
+    })
+
+    it('routes any error with fatal: false to severity=warning, regardless of code', () => {
+      const calls: Array<{ severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ severity })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'SOME_FUTURE_NON_FATAL_CODE',
+          message: 'recoverable',
+          fatal: false,
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.severity).toBe('warning')
+    })
+
+    it('routes STREAM_ERROR / ABORT and other unmarked codes to severity=error (red toast)', () => {
+      const calls: Array<{ severity: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown, _action: unknown, severity?: 'error' | 'warning',
+      ) => {
+        calls.push({ severity })
+      }
+      handleMessage(
+        { type: 'error', code: 'STREAM_ERROR', message: 'stream failed' } as any,
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'error', code: 'ABORT', message: 'aborted' } as any,
+        ctx() as any,
+      )
+      expect(calls.map((c) => c.severity)).toEqual(['error', 'error'])
+    })
+  })
+
   describe('pairing_refreshed dispatch (#2916)', () => {
     it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
       store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))

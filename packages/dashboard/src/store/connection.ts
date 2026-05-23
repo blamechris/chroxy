@@ -1854,7 +1854,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ logEntries: [] });
   },
 
-  addServerError: (message, action) => {
+  addServerError: (message, action, severity) => {
     const now = Date.now();
     const err = {
       id: nextMessageId('info'),
@@ -1867,6 +1867,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // one-click retry — undefined for the common path so the toast
       // renders message-only as before.
       ...(action ? { action } : {}),
+      // #4148: severity differentiates non-fatal warnings (e.g.
+      // MAX_TOOL_ROUNDS_REACHED) from destructive STREAM_ERROR / ABORT.
+      // Defaults to 'error' when unset — existing call sites unchanged.
+      ...(severity ? { severity } : {}),
     };
     set((state) => ({
       serverErrors: [...state.serverErrors, err].slice(-10),
