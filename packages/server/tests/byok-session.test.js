@@ -1044,6 +1044,126 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('embeds the summary instruction in the existing tool_result user turn (#4063 alternation guard — review #4146)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools, messages }) => {
+            if (!tools || tools.length === 0) {
+              // On the summary round, the LAST entry in `messages` must
+              // be a user turn carrying both tool_result blocks AND the
+              // synthetic instruction. Verify that here so a regression
+              // that pushes a second user turn back-to-back is caught.
+              const last = messages[messages.length - 1]
+              assert.equal(last.role, 'user', 'last turn must be user (single turn, not two consecutive)')
+              const kinds = last.content.map((c) => c.type).sort()
+              assert.ok(kinds.includes('tool_result'), 'last user turn must still carry tool_result blocks')
+              assert.ok(kinds.includes('text'), 'last user turn must include the synthetic text instruction')
+              // Verify the second-to-last is assistant (alternation).
+              const prev = messages[messages.length - 2]
+              assert.equal(prev.role, 'assistant', 'turn before final must be assistant')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'summary' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_x', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      // Attach an error listener so EventEmitter doesn't throw on the
+      // non-fatal MAX_TOOL_ROUNDS_REACHED emit. We don't use the captured
+      // payload — the alternation check happens in the stream stub above.
+      captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+      await session.destroy()
+    })
+
+    it('pops the synthetic instruction on summary stream-init failure (#4063 invariant — review)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              // Synchronous throw from summary stream-init.
+              throw new Error('summary-init failed')
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_x', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+      // After failure, the user-turn rollback should have popped the
+      // synthetic instruction back off. The last user turn should
+      // contain ONLY tool_result blocks — no leftover text instruction.
+      const last = session._history[session._history.length - 1]
+      assert.equal(last.role, 'user')
+      const types = last.content.map((c) => c.type)
+      assert.equal(types.every((t) => t === 'tool_result'), true,
+        `last user turn must not retain summary text on failure, got types: ${types.join(',')}`)
+      await session.destroy()
+    })
+
+    it('rolls back the entire turn when the summary stream rejects async (outer catch — review)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      const historyBefore = []
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              // Stream init succeeds but async iteration throws.
+              return {
+                async *[Symbol.asyncIterator]() {
+                  throw new Error('async network error in summary stream')
+                },
+                async finalMessage() { throw new Error('never reached') },
+              }
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_x', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      historyBefore.push(...session._history)
+      const captured = captureEvents(session)
+      await session.sendMessage('go')
+      // Outer catch should have truncated the WHOLE turn — the user's
+      // original prompt + every assistant/tool_result pair.
+      assert.equal(session._history.length, historyBefore.length,
+        'history must roll back to pre-send length on async summary failure')
+      // A STREAM_ERROR should also be emitted (from _emitTurnError).
+      const errs = captured.filter((e) => e.name === 'error')
+      assert.ok(errs.some((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED'),
+        'cap-hit error fires before the failure')
+      assert.ok(errs.some((e) => e.payload?.code === 'STREAM_ERROR'),
+        'async failure escalates to STREAM_ERROR')
+      await session.destroy()
+    })
+
     it('streams summary text from the post-cap round so the user sees what was accomplished (#4063)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')

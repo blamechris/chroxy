@@ -436,10 +436,11 @@ export class ClaudeByokSession extends BaseSession {
         if (round === MAX_TOOL_ROUNDS - 1) {
           // #4063: instead of bailing silently, run ONE more text-only
           // stream so the model can summarise what it accomplished and the
-          // user sees a closing message instead of an apparent hang. The
-          // tool-loop history already contains every tool_use + tool_result
-          // pair; appending a user instruction asking for a summary keeps
-          // the alternation invariant.
+          // user sees a closing message instead of an apparent hang. To
+          // preserve the strict user/assistant alternation invariant
+          // (#4109/#4118), we EMBED the summary instruction as an extra
+          // content block on the existing tool_result user turn rather
+          // than pushing a second user turn back-to-back.
           log.warn(`hit MAX_TOOL_ROUNDS=${MAX_TOOL_ROUNDS} cap; running summary round`)
 
           // Emit a non-fatal error so the dashboard can render a warning
@@ -452,18 +453,22 @@ export class ClaudeByokSession extends BaseSession {
             fatal: false,
           })
 
-          // Synthetic user turn — ALWAYS appended after a complete user
-          // tool_result turn (round just finished), so the alternation is
-          // assistant → user(tool_results) → user(summary instruction).
-          // Per Anthropic API, two consecutive user turns are concatenated;
-          // the synthetic message is part of the same logical turn.
-          this._history.push({
-            role: 'user',
-            content: [{
-              type: 'text',
-              text: `Tool budget exhausted (${MAX_TOOL_ROUNDS} rounds). Please summarise what you accomplished so far. Do not call any more tools.`,
-            }],
-          })
+          // Append the instruction as a text block on the last user turn
+          // (the one we just pushed at line ~432 with tool_results).
+          const summaryInstruction = {
+            type: 'text',
+            text: `Tool budget exhausted (${MAX_TOOL_ROUNDS} rounds). Please summarise what you accomplished so far. Do not call any more tools.`,
+          }
+          const lastTurn = this._history[this._history.length - 1]
+          if (lastTurn?.role === 'user' && Array.isArray(lastTurn.content)) {
+            lastTurn.content.push(summaryInstruction)
+          } else {
+            // Defensive fallback — should never hit given the immediately-
+            // prior push at line ~432, but if invariants change later
+            // we'd rather log and bail than corrupt history.
+            log.warn(`MAX_TOOL_ROUNDS cap-hit: last turn is not a user tool_result turn; skipping summary`)
+            break
+          }
 
           let summaryStream
           try {
@@ -480,15 +485,23 @@ export class ClaudeByokSession extends BaseSession {
               { signal: this._abortController.signal },
             )
           } catch (err) {
-            // Stream-init threw on the summary round. Bail without breaking
-            // alternation — the user instruction we just pushed is the
-            // last turn; truncating is safe because the next sendMessage
-            // would start with a new user prompt anyway.
-            this._history.length -= 1
+            // Stream-init threw synchronously. Pop the instruction we
+            // just appended so the user turn returns to pure tool_results
+            // — invariant preserved.
+            const popped = lastTurn.content.pop()
+            if (popped !== summaryInstruction) {
+              log.warn(`MAX_TOOL_ROUNDS rollback: popped content block was not the summary instruction`)
+            }
             log.warn(`MAX_TOOL_ROUNDS summary stream-init failed: ${err?.message}`)
             break
           }
 
+          // Async failures inside the for-await or finalMessage() rethrow
+          // and propagate to the outer catch, which truncates _history to
+          // historyLengthBeforeSend — rolling back the entire turn
+          // (consistent with #4109/#4118). The user has already seen
+          // emitted tool_result events; only the history-persisted state
+          // resets.
           for await (const event of summaryStream) {
             const t = translateSdkEvent(event)
             if (!t) continue
