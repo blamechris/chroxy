@@ -66,12 +66,14 @@ describe('BUILTIN_TOOLS', () => {
     // reintroducing the contradiction.
     const wf = BUILTIN_TOOLS.find((t) => t.name === 'WebFetch')
     assert.ok(wf, 'WebFetch must be registered')
-    assert.equal(/always permission-gated/i.test(wf.description), false,
+    assert.doesNotMatch(wf.description, /always permission-gated/i,
       'description must not promise "always" gating when auto mode bypasses it')
-    assert.match(wf.description, /auto/i)
+    // Word-boundary match on "auto" so we don't accept incidental
+    // substrings like "automatic" or "auto-redirect" — the pin should
+    // catch references to the auto permission mode specifically.
+    assert.match(wf.description, /\bauto\b/i)
     // Pin the disclosure intent so a future rewording that mentions "auto"
-    // in passing (e.g. "auto-redirects") but loses the bypass-disclosure
-    // doesn't silently regress.
+    // in passing but loses the bypass-disclosure doesn't silently regress.
     assert.match(wf.description, /bypass|opt(ed)? out/i,
       'description must disclose that auto mode bypasses / opts out of the prompt')
   })
