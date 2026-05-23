@@ -36,5 +36,13 @@ export const MIN_PROTOCOL_VERSION = 1
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from './schemas/index.ts'
 
+// #4192: explicit named type re-export pins the alias at the package entry
+// point. `export *` would silently emit nothing if `ServerErrorEnvelopeMessage`
+// were removed from `./schemas/server.ts`; the named re-export below makes
+// `tsc --build` fail with "module has no exported member" — closing the
+// runtime-test-can't-see-types gap Copilot flagged on #4196. Add a sibling
+// line for any future type alias whose existence is a public contract.
+export type { ServerErrorEnvelopeMessage } from './schemas/server.ts'
+
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'
