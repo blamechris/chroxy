@@ -346,6 +346,10 @@ async function runWebFetch({ input, signal }) {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
     return { content: 'EINVAL: url is required', isError: true }
   }
+  const rawPrompt = input?.prompt
+  if (typeof rawPrompt !== 'string' || rawPrompt.length === 0) {
+    return { content: 'EINVAL: prompt is required', isError: true }
+  }
   let parsed
   try {
     parsed = new URL(rawUrl)
@@ -366,9 +370,15 @@ async function runWebFetch({ input, signal }) {
 
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(new Error('timeout')), timeoutMs)
-  // Forward an external abort signal (session destroy) into our local controller.
+  // Forward an external abort signal (session destroy) into our local
+  // controller. If the signal is ALREADY aborted at entry, the listener
+  // wouldn't fire — short-circuit so a destroyed session doesn't make an
+  // outbound request.
   const onExternalAbort = () => ac.abort(signal.reason)
-  if (signal) signal.addEventListener('abort', onExternalAbort, { once: true })
+  if (signal) {
+    if (signal.aborted) ac.abort(signal.reason)
+    else signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
 
   try {
     const res = await fetch(parsed.toString(), {
@@ -395,21 +405,28 @@ async function runWebFetch({ input, signal }) {
     const raw = await readBodyCapped(res, WEBFETCH_MAX_RAW_BYTES)
     const isHtml = ctype.includes('text/html') || ctype.includes('application/xhtml')
     const text = isHtml ? stripHtmlToText(raw.text) : raw.text
-    const { output, truncated } = capOutput(text, WEBFETCH_MAX_OUTPUT_CHARS, raw.truncated)
+    const { output, outputTruncated } = capOutput(text, WEBFETCH_MAX_OUTPUT_CHARS)
 
-    const promptHeader = typeof input?.prompt === 'string' && input.prompt.length > 0
-      ? `Prompt: ${input.prompt}\nURL: ${parsed.toString()}\n\n`
-      : `URL: ${parsed.toString()}\n\n`
+    // Distinct markers so the model can tell whether it lost data at the
+    // socket (raw cap) or after HTML extraction (output cap). Output cap
+    // takes precedence in the marker because that's the final visible cut.
+    let marker = ''
+    if (outputTruncated) {
+      marker = `\n\n[truncated at output cap: ${WEBFETCH_MAX_OUTPUT_CHARS} chars]`
+    } else if (raw.truncated) {
+      marker = `\n\n[truncated at raw body cap: ${WEBFETCH_MAX_RAW_BYTES} bytes]`
+    }
 
     return {
-      content: promptHeader + output + (truncated ? '\n\n[truncated at output cap]' : ''),
+      content: `Prompt: ${rawPrompt}\nURL: ${parsed.toString()}\n\n${output}${marker}`,
       isError: false,
     }
   } catch (err) {
-    // ac.abort(new Error('timeout')) lands here as a generic Error with
-    // message='timeout' (not AbortError) — Node's fetch surfaces the
-    // reason rather than wrapping it. Match the timeout signature too.
-    if (err?.name === 'AbortError' || /aborted|abort|timeout/i.test(err?.message || '')) {
+    // ac.abort(reason) surfaces `reason` as the thrown error rather than
+    // wrapping it in AbortError. The most reliable signal that we aborted
+    // is the controller's signal.aborted state — message-string matching
+    // misses arbitrary user-supplied reasons (e.g. "session destroyed").
+    if (ac.signal.aborted) {
       return { content: `WebFetch timed out or aborted after ${timeoutMs}ms`, isError: true }
     }
     return { content: `WebFetch failed: ${err?.message || String(err)}`, isError: true }
@@ -477,23 +494,27 @@ function stripHtmlToText(html) {
   s = s.replace(/<[^>]+>/g, '')
   // 4. Decode named entities + numeric (decimal + hex) entities.
   s = s.replace(/&(?:amp|lt|gt|quot|apos|#39|nbsp);/g, (m) => HTML_ENTITY_MAP[m])
-  s = s.replace(/&#(\d+);/g, (_, n) => {
-    const code = Number(n)
-    return Number.isFinite(code) ? String.fromCodePoint(code) : ''
-  })
-  s = s.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
-    const code = parseInt(h, 16)
-    return Number.isFinite(code) ? String.fromCodePoint(code) : ''
-  })
+  s = s.replace(/&#(\d+);/g, (_, n) => safeFromCodePoint(Number(n)))
+  s = s.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => safeFromCodePoint(parseInt(h, 16)))
   // 5. Collapse whitespace per line + trim aggressive blank-line runs.
   s = s.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()).join('\n')
   s = s.replace(/\n{3,}/g, '\n\n').trim()
   return s
 }
 
-function capOutput(text, maxChars, sourceTruncated) {
+// Unicode code points are 0..0x10FFFF and the surrogate range 0xD800..0xDFFF
+// is reserved (passing those to fromCodePoint also throws). Return empty
+// string for out-of-range values so a malicious entity like &#9999999999;
+// can't crash the entire WebFetch.
+function safeFromCodePoint(code) {
+  if (!Number.isFinite(code) || code < 0 || code > 0x10FFFF) return ''
+  if (code >= 0xD800 && code <= 0xDFFF) return ''
+  return String.fromCodePoint(code)
+}
+
+function capOutput(text, maxChars) {
   if (text.length <= maxChars) {
-    return { output: text, truncated: sourceTruncated }
+    return { output: text, outputTruncated: false }
   }
-  return { output: text.slice(0, maxChars), truncated: true }
+  return { output: text.slice(0, maxChars), outputTruncated: true }
 }

@@ -450,6 +450,70 @@ describe('executeBuiltinTool', () => {
       assert.match(r.content, /timed out|abort/i)
     })
 
+    it('rejects empty / missing prompt with a clear error (review #4131)', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/text`, prompt: '' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /prompt is required/i)
+    })
+
+    it('short-circuits when external signal is already aborted (review #4131)', async () => {
+      let hit = false
+      routes.set('/never', (_req, res) => {
+        hit = true
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('should not reach')
+      })
+      const externalAc = new AbortController()
+      externalAc.abort(new Error('session destroyed'))
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/never`, prompt: 'x' },
+        ...ctx(),
+        signal: externalAc.signal,
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /aborted|timed out/i)
+      assert.equal(hit, false, 'pre-aborted signal must skip the outbound fetch')
+    })
+
+    it('uses distinct markers for raw-cap vs output-cap truncation (review #4131)', async () => {
+      // Output cap (100 KB) reached after HTML strip: the raw cap (1 MB) is
+      // not hit but the output cap is. We test by passing a payload that's
+      // slightly over the output cap and well under the raw cap.
+      const overOutput = 'B'.repeat(120_000)
+      routes.set('/over-out', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end(overOutput)
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/over-out`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /\[truncated at output cap: \d+ chars\]/)
+    })
+
+    it('survives malicious HTML numeric entities without throwing (review #4131)', async () => {
+      // String.fromCodePoint(9999999999) throws RangeError; safeFromCodePoint
+      // must guard so the entire fetch doesn't error out.
+      routes.set('/evil-entity', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html' })
+        res.end('<p>before&#9999999999;middle&#x110000;after&#xD800;</p>')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/evil-entity`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false, 'out-of-range numeric entities must not throw')
+      assert.match(r.content, /beforemiddleafter/)
+    })
+
     it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {
       routes.set('/entities', (_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html' })
