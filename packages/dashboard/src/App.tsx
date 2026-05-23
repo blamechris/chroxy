@@ -986,7 +986,11 @@ export function App() {
         .map(e => ({
           id: e.id,
           message: e.message,
-          level: 'error' as const,
+          // #4148: thread severity through. Default to 'error' for any
+          // ServerError that doesn't set the field — preserves the
+          // existing red-toast behavior for STREAM_ERROR / ABORT and
+          // every pre-#4148 call site of addServerError.
+          level: (e.severity === 'warning' ? 'warning' : 'error') as 'error' | 'warning',
           ...(e.action
             ? {
                 action: e.action,

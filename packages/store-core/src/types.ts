@@ -244,6 +244,13 @@ export interface ServerError {
    * suggesting a retry with the correct author).
    */
   action?: ServerErrorAction;
+  /**
+   * #4148: severity used by the toast UI to differentiate non-fatal
+   * server signals (e.g. MAX_TOOL_ROUNDS_REACHED) from destructive
+   * STREAM_ERROR / ABORT events. Defaults to 'error' when unset so
+   * existing callers continue to render as red error toasts.
+   */
+  severity?: 'error' | 'warning';
 }
 
 export interface DevPreview {

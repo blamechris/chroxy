@@ -2964,7 +2964,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         surfaced = errMsg;
       }
-      get().addServerError(surfaced, action);
+      // #4148: non-fatal server signals (MAX_TOOL_ROUNDS_REACHED and any
+      // future error envelope that sets fatal: false) render as warnings
+      // — yellow toast, role=status, less alarming — instead of the
+      // destructive red toast used for STREAM_ERROR / ABORT. The session
+      // remains usable; the toast is informational. errCode-list lets us
+      // keep the fatal: false check for future-proofing while still
+      // catching codes that don't carry the flag.
+      const NON_FATAL_ERROR_CODES = new Set(['MAX_TOOL_ROUNDS_REACHED']);
+      const isNonFatal = msg.fatal === false || NON_FATAL_ERROR_CODES.has(errCode);
+      const severity: 'error' | 'warning' = isNonFatal ? 'warning' : 'error';
+      get().addServerError(surfaced, action, severity);
       break;
     }
 
