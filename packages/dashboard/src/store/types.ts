@@ -752,6 +752,11 @@ export interface ConnectionState {
     source: 'env' | 'file' | 'none';
     masked?: string;
     reason?: string;
+    // #4144: surface stale-file state. true when ~/.chroxy/credentials.json
+    // exists on disk, regardless of which source wins precedence. Lets the
+    // Remove button stay enabled even when source is 'env' (the file is
+    // shadowed but the user can still want it cleared).
+    fileExists?: boolean;
   } | null;
   refreshByokCredentialsStatus: () => void;
   setByokCredentials: (anthropicApiKey: string) => void;

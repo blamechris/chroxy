@@ -181,10 +181,37 @@ export function clearAnthropicApiKey() {
  */
 export function getAnthropicApiKeyStatus() {
   const r = resolveAnthropicApiKey()
+  // #4144: report file presence independently of which source wins. When
+  // the env var is set, the file is shadowed by env precedence; the
+  // dashboard uses this to surface "stale file on disk" UX and to keep
+  // the Remove button enabled even when source is 'env'.
+  //
+  // Theoretical race: the file could be (un)linked between
+  // resolveAnthropicApiKey() and hasStoredCredentials(). Acceptable for
+  // a status query — the dashboard polls on open and after every
+  // set/clear, so any transient inconsistency self-heals on the next
+  // refresh. We're not making security decisions on this flag.
+  const fileExists = hasStoredCredentials()
   if (r.key) {
-    return { status: 'set', source: r.source, masked: maskApiKey(r.key) }
+    return { status: 'set', source: r.source, masked: maskApiKey(r.key), fileExists }
   }
-  return { status: 'missing', source: 'none', reason: r.reason }
+  return { status: 'missing', source: 'none', reason: r.reason, fileExists }
+}
+
+/**
+ * Whether `~/.chroxy/credentials.json` currently exists on disk, regardless
+ * of mode validity, JSON shape, or whether resolveAnthropicApiKey would
+ * accept it. Used by the dashboard's BYOK section to surface stale-file
+ * UX even when an env var wins precedence (#4144).
+ *
+ * @returns {boolean}
+ */
+export function hasStoredCredentials() {
+  try {
+    return existsSync(credentialsFilePath())
+  } catch {
+    return false
+  }
 }
 
 /**

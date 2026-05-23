@@ -9,6 +9,7 @@ import {
   writeAnthropicApiKey,
   clearAnthropicApiKey,
   getAnthropicApiKeyStatus,
+  hasStoredCredentials,
 } from '../src/byok-credentials.js'
 
 /**
@@ -270,6 +271,51 @@ describe('byok-credentials', () => {
       assert.equal(s.status, 'set')
       assert.equal(s.source, 'file')
       assert.match(s.masked, /^sk-ant-api03/)
+    })
+
+    it('reports fileExists=false when no credentials file is on disk (#4144)', () => {
+      const s = getAnthropicApiKeyStatus()
+      assert.equal(s.fileExists, false)
+    })
+
+    it('reports fileExists=true when env wins precedence but file is on disk (#4144 stale-file)', () => {
+      // Plant a file and an env var. Env wins; the dashboard still needs
+      // to know the shadowed file exists so it can offer Remove.
+      writeAnthropicApiKey('sk-ant-api03-' + 'c'.repeat(95))
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-' + 'd'.repeat(95)
+      const s = getAnthropicApiKeyStatus()
+      assert.equal(s.status, 'set')
+      assert.equal(s.source, 'env', 'env must still win precedence')
+      assert.equal(s.fileExists, true, 'stale file on disk must be visible to the dashboard')
+    })
+
+    it('reports fileExists=true when only the file is the key source (#4144 consistency)', () => {
+      writeAnthropicApiKey('sk-ant-api03-' + 'e'.repeat(95))
+      const s = getAnthropicApiKeyStatus()
+      assert.equal(s.source, 'file')
+      assert.equal(s.fileExists, true)
+    })
+  })
+
+  describe('hasStoredCredentials (#4144)', () => {
+    it('returns false when no file exists', () => {
+      assert.equal(hasStoredCredentials(), false)
+    })
+
+    it('returns true after writeAnthropicApiKey lands a file', () => {
+      writeAnthropicApiKey('sk-ant-api03-' + 'f'.repeat(95))
+      assert.equal(hasStoredCredentials(), true)
+    })
+
+    it('returns true even when the file mode is wrong (resolve would refuse it)', () => {
+      // Plant a file with mode 0644 — resolveAnthropicApiKey will refuse
+      // to read it, but the user still has a file on disk to clear.
+      const credsPath = join(tmpHome, '.chroxy', 'credentials.json')
+      mkdirSync(join(tmpHome, '.chroxy'), { recursive: true })
+      writeFileSync(credsPath, '{"anthropicApiKey":"x"}', { mode: 0o644 })
+      chmodSync(credsPath, 0o644)
+      assert.equal(hasStoredCredentials(), true,
+        'presence is independent of resolution validity')
     })
   })
 })

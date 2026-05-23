@@ -1280,6 +1280,48 @@ describe('dashboard message-handler dispatch', () => {
   })
 
 
+  describe('byok_credentials_status dispatch (#4144 fileExists propagation)', () => {
+    it('propagates the fileExists field to the store', () => {
+      // Pre-fix the reducer hand-picked fields and silently dropped
+      // fileExists, so the stale-file notice + Remove button were
+      // both effectively dead in production. Pin the field flows
+      // through the message-handler layer.
+      handleMessage(
+        {
+          type: 'byok_credentials_status',
+          status: 'set',
+          source: 'env',
+          masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: true,
+        } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.byokCredentialsStatus).toEqual({
+        status: 'set',
+        source: 'env',
+        masked: 'sk-ant-api03...[95 chars redacted]',
+        reason: undefined,
+        fileExists: true,
+      })
+    })
+
+    it('preserves fileExists=false when the server omits or sets it explicitly false', () => {
+      handleMessage(
+        {
+          type: 'byok_credentials_status',
+          status: 'missing',
+          source: 'none',
+          reason: 'no key',
+          fileExists: false,
+        } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.byokCredentialsStatus.fileExists).toBe(false)
+    })
+  })
+
   describe('result — cost calculation for Codex/Gemini (cost: null from server)', () => {
     function seedWithModel(sessionId: string, model: string) {
       store = createMockStore(
