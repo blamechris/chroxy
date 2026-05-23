@@ -710,7 +710,7 @@ export interface ConnectionState {
   // recovery button to the toast. Existing call sites that pass only
   // `message` keep working — `action` is undefined and the toast renders
   // message-only as before.
-  addServerError: (message: string, action?: ServerErrorAction, severity?: 'error' | 'warning') => void;
+  addServerError: (message: string, action?: ServerErrorAction, severity?: ServerError['severity']) => void;
   dismissServerError: (id: string) => void;
 
   // Info notification actions
