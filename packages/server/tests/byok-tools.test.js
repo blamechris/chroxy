@@ -9,9 +9,9 @@ import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES } from '../src/byok-tools.js'
  */
 
 describe('BUILTIN_TOOLS', () => {
-  it('exposes the documented toolset (PR 2 v1 + WebFetch from #4050)', () => {
+  it('exposes the documented toolset (PR 2 v1 + WebFetch #4050 + TodoWrite #4051)', () => {
     const names = BUILTIN_TOOLS.map((t) => t.name).sort()
-    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'WebFetch', 'Write'])
+    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'TodoWrite', 'WebFetch', 'Write'])
   })
 
   it('every tool has a name, description, and input_schema', () => {
@@ -56,5 +56,14 @@ describe('BUILTIN_TOOLS', () => {
     const wf = BUILTIN_TOOLS.find((t) => t.name === 'WebFetch')
     assert.ok(wf, 'WebFetch must be registered')
     assert.deepEqual(wf.input_schema.required.sort(), ['prompt', 'url'])
+  })
+
+  it('TodoWrite requires todos array with id/content/status per item (#4051)', () => {
+    const tw = BUILTIN_TOOLS.find((t) => t.name === 'TodoWrite')
+    assert.ok(tw, 'TodoWrite must be registered')
+    assert.deepEqual(tw.input_schema.required, ['todos'])
+    assert.equal(tw.input_schema.properties.todos.type, 'array')
+    const itemReq = tw.input_schema.properties.todos.items.required.sort()
+    assert.deepEqual(itemReq, ['content', 'id', 'status'])
   })
 })

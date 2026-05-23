@@ -10,10 +10,17 @@
  * the SDK consumes them as Anthropic API tool definitions.
  *
  * Deferred to follow-up issues (see #4047 epic):
- *   - TodoWrite — #4051
  *   - Task (subagent) — #4049
  *   - MCP — #4048
  */
+
+/**
+ * Valid TodoWrite status values. Single source of truth — the JSON-schema
+ * enum below and the Set used for runtime validation both derive from
+ * `TODO_STATUS_LIST` so they can't drift apart.
+ */
+export const TODO_STATUS_LIST = Object.freeze(['pending', 'in_progress', 'completed'])
+export const TODO_STATUSES = new Set(TODO_STATUS_LIST)
 
 export const BUILTIN_TOOLS = [
   {
@@ -110,6 +117,35 @@ export const BUILTIN_TOOLS = [
         timeout: { type: 'number', description: 'Optional fetch timeout in milliseconds. Max 120000 (2 min).' },
       },
       required: ['url', 'prompt'],
+    },
+  },
+  {
+    name: 'TodoWrite',
+    description:
+      'Update the session-scoped todo list. Items are merged by `id` — a call that ' +
+      'omits an item leaves that item unchanged (partial updates are supported). ' +
+      'Each item: `{ id, content, status, activeForm? }`. Status must be one of ' +
+      '`pending`, `in_progress`, `completed`. The list is in-memory only — it resets ' +
+      'when the session is destroyed. Returns a short summary of the current list.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        todos: {
+          type: 'array',
+          description: 'Array of todo items to merge into the list (by id).',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Stable identifier — used as the merge key.' },
+              content: { type: 'string', description: 'Short description of the task.' },
+              status: { type: 'string', enum: TODO_STATUS_LIST, description: 'Current state.' },
+              activeForm: { type: 'string', description: 'Optional present-continuous form (e.g. "Running tests") shown when in_progress.' },
+            },
+            required: ['id', 'content', 'status'],
+          },
+        },
+      },
+      required: ['todos'],
     },
   },
   {
