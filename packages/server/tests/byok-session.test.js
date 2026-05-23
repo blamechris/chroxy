@@ -1357,6 +1357,258 @@ describe('ClaudeByokSession', () => {
         await session.destroy()
       })
 
+      it('writes a real file via the unstubbed executor (Write seam) (#4150)', async () => {
+        const targetPath = join(workspace, 'fresh.txt')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_w', name: 'Write',
+                      input: { file_path: targetPath, content: 'planted on disk' },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('write a note')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /Wrote 15 bytes/)
+        assert.match(toolResultBlock.content, /\(created\)/)
+        // The file must actually exist on disk with the planted content.
+        const { readFileSync } = await import('node:fs')
+        assert.equal(readFileSync(targetPath, 'utf8'), 'planted on disk')
+        await session.destroy()
+      })
+
+      it('edits a real file via the unstubbed executor (Edit seam) (#4150)', async () => {
+        const targetPath = join(workspace, 'edit-me.txt')
+        writeFileSync(targetPath, 'before:keep:after')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_e', name: 'Edit',
+                      input: { file_path: targetPath, old_string: 'keep', new_string: 'KEPT' },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('do the edit')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /Replaced 1 occurrence/)
+        const { readFileSync } = await import('node:fs')
+        assert.equal(readFileSync(targetPath, 'utf8'), 'before:KEPT:after')
+        await session.destroy()
+      })
+
+      it('runs a Bash command via the unstubbed executor and feeds stdout back (#4150)', async () => {
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_b', name: 'Bash',
+                      input: { command: 'echo bash-seam-ok' },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('run echo')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /bash-seam-ok/)
+        // Bash result includes the exit-footer the model relies on.
+        assert.match(toolResultBlock.content, /exit=0/)
+        await session.destroy()
+      })
+
+      it('redacts ANTHROPIC_API_KEY from the Bash subprocess environment (#4150 secret denylist)', async () => {
+        // ANTHROPIC_API_KEY is already 'sk-ant-test-key-fixture' from the
+        // outer beforeEach. Bash's safe-env builder must strip it before
+        // spawning so `env` inside Bash never sees it.
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_secret', name: 'Bash',
+                      input: { command: 'env' },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('dump env')
+        assert.ok(toolResultBlock, 'Bash env dump must produce a tool_result')
+        // The fixture key MUST NOT appear in stdout — the safe-env builder
+        // drops it before spawn.
+        assert.equal(toolResultBlock.content.includes('sk-ant-test-key-fixture'), false,
+          'ANTHROPIC_API_KEY must not leak into Bash subprocess env')
+        await session.destroy()
+      })
+
+      it('lists files via the unstubbed Glob executor (#4150)', async () => {
+        writeFileSync(join(workspace, 'a.txt'), '1')
+        writeFileSync(join(workspace, 'b.txt'), '2')
+        writeFileSync(join(workspace, 'c.md'), '3')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_g', name: 'Glob',
+                      input: { pattern: '*.txt' },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('find txt files')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /a\.txt/)
+        assert.match(toolResultBlock.content, /b\.txt/)
+        assert.equal(toolResultBlock.content.includes('c.md'), false, '*.txt glob must not include c.md')
+        await session.destroy()
+      })
+
+      it('greps real file contents via the unstubbed executor (#4150)', async () => {
+        writeFileSync(join(workspace, 'haystack.txt'), 'alpha\nNEEDLE-here\ngamma\n')
+        const session = new ClaudeByokSession({ cwd: workspace })
+        session.setPermissionMode('auto')
+        let round = 0
+        let toolResultBlock = null
+        session._client = {
+          messages: {
+            stream: ({ messages }) => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{
+                      type: 'tool_use', id: 'toolu_grep', name: 'Grep',
+                      input: { pattern: 'NEEDLE' },
+                    }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              const lastTurn = messages[messages.length - 1]
+              toolResultBlock = (lastTurn.content || []).find((c) => c?.type === 'tool_result')
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        await session.start()
+        await session.sendMessage('grep for it')
+        assert.equal(toolResultBlock.is_error, false)
+        assert.match(toolResultBlock.content, /haystack\.txt/)
+        assert.match(toolResultBlock.content, /NEEDLE-here/)
+        await session.destroy()
+      })
+
       it('refuses a path-traversal attempt via the real path-safety check', async () => {
         // Real executor enforces validatePathWithinCwd. Asking for
         // /etc/passwd should produce is_error: true with a recognisable
