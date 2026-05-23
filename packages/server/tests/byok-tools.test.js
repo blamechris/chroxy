@@ -9,9 +9,9 @@ import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES } from '../src/byok-tools.js'
  */
 
 describe('BUILTIN_TOOLS', () => {
-  it('exposes the documented PR 2 v1 toolset', () => {
+  it('exposes the documented toolset (PR 2 v1 + WebFetch from #4050)', () => {
     const names = BUILTIN_TOOLS.map((t) => t.name).sort()
-    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write'])
+    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'WebFetch', 'Write'])
   })
 
   it('every tool has a name, description, and input_schema', () => {
@@ -50,5 +50,11 @@ describe('BUILTIN_TOOLS', () => {
   it('Bash requires only command', () => {
     const bash = BUILTIN_TOOLS.find((t) => t.name === 'Bash')
     assert.deepEqual(bash.input_schema.required, ['command'])
+  })
+
+  it('WebFetch requires url and prompt (#4050)', () => {
+    const wf = BUILTIN_TOOLS.find((t) => t.name === 'WebFetch')
+    assert.ok(wf, 'WebFetch must be registered')
+    assert.deepEqual(wf.input_schema.required.sort(), ['prompt', 'url'])
   })
 })

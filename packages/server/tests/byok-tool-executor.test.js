@@ -1,8 +1,9 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:http'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
 
 /**
@@ -285,6 +286,182 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, false)
       assert.match(r.content, /HOME_PRESENT=yes/)
       assert.match(r.content, /PATH_LEN=\d/)
+    })
+  })
+
+  describe('WebFetch (#4050)', () => {
+    let server
+    let baseUrl
+    const routes = new Map()
+
+    before(async () => {
+      server = createServer((req, res) => {
+        const handler = routes.get(req.url)
+        if (!handler) {
+          res.writeHead(404, { 'Content-Type': 'text/plain' })
+          res.end('not found')
+          return
+        }
+        handler(req, res)
+      })
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const { port } = server.address()
+      baseUrl = `http://127.0.0.1:${port}`
+    })
+
+    after(async () => {
+      await new Promise((resolve) => server.close(resolve))
+    })
+
+    beforeEach(() => {
+      routes.clear()
+    })
+
+    it('extracts readable text from an HTML page, dropping <script> and <style>', async () => {
+      routes.set('/article', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(`
+          <html><head>
+            <style>.x { color: red }</style>
+            <script>alert('xss')</script>
+          </head><body>
+            <h1>Hello World</h1>
+            <p>Some readable text.</p>
+            <script>tracking()</script>
+          </body></html>
+        `)
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/article`, prompt: 'summarize' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /Hello World/)
+      assert.match(r.content, /Some readable text/)
+      assert.equal(r.content.includes('alert'), false, '<script> bodies must be stripped')
+      assert.equal(r.content.includes('color: red'), false, '<style> bodies must be stripped')
+    })
+
+    it('returns JSON bodies as plain text without HTML processing', async () => {
+      routes.set('/api', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, items: [1, 2, 3] }))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/api`, prompt: 'parse' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /"ok":true/)
+      assert.match(r.content, /"items":\[1,2,3\]/)
+    })
+
+    it('returns plaintext bodies as-is', async () => {
+      routes.set('/text', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('hello\nworld')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/text`, prompt: 'read' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /hello\nworld/)
+    })
+
+    it('refuses non-http(s) URLs (file://, ftp://, javascript:)', async () => {
+      for (const url of ['file:///etc/passwd', 'ftp://example.com/x', 'javascript:alert(1)']) {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url, prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true, `expected error for ${url}`)
+        assert.match(r.content, /only http\(s\)/i)
+      }
+    })
+
+    it('rejects empty / missing url with a clear error', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: '', prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /url is required/i)
+    })
+
+    it('marks 404 responses as error and surfaces status', async () => {
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/missing`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /404/)
+    })
+
+    it('refuses binary content-types (image, octet-stream)', async () => {
+      routes.set('/binary', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' })
+        res.end(Buffer.from([0x00, 0x01, 0x02]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/binary`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /binary|unsupported content-type/i)
+    })
+
+    it('truncates oversize responses with a clear marker', async () => {
+      const huge = 'A'.repeat(500_000)
+      routes.set('/huge', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end(huge)
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/huge`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /\[truncated/)
+      assert.ok(r.content.length < huge.length, 'content should be capped below source size')
+    })
+
+    it('respects a short timeout', async () => {
+      routes.set('/slow', (_req, res) => {
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'text/plain' })
+          res.end('eventually')
+        }, 3000)
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/slow`, prompt: 'x', timeout: 200 },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /timed out|abort/i)
+    })
+
+    it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {
+      routes.set('/entities', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html' })
+        res.end('<p>Tom &amp; Jerry &lt;3 &quot;hi&quot; &#39;ok&#39;</p>')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/entities`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /Tom & Jerry <3 "hi" 'ok'/)
     })
   })
 })
