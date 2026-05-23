@@ -450,6 +450,27 @@ export class ClaudeByokSession extends BaseSession {
         cost: turnCost,
       })
     } catch (err) {
+      // #4118: extend the synchronous stream-init rollback (#4109) to
+      // ANY error that bubbles to the outer catch at round 1+ — the
+      // for-await loop rejecting mid-iteration, finalMessage() rejecting,
+      // a tool-execution promise rejecting after at least one round has
+      // committed assistant + user tool_result to _history. Without this,
+      // history ends on a `user` tool_result turn and the next
+      // sendMessage pushes a plain-text `user` turn back-to-back —
+      // soft-breaking the alternation invariant the API may tighten on.
+      //
+      // The synthetic-tool_result completion path (#4061, when the user
+      // aborts mid-tool-loop) intentionally COMMITS the user turn so
+      // the next turn doesn't 400. That path emits a 'result' event
+      // before reaching this catch and never throws, so it's not
+      // affected here. We only catch real errors.
+      //
+      // Truncating to historyLengthBeforeSend is idempotent: if the
+      // inner stream-init catch already truncated (round-0 path), the
+      // length is already at or below the snapshot and this is a no-op.
+      if (this._history.length > historyLengthBeforeSend) {
+        this._history.length = historyLengthBeforeSend
+      }
       this.emit('stream_end', { messageId })
       this._emitTurnError(messageId, err, 'STREAM_ERROR')
     } finally {
