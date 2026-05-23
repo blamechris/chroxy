@@ -3,15 +3,11 @@ name: ChatView TodoWrite tool rendering
 ---
 
 # #4195 — End-to-end coverage for TodoWrite tool rendering in the chat
-# flow. Discovered while running this flow: the structured TodoList
-# renderer that #4194 added to ToolBubble is unreachable from the chat
-# flow on mobile today — `groupMessages` always bundles tool_use into
-# an activity group, and ActivityEntry only renders a truncated text
-# preview (no expand-to-ToolBubble path). Tracked as a CRITICAL bug
-# in #4201; this flow asserts against the current (truncated-text)
-# behaviour as a regression net until #4201 lands the wiring fix,
-# at which point the assertions get re-pointed at todo-list-header
-# / todo-list-item-<id> testIDs.
+# flow. Post-#4201 ActivityEntry has its own per-entry expand state,
+# so tapping a TodoWrite row inside an expanded activity group reveals
+# the structured TodoList inline (header + per-item rows with status
+# markers + optional truncation marker). This flow exercises that
+# full path end-to-end.
 #
 # Trigger: 'show-todos' user input → mock-server.mjs emits a synthetic
 # tool_start (TodoWrite) + tool_result (canonical executor text). The
@@ -115,8 +111,13 @@ name: ChatView TodoWrite tool rendering
 - tapOn:
     id: "chat-send-button"
 
-# Wait for the activity group to land. testID set on the outer
-# TouchableOpacity in ActivityGroup.tsx.
+# Dismiss the keyboard so the activity group's bounds line up with the
+# unscrolled screen — the keyboard pushes content up by ~50% and would
+# move the entry row out from under our point-tap.
+- hideKeyboard
+
+# Wait for the activity group to land. testID set on the outer View
+# in ActivityGroup.tsx (the View wraps the header + body).
 - extendedWaitUntil:
     visible:
       id: "activity-group"
@@ -125,23 +126,51 @@ name: ChatView TodoWrite tool rendering
 # Screenshot the collapsed activity group ("1 tool used — 1 TodoWrite")
 - takeScreenshot: chat-todolist-activity-group-collapsed
 
-# Expand the activity group → reveals the per-tool ActivityEntry rows
-# inside (NOT a ToolBubble — that's a wiring gap tracked in #4201).
+# Expand the activity group by tapping its header. The outer
+# `activity-group` is a View — its testID is for assertion only; the
+# onPress handler is on the inner `activity-group-header` TouchableOpacity.
 - tapOn:
-    id: "activity-group"
+    id: "activity-group-header"
 - waitForAnimationToEnd
 
-# Regression net for today's behaviour: ActivityEntry shows a
-# truncated text preview of the result (clipped to ~60 chars). When
-# #4201 lands the wiring fix, these assertions get replaced with
-# `id: todo-list-header` + `id: todo-list-item-t1/t2/t3` against the
-# structured TodoList renderer. Maestro `text:` requires full-string
-# match unless wrapped in `.*` — use regex anchors.
-- assertVisible:
-    text: ".*TodoWrite.*"
-- assertVisible:
-    text: ".*Todo list \\(3 items\\).*"
+# Screenshot the collapsed-entry state (group expanded, entry not).
+- takeScreenshot: chat-todolist-entry-collapsed
 
-# Screenshot the expanded state so reviewers can spot regression in
-# the activity-entry row styling.
-- takeScreenshot: chat-todolist-activity-group-expanded
+# Tap the TodoWrite entry to expand it → parseTodoList(message.toolResult)
+# runs and renders <TodoList /> inline. The mock server emits entries
+# with id `tool-todowrite-mock-<counter>` so we tap by regex prefix.
+# Stays a point-tap (50%,55% targets the entry row at ~y=492-536 on
+# iPhone 17 Pro Max) because Maestro's iOS XCUITest tap-by-id on a
+# nested TouchableOpacity doesn't always propagate to React Native's
+# touch responder system. We do NOT double-tap with both id and point
+# because if BOTH succeed they toggle the state twice and collapse the
+# entry — flaky. Point-tap is the production path.
+- tapOn:
+    point: "50%,55%"
+- waitForAnimationToEnd
+
+# LayoutAnimation can defer the state→render commit on iOS; give it a
+# real window before asserting.
+- extendedWaitUntil:
+    visible:
+      id: "todo-list-header"
+    timeout: 5000
+
+# Assert the structured renderer is present. Each testID is set in
+# packages/app/src/components/chat/TodoList.tsx — if the parser missed
+# the canonical header (regression in TODO_LINE_RE) or ActivityEntry
+# parses the wrong field (regression on #4194's content→toolResult fix
+# re-introduced at the new call site), these would not render and the
+# assertions would fail.
+- assertVisible:
+    id: "todo-list-header"
+- assertVisible:
+    id: "todo-list-item-t1"
+- assertVisible:
+    id: "todo-list-item-t2"
+- assertVisible:
+    id: "todo-list-item-t3"
+
+# Screenshot the expanded TodoList — header, status markers (✓ ⋯ ○),
+# completed-strikethrough, color cues.
+- takeScreenshot: chat-todolist-expanded
