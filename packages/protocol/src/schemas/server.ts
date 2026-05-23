@@ -579,6 +579,23 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
   actualAuthor: z.string(),
 })
 
+// #4178: generic server `error` envelope shape — the catch-all schema for
+// `type: 'error'` messages that aren't covered by a code-specific variant
+// like `ServerSkillTrustGrantInvalidAuthorSchema`. `fatal: false` was
+// introduced by #4145 (MAX_TOOL_ROUNDS_REACHED) and is consumed by
+// #4176's warning-toast branch in the dashboard. Declaring it here lets
+// other clients (mobile app, future tools) consume the same shape via
+// the shared store-core `handleError` parser. `fatal` defaults unset
+// (treated as `true` by consumers) so omitting it preserves the
+// pre-#4145 contract.
+export const ServerErrorEnvelopeSchema = z.object({
+  type: z.literal('error'),
+  requestId: z.string().nullable().optional(),
+  code: z.string().optional(),
+  message: z.string(),
+  fatal: z.boolean().optional(),
+})
+
 // #3544: cumulative stdin_dropped totals broadcast to clients bound to the
 // session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
 // tailing the server log (mobile users, dashboard-only operators) see a live

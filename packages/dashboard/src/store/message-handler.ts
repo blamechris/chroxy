@@ -2916,7 +2916,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface it as a server error notification.
-      const { code: errCode, message: errMsg } = sharedError(msg);
+      // #4178: `fatal` is read off the typed parser return so dashboard
+      // + app share a single normalised shape (no `msg.fatal` reach-in,
+      // no per-client type guard, and a typo'd value can't silently
+      // degrade severity).
+      const { code: errCode, message: errMsg, fatal: errFatal } = sharedError(msg);
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
       // #3588: clear any in-flight skill_trust_grant whose requestId
       // matches this error envelope so the SkillsPanel "Pending review"
@@ -2986,7 +2990,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // remains usable; the toast is informational. errCode-list lets us
       // keep the fatal: false check for future-proofing while still
       // catching codes that don't carry the flag.
-      const isNonFatal = msg.fatal === false || NON_FATAL_ERROR_CODES.has(errCode);
+      // #4178: `errFatal` is the typed (boolean | undefined) value from
+      // sharedError. A typo on the wire ('fatal': 'false') resolves to
+      // undefined, which falls back to the errCode-list — preserving
+      // the loud red toast instead of silently degrading.
+      const isNonFatal = errFatal === false || NON_FATAL_ERROR_CODES.has(errCode);
       const severity: 'error' | 'warning' = isNonFatal ? 'warning' : 'error';
       get().addServerError(surfaced, action, severity);
       break;

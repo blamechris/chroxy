@@ -768,6 +768,32 @@ describe('handleError', () => {
     expect(handleError({}).requestId).toBeNull()
     expect(handleError({ requestId: 42 }).requestId).toBeNull()
   })
+
+  // #4178: surface `fatal` on the typed return so dashboard + app share a
+  // single parsed shape rather than each reaching into `msg.fatal` with
+  // its own ad-hoc type guard. Default unset (undefined) is treated as
+  // fatal by consumers — pin that contract here.
+  it('extracts fatal when boolean false', () => {
+    expect(handleError({ code: 'MAX_TOOL_ROUNDS_REACHED', fatal: false }).fatal).toBe(false)
+  })
+
+  it('extracts fatal when boolean true', () => {
+    expect(handleError({ code: 'STREAM_ERROR', fatal: true }).fatal).toBe(true)
+  })
+
+  it('leaves fatal undefined when missing', () => {
+    expect(handleError({ code: 'WHATEVER' }).fatal).toBeUndefined()
+  })
+
+  it('leaves fatal undefined when non-boolean (string "false" must NOT degrade to false)', () => {
+    // A typo (msg.fatal: 'false') was the regression risk #4178 calls
+    // out. The parser must reject non-boolean and leave fatal=undefined,
+    // which downstream treats as fatal — surfacing the bug as a red
+    // toast instead of silently downgrading to a warning.
+    expect(handleError({ fatal: 'false' as unknown as boolean }).fatal).toBeUndefined()
+    expect(handleError({ fatal: 0 as unknown as boolean }).fatal).toBeUndefined()
+    expect(handleError({ fatal: null as unknown as boolean }).fatal).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------

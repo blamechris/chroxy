@@ -731,12 +731,24 @@ export function handleError(msg: Record<string, unknown>): {
   code: string
   message: string
   requestId: string | null
+  /**
+   * #4178: optional severity hint from the server. `false` means the
+   * envelope is non-fatal — the session is alive and the dashboard
+   * should render a yellow warning toast rather than the destructive
+   * red toast used for STREAM_ERROR / ABORT. `true` or `undefined` are
+   * both treated as fatal by consumers (so missing / typo'd values
+   * surface loudly instead of silently degrading).
+   */
+  fatal: boolean | undefined
 } {
   const code = typeof msg.code === 'string' ? msg.code : 'UNKNOWN'
   const rawMessage =
     typeof msg.message === 'string' ? stripAnsi(msg.message).trim() : ''
   const message = rawMessage.length > 0 ? rawMessage : DEFAULT_ERROR_MESSAGE
   const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
+  // Strict boolean check — a typo (e.g. fatal: 'false' string) must NOT
+  // degrade to a warning toast. Treat anything non-boolean as undefined.
+  const fatal = typeof msg.fatal === 'boolean' ? msg.fatal : undefined
   // `systemMessage` was dropped from the return shape (#3112) — neither
   // call site (`dashboard:store/message-handler.ts:case 'error'`,
   // `app:store/message-handler.ts:case 'error'`) consumed it.
@@ -744,6 +756,7 @@ export function handleError(msg: Record<string, unknown>): {
     code,
     message,
     requestId,
+    fatal,
   }
 }
 
