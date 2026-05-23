@@ -866,6 +866,91 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.content.includes('hunter2'), false)
     })
 
+    it('marks the URL line when userinfo was stripped on success (#4160)', async () => {
+      // Without a marker, the silent strip looks like a vanilla unauthed
+      // request — a downstream 401 is mysterious. The marker lets the
+      // model explain the situation and suggest fixes.
+      routes.set('/creds-marker-ok', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('ok')
+      })
+      const { port } = server.address()
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/creds-marker-ok`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /\[userinfo stripped\]/)
+      // Credentials still must not leak alongside the marker.
+      assert.equal(r.content.includes('alice'), false)
+      assert.equal(r.content.includes('hunter2'), false)
+    })
+
+    it('marks the URL line when userinfo was stripped on error path (#4160)', async () => {
+      const { port } = server.address()
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: {
+          url: `http://alice:hunter2@127.0.0.1:${port}/missing`,
+          prompt: 'x',
+        },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /404/)
+      assert.match(r.content, /\[userinfo stripped\]/)
+    })
+
+    it('does NOT mark the URL line when input had no userinfo (#4160)', async () => {
+      // Regress-guard: the marker must only appear when userinfo was
+      // actually stripped, otherwise it would tag every URL.
+      routes.set('/no-creds', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('plain')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/no-creds`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.equal(r.content.includes('[userinfo stripped]'), false,
+        'marker must not appear when input had no userinfo')
+    })
+
+    it('strips userinfo introduced by a redirect Location header (#4182 Copilot review)', async () => {
+      // A Location header can carry `user:pass@` userinfo even when the
+      // initial URL had none. Without per-hop stripping, that URL would
+      // be passed to fetch(), which refuses credentialed URLs with an
+      // error message that echoes the credentialed URL — leaking the
+      // creds via the catch-all `WebFetch failed: ${err.message}` path.
+      const { port } = server.address()
+      routes.set('/r-creds', (_req, res) => {
+        res.writeHead(302, { Location: `http://bob:s3cr3t@127.0.0.1:${port}/r-creds-final` })
+        res.end()
+      })
+      routes.set('/r-creds-final', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('landed')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `http://127.0.0.1:${port}/r-creds`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false, 'redirect with userinfo must not leak via WebFetch failed:')
+      assert.match(r.content, /landed/, 'must follow the redirect to the final page')
+      assert.match(r.content, /\[userinfo stripped\]/,
+        'marker must reflect userinfo stripped on a redirect hop')
+      assert.equal(r.content.includes('bob'), false, 'username must not leak')
+      assert.equal(r.content.includes('s3cr3t'), false, 'password must not leak')
+      assert.equal(r.content.includes('bob:s3cr3t@'), false, 'userinfo must not leak verbatim')
+    })
+
     it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
       // ISO-8859-1: 0xE9 is 'é', 0xF6 is 'ö'. Decoded as utf-8 those
       // bytes are invalid continuations and become replacement
@@ -1091,6 +1176,159 @@ describe('executeBuiltinTool', () => {
       } finally {
         if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
       }
+    })
+
+    it('refuses initial RFC1918 10.0.0.0/8 host when env opt-out unset (#4167 coverage)', async () => {
+      // Pre-#4167 the SSRF tests covered 169.254 + 127.0.0.1 but skipped
+      // the two most common LAN ranges. Adding 10.0.0.x and 192.168.x
+      // explicitly so a regression in the RFC1918 branches is caught.
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://10.0.0.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses initial RFC1918 192.168.0.0/16 host when env opt-out unset (#4167 coverage)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://192.168.1.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses CGNAT 100.64.0.0/10 host (RFC 6598, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          // 100.64.0.1 is at the bottom of the CGNAT range.
+          input: { url: 'http://100.64.0.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses TEST-NET-1 192.0.2.0/24 host (RFC 5737, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://192.0.2.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses TEST-NET-2 198.51.100.0/24 host (RFC 5737, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://198.51.100.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses TEST-NET-3 203.0.113.0/24 host (RFC 5737, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          input: { url: 'http://203.0.113.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('refuses benchmark range 198.18.0.0/15 host (RFC 2544, #4167)', async () => {
+      const prior = process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      delete process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'WebFetch',
+          // 198.19.x is the top half of the /15.
+          input: { url: 'http://198.19.0.1/', prompt: 'x' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /private|loopback|link-local|SSRF/i)
+      } finally {
+        if (prior !== undefined) process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE = prior
+      }
+    })
+
+    it('follows relative Location header (#4167 coverage)', async () => {
+      // `new URL(loc, currentUrl)` should resolve `/login` against the
+      // base. Pre-fix this was uncovered by tests even though it works.
+      routes.set('/r-rel', (_req, res) => {
+        res.writeHead(302, { Location: '/login' })
+        res.end()
+      })
+      routes.set('/login', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('relative-redirect-target')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-rel`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /relative-redirect-target/)
+    })
+
+    it('refuses 3xx with empty Location header (#4167 coverage)', async () => {
+      // A 302 with no Location is malformed; pre-fix code handled it but
+      // there was no test pinning the behaviour.
+      routes.set('/r-empty', (_req, res) => {
+        res.writeHead(302, { Location: '' })
+        res.end()
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/r-empty`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /no Location header/)
     })
 
     it('refuses redirect to a non-http(s) scheme even when host check is bypassed (#4132)', async () => {
