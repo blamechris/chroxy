@@ -369,7 +369,7 @@ function isPrivateOrSpecialIp(ipStr) {
   const v = isIP(ipStr)
   if (v === 4) {
     // ipStr is dotted-quad.
-    const [a, b] = ipStr.split('.').map((p) => parseInt(p, 10))
+    const [a, b, c] = ipStr.split('.').map((p) => parseInt(p, 10))
     if (a === 127) return true                 // loopback 127.0.0.0/8
     if (a === 10) return true                  // RFC1918 10.0.0.0/8
     if (a === 172 && b >= 16 && b <= 31) return true  // RFC1918 172.16.0.0/12
@@ -377,6 +377,14 @@ function isPrivateOrSpecialIp(ipStr) {
     if (a === 169 && b === 254) return true    // link-local 169.254.0.0/16
     if (a === 0) return true                   // 0.0.0.0/8 (this network)
     if (a >= 224) return true                  // multicast + reserved
+    // #4167: defense-in-depth — also block ranges that aren't routable on
+    // the public internet and that have a history of colliding with
+    // internal infra.
+    if (a === 100 && b >= 64 && b <= 127) return true  // CGNAT 100.64.0.0/10 (RFC 6598)
+    if (a === 192 && b === 0 && c === 2) return true   // TEST-NET-1 192.0.2.0/24 (RFC 5737)
+    if (a === 198 && b === 51 && c === 100) return true // TEST-NET-2 198.51.100.0/24
+    if (a === 203 && b === 0 && c === 113) return true // TEST-NET-3 203.0.113.0/24
+    if (a === 198 && (b === 18 || b === 19)) return true // benchmark 198.18.0.0/15 (RFC 2544)
     return false
   }
   if (v === 6) {
@@ -513,7 +521,15 @@ async function runWebFetch({ input, signal }) {
   //      failure path leaks. Stripping here turns the fetch into an
   //      unauthenticated request — the server may 401 / 403, which is
   //      surfaced cleanly without exposing the creds.
-  if (parsed.username || parsed.password) {
+  // #4160: remember whether userinfo was present so the result header
+  // can surface a `[userinfo stripped]` marker — a silent strip turns
+  // a downstream 401 into a mysterious failure that the model can't
+  // diagnose. The marker is the design trade-off worth flagging.
+  // Tracked as `let` because a redirect Location can introduce userinfo
+  // on a later hop; we OR into this flag so the marker reflects stripping
+  // at ANY hop (Copilot review on #4182).
+  let hadUserinfo = Boolean(parsed.username || parsed.password)
+  if (hadUserinfo) {
     parsed.username = ''
     parsed.password = ''
   }
@@ -574,6 +590,18 @@ async function runWebFetch({ input, signal }) {
       } catch {
         return { content: `WebFetch refused redirect: malformed Location header`, isError: true }
       }
+      // #4182 (Copilot review): a Location header can introduce
+      // `user:pass@` userinfo on any hop. Strip it BEFORE the next fetch
+      // — Node fetch refuses credentialed URLs with an error that echoes
+      // the credentialed URL, which would then leak via the catch-all
+      // `WebFetch failed: ${err.message}` path. OR into `hadUserinfo`
+      // so the result marker reflects stripping at any hop, not just
+      // the initial URL.
+      if (nextUrl.username || nextUrl.password) {
+        hadUserinfo = true
+        nextUrl.username = ''
+        nextUrl.password = ''
+      }
       if (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') {
         // The Location header is attacker-controlled, so don't echo it
         // verbatim — that's a prompt-injection surface AND would leak
@@ -601,9 +629,13 @@ async function runWebFetch({ input, signal }) {
       currentUrl = nextUrl
     }
 
+    // Compute the marker AFTER the redirect loop so it reflects any
+    // userinfo stripped on a hop (#4182 Copilot review).
+    const userinfoMarker = hadUserinfo ? ' [userinfo stripped]' : ''
+
     if (!res.ok) {
       return {
-        content: `HTTP ${res.status} ${res.statusText} from ${currentUrl.toString()}`,
+        content: `HTTP ${res.status} ${res.statusText} from ${currentUrl.toString()}${userinfoMarker}`,
         isError: true,
       }
     }
@@ -638,7 +670,7 @@ async function runWebFetch({ input, signal }) {
     }
 
     return {
-      content: `Prompt: ${rawPrompt}\nURL: ${currentUrl.toString()}\n\n${output}${marker}`,
+      content: `Prompt: ${rawPrompt}\nURL: ${currentUrl.toString()}${userinfoMarker}\n\n${output}${marker}`,
       isError: false,
     }
   } catch (err) {
