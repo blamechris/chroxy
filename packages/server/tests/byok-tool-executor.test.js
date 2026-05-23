@@ -856,6 +856,83 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.content.includes('hunter2'), false)
     })
 
+    it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
+      // ISO-8859-1: 0xE9 is 'é', 0xF6 is 'ö'. Decoded as utf-8 those
+      // bytes are invalid continuations and become replacement
+      // characters (mojibake). Pre-fix readBodyCapped used utf-8 always.
+      routes.set('/latin1', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=ISO-8859-1' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xE9, 0x20, 0x66, 0xF6, 0x6F])) // "café föo"
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/latin1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café föo/)
+    })
+
+    it('falls back to utf-8 when charset is unrecognised (#4134)', async () => {
+      // Use a sequence that is valid utf-8 but would decode differently
+      // under Latin-1 — proves the fallback is utf-8, not "whatever the
+      // bogus label happens to alias to". The bytes "café" in utf-8
+      // are 0x63 0x61 0x66 0xC3 0xA9. As Latin-1 those last two would
+      // be "Ã©". Asserting "café" appears means we used utf-8.
+      routes.set('/weirdcharset', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=not-a-real-charset' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xC3, 0xA9]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/weirdcharset`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café/)
+      assert.equal(r.content.includes('Ã©'), false, 'must NOT be Latin-1 decoded')
+    })
+
+    it('falls back to utf-8 when Content-Type omits charset (#4134)', async () => {
+      // Same payload as the unknown-charset test — bytes that decode
+      // distinctly under utf-8 vs Latin-1 — but with no charset
+      // declared. The model gets utf-8 (the default), not raw bytes.
+      routes.set('/nocharset', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xC3, 0xA9]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/nocharset`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café/)
+      assert.equal(r.content.includes('Ã©'), false)
+    })
+
+    it('charset parameter boundary anchoring — xcharset=fakeout is not matched (#4162)', async () => {
+      // Pre-fix the regex matched `xcharset=` substring → label "fakeout"
+      // → TextDecoder rejects it → fallback to utf-8. That's the right
+      // outcome by accident; the parameter-boundary anchor makes the
+      // regex correct on principle. Pin it with a header that contains
+      // a real `charset` parameter AFTER a fake one, so a non-anchored
+      // regex would grab the wrong value.
+      routes.set('/boundary', (_req, res) => {
+        // "xcharset=ISO-8859-1; charset=utf-8" — the real charset is utf-8.
+        // utf-8 bytes for "café" must decode as utf-8, not Latin-1.
+        res.writeHead(200, { 'Content-Type': 'text/plain; xcharset=ISO-8859-1; charset=utf-8' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xC3, 0xA9]))
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/boundary`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café/)
+    })
+
     it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {
       routes.set('/entities', (_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html' })

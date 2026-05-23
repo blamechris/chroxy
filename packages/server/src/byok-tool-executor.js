@@ -428,7 +428,13 @@ async function runWebFetch({ input, signal }) {
       }
     }
 
-    const raw = await readBodyCapped(res, WEBFETCH_MAX_RAW_BYTES)
+    // #4134: respect the declared charset rather than blindly utf-8.
+    // Legacy sites still serve ISO-8859-1, Shift_JIS, GB2312, etc.; an
+    // unconditional utf-8 decode produces mojibake that the model
+    // can't reason about. Falls back to utf-8 when charset is missing,
+    // unknown, or rejected by TextDecoder.
+    const charset = pickCharset(ctype)
+    const raw = await readBodyCapped(res, WEBFETCH_MAX_RAW_BYTES, charset)
     const isHtml = ctype.includes('text/html') || ctype.includes('application/xhtml')
     const text = isHtml ? stripHtmlToText(raw.text) : raw.text
     const { output, outputTruncated } = capOutput(text, WEBFETCH_MAX_OUTPUT_CHARS)
@@ -470,12 +476,47 @@ function isBinaryContentType(ctype) {
   return true
 }
 
-async function readBodyCapped(res, maxBytes) {
+/**
+ * Pick a TextDecoder-compatible charset label from a Content-Type header.
+ * Returns 'utf-8' when missing, unparseable, or rejected by TextDecoder
+ * (so the caller never has to handle a thrown constructor).
+ */
+function pickCharset(ctype) {
+  if (!ctype) return 'utf-8'
+  // Match `charset=foo` allowing quoted values per RFC 7231. Anchor on
+  // a parameter-boundary (start-of-string or `;`) so a contrived header
+  // like `text/html; xcharset=fakeout` can't have its tail matched and
+  // mistaken for the real `charset` parameter. (#4162)
+  const m = ctype.match(/(?:^|;)\s*charset\s*=\s*"?([\w.:+-]+)"?/i)
+  if (!m) return 'utf-8'
+  const label = m[1]
+  try {
+    // Constructor throws if the label is unknown to the WHATWG registry.
+    // We only use the throw signal — `new TextDecoder(label)` itself is
+    // not retained; the real decoder is built per-call in readBodyCapped.
+    new TextDecoder(label)
+    return label
+  } catch {
+    return 'utf-8'
+  }
+}
+
+async function readBodyCapped(res, maxBytes, charset = 'utf-8') {
+  // pickCharset has already validated the label, so this can't throw.
+  const decoder = new TextDecoder(charset)
   const reader = res.body?.getReader()
   if (!reader) {
-    const text = await res.text()
-    if (text.length > maxBytes) return { text: text.slice(0, maxBytes), truncated: true }
-    return { text, truncated: false }
+    // Defensive fallback for the (unreachable in practice) case where
+    // fetch returns no body stream. Use arrayBuffer + TextDecoder so
+    // both paths apply the same charset AND the same byte-based cap —
+    // res.text() would (a) hard-wire utf-8 in undici and (b) measure
+    // the cap in chars, not bytes. Keeps the contract consistent.
+    const ab = await res.arrayBuffer()
+    const bytes = Buffer.from(ab)
+    if (bytes.byteLength > maxBytes) {
+      return { text: decoder.decode(bytes.subarray(0, maxBytes)), truncated: true }
+    }
+    return { text: decoder.decode(bytes), truncated: false }
   }
   const chunks = []
   let total = 0
@@ -495,7 +536,7 @@ async function readBodyCapped(res, maxBytes) {
     chunks.push(value)
   }
   const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)))
-  return { text: buf.toString('utf8'), truncated }
+  return { text: decoder.decode(buf), truncated }
 }
 
 const HTML_ENTITY_MAP = {
