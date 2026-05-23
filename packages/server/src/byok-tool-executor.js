@@ -562,9 +562,12 @@ function runTodoWrite({ input, todoStore }) {
     // almost certainly a model bug; rejecting it lets the model see the
     // mistake and self-correct rather than letting the last write win
     // silently. Across separate calls, merge-by-id is unchanged.
+    // JSON.stringify on the id (same shape used for `status` below) keeps
+    // the error parseable when an id contains quotes / newlines / control
+    // chars — raw single-quotes would mangle.
     if (seenIds.has(t.id)) {
       return {
-        content: `EINVAL: todos[${i}].id '${t.id}' duplicates an earlier entry in this call`,
+        content: `EINVAL: todos[${i}].id ${JSON.stringify(t.id)} duplicates an earlier entry in this call`,
         isError: true,
       }
     }

@@ -365,11 +365,29 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, true)
       assert.match(r.content, /duplicate/i)
-      assert.match(r.content, /'a'/)
-      // Pin the index so the error template can't drift to a different
-      // shape unnoticed.
+      // Id is JSON-quoted for parseability (so embedded quotes / newlines /
+      // control chars don't mangle the message). Pin both the JSON-quoted
+      // id and the array index so the template can't drift unnoticed.
+      assert.match(r.content, /"a"/)
       assert.match(r.content, /todos\[1\]/)
       assert.equal(store.size, 0, 'duplicate-id call must not mutate the store (atomic)')
+    })
+
+    it('JSON-quotes the id in the dup-rejection error (Copilot review on #4155)', async () => {
+      // An id containing a quote or newline must not mangle the error
+      // string. JSON.stringify yields a parseable representation.
+      const store = new Map()
+      const r = await executeBuiltinTool({
+        toolName: 'TodoWrite',
+        input: { todos: [
+          { id: 'a"b', content: 'first', status: 'pending' },
+          { id: 'a"b', content: 'second', status: 'completed' },
+        ] },
+        cwd: dir, cwdRealCache, cwdCacheTtl: 30_000, todoStore: store,
+      })
+      assert.equal(r.isError, true)
+      // JSON.stringify('a"b') === '"a\\"b"' — the escaped quote survives.
+      assert.match(r.content, /"a\\"b"/)
     })
 
     it('treats ids as case-sensitive (dup check matches storage semantics)', async () => {
