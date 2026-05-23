@@ -856,6 +856,51 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.content.includes('hunter2'), false)
     })
 
+    it('decodes per declared Content-Type charset, not assumed utf-8 (#4134)', async () => {
+      // ISO-8859-1: 0xE9 is 'é', 0xF6 is 'ö'. Decoded as utf-8 those
+      // bytes are invalid continuations and become replacement
+      // characters (mojibake). Pre-fix readBodyCapped used utf-8 always.
+      routes.set('/latin1', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=ISO-8859-1' })
+        res.end(Buffer.from([0x63, 0x61, 0x66, 0xE9, 0x20, 0x66, 0xF6, 0x6F])) // "café föo"
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/latin1`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /café föo/)
+    })
+
+    it('falls back to utf-8 when charset is unrecognised (#4134)', async () => {
+      routes.set('/weirdcharset', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=not-a-real-charset' })
+        res.end('plain utf-8 text')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/weirdcharset`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /plain utf-8 text/)
+    })
+
+    it('falls back to utf-8 when Content-Type omits charset (#4134)', async () => {
+      routes.set('/nocharset', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('utf-8 by default')
+      })
+      const r = await executeBuiltinTool({
+        toolName: 'WebFetch',
+        input: { url: `${baseUrl}/nocharset`, prompt: 'x' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /utf-8 by default/)
+    })
+
     it('decodes HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;)', async () => {
       routes.set('/entities', (_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html' })
