@@ -1168,6 +1168,63 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('swallows APIUserAbortError on summary stream-init — does NOT fire ABORT (#4170)', async () => {
+      // Pin the current contract for the narrow window between the cap-
+      // hit error emit (~L456) and summary stream-init (~L482): if the
+      // user aborts in this gap the SDK throws APIUserAbortError, which
+      // normally _emitTurnError routes to ABORT. But it hits the inner
+      // try/catch around the stream-init (L494) BEFORE reaching the
+      // outer catch — so the abort is swallowed: the instruction is
+      // popped, a warning logs, and the loop breaks. No ABORT event,
+      // no STREAM_ERROR. The turn ends via the existing result+stream_end
+      // emits identical to the sync init-fail path (#4147).
+      //
+      // Whether that's the right contract is a separate question (the
+      // issue invites that conversation). This test pins the behaviour
+      // so any future change in the inner catch surfaces deliberately.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              // Summary stream-init throws APIUserAbortError synchronously.
+              // Simulates the SDK's behaviour when signal is already aborted
+              // at the call site.
+              throw new APIUserAbortError({ message: 'Request was aborted.' })
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_ag', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      const capErrs = errs.filter((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      const streamErrs = errs.filter((e) => e.payload?.code === 'STREAM_ERROR')
+      const aborts = errs.filter((e) => e.payload?.code === 'ABORT')
+      const results = captured.filter((e) => e.name === 'result')
+      assert.equal(capErrs.length, 1, 'exactly one MAX_TOOL_ROUNDS_REACHED must fire')
+      assert.equal(capErrs[0].payload.fatal, false, 'cap-hit error must be non-fatal')
+      assert.equal(aborts.length, 0,
+        'APIUserAbortError swallowed by inner catch — no ABORT event surfaces (current contract)')
+      assert.equal(streamErrs.length, 0,
+        'init failure must NOT escalate to STREAM_ERROR even when the cause is an abort')
+      assert.equal(results.length, 1, 'turn must still emit exactly one result event after the break')
+      assert.equal(results[0].payload.stopReason, 'tool_use',
+        'result reflects the cap-hit round (no summary ran)')
+      assert.equal(session._isBusy, false, 'session must be released after the break')
+      await session.destroy()
+    })
+
     it('treats abort during summary for-await as ABORT, not STREAM_ERROR (#4147)', async () => {
       // The existing async-rejection test throws a plain Error and
       // asserts STREAM_ERROR. #4147 asks us to also pin the abort
