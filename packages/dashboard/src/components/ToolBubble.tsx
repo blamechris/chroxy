@@ -2,8 +2,15 @@
  * ToolBubble component — collapsible tool use card.
  *
  * Shows tool name + input summary. Clicking expands to show full result.
+ *
+ * #4139: TodoWrite results are surfaced as a structured checklist rather
+ * than raw text. The TodoList component parses the executor's
+ * `[ ] / [~] / [x] ... (id)` format back into items; on parse failure
+ * (unknown format / future schema change) we fall back to the original
+ * `<pre>` treatment so nothing is lost.
  */
 import { useState } from 'react'
+import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
   toolName: string
@@ -41,6 +48,12 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
   const [expanded, setExpanded] = useState(false)
   const summary = getInputSummary(input)
   const resultId = `tool-result-${toolUseId}`
+  // #4139: parse the TodoWrite result once and pass the result down,
+  // rather than re-parsing inside TodoList (Copilot review on #4179).
+  // Non-TodoWrite tools skip the parse entirely.
+  const todoParsed = expanded && result && toolName === 'TodoWrite'
+    ? parseTodoList(result)
+    : null
 
   const toggle = () => setExpanded(prev => !prev)
 
@@ -73,8 +86,19 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
         </span>
       )}
       {expanded && result && (
-        <div className="tool-result" id={resultId}>
-          <pre>{result}</pre>
+        // #4139: click inside the result area must not bubble up to the
+        // outer onClick that collapses the bubble — otherwise selecting
+        // text or interacting with the checklist accidentally re-toggles.
+        <div
+          className="tool-result"
+          id={resultId}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {todoParsed ? (
+            <TodoList parsed={todoParsed} />
+          ) : (
+            <pre>{result}</pre>
+          )}
         </div>
       )}
     </div>
