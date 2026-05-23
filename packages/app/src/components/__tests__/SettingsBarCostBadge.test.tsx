@@ -8,7 +8,8 @@
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
 import { Text } from 'react-native';
-import { SettingsBar, formatCostBadge } from '../SettingsBar';
+import { SettingsBar } from '../SettingsBar';
+import { formatCostBadge } from '@chroxy/store-core';
 import type { CumulativeUsage } from '@chroxy/store-core';
 
 function collectVisibleText(root: ReactTestInstance): string {

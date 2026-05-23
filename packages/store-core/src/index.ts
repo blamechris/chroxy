@@ -131,6 +131,14 @@ export {
   isActivityEvent,
 } from './utils'
 
+// #4123: shared cost formatters used by both dashboard sidebar badge
+// (#4073) and mobile session-header badge (#4074). Keeping a single
+// implementation avoids drift between the two surfaces.
+export {
+  formatCostBadge,
+  formatCostBreakdown,
+} from './cost-format'
+
 export type {
   SessionVisualStatus,
   SessionVisualStatusInput,

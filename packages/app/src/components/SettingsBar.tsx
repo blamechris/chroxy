@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, Accessibi
 import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm } from '@chroxy/store-core';
+import { formatCostBadge } from '@chroxy/store-core';
 import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -87,22 +88,6 @@ function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M tokens`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k tokens`;
   return `${tokens} tokens`;
-}
-
-/**
- * #4074: Format a USD value for the session-header cost badge. Mirrors
- * the dashboard's `formatCostBadge` (#4073) so the same number formats
- * identically on every surface.
- *
- * Below $0.01 → 4 decimals ($0.0023) — preserves precision for small turns.
- * $0.01 to $1 → 3 decimals ($0.070) — sub-dollar accuracy.
- * >= $1 → 2 decimals ($42.50) — dollars are the unit at this scale.
- */
-export function formatCostBadge(costUsd: number): string {
-  if (!Number.isFinite(costUsd) || costUsd <= 0) return '$0';
-  if (costUsd >= 1) return `$${costUsd.toFixed(2)}`;
-  if (costUsd < 0.01) return `$${costUsd.toFixed(4)}`;
-  return `$${costUsd.toFixed(3)}`;
 }
 
 // -- Component --

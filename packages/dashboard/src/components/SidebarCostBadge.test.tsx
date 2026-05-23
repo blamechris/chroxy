@@ -31,7 +31,9 @@ vi.mock('../store/connection', () => ({
 }))
 
 // Import AFTER vi.mock declarations so the mocks register first.
-import { Sidebar, formatCostBadge, formatCostBreakdown } from './Sidebar'
+import { Sidebar } from './Sidebar'
+// #4123: formatters now live in store-core, not Sidebar.tsx.
+import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 
 afterEach(cleanup)
 
