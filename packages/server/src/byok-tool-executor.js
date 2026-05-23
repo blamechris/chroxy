@@ -371,6 +371,20 @@ async function runWebFetch({ input, signal }) {
       isError: true,
     }
   }
+  // #4133: strip user:pass@ userinfo before either echoing the URL back
+  // to the model OR passing it to fetch(). Two reasons:
+  //   1. The model's tool_result lands in conversation history and gets
+  //      resent to the Anthropic API on the next turn — userinfo in the
+  //      URL is a credential exfiltration path.
+  //   2. Node fetch refuses URLs containing credentials outright with
+  //      an error that itself echoes the credentialed URL, so even the
+  //      failure path leaks. Stripping here turns the fetch into an
+  //      unauthenticated request — the server may 401 / 403, which is
+  //      surfaced cleanly without exposing the creds.
+  if (parsed.username || parsed.password) {
+    parsed.username = ''
+    parsed.password = ''
+  }
 
   const requested = Number(input?.timeout)
   const timeoutMs = Number.isFinite(requested) && requested > 0
