@@ -952,7 +952,8 @@ describe('ClaudeByokSession', () => {
 
     it('breaks out of the loop after MAX_TOOL_ROUNDS (infinite-loop safety)', async () => {
       // Model insists on calling a tool on every round — agent loop must
-      // bail at the cap and emit result so the session doesn't hang.
+      // bail at the cap, run one summary round (#4063), and emit result so
+      // the session doesn't hang.
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block }) {
@@ -961,8 +962,24 @@ describe('ClaudeByokSession', () => {
       let callCount = 0
       session._client = {
         messages: {
-          stream: () => {
+          stream: ({ tools }) => {
             callCount += 1
+            // The summary round (#4063) is called without `tools` — the
+            // model must respond with text only. Distinguish here to keep
+            // the existing assertion meaningful: tool calls are bounded.
+            if (!tools || tools.length === 0) {
+              return fakeStream(
+                [
+                  { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+                  { type: 'message_stop' },
+                ],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'I made some progress but hit the cap.' }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
             return fakeStream(
               [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
               {
@@ -977,9 +994,97 @@ describe('ClaudeByokSession', () => {
       const captured = captureEvents(session)
       await session.start()
       await session.sendMessage('infinite loop please')
-      assert.ok(callCount <= 25, `expected <= MAX_TOOL_ROUNDS, got ${callCount}`)
+      // 25 tool-rounds + 1 summary round = 26 calls.
+      assert.equal(callCount, 26, `expected 25 tool rounds + 1 summary, got ${callCount}`)
       const results = captured.filter((e) => e.name === 'result')
       assert.equal(results.length, 1, 'must emit result even on safety-cap exit')
+      await session.destroy()
+    })
+
+    it('emits a non-fatal MAX_TOOL_ROUNDS_REACHED error when the cap fires (#4063)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'x', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'Summary text.' }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              {
+                stop_reason: 'tool_use',
+                content: [{ type: 'tool_use', id: 'toolu_x', name: 'Read', input: {} }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('infinite loop please')
+      const errs = captured.filter((e) => e.name === 'error')
+      const capErr = errs.find((e) => e.payload?.code === 'MAX_TOOL_ROUNDS_REACHED')
+      assert.ok(capErr, `expected MAX_TOOL_ROUNDS_REACHED error, got: ${errs.map((e) => e.payload?.code).join(', ') || 'none'}`)
+      assert.equal(capErr.payload.fatal, false, 'cap-reached must be non-fatal (session stays alive)')
+      assert.match(capErr.payload.message, /25/, 'message should cite the cap count')
+      // Session must still be usable after — busy flag clears via _finishTurn.
+      assert.equal(session._isBusy, false, 'session should not be stuck busy after non-fatal cap-hit error')
+      await session.destroy()
+    })
+
+    it('streams summary text from the post-cap round so the user sees what was accomplished (#4063)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              return fakeStream(
+                [
+                  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'I capped out but did X, Y, Z.' } },
+                  { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+                ],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'I capped out but did X, Y, Z.' }],
+                  usage: { input_tokens: 5, output_tokens: 10 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              {
+                stop_reason: 'tool_use',
+                content: [{ type: 'tool_use', id: 'toolu_x', name: 'Read', input: {} }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+      const deltas = captured.filter((e) => e.name === 'stream_delta').map((e) => e.payload.delta || '').join('')
+      assert.match(deltas, /capped out but did X, Y, Z/, 'summary text must be streamed to the dashboard')
+      // The result event reflects the summary's stop_reason, not the cap-hit's tool_use.
+      const result = captured.find((e) => e.name === 'result')
+      assert.equal(result.payload.stopReason, 'end_turn')
       await session.destroy()
     })
 

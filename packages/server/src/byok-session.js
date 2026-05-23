@@ -434,8 +434,85 @@ export class ClaudeByokSession extends BaseSession {
         if (this._abortController?.signal?.aborted) break
 
         if (round === MAX_TOOL_ROUNDS - 1) {
-          // Hit the safety cap. Push one more assistant note + bail.
-          log.warn(`hit MAX_TOOL_ROUNDS=${MAX_TOOL_ROUNDS} cap; stopping agent loop`)
+          // #4063: instead of bailing silently, run ONE more text-only
+          // stream so the model can summarise what it accomplished and the
+          // user sees a closing message instead of an apparent hang. The
+          // tool-loop history already contains every tool_use + tool_result
+          // pair; appending a user instruction asking for a summary keeps
+          // the alternation invariant.
+          log.warn(`hit MAX_TOOL_ROUNDS=${MAX_TOOL_ROUNDS} cap; running summary round`)
+
+          // Emit a non-fatal error so the dashboard can render a warning
+          // banner. The session stays alive — the user can keep talking;
+          // it's not a STREAM_ERROR / ABORT.
+          this.emit('error', {
+            messageId,
+            code: 'MAX_TOOL_ROUNDS_REACHED',
+            message: `Tool round cap reached (${MAX_TOOL_ROUNDS}). Asked the model to summarise what it accomplished so far.`,
+            fatal: false,
+          })
+
+          // Synthetic user turn — ALWAYS appended after a complete user
+          // tool_result turn (round just finished), so the alternation is
+          // assistant → user(tool_results) → user(summary instruction).
+          // Per Anthropic API, two consecutive user turns are concatenated;
+          // the synthetic message is part of the same logical turn.
+          this._history.push({
+            role: 'user',
+            content: [{
+              type: 'text',
+              text: `Tool budget exhausted (${MAX_TOOL_ROUNDS} rounds). Please summarise what you accomplished so far. Do not call any more tools.`,
+            }],
+          })
+
+          let summaryStream
+          try {
+            summaryStream = this._client.messages.stream(
+              {
+                model: this.model || 'claude-opus-4-7',
+                max_tokens: DEFAULT_MAX_TOKENS,
+                ...(systemPrompt ? { system: systemPrompt } : {}),
+                // No tools — force a text-only summary. Even if the model
+                // tried to tool_use, the API would reject (no tools to
+                // dispatch to). Cleaner to just omit.
+                messages: this._history,
+              },
+              { signal: this._abortController.signal },
+            )
+          } catch (err) {
+            // Stream-init threw on the summary round. Bail without breaking
+            // alternation — the user instruction we just pushed is the
+            // last turn; truncating is safe because the next sendMessage
+            // would start with a new user prompt anyway.
+            this._history.length -= 1
+            log.warn(`MAX_TOOL_ROUNDS summary stream-init failed: ${err?.message}`)
+            break
+          }
+
+          for await (const event of summaryStream) {
+            const t = translateSdkEvent(event)
+            if (!t) continue
+            switch (t.kind) {
+              case 'stream_delta':
+                this.emit('stream_delta', { messageId, delta: t.text })
+                break
+              case 'message_delta':
+                if (t.stopReason) lastStopReason = t.stopReason
+                break
+              default:
+                break
+            }
+          }
+
+          const summaryFinal = await summaryStream.finalMessage()
+          lastStopReason = summaryFinal.stop_reason
+          const sUsage = summaryFinal.usage || {}
+          turnUsage.input_tokens += Number(sUsage.input_tokens) || 0
+          turnUsage.output_tokens += Number(sUsage.output_tokens) || 0
+          turnUsage.cache_read_input_tokens += Number(sUsage.cache_read_input_tokens) || 0
+          turnUsage.cache_creation_input_tokens += Number(sUsage.cache_creation_input_tokens) || 0
+          turnCost += computePromptCostUsd(sUsage, pricing)
+          this._history.push({ role: 'assistant', content: summaryFinal.content })
           break
         }
       }
