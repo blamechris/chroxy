@@ -17,6 +17,8 @@
  */
 
 import { resolve, isAbsolute } from 'node:path'
+import { isIP } from 'node:net'
+import { lookup as dnsLookup } from 'node:dns/promises'
 import { validatePathWithinCwd } from './ws-file-ops/common.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
@@ -349,6 +351,133 @@ const WEBFETCH_DEFAULT_TIMEOUT_MS = 30_000
 const WEBFETCH_TIMEOUT_CEILING_MS = 120_000
 const WEBFETCH_MAX_RAW_BYTES = 1_048_576       // 1 MB cap on body read from socket
 const WEBFETCH_MAX_OUTPUT_CHARS = 100_000      // 100 KB cap on text returned to model
+// #4132: undici's default redirect cap is 20. Ours is tighter so the
+// model can't burn its turn on a redirect-loop honeypot — and we
+// re-validate scheme + host on every hop, so the loop is also a
+// per-hop SSRF gate, not just a count.
+const WEBFETCH_MAX_REDIRECT_HOPS = 10
+
+/**
+ * #4132 SSRF defense. By default WebFetch refuses targets in
+ * private / loopback / link-local ranges so a model induced into
+ * fetching `http://169.254.169.254/`, `http://127.0.0.1:<port>`, or
+ * an RFC1918 address can't hit the user's local / cloud-instance
+ * environment. Set `CHROXY_WEBFETCH_ALLOW_PRIVATE=1` to opt back in
+ * (local dev fetching the project's own dev server, etc.).
+ */
+function isPrivateOrSpecialIp(ipStr) {
+  const v = isIP(ipStr)
+  if (v === 4) {
+    // ipStr is dotted-quad.
+    const [a, b] = ipStr.split('.').map((p) => parseInt(p, 10))
+    if (a === 127) return true                 // loopback 127.0.0.0/8
+    if (a === 10) return true                  // RFC1918 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true  // RFC1918 172.16.0.0/12
+    if (a === 192 && b === 168) return true    // RFC1918 192.168.0.0/16
+    if (a === 169 && b === 254) return true    // link-local 169.254.0.0/16
+    if (a === 0) return true                   // 0.0.0.0/8 (this network)
+    if (a >= 224) return true                  // multicast + reserved
+    return false
+  }
+  if (v === 6) {
+    const lower = ipStr.toLowerCase()
+    if (lower === '::1' || lower === '::') return true        // loopback / unspecified
+    if (lower.startsWith('fe8') || lower.startsWith('fe9') ||
+        lower.startsWith('fea') || lower.startsWith('feb')) return true  // link-local fe80::/10
+    if (lower.startsWith('fc') || lower.startsWith('fd')) return true   // ULA fc00::/7
+    if (lower.startsWith('ff')) return true                              // multicast
+    // IPv4-mapped IPv6: ::ffff:0:0/96 — the last 32 bits are the IPv4
+    // address. Two textual forms exist:
+    //   ::ffff:1.2.3.4         (dotted-quad tail)
+    //   ::ffff:0102:0304       (hex tail — same address)
+    // Pre-fix only the dotted form was caught; ::ffff:7f00:1 (= 127.0.0.1)
+    // would have bypassed the SSRF guard. Now we expand the address into
+    // 8 hex groups, then if it's IPv4-mapped we materialise the v4
+    // dotted form and recurse. (Copilot review on #4165.)
+    const v4 = mappedV6ToV4(lower)
+    if (v4) return isPrivateOrSpecialIp(v4)
+    return false
+  }
+  // Not an IP literal; caller should resolve first.
+  return false
+}
+
+/**
+ * If `lower` is an IPv4-mapped IPv6 address (::ffff:0:0/96), return the
+ * embedded IPv4 in dotted-quad form. Returns null for any other v6.
+ * Handles both textual forms (dotted-quad tail and hex tail).
+ */
+function mappedV6ToV4(lower) {
+  // Expand `::` so we have exactly 8 hex groups (or 6 hex + 1 dotted v4).
+  // node:net has already accepted this as a valid IPv6 so the shape is sane.
+  let groups
+  if (lower.includes('.')) {
+    // Dotted-quad tail. Replace the trailing v4 with two hex groups.
+    const lastColon = lower.lastIndexOf(':')
+    const head = lower.slice(0, lastColon)
+    const v4 = lower.slice(lastColon + 1)
+    if (isIP(v4) !== 4) return null
+    const [a, b, c, d] = v4.split('.').map((p) => parseInt(p, 10))
+    const hex = `${((a << 8) | b).toString(16).padStart(4, '0')}:${((c << 8) | d).toString(16).padStart(4, '0')}`
+    groups = expandV6Groups(`${head}:${hex}`)
+  } else {
+    groups = expandV6Groups(lower)
+  }
+  if (!groups || groups.length !== 8) return null
+  // IPv4-mapped means groups[0..4] are 0 and groups[5] is ffff.
+  for (let i = 0; i < 5; i++) if (groups[i] !== 0) return null
+  if (groups[5] !== 0xffff) return null
+  const g6 = groups[6]
+  const g7 = groups[7]
+  return `${(g6 >> 8) & 0xff}.${g6 & 0xff}.${(g7 >> 8) & 0xff}.${g7 & 0xff}`
+}
+
+function expandV6Groups(addr) {
+  const parts = addr.split('::')
+  if (parts.length > 2) return null
+  const left = parts[0] ? parts[0].split(':') : []
+  const right = parts.length === 2 && parts[1] ? parts[1].split(':') : []
+  const missing = 8 - (left.length + right.length)
+  if (missing < 0) return null
+  const middle = parts.length === 2 ? new Array(missing).fill('0') : []
+  const all = [...left, ...middle, ...right]
+  if (all.length !== 8) return null
+  const out = []
+  for (const g of all) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null
+    out.push(parseInt(g, 16))
+  }
+  return out
+}
+
+async function isHostAllowed(hostname) {
+  if (process.env.CHROXY_WEBFETCH_ALLOW_PRIVATE === '1') return true
+  if (typeof hostname !== 'string' || hostname.length === 0) return false
+  // URL.hostname returns IPv6 literals WITH square brackets ('[::1]'),
+  // and node:net isIP doesn't accept brackets. Strip them before the
+  // isIP probe so legitimate public IPv6 URLs aren't all rejected as
+  // unresolvable hostnames. (Caught by /agent-review on #4165 — #4166.)
+  const probe = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname
+  if (isIP(probe)) return !isPrivateOrSpecialIp(probe)
+  try {
+    // Resolve ALL addresses (both families). A multi-A host that returns
+    // a public IP plus a private IP would otherwise slip past with the
+    // single-address default — `fetch` may then pick the private one.
+    // Refuse if ANY resolved address is private/special. (Copilot review
+    // on #4165.)
+    const addresses = await dnsLookup(probe, { all: true })
+    if (!Array.isArray(addresses) || addresses.length === 0) return false
+    for (const { address } of addresses) {
+      if (isPrivateOrSpecialIp(address)) return false
+    }
+    return true
+  } catch {
+    // Unresolvable host — refuse rather than letting fetch try.
+    return false
+  }
+}
 
 async function runWebFetch({ input, signal }) {
   const rawUrl = input?.url
@@ -407,15 +536,74 @@ async function runWebFetch({ input, signal }) {
   }
 
   try {
-    const res = await fetch(parsed.toString(), {
-      signal: ac.signal,
-      redirect: 'follow',
-      headers: { 'user-agent': 'chroxy-webfetch/1.0' },
-    })
+    // #4132: SSRF check on the initial URL. Done before any network
+    // attempt so an attacker can't even confirm a private host is
+    // listening on the chroxy host.
+    if (!(await isHostAllowed(parsed.hostname))) {
+      return {
+        content:
+          `EACCES: refusing to fetch private/loopback/link-local host (${parsed.hostname}). ` +
+          'Set CHROXY_WEBFETCH_ALLOW_PRIVATE=1 to opt in (local dev only — this is an SSRF guard).',
+        isError: true,
+      }
+    }
+
+    // #4132: manual redirect handling so we can re-validate scheme +
+    // host on every hop. `redirect: 'follow'` would otherwise honour an
+    // attacker's redirect to file:// (well, undici would refuse it
+    // with a vague network error) or to a private IP (which undici
+    // happily follows).
+    let res
+    let currentUrl = parsed
+    for (let hop = 0; hop <= WEBFETCH_MAX_REDIRECT_HOPS; hop++) {
+      res = await fetch(currentUrl.toString(), {
+        signal: ac.signal,
+        redirect: 'manual',
+        headers: { 'user-agent': 'chroxy-webfetch/1.0' },
+      })
+      if (res.status < 300 || res.status >= 400) break
+      const loc = res.headers.get('location')
+      // Drain the body so the connection can return to the pool.
+      try { await res.body?.cancel() } catch { /* connection already torn down */ }
+      if (!loc) {
+        return { content: `WebFetch redirect ${res.status} with no Location header`, isError: true }
+      }
+      let nextUrl
+      try {
+        nextUrl = new URL(loc, currentUrl)
+      } catch {
+        return { content: `WebFetch refused redirect: malformed Location header`, isError: true }
+      }
+      if (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') {
+        // The Location header is attacker-controlled, so don't echo it
+        // verbatim — that's a prompt-injection surface AND would leak
+        // sensitive paths (e.g. file:///etc/passwd). Just report the
+        // scheme. (Copilot review on #4165.)
+        return {
+          content: `WebFetch refused redirect scheme: only http(s) allowed (got ${nextUrl.protocol})`,
+          isError: true,
+        }
+      }
+      if (!(await isHostAllowed(nextUrl.hostname))) {
+        return {
+          content:
+            `WebFetch refused redirect to private/loopback/link-local host (${nextUrl.hostname}). ` +
+            'Set CHROXY_WEBFETCH_ALLOW_PRIVATE=1 to opt in.',
+          isError: true,
+        }
+      }
+      if (hop === WEBFETCH_MAX_REDIRECT_HOPS) {
+        return {
+          content: `WebFetch hit redirect cap: too many redirects (>${WEBFETCH_MAX_REDIRECT_HOPS} hops)`,
+          isError: true,
+        }
+      }
+      currentUrl = nextUrl
+    }
 
     if (!res.ok) {
       return {
-        content: `HTTP ${res.status} ${res.statusText} from ${parsed.toString()}`,
+        content: `HTTP ${res.status} ${res.statusText} from ${currentUrl.toString()}`,
         isError: true,
       }
     }
@@ -450,7 +638,7 @@ async function runWebFetch({ input, signal }) {
     }
 
     return {
-      content: `Prompt: ${rawPrompt}\nURL: ${parsed.toString()}\n\n${output}${marker}`,
+      content: `Prompt: ${rawPrompt}\nURL: ${currentUrl.toString()}\n\n${output}${marker}`,
       isError: false,
     }
   } catch (err) {
