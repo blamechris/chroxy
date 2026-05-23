@@ -293,6 +293,30 @@ export const ServerPlanReadySchema = z.object({
   allowedPrompts: z.array(z.any()).optional(),
 })
 
+// #4091: cumulative per-session token + cost totals. Emitted by
+// _trackUsage on every priced result event; consumed by the dashboard
+// sidebar cost badge (#4073) and mobile session-header badge (#4074).
+//
+// Token counts + turnsBilled are non-negative integers — they are
+// monotonic counters that only grow on priced result events. costUsd
+// is finite but intentionally kept unconstrained-sign: a refund /
+// credit-adjustment turn (#4099) subtracts from the running total,
+// and a session that received only refunds could legitimately end up
+// with a negative cumulative.
+//
+// Declared up here (and not next to the other event-emit schemas
+// further down the file) so it can be reused inline by
+// `ServerSessionListEntrySchema` below — keeps the snapshot field and
+// the event-emit shape in lockstep when either changes.
+export const CumulativeUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  cacheReadTokens: z.number().int().nonnegative(),
+  cacheCreationTokens: z.number().int().nonnegative(),
+  costUsd: z.number().finite(),
+  turnsBilled: z.number().int().nonnegative(),
+})
+
 /**
  * One entry in a `session_list` payload (and the equivalent shape returned
  * by `SessionManager.listSessions()` server-side).
@@ -346,6 +370,18 @@ export const ServerSessionListEntrySchema = z.object({
   // serialize as 0.
   stdinDroppedBytes: z.number().int().nonnegative().optional(),
   stdinDroppedCount: z.number().int().nonnegative().optional(),
+  // #4091: per-session running token + cost totals included in the
+  // session_list snapshot (#4072 / #4088). Optional because older
+  // servers omit it entirely; consumers should treat `undefined` as
+  // "no data yet" and an all-zero block as "session has had no priced
+  // turns yet" (e.g. subscription-billed providers).
+  //
+  // Token counts + turnsBilled are non-negative integers; cumulative
+  // costUsd is finite but intentionally allowed to be negative — a
+  // refund / credit-adjustment turn (#4099) can subtract from the
+  // running total, and a session that received only refunds could
+  // legitimately end up with a negative cumulative.
+  cumulativeUsage: CumulativeUsageSchema.optional(),
 }).passthrough()
 
 export const ServerSessionListSchema = z.object({
@@ -594,6 +630,29 @@ export const ServerCostUpdateSchema = z.object({
   budget: z.number().nullable().optional(),
 })
 
+export const ServerSessionUsageSchema = z.object({
+  type: z.literal('session_usage'),
+  // sessionId is injected by _broadcastToSession; optional in the schema
+  // so consumers can construct the message without it pre-broadcast.
+  sessionId: z.string().optional(),
+  cumulativeUsage: CumulativeUsageSchema,
+})
+
+// #4075: soft per-session cost-threshold crossing. Fires ONCE per
+// session when cumulativeUsage.costUsd >= the configured threshold.
+//
+// costUsd is finite but kept unconstrained-sign: in practice it's the
+// running cumulative at the crossing point so always positive, but the
+// schema doesn't enforce that to stay consistent with CumulativeUsage
+// where refunds (#4099) can in principle drive the cumulative
+// negative. thresholdUsd is non-negative by setter contract.
+export const ServerSessionCostThresholdCrossedSchema = z.object({
+  type: z.literal('session_cost_threshold_crossed'),
+  sessionId: z.string().optional(),
+  costUsd: z.number().finite(),
+  thresholdUsd: z.number().finite().nonnegative(),
+})
+
 export const ServerBudgetWarningSchema = z.object({
   type: z.literal('budget_warning'),
   sessionCost: z.number(),
@@ -796,6 +855,9 @@ export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
+export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>
+export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>
+export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>
