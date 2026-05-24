@@ -106,6 +106,7 @@ import {
 } from './crypto';
 import { filterThinking, nextMessageId } from './utils';
 import { calculateCost } from '../lib/model-pricing';
+import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import type {
   ChatMessage,
   ConnectedClient,
@@ -2260,15 +2261,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const normalized = sharedResultUsage(msg, get().activeSessionId);
       const targetId = normalized.sessionId;
       // Resolve cost: server provides it for Claude; compute client-side for
-      // Codex/Gemini sessions that emit cost: null. The shared helper returns
-      // null when msg.cost is missing/non-numeric — fall back to client-side
-      // pricing only when we have a usage payload to work with.
+      // sessions whose provider really cannot return a cost number (Codex,
+      // Gemini). The provider gate is intentionally narrow — see
+      // CLIENT_ESTIMATED_COST_PROVIDERS — so a new server-side priced
+      // provider that just happens to emit `cost: null` momentarily (race,
+      // edge case) doesn't get a wrong client-side estimate written into
+      // its session state. The shared helper returns null when msg.cost
+      // is missing/non-numeric; we fall back to client-side pricing only
+      // when we have a usage payload AND the provider is on the list.
+      // #4206: this list is also imported by status-tooltips.ts so the
+      // "estimated client-side" tooltip wording can only diverge with an
+      // explicit double edit.
       let resolvedCost: number | null = normalized.lastResultCost;
       if (resolvedCost === null && normalized.contextUsage) {
-        const sessionModel = get().sessions.find(
+        const session = get().sessions.find(
           (s: SessionInfo) => s.sessionId === targetId,
-        )?.model ?? null;
-        if (sessionModel) {
+        );
+        const sessionModel = session?.model ?? null;
+        const sessionProvider = session?.provider ?? null;
+        if (sessionModel && sessionProvider && CLIENT_ESTIMATED_COST_PROVIDERS.has(sessionProvider)) {
           resolvedCost = calculateCost(
             sessionModel,
             normalized.contextUsage.inputTokens,

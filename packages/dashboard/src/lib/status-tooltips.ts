@@ -18,12 +18,11 @@
  * announce it — native `title=` is not reliably exposed to AT on `<span>`.
  */
 
-/**
- * Provider ids whose cost is computed client-side from token usage
- * (Codex, Gemini) rather than reported by the server (Claude). When the
- * cost chip describes a client-estimated value, the tooltip says so.
- */
-const CLIENT_ESTIMATED_COST_PROVIDERS = new Set(['codex', 'gemini'])
+// #4206: the source-of-truth list lives in client-estimated-cost-providers.ts
+// and is also imported by message-handler.ts (where the cost fallback fires).
+// Adding a provider in one site without the other was the bug-in-waiting that
+// motivated the extraction — see that module's header for the full why.
+import { CLIENT_ESTIMATED_COST_PROVIDERS } from './client-estimated-cost-providers'
 
 export interface CostTooltipArgs {
   cost: number | undefined

@@ -1390,10 +1390,14 @@ describe('dashboard message-handler dispatch', () => {
   })
 
   describe('result — cost calculation for Codex/Gemini (cost: null from server)', () => {
-    function seedWithModel(sessionId: string, model: string) {
+    // #4206: the client-side cost fallback is now gated on the session's
+    // provider matching CLIENT_ESTIMATED_COST_PROVIDERS. Tests must
+    // therefore seed the SessionInfo with the right provider id —
+    // otherwise the fallback no-ops and lastResultCost stays null.
+    function seedWithModel(sessionId: string, model: string, provider: string) {
       store = createMockStore(
         baseState({
-          sessions: [{ sessionId, name: 'S', model } as any],
+          sessions: [{ sessionId, name: 'S', model, provider } as any],
           sessionStates: { [sessionId]: createEmptySessionState() },
         }),
       )
@@ -1401,7 +1405,7 @@ describe('dashboard message-handler dispatch', () => {
     }
 
     it('computes lastResultCost client-side for a known Codex model when server sends cost: null', () => {
-      seedWithModel('s-codex', 'gpt-4o')
+      seedWithModel('s-codex', 'gpt-4o', 'codex')
       handleMessage(
         {
           type: 'result',
@@ -1418,7 +1422,7 @@ describe('dashboard message-handler dispatch', () => {
     })
 
     it('computes lastResultCost client-side for a known Gemini model when server sends cost: null', () => {
-      seedWithModel('s-gemini', 'gemini-2.5-pro')
+      seedWithModel('s-gemini', 'gemini-2.5-pro', 'gemini')
       handleMessage(
         {
           type: 'result',
@@ -1435,7 +1439,7 @@ describe('dashboard message-handler dispatch', () => {
     })
 
     it('leaves lastResultCost null when model is unknown and server sends cost: null', () => {
-      seedWithModel('s-unknown', 'some-unknown-model')
+      seedWithModel('s-unknown', 'some-unknown-model', 'codex')
       handleMessage(
         {
           type: 'result',
@@ -1450,7 +1454,7 @@ describe('dashboard message-handler dispatch', () => {
     })
 
     it('uses server-provided cost when it is a number (Claude passthrough)', () => {
-      seedWithModel('s-claude', 'claude-3-5-sonnet-20241022')
+      seedWithModel('s-claude', 'claude-3-5-sonnet-20241022', 'claude-sdk')
       handleMessage(
         {
           type: 'result',
@@ -1462,6 +1466,27 @@ describe('dashboard message-handler dispatch', () => {
       )
       const cost = (store.getState() as any).sessionStates['s-claude'].lastResultCost
       expect(cost).toBe(0.042)
+    })
+
+    it('does NOT fall back to client-side pricing for providers NOT in CLIENT_ESTIMATED_COST_PROVIDERS', () => {
+      // #4206: a server-priced provider (e.g. claude-byok) that
+      // momentarily emits `cost: null` must NOT get a wrong client-side
+      // estimate written into its session state. Pre-#4206 the
+      // fallback fired purely on cost===null + usage, so any provider
+      // could accidentally trigger it. Pin the gate here so a refactor
+      // that drops the provider check has to fail this test.
+      seedWithModel('s-byok', 'claude-3-5-sonnet-20241022', 'claude-byok')
+      handleMessage(
+        {
+          type: 'result',
+          sessionId: 's-byok',
+          cost: null,
+          usage: { input_tokens: 1000, output_tokens: 500 },
+        },
+        ctx() as any,
+      )
+      const cost = (store.getState() as any).sessionStates['s-byok'].lastResultCost
+      expect(cost).toBeNull()
     })
   })
 

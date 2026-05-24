@@ -15,6 +15,7 @@ import {
   modelTooltip,
   agentCountTooltip,
 } from './status-tooltips'
+import { CLIENT_ESTIMATED_COST_PROVIDERS } from './client-estimated-cost-providers'
 
 describe('costTooltip (#3858)', () => {
   it('describes the cost as cumulative session total when no provider hint', () => {
@@ -104,6 +105,39 @@ describe('agentCountTooltip (#3858)', () => {
     expect(agentCountTooltip(0)).toBe('')
     expect(agentCountTooltip(undefined)).toBe('')
     expect(agentCountTooltip(null)).toBe('')
+  })
+})
+
+describe('costTooltip single source of truth (#4206)', () => {
+  // Pre-#4206 the provider list lived twice — once in status-tooltips.ts
+  // (this file's gate for the "estimated client-side" wording) and
+  // implicitly in message-handler.ts (where the cost-fallback fires).
+  // The two sites stayed in sync by accident: the only providers that
+  // emitted `cost: null` + usage happened to be Codex and Gemini. The
+  // moment a new such provider lands, the message-handler fallback
+  // would silently price it without the tooltip flagging it as
+  // estimated. After #4206 both sites import the same exported set,
+  // so adding a provider is a single edit. This test pins that
+  // contract: every provider in the shared set MUST get the
+  // estimated-client-side wording out of costTooltip, with no second
+  // edit required here.
+  it('every CLIENT_ESTIMATED_COST_PROVIDERS entry triggers the estimated-client-side wording', () => {
+    for (const provider of CLIENT_ESTIMATED_COST_PROVIDERS) {
+      const t = costTooltip({ cost: 0.5, provider })
+      expect(t, `provider "${provider}" must trigger estimated-client-side wording`)
+        .toMatch(/estimated client-side/i)
+    }
+  })
+
+  it('the shared set is non-empty and includes the known client-priced providers', () => {
+    // Belt-and-suspenders: if a future refactor accidentally empties
+    // the set, the loop above would vacuously pass. Pin the floor
+    // explicitly. Codex + Gemini are the two providers that emit
+    // cost: null today; any reduction below that needs an obvious
+    // failure here so the change is intentional.
+    expect(CLIENT_ESTIMATED_COST_PROVIDERS.has('codex')).toBe(true)
+    expect(CLIENT_ESTIMATED_COST_PROVIDERS.has('gemini')).toBe(true)
+    expect(CLIENT_ESTIMATED_COST_PROVIDERS.size).toBeGreaterThanOrEqual(2)
   })
 })
 
