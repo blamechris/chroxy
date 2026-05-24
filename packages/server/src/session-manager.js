@@ -141,6 +141,13 @@ export { ProviderBinaryNotFoundError, ProviderCredentialMissingError }
  * @property {string}  [defaultCwd]              - Default working directory (falls back to process.cwd())
  * @property {string}  [defaultModel]            - Default Claude model identifier
  * @property {string}  [defaultPermissionMode='approve'] - Default permission mode
+ * @property {boolean} [defaultSkipPermissions=false] - Default for `skipPermissions` on
+ *                                                       createSession() — used to seed the
+ *                                                       auto-created Default session at boot
+ *                                                       when the server was launched with
+ *                                                       `chroxy start --dangerously-skip-permissions`
+ *                                                       (#4209). TUI-only at the spawn site;
+ *                                                       other providers ignore it harmlessly.
  * @property {string}  [providerType='claude-sdk'] - Provider type from providers.js registry
  *
  * Session behavior
@@ -174,6 +181,12 @@ export class SessionManager extends EventEmitter {
     defaultCwd,
     defaultModel,
     defaultPermissionMode,
+    // #4209: opt-in default for skipPermissions on the auto-created Default
+    // session and for any createSession() call that omits the field. Plumbed
+    // through from `chroxy start --dangerously-skip-permissions` so the
+    // TUI session boots already in unmediated mode without requiring the
+    // dashboard checkbox round-trip.
+    defaultSkipPermissions = false,
     providerType = 'claude-sdk',
 
     // Session behavior
@@ -224,6 +237,10 @@ export class SessionManager extends EventEmitter {
     this._defaultCwd = defaultCwd || process.cwd()
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
+    // #4209: coerced to a strict boolean so a non-boolean from config can't
+    // partially enable the flag. Forwarded to providerOpts.skipPermissions
+    // for every createSession() call that omits the field.
+    this._defaultSkipPermissions = !!defaultSkipPermissions
     this._providerType = providerType
 
     // Session behavior
@@ -416,9 +433,14 @@ export class SessionManager extends EventEmitter {
    *   `restoreState()`, which must seed history and budget after createSession before the
    *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
    *   empty history and destroy the very data we're restoring.
+   * @param {boolean} [options.skipPermissions] - #4208 / #4209: spawn the claude TUI with
+   *   `--dangerously-skip-permissions` (and elide chroxy's permission hook + sidecar
+   *   entirely). Forwarded to ClaudeTuiSession; other providers ignore it harmlessly via
+   *   destructuring. When omitted, falls back to the SessionManager-wide
+   *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, bootedModel, messageCounter, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -588,6 +610,16 @@ export class SessionManager extends EventEmitter {
     if (stdinForwardingDisabled === true) {
       providerOpts.stdinForwardingDisabled = true
     }
+    // #4208 / #4209: per-session skipPermissions, with the server-wide
+    // default as fallback. Only forwarded when truthy so non-TUI providers
+    // never see a `skipPermissions: false` key they have to destructure
+    // around (kept consistent with the existing "forward only when set"
+    // discipline above). Boolean coerce defensively in case a hand-edited
+    // state file or future protocol drift sends a truthy non-boolean.
+    const resolvedSkipPermissions = typeof skipPermissions === 'boolean'
+      ? skipPermissions
+      : this._defaultSkipPermissions
+    if (resolvedSkipPermissions) providerOpts.skipPermissions = true
     // Sandbox: per-session overrides server-level default
     const resolvedSandbox = sandbox || this._sandbox
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox

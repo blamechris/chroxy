@@ -76,6 +76,33 @@ export const PermissionRuleSchema = z.object({
     tool: z.string().min(1).max(256),
     decision: z.enum(['allow', 'deny']),
 });
+// -- BYOK credentials (#4052) --
+/**
+ * Request the current BYOK credentials status. Server replies with a
+ * byok_credentials_status server message containing the masked preview.
+ */
+export const ByokGetCredentialsStatusSchema = z.object({
+    type: z.literal('byok_get_credentials_status'),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
+/**
+ * Persist a new Anthropic API key to ~/.chroxy/credentials.json (mode 0600).
+ * The server validates that the key starts with `sk-ant-`.
+ */
+export const ByokSetCredentialsSchema = z.object({
+    type: z.literal('byok_set_credentials'),
+    requestId: z.string().max(128).optional(),
+    // No upper bound on key length — Anthropic key format may evolve. The
+    // server's z.string() max in the persisted file is unbounded too.
+    anthropicApiKey: z.string().min(1),
+}).passthrough();
+/**
+ * Remove the credentials file. No-op if no file is present.
+ */
+export const ByokClearCredentialsSchema = z.object({
+    type: z.literal('byok_clear_credentials'),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
 export const SetPermissionRulesSchema = z.object({
     type: z.literal('set_permission_rules'),
     rules: z.array(PermissionRuleSchema).max(1000),
@@ -186,6 +213,12 @@ export const CreateSessionSchema = z.object({
     sandbox: SandboxSchema.optional(),
     isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
     environmentId: z.string().max(256).optional(),
+    // #4208: opt-in to spawning the claude TUI with
+    // `--dangerously-skip-permissions`. Only the `claude-tui` provider honours
+    // this — other providers ignore it harmlessly. The dashboard surfaces it
+    // as a TUI-only checkbox with explicit warning copy; the server still
+    // applies the flag if a non-TUI provider request includes it (no-op).
+    skipPermissions: z.boolean().optional(),
 });
 export const DestroySessionSchema = z.object({
     type: z.literal('destroy_session'),
@@ -471,6 +504,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     UnsubscribeSessionsSchema,
     ClientVisibleSchema,
     ListProvidersSchema,
+    ByokGetCredentialsStatusSchema,
+    ByokSetCredentialsSchema,
+    ByokClearCredentialsSchema,
     ListSkillsSchema,
     ListReposSchema,
     AddRepoSchema,

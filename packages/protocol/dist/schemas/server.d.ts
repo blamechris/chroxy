@@ -57,6 +57,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     maxProtocolVersion: z.ZodNumber;
     capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
     resultTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    hardTimeoutMs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;
@@ -213,6 +214,14 @@ export declare const ServerPlanReadySchema: z.ZodObject<{
     type: z.ZodLiteral<"plan_ready">;
     allowedPrompts: z.ZodOptional<z.ZodArray<z.ZodAny>>;
 }, z.core.$strip>;
+export declare const CumulativeUsageSchema: z.ZodObject<{
+    inputTokens: z.ZodNumber;
+    outputTokens: z.ZodNumber;
+    cacheReadTokens: z.ZodNumber;
+    cacheCreationTokens: z.ZodNumber;
+    costUsd: z.ZodNumber;
+    turnsBilled: z.ZodNumber;
+}, z.core.$strip>;
 /**
  * One entry in a `session_list` payload (and the equivalent shape returned
  * by `SessionManager.listSessions()` server-side).
@@ -255,6 +264,14 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
     stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
     stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
+    cumulativeUsage: z.ZodOptional<z.ZodObject<{
+        inputTokens: z.ZodNumber;
+        outputTokens: z.ZodNumber;
+        cacheReadTokens: z.ZodNumber;
+        cacheCreationTokens: z.ZodNumber;
+        costUsd: z.ZodNumber;
+        turnsBilled: z.ZodNumber;
+    }, z.core.$strip>>;
 }, z.core.$loose>;
 export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
@@ -278,6 +295,14 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
         stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
         stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
+        cumulativeUsage: z.ZodOptional<z.ZodObject<{
+            inputTokens: z.ZodNumber;
+            outputTokens: z.ZodNumber;
+            cacheReadTokens: z.ZodNumber;
+            cacheCreationTokens: z.ZodNumber;
+            costUsd: z.ZodNumber;
+            turnsBilled: z.ZodNumber;
+        }, z.core.$strip>>;
     }, z.core.$loose>>;
 }, z.core.$strip>;
 /**
@@ -416,6 +441,31 @@ export declare const ServerSkillTrustGrantInvalidAuthorSchema: z.ZodObject<{
     message: z.ZodString;
     actualAuthor: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerErrorEnvelopeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"error">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodString;
+    fatal: z.ZodOptional<z.ZodBoolean>;
+    correlationId: z.ZodOptional<z.ZodString>;
+    details: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+export declare const ServerByokCredentialsStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_credentials_status">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    status: z.ZodEnum<{
+        set: "set";
+        missing: "missing";
+    }>;
+    source: z.ZodEnum<{
+        file: "file";
+        none: "none";
+        env: "env";
+    }>;
+    masked: z.ZodOptional<z.ZodString>;
+    reason: z.ZodOptional<z.ZodString>;
+    fileExists: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$loose>;
 export declare const ServerStdinDroppedTotalsSchema: z.ZodObject<{
     type: z.ZodLiteral<"stdin_dropped_totals">;
     sessionId: z.ZodNullable<z.ZodString>;
@@ -451,6 +501,24 @@ export declare const ServerCostUpdateSchema: z.ZodObject<{
     sessionCost: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     totalCost: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     budget: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+}, z.core.$strip>;
+export declare const ServerSessionUsageSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_usage">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    cumulativeUsage: z.ZodObject<{
+        inputTokens: z.ZodNumber;
+        outputTokens: z.ZodNumber;
+        cacheReadTokens: z.ZodNumber;
+        cacheCreationTokens: z.ZodNumber;
+        costUsd: z.ZodNumber;
+        turnsBilled: z.ZodNumber;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const ServerSessionCostThresholdCrossedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_cost_threshold_crossed">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    costUsd: z.ZodNumber;
+    thresholdUsd: z.ZodNumber;
 }, z.core.$strip>;
 export declare const ServerBudgetWarningSchema: z.ZodObject<{
     type: z.ZodLiteral<"budget_warning">;
@@ -607,7 +675,11 @@ export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>;
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>;
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>;
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>;
+export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchema>;
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
+export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>;
+export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>;
+export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;
@@ -615,3 +687,4 @@ export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewrit
 export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>;
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>;
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>;
+export type ServerByokCredentialsStatusMessage = z.infer<typeof ServerByokCredentialsStatusSchema>;

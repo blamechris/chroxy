@@ -33,6 +33,12 @@ const CONFIG_SCHEMA = {
   tunnelHostname: 'string',
   tunnelConfig: 'object',
   legacyCli: 'boolean',
+  // #4209: server-wide default for the per-session `skipPermissions`
+  // option. Honoured only by the claude-tui provider (spawns claude with
+  // `--dangerously-skip-permissions` + elides chroxy's permission hook).
+  // Wired from `chroxy start --dangerously-skip-permissions`; can also be
+  // pinned in config.json for headless deploys.
+  skipPermissions: 'boolean',
   provider: 'string',
   // Providers the user opted into during `chroxy init`. Informational
   // today — `provider` remains the authoritative runtime selector — but

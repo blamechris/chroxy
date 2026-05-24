@@ -91,6 +91,14 @@ function handleCreateSession(ws, client, msg, ctx) {
   const worktree = msg.worktree === true ? true : undefined
   const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
   const environmentId = (typeof msg.environmentId === 'string' && msg.environmentId.trim()) ? msg.environmentId.trim() : undefined
+  // #4208: opt-in TUI flag — preserve strict booleans so an explicit `false`
+  // can override a server-wide `defaultSkipPermissions: true` on a per-session
+  // basis. Anything non-boolean (undefined, null, string, etc.) falls through
+  // to the SessionManager default rather than overriding it. Server-side this
+  // is a no-op for non-TUI providers (ClaudeTuiSession is the only constructor
+  // that honours it); we don't gate by provider here — the SessionManager
+  // forwards via providerOpts and non-TUI providers ignore the unknown key.
+  const skipPermissions = typeof msg.skipPermissions === 'boolean' ? msg.skipPermissions : undefined
   // Note: isolation is accepted in the schema but always derived server-side
   // from the actual session state (provider capabilities, worktree, sandbox).
 
@@ -129,7 +137,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, ...envOpts })
+    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, ...envOpts })
     client.activeSessionId = sessionId
     client.subscribedSessionIds.add(sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)

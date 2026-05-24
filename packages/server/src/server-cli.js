@@ -337,6 +337,10 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
+    // #4209: seed the auto-created Default session + any subsequent
+    // createSession() that omits the field. Only honoured by the
+    // claude-tui provider; other providers ignore it harmlessly.
+    defaultSkipPermissions: !!config.skipPermissions,
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],

@@ -194,6 +194,57 @@ describe('session-handlers', () => {
       assert.match(sent.message, /disk full/)
     })
 
+    // #4208: WS-handler must preserve strict booleans for skipPermissions so
+    // an explicit `false` from the dashboard can override a server-wide
+    // `defaultSkipPermissions: true`. The SessionManager-level test exists
+    // in session-manager-skip-permissions.test.js; this asserts the
+    // wire-layer hand-off it depends on.
+    it('forwards skipPermissions=true from WS payload to SessionManager.createSession', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx._sessions.set('new-id', { session, name: 'TUI', cwd: '/tmp' })
+
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'TUI', skipPermissions: true }, ctx)
+
+      const [createArgs] = ctx.sessionManager.createSession.lastCall
+      assert.equal(createArgs.skipPermissions, true,
+        'explicit true must reach SessionManager so TUI spawns with --dangerously-skip-permissions')
+    })
+
+    it('forwards skipPermissions=false from WS payload to SessionManager.createSession', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx._sessions.set('new-id', { session, name: 'TUI', cwd: '/tmp' })
+
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'TUI', skipPermissions: false }, ctx)
+
+      const [createArgs] = ctx.sessionManager.createSession.lastCall
+      // CRITICAL: an explicit `false` must NOT be coerced to undefined here.
+      // Otherwise a dashboard user can't un-tick the box on a server launched
+      // with `chroxy start --dangerously-skip-permissions` — SessionManager
+      // would silently fall through to its `defaultSkipPermissions: true`.
+      assert.equal(createArgs.skipPermissions, false,
+        'explicit false must reach SessionManager so it can override a server-wide true default')
+    })
+
+    it('omits skipPermissions when payload field is non-boolean (defensive coercion)', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx._sessions.set('new-id', { session, name: 'TUI', cwd: '/tmp' })
+
+      // A hand-crafted client / older protocol could send a string. The
+      // handler must treat that as "field absent" so the SessionManager
+      // default still applies — never coerce a truthy non-boolean.
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'TUI', skipPermissions: 'yes' }, ctx)
+
+      const [createArgs] = ctx.sessionManager.createSession.lastCall
+      assert.equal(createArgs.skipPermissions, undefined,
+        'non-boolean values must NOT propagate — keep "field absent" semantics for fall-through to server default')
+    })
+
     it('propagates err.code on session_error for preflight failures (#2962)', () => {
       // Simulate the preflight layer throwing a coded error so the UI can
       // render an actionable hint (e.g. "install Codex CLI") instead of just

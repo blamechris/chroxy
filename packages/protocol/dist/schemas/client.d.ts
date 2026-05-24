@@ -99,6 +99,30 @@ export declare const PermissionRuleSchema: z.ZodObject<{
         deny: "deny";
     }>;
 }, z.core.$strip>;
+/**
+ * Request the current BYOK credentials status. Server replies with a
+ * byok_credentials_status server message containing the masked preview.
+ */
+export declare const ByokGetCredentialsStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Persist a new Anthropic API key to ~/.chroxy/credentials.json (mode 0600).
+ * The server validates that the key starts with `sk-ant-`.
+ */
+export declare const ByokSetCredentialsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_set_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+    anthropicApiKey: z.ZodString;
+}, z.core.$loose>;
+/**
+ * Remove the credentials file. No-op if no file is present.
+ */
+export declare const ByokClearCredentialsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_clear_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const SetPermissionRulesSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_permission_rules">;
     rules: z.ZodArray<z.ZodObject<{
@@ -216,6 +240,7 @@ export declare const CreateSessionSchema: z.ZodObject<{
         container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
+    skipPermissions: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const DestroySessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
@@ -544,6 +569,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
+    skipPermissions: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
     sessionId: z.ZodString;
@@ -653,6 +679,16 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_set_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+    anthropicApiKey: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_clear_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_skills">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_repos">;
