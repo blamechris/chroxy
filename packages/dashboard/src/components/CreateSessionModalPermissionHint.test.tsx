@@ -13,8 +13,11 @@
  *   2. fallback-wins — when the selected mode has no description (older
  *      server, or a mode the server hasn't enumerated), the hint renders
  *      the hardcoded fallback string for that mode id.
+ *   3. server-default-wins — when no mode is selected (empty-string
+ *      "Server default" option), the hint renders the
+ *      `--default-permission-mode` explainer copy rather than blank.
  *
- * Both assertions read the hint via the `#permission-mode-hint` span
+ * All assertions read the hint via the `#permission-mode-hint` span
  * (the same selector the modal's aria-describedby points at).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
