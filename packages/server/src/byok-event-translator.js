@@ -18,6 +18,36 @@
  * Returns `null` for events the caller doesn't need to forward (pings,
  * unrecognized future event types). The translator never throws on an
  * unknown shape — forward as `unknown` and let the caller decide.
+ *
+ * ## Design decision: block-type tracking lives in the SESSION, not here (#4059)
+ *
+ * The `content_block_stop` event we emit carries only `{ kind, index }` — NOT
+ * the block type (text / tool_use / thinking). PR 2 of the BYOK epic (#4047)
+ * needs to know on `content_block_stop` whether the just-finished block was a
+ * tool_use (so it can parse the accumulated `tool_input_delta.partial` strings
+ * and dispatch the tool) versus a text or thinking block (no action — those
+ * are already streamed live via `stream_delta` / `thinking_delta`). The
+ * consumer (`byok-session.js`) is expected to maintain its own
+ * `Map<index, blockType>` populated on `content_block_start` and queried on
+ * `content_block_stop`.
+ *
+ * Rationale for keeping this OUT of the translator:
+ * - **Purity is the translator's best property.** Adding stateful tracking
+ *   would move it from a pure function (testable against fixture streams with
+ *   no setup) to a stateful object that needs construction + cleanup. The
+ *   fixture-test pattern in `byok-event-translator.test.js` would either lose
+ *   its directness or grow setup boilerplate for every test.
+ * - **The tracking state belongs to the consumer's turn lifecycle.** The
+ *   session already maintains other per-turn state (active turn id, partial
+ *   tool-input JSON accumulator); colocating the block-type map there keeps
+ *   the lifecycle simple — one place owns "what's in flight this turn."
+ * - **PR 1 doesn't need it.** Pinning the choice now avoids a translator
+ *   refactor later when PR 2's needs become concrete.
+ *
+ * If a future need genuinely requires the translator to know block types
+ * (e.g. emitting different translated events per type without exposing
+ * indices), revisit this — it's not load-bearing, just the path of least
+ * coupling today.
  */
 
 /**
