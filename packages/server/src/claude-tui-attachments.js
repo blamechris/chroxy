@@ -255,7 +255,8 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
  * @property {boolean} bareFallback   True when even the single-entry suffix didn't fit and we
  *                                    fell back to the size-cap marker (the worst, most-lossy path).
  * @property {number}  byteLength     Final UTF-8 byte length of the suffix string.
- * @property {number}  cap            The byte cap (MAX_ATTACHMENT_SUFFIX_BYTES) that triggered truncation.
+ * @property {number}  cap            The byte cap (MAX_ATTACHMENT_SUFFIX_BYTES) in effect for this build —
+ *                                    populated whether or not truncation actually fired.
  *
  * @param {Array<{path: string, name: string, mediaType: string, size: number}>} files
  * @returns {AttachmentSuffixResult}
