@@ -247,6 +247,8 @@ source "$HOME/.cargo/env"
 
 # 2. Tauri's required system libraries
 # (Debian/Ubuntu — Fedora/Arch package names differ; see Tauri docs link below)
+# Maintainers: resync this list against https://v2.tauri.app/start/prerequisites/#linux
+# at each Tauri minor bump — upstream occasionally renames/adds packages.
 sudo apt update
 sudo apt install -y \
   build-essential curl wget file libssl-dev libxdo-dev \
