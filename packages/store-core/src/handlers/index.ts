@@ -3362,6 +3362,83 @@ export function handleToolResult(
 }
 
 // ---------------------------------------------------------------------------
+// tool_input_delta
+// ---------------------------------------------------------------------------
+
+/** Result returned from {@link handleToolInputDelta} when the message is well-formed. */
+export interface ToolInputDeltaPayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** The `toolUseId` whose tool_use bubble should accumulate the partial. */
+  toolUseId: string
+  /** The new partial JSON chunk to append to `toolInputPartial`. */
+  partialJson: string
+  /**
+   * Apply the delta to a session's `messages` array. Locates the matching
+   * `tool_use` entry by `toolUseId`, concatenates `partialJson` onto the
+   * existing `toolInputPartial` (treating undefined as ''), and returns a
+   * new array with the updated entry. Returns the same reference (no-op)
+   * when no matching tool_use is found — callers treat same-reference as
+   * "drop this delta, the bubble isn't here." This mirrors the
+   * applyTo-on-no-match pattern used by `handleToolResult`.
+   */
+  applyTo: (messages: ChatMessage[]) => ChatMessage[]
+}
+
+/**
+ * Validate and build an accumulator for a `tool_input_delta` message
+ * (server-side wire-up in #4080; UI in #4081). The server emits
+ * `{ messageId, toolUseId, partialJson }` as the Anthropic SDK streams
+ * `input_json_delta` chunks for a tool_use block — long inputs (e.g.
+ * Bash `command`) take many SDK chunks to assemble. Pre-#4080 those
+ * chunks were silently dropped so the tool-call bubble saw nothing
+ * until `finalMessage()` resolved.
+ *
+ * Returns `null` when `toolUseId` is missing/non-string or when
+ * `partialJson` is missing/non-string — both are required by the wire
+ * shape; malformed payloads are dropped silently rather than thrown so
+ * a buggy server can't crash the client.
+ *
+ * The accumulator concatenates onto the bubble's `toolInputPartial`
+ * (initialised to `''` for the first delta). Renderers parse it
+ * best-effort: partial JSON is inherently unparseable mid-stream, so
+ * unparseable chunks render verbatim as a code block — NOT as an
+ * error. Once `tool_result` arrives, the bubble's render switches to
+ * the standard result view; `toolInputPartial` is kept for
+ * history/replay but no longer drives the active display.
+ */
+export function handleToolInputDelta(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): ToolInputDeltaPayload | null {
+  if (typeof msg.toolUseId !== 'string' || !msg.toolUseId) return null
+  if (typeof msg.partialJson !== 'string') return null
+  const toolUseId = msg.toolUseId
+  const partialJson = msg.partialJson
+  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const sessionId = msgSessionId || activeSessionId
+
+  return {
+    sessionId,
+    toolUseId,
+    partialJson,
+    applyTo: (messages) => {
+      const idx = messages.findIndex(
+        (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+      )
+      if (idx === -1) return messages
+      const updated = [...messages]
+      const existing = updated[idx]!
+      updated[idx] = {
+        ...existing,
+        toolInputPartial: (existing.toolInputPartial || '') + partialJson,
+      }
+      return updated
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // stream_start
 // ---------------------------------------------------------------------------
 

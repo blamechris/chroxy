@@ -336,6 +336,7 @@ export {
   handleMessage,
   handleToolStart,
   handleToolResult,
+  handleToolInputDelta,
   handleStreamStart,
   handleStreamEnd,
   handleResultUsage,

@@ -110,6 +110,12 @@ export const ACTIVITY_EVENT_TYPES: ReadonlySet<string> = new Set([
   'stream_delta',
   'stream_end',
   'tool_start',
+  // #4081: long tool inputs (e.g. Bash `command`) stream as a long run
+  // of `tool_input_delta` events between `tool_start` and `tool_result`.
+  // Without this entry, the "Working… last activity Ns ago" indicator
+  // would falsely report the agent as stalled mid-assembly of a large
+  // tool input. Mirrors the rationale for including `stream_delta`.
+  'tool_input_delta',
   'tool_result',
   'message',
   'result',

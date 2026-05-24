@@ -46,6 +46,7 @@ import {
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
+  handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
@@ -1581,6 +1582,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             patch.streamingMessageId = toolMsg.id;
           }
           return patch;
+        });
+      }
+      break;
+    }
+
+    case 'tool_input_delta': {
+      // #4081: accumulate the partialJson chunk onto the matching
+      // tool_use bubble's `toolInputPartial`. sharedToolInputDelta
+      // validates the wire payload, resolves sessionId, and returns an
+      // applyTo that no-ops when the tool_use can't be found (mirrors
+      // tool_result below). Permission-pending suppression lives on the
+      // server (#4080) — by the time a delta reaches the client the
+      // bubble is the live target.
+      const result = sharedToolInputDelta(msg, get().activeSessionId);
+      if (!result) break;
+      const effectiveId = (result.sessionId && get().sessionStates[result.sessionId])
+        ? result.sessionId
+        : get().activeSessionId;
+      if (effectiveId && get().sessionStates[effectiveId]) {
+        updateSession(effectiveId, (ss: SessionState) => {
+          const updated = result.applyTo(ss.messages);
+          if (updated === ss.messages) return {};
+          return { messages: updated };
         });
       }
       break;

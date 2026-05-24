@@ -13,6 +13,28 @@ import { COLORS } from '../../constants/colors';
 import { formatToolName } from './chat-utils';
 import { TodoList, parseTodoList } from './TodoList';
 
+/**
+ * #4081: while a `tool_use` is streaming its input via
+ * `tool_input_delta`, `handleToolStart`'s initial `content` is just the
+ * tool name (the server hadn't computed final input yet — see
+ * store-core/handlers/index.ts where `content` falls through input →
+ * tool name → ''). We surface `message.toolInputPartial` instead so
+ * the user sees the JSON forming (canonical case: Bash `command`,
+ * needed for early-abort UX #4063). Best-effort pretty-print: try
+ * JSON.parse first, fall back to verbatim text on parse failure (mid-
+ * stream partial JSON is inherently unparseable — that's normal, NOT
+ * an error). Once `toolResult` arrives the bubble renders the result
+ * via the existing onOpenDetail path; the partial buffer becomes
+ * informational only.
+ */
+function formatPartialPreview(partial: string): string {
+  try {
+    return JSON.stringify(JSON.parse(partial), null, 2);
+  } catch {
+    return partial;
+  }
+}
+
 export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpenDetail }: {
   message: ChatMessage;
   isSelected: boolean;
@@ -22,7 +44,18 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
 }) {
   const [expanded, setExpanded] = useState(false);
   const longPressedRef = useRef(false);
-  const content = message.content?.trim();
+  // #4081: streaming inputs land in `toolInputPartial` before `content`
+  // is populated. Use it as the bubble body when `content` is empty or
+  // identical to the tool name (the placeholder handleToolStart sets
+  // when `msg.input` is missing). The result-arrival path is unchanged.
+  const partialPreview = !message.toolResult && message.toolInputPartial
+    ? formatPartialPreview(message.toolInputPartial)
+    : '';
+  const rawContent = message.content?.trim() || '';
+  const isPlaceholderContent = !rawContent || rawContent === message.tool;
+  const content = partialPreview && isPlaceholderContent
+    ? partialPreview
+    : (rawContent || partialPreview);
 
   // Hide empty tool messages
   if (!content) return null;

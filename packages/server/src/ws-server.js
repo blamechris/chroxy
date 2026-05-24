@@ -279,6 +279,7 @@ function _isSecureRequest(req) {
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
  *   { type: 'tool_start',   messageId, toolUseId, tool, input, serverName? } — tool invocation (serverName present for MCP tools)
+ *   { type: 'tool_input_delta', messageId, toolUseId, partialJson } — #4080/#4081: incremental partial JSON for the streaming tool_use `input`; concatenate per-toolUseId for the live bubble preview
  *   { type: 'tool_result',  toolUseId, result, truncated, images? }  — tool result (images: [{mediaType, data}])
  *   { type: 'mcp_servers',  servers: [{ name, status }] }     — connected MCP servers
  *   { type: 'result',       ... }                     — query stats
