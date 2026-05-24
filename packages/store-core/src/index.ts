@@ -161,6 +161,13 @@ export {
   applyOrphanDeltas,
 } from './orphan-deltas'
 
+// #4242: cheap structural gate for `JSON.parse` on streaming
+// `tool_input_delta` accumulators. Amortises N-1 throws on long
+// streams (every Bash invocation, every Edit).
+export {
+  tryParseCompleteJson,
+} from './partial-json'
+
 export type {
   DisplayGroup,
 } from './group-messages'

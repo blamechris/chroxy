@@ -7,6 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
+import { tryParseCompleteJson } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -26,13 +27,16 @@ import { TodoList, parseTodoList } from './TodoList';
  * an error). Once `toolResult` arrives the bubble renders the result
  * via the existing onOpenDetail path; the partial buffer becomes
  * informational only.
+ *
+ * #4242: gate the parse behind `tryParseCompleteJson` so we skip the
+ * throw on the N-1 mid-stream deltas whose tail can't yet be `}`/`]`.
  */
 function formatPartialPreview(partial: string): string {
-  try {
-    return JSON.stringify(JSON.parse(partial), null, 2);
-  } catch {
-    return partial;
+  const parsed = tryParseCompleteJson(partial);
+  if (parsed !== undefined) {
+    return JSON.stringify(parsed, null, 2);
   }
+  return partial;
 }
 
 export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpenDetail }: {
