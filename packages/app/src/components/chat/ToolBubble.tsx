@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { tryParseCompleteJson } from '@chroxy/store-core';
+import { getPartialSummary } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -87,7 +87,42 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     onToggleSelection();
   };
 
-  const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
+  // #4243: collapsed-preview field-priority extraction — mirrors the
+  // dashboard's `getPartialSummary` so the same useful single field
+  // (`command` / `file_path` / `path` / `description`) surfaces on both
+  // platforms.
+  //
+  // Two paths feed this preview:
+  //
+  // - Streaming partial (`toolInputPartial`): `getPartialSummary`
+  //   parses the in-flight buffer and extracts the priority field.
+  //   When the partial has just become parseable but the server
+  //   hasn't shipped the final input yet, `isPlaceholderContent` is
+  //   true and the legacy fallback would otherwise show
+  //   `{"command":"ls -la}` truncated to 60 chars — the dashboard
+  //   already shows `ls -la` here, so we match it.
+  //
+  // - Final input (`message.content`): `handleToolStart` in
+  //   store-core sets `content = JSON.stringify(msg.input)`. The
+  //   legacy 60-char slice of that string gives users `{"command":
+  //   "rm -rf node_mod` for a long Bash command. We try the same
+  //   field-priority parse against `content` so the collapsed
+  //   bubble surfaces `rm -rf node_modules` instead. Falls back to
+  //   the raw 60-char slice when content isn't JSON-shaped (raw
+  //   string inputs, server-sent placeholder text, etc.).
+  //
+  // The Bash early-abort UX (#4063) hinges on `command` being
+  // legible at a glance without expanding the bubble.
+  const partialSummary = message.toolInputPartial
+    ? getPartialSummary(message.toolInputPartial)
+    : null;
+  const contentSummary = !isPlaceholderContent
+    ? getPartialSummary(content)
+    : null;
+  const previewSource = partialSummary && isPlaceholderContent
+    ? partialSummary
+    : (contentSummary || content);
+  const preview = previewSource.length > 60 ? previewSource.slice(0, 60) + '...' : previewSource;
 
   // #4180: TodoWrite tool_result is rendered as a structured checklist
   // when expanded. Parse once (only when expanded + tool matches + the
