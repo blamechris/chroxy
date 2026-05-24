@@ -140,4 +140,110 @@ describe('ToolBubble', () => {
       expect(screen.getByText('Fs: Read File')).toBeInTheDocument()
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // #4081: tool_input_delta streaming preview
+  // ---------------------------------------------------------------------------
+  describe('inputPartial streaming preview (#4081)', () => {
+    it('renders inputPartial verbatim in the result area when expanded and result is absent', () => {
+      // Mid-stream: partial JSON that JSON.parse cannot accept yet.
+      // Must render as a code block (NOT as an error) so users see the
+      // Bash `command` field forming.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-partial"
+          inputPartial='{"command":"rm -rf /tmp/'
+        />,
+      )
+      const toggle = screen.getByRole('button')
+      fireEvent.click(toggle)
+      const preview = screen.getByTestId('tool-input-partial-tu-partial')
+      expect(preview).toHaveTextContent('{"command":"rm -rf /tmp/')
+      expect(preview).toHaveAttribute('data-parsed', 'false')
+    })
+
+    it('pretty-prints inputPartial as JSON when the buffer is parseable', () => {
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-parsed"
+          inputPartial='{"command":"ls -la"}'
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      const preview = screen.getByTestId('tool-input-partial-tu-parsed')
+      expect(preview).toHaveAttribute('data-parsed', 'true')
+      // Pretty-printed with 2-space indent: the `command` key is on its own line.
+      expect(preview.textContent).toContain('"command": "ls -la"')
+    })
+
+    it('switches to the standard result view once result arrives', () => {
+      // Same toolUseId, partial buffer present, but a result has landed.
+      // The partial preview must NOT render — the result view takes over.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-resolved"
+          inputPartial='{"command":"ls"}'
+          result="file1.ts file2.ts"
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.queryByTestId('tool-input-partial-tu-resolved')).not.toBeInTheDocument()
+      expect(screen.getByText('file1.ts file2.ts')).toBeInTheDocument()
+    })
+
+    it('shows a partial summary in the collapsed bubble (Bash early-abort UX)', () => {
+      // The collapsed bubble must surface the assembling `command` so the
+      // user can early-abort BEFORE expanding — this is the #4063 UX hook.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-summary"
+          inputPartial='{"command":"rm -rf /tmp/foo"}'
+        />,
+      )
+      expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('rm -rf /tmp/foo')
+    })
+
+    it('shows the verbatim partial tail in the summary when JSON is unparseable', () => {
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-summary-raw"
+          inputPartial='{"command":"rm -rf '
+        />,
+      )
+      // Unparseable partial: summary falls back to the raw buffer so the
+      // collapsed bubble still shows what's forming.
+      expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('{"command":"rm -rf')
+    })
+
+    it('does not render a partial preview when collapsed', () => {
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-collapsed"
+          inputPartial='{"command":"ls"}'
+        />,
+      )
+      // Collapsed by default — only the summary renders, never the partial-preview block.
+      expect(screen.queryByTestId('tool-input-partial-tu-collapsed')).not.toBeInTheDocument()
+    })
+
+    it('prefers structured `input` summary over inputPartial when both are present', () => {
+      // Final input arrived (e.g. via legacy non-streaming providers).
+      // The structured summary wins; the partial buffer is informational.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-both"
+          input={{ command: 'final-cmd' }}
+          inputPartial='{"command":"streaming-stale"}'
+        />,
+      )
+      expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('final-cmd')
+    })
+  })
 })

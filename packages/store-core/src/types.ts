@@ -54,6 +54,22 @@ export interface ChatMessage {
   toolResultTruncated?: boolean;
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
+  /**
+   * #4081: accumulated partial JSON streamed via `tool_input_delta`
+   * (server PR #4080). Concatenated string of every `partialJson` chunk
+   * the server has emitted for this tool_use, in arrival order. Set on
+   * `tool_use` ChatMessages only; remains undefined on bubbles whose
+   * server-emitted input arrived in one shot (legacy non-streaming
+   * providers, or short inputs that the SDK never split into deltas).
+   *
+   * Renderers show this as a code block while streaming. Best-effort
+   * JSON.parse — partial JSON mid-stream is inherently unparseable, so
+   * unparseable chunks render verbatim rather than as an error. Once
+   * `toolResult` is populated the bubble switches to the standard
+   * result view and `toolInputPartial` becomes informational only
+   * (preserved for history/replay).
+   */
+  toolInputPartial?: string;
   answered?: string;
   /** Timestamp when the user answered a permission prompt */
   answeredAt?: number;

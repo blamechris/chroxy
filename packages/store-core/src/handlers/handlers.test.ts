@@ -85,6 +85,7 @@ import {
   handleMessage,
   handleToolStart,
   handleToolResult,
+  handleToolInputDelta,
   handleStreamStart,
   handleStreamEnd,
 } from './index'
@@ -5336,6 +5337,180 @@ describe('handleToolResult', () => {
       )
       const updated = out!.applyTo(baseMessages)
       expect(updated[1]!.toolResultImages).toEqual(images)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleToolInputDelta (#4081)
+// ---------------------------------------------------------------------------
+describe('handleToolInputDelta', () => {
+  it('returns null when toolUseId is missing', () => {
+    const out = handleToolInputDelta({ partialJson: '{"a":1}' }, 'sess-active')
+    expect(out).toBeNull()
+  })
+
+  it('returns null when toolUseId is non-string', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 42, partialJson: '{"a":1}' },
+      'sess-active',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('returns null when partialJson is missing', () => {
+    const out = handleToolInputDelta({ toolUseId: 'tu-1' }, 'sess-active')
+    expect(out).toBeNull()
+  })
+
+  it('returns null when partialJson is non-string', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: 123 },
+      'sess-active',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('accepts empty-string partialJson (SDK can emit empty chunks)', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '' },
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.partialJson).toBe('')
+  })
+
+  it('resolves sessionId from message when present', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '{', sessionId: 'sess-1' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-1')
+  })
+
+  it('falls back to active sessionId when not on message', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '{' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  it('coerces non-string sessionId to activeSessionId fallback', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '{', sessionId: 42 },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  describe('applyTo()', () => {
+    const baseMessages: ChatMessage[] = [
+      { id: 'msg-1', type: 'response', content: 'hello', timestamp: 1 },
+      {
+        id: 'msg-2',
+        type: 'tool_use',
+        content: 'Bash',
+        toolUseId: 'tu-1',
+        timestamp: 2,
+      },
+      { id: 'msg-3', type: 'response', content: 'after', timestamp: 3 },
+    ]
+
+    it('appends partialJson to undefined toolInputPartial on first delta', () => {
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: '{"command":"' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated).not.toBe(baseMessages)
+      expect(updated[1]!.toolInputPartial).toBe('{"command":"')
+    })
+
+    it('concatenates 3 sequential partials into the full buffer', () => {
+      // Canonical case from the issue: Bash `command` assembled across
+      // 3 input_json_delta chunks. After all 3 deltas the buffer must
+      // equal their string concatenation in arrival order.
+      const chunks = ['{"command":"', 'rm -rf /tmp/', 'foo"}']
+      let messages = baseMessages
+      for (const partialJson of chunks) {
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson },
+          'sess-active',
+        )
+        messages = out!.applyTo(messages)
+      }
+      expect(messages[1]!.toolInputPartial).toBe('{"command":"rm -rf /tmp/foo"}')
+    })
+
+    it('returns same array reference when no matching tool_use is found (no-op)', () => {
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-missing', partialJson: '{' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated).toBe(baseMessages)
+    })
+
+    it('does not match a non-tool_use message even if its toolUseId field equals', () => {
+      const messages: ChatMessage[] = [
+        {
+          id: 'm-1',
+          type: 'response',
+          content: 'x',
+          toolUseId: 'tu-1',
+          timestamp: 1,
+        },
+      ]
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: '{' },
+        'sess-active',
+      )
+      expect(out!.applyTo(messages)).toBe(messages)
+    })
+
+    it('does not disturb other messages in the array', () => {
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: '{' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated[0]).toBe(baseMessages[0])
+      expect(updated[2]).toBe(baseMessages[2])
+    })
+
+    it('only touches the matching tool_use when multiple tool_use entries exist', () => {
+      const messages: ChatMessage[] = [
+        { id: 'm-1', type: 'tool_use', content: 'A', toolUseId: 'tu-a', timestamp: 1 },
+        { id: 'm-2', type: 'tool_use', content: 'B', toolUseId: 'tu-b', timestamp: 2 },
+      ]
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-b', partialJson: '{"x":1}' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(messages)
+      expect(updated[0]).toBe(messages[0])
+      expect(updated[0]!.toolInputPartial).toBeUndefined()
+      expect(updated[1]!.toolInputPartial).toBe('{"x":1}')
+    })
+
+    it('preserves existing toolInputPartial when applyTo runs after prior deltas', () => {
+      const seeded: ChatMessage[] = [
+        {
+          id: 'msg-2',
+          type: 'tool_use',
+          content: 'Bash',
+          toolUseId: 'tu-1',
+          toolInputPartial: '{"command":"ls',
+          timestamp: 2,
+        },
+      ]
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: ' -la"}' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(seeded)
+      expect(updated[0]!.toolInputPartial).toBe('{"command":"ls -la"}')
     })
   })
 })

@@ -8,15 +8,53 @@
  * `[ ] / [~] / [x] ... (id)` format back into items; on parse failure
  * (unknown format / future schema change) we fall back to the original
  * `<pre>` treatment so nothing is lost.
+ *
+ * #4081: `inputPartial` carries the running accumulator of every
+ * `tool_input_delta` chunk for this tool_use. While streaming (no
+ * `result` yet) we render it as a live code-block preview so long
+ * inputs like Bash `command` are visible as they assemble — Bash early-
+ * abort (#4063) needs this to surface `rm -rf` BEFORE the round
+ * finishes. Once `result` arrives the bubble switches to the standard
+ * result view; the partial buffer becomes informational only.
+ *
+ * Partial JSON mid-stream is inherently unparseable; we render
+ * verbatim rather than throwing or rendering an error. When the chunk
+ * happens to parse (e.g. final delta completes the JSON or the input
+ * is one short chunk), we pretty-print it for legibility.
  */
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
   toolName: string
   toolUseId: string
   input?: Record<string, unknown> | string
+  /**
+   * #4081: running accumulator of `tool_input_delta` chunks for this
+   * tool_use. May be unparseable JSON mid-stream — the renderer falls
+   * back to verbatim text when JSON.parse throws.
+   */
+  inputPartial?: string
   result?: string
+}
+
+/**
+ * #4081: extract the most useful single-field preview from a partial-
+ * JSON buffer. Mirrors `getInputSummary` below: prefers `command`,
+ * `file_path`, `path`, `description` in that order. Returns `null` when
+ * the buffer isn't yet valid JSON (mid-stream) so the caller renders
+ * the verbatim accumulator instead of the structured preview.
+ */
+function getPartialSummary(partial: string): string | null {
+  try {
+    const parsed = JSON.parse(partial) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object') return null
+    const summary = (parsed.command || parsed.file_path || parsed.path || parsed.description || '') as unknown
+    if (typeof summary !== 'string' || !summary) return null
+    return summary.slice(0, 100)
+  } catch {
+    return null
+  }
 }
 
 function getInputSummary(input: ToolBubbleProps['input']): string {
@@ -44,9 +82,26 @@ function formatToolName(name: string): string {
   return name.split('_').filter(Boolean).map(capitalize).join(' ')
 }
 
-export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubbleProps) {
+export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }: ToolBubbleProps) {
   const [expanded, setExpanded] = useState(false)
-  const summary = getInputSummary(input)
+  // #4081: prefer the structured `input` summary when present (server
+  // gave us the full final input, e.g. via legacy non-streaming
+  // providers or after `tool_result` lands). Otherwise fall back to the
+  // streaming `inputPartial` accumulator: try a parse, and if that
+  // fails (mid-stream partial JSON), show the raw tail so users still
+  // see the field forming. The collapsed-state preview is what surfaces
+  // Bash early-abort UX (#4063).
+  const summary = useMemo(() => {
+    const fromInput = getInputSummary(input)
+    if (fromInput) return fromInput
+    if (!inputPartial) return ''
+    const parsed = getPartialSummary(inputPartial)
+    if (parsed) return parsed
+    // Mid-stream: render the verbatim tail so the user sees the JSON
+    // assembling. Capped at 100 chars to keep the collapsed bubble
+    // compact like the structured-summary path.
+    return inputPartial.slice(0, 100)
+  }, [input, inputPartial])
   const resultId = `tool-result-${toolUseId}`
   // #4139: parse the TodoWrite result once and pass the result down,
   // rather than re-parsing inside TodoList (Copilot review on #4179).
@@ -54,6 +109,21 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
   const todoParsed = expanded && result && toolName === 'TodoWrite'
     ? parseTodoList(result)
     : null
+  // #4081: streaming preview — render the accumulator as a code block
+  // while the result hasn't arrived. Best-effort pretty-print: try
+  // JSON.parse first (the final delta often completes the JSON), fall
+  // back to verbatim text on parse failure. Only shown when expanded
+  // AND we have no result yet — once `result` arrives the standard
+  // result panel takes over.
+  const partialPreview = useMemo(() => {
+    if (!expanded || result || !inputPartial) return null
+    try {
+      const parsed = JSON.parse(inputPartial)
+      return { text: JSON.stringify(parsed, null, 2), parsed: true }
+    } catch {
+      return { text: inputPartial, parsed: false }
+    }
+  }, [expanded, result, inputPartial])
 
   const toggle = () => setExpanded(prev => !prev)
 
@@ -99,6 +169,21 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
           ) : (
             <pre>{result}</pre>
           )}
+        </div>
+      )}
+      {/* #4081: streaming preview — shown only while expanded AND no
+          result yet. The `tool_input_delta` accumulator renders as a
+          code block; unparseable mid-stream JSON renders verbatim
+          (NOT as an error). Result arrival flips the bubble to the
+          standard result view above. */}
+      {expanded && !result && partialPreview && (
+        <div
+          className="tool-input-partial"
+          data-testid={`tool-input-partial-${toolUseId}`}
+          data-parsed={partialPreview.parsed ? 'true' : 'false'}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <pre>{partialPreview.text}</pre>
         </div>
       )}
     </div>
