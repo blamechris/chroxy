@@ -110,6 +110,23 @@ Object.assign(EVENT_MAP, {
     return { messages: [{ msg }] }
   },
 
+  // #4080: incremental partial-JSON chunk for a streaming tool_use
+  // `input`. Emitted between tool_start and tool_result while the
+  // SDK's input_json_delta chunks arrive. The wire shape mirrors the
+  // chroxy event the session emits — clients concatenate partialJson
+  // onto a per-toolUseId accumulator (see #4081 / PR #4239 for the
+  // dashboard + mobile renderer that consumes this).
+  tool_input_delta: (data) => ({
+    messages: [{
+      msg: {
+        type: 'tool_input_delta',
+        messageId: data.messageId,
+        toolUseId: data.toolUseId,
+        partialJson: data.partialJson,
+      },
+    }],
+  }),
+
   tool_result: (data) => {
     const msg = { type: 'tool_result', toolUseId: data.toolUseId, result: data.result, truncated: data.truncated }
     if (data.images?.length) msg.images = data.images

@@ -97,12 +97,17 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   static get customEvents() {
-    // tool_start / tool_result are surfaced per turn for the dashboard's
-    // tool-call bubble UI. permission_request / user_question /
-    // permission_resolved are re-emitted from PermissionManager and
-    // already known to the SessionManager forwarding pipeline, but list
-    // them here so the capability matrix reflects reality.
-    return ['tool_start', 'tool_result']
+    // tool_start / tool_result / tool_input_delta are surfaced per turn
+    // for the dashboard's tool-call bubble UI. permission_request /
+    // user_question / permission_resolved are re-emitted from
+    // PermissionManager and already known to the SessionManager
+    // forwarding pipeline, but list them here so the capability matrix
+    // reflects reality. tool_input_delta (#4080) MUST be in this list —
+    // session-manager.js:_wireSessionEvents reads `customEvents` to
+    // build the TRANSIENT_EVENTS set it bridges to `session_event`
+    // listeners; without it the emit fires on the local EventEmitter
+    // and never reaches ws-forwarding.
+    return ['tool_start', 'tool_result', 'tool_input_delta']
   }
 
   /**
@@ -650,6 +655,14 @@ export class ClaudeByokSession extends BaseSession {
       this.emit('stream_end', { messageId })
       this._emitTurnError(messageId, err, 'STREAM_ERROR')
     } finally {
+      // #4080: per-turn isolation guarantee. The per-round clear after
+      // finalMessage() above runs on the success path; an iteration or
+      // finalMessage() throw skips it and would leak stale
+      // index→toolUseId entries into the next turn (mis-tagging the
+      // next stream's tool_input_delta events). Clearing here drains
+      // them on every exit path — success, error, abort, hard timeout.
+      // Safe to call when already empty.
+      this._streamingIndexToToolUseId.clear()
       this._finishTurn()
     }
   }

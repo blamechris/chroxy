@@ -977,6 +977,48 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('clears the index→toolUseId map on the error path so stale entries do not leak into the next turn', async () => {
+      // Copilot review on #4233: pre-fix the per-round clear lived
+      // ONLY after finalMessage() resolved. An iteration /
+      // finalMessage() throw skipped it, so a stream that errored
+      // mid-tool-stream left index N → tu_X stuck in the map, and the
+      // NEXT turn's tool_input_delta for index N would resolve to the
+      // previous turn's tu_X — silently mis-tagging. Verify the
+      // finally block drains the map regardless of exit path.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () => ({
+            // eslint-disable-next-line require-yield
+            async *[Symbol.asyncIterator]() {
+              // Yield a tool_use start so the map gets populated,
+              // then throw — finalMessage() never runs, so the
+              // per-round clear after it never fires.
+              yield { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_pre_err', name: 'Read', input: {} } }
+              throw new Error('simulated mid-stream failure')
+            },
+            async finalMessage() {
+              throw new Error('finalMessage not reached')
+            },
+          }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('this turn will fail')
+      // The error path emits an error event and ends the turn.
+      const errors = captured.filter((e) => e.name === 'error')
+      assert.ok(errors.length >= 1, 'error event surfaces on the failure path')
+      // The map MUST be empty before the next turn starts. Reading
+      // private state is acceptable here because the alternative
+      // (running a SECOND fake stream and asserting no stale toolUseId
+      // leaks through) duplicates the existing per-round-clear test
+      // without proving the finally path actually ran.
+      assert.equal(session._streamingIndexToToolUseId.size, 0,
+        'finally must clear the map even when the stream throws')
+      await session.destroy()
+    })
+
     it('clears the index→toolUseId map between rounds so a later index does not pick up a stale toolUseId', async () => {
       // Round 1: tool_use at index 0 → tu_a, content_block_stop fires
       // → map entry deleted. But the defensive clear after
