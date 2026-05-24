@@ -16,8 +16,9 @@
  * `"foo}"` ends in `}` but isn't valid JSON; an unterminated string
  * that happens to contain a `}` would also pass the gate).
  *
- * Trade-off: one `trim` + `endsWith` per delta against N-1 `JSON.parse`
- * throws on long streams. Noticeable for chatty Bash/Edit inputs.
+ * Trade-off: one `trimEnd` + `charCodeAt` per delta against N-1
+ * `JSON.parse` throws on long streams. Noticeable for chatty
+ * Bash/Edit inputs.
  *
  * Note: we deliberately do NOT support top-level JSON scalars
  * (`"string"`, `42`, `true`). Tool inputs are always objects or
