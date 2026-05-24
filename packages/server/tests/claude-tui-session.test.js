@@ -4,6 +4,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSy
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 describe('ClaudeTuiSession', () => {
   let emptySkillsDir
@@ -897,6 +898,129 @@ describe('ClaudeTuiSession', () => {
 
       assert.equal(writtenToPty, 'Important message\r',
         'materialization failure must NOT drop the user prompt')
+
+      rmSync(sinkDir, { recursive: true, force: true })
+    })
+  })
+
+  describe('attachment-cap warn lines (#4216)', () => {
+    // #4215 added two distinct log.warn lines in the attachment-suffix
+    // path: a regular-truncation warn and a bare-fallback warn. The
+    // suffix builder itself is unit-tested in claude-tui-attachments,
+    // but the caller-side logging was not pinned — a future refactor
+    // could downgrade these to info, swap the branches, or drop one
+    // entirely without any test catching it. These two tests pin the
+    // exact warn-line text per branch, end-to-end through sendMessage.
+    //
+    // Both trigger conditions are forced via crafted attachments that
+    // push the suffix past MAX_ATTACHMENT_SUFFIX_BYTES (8 KiB). The
+    // session-level validateAttachments() runs at the WS boundary so
+    // calling sendMessage() directly here bypasses it — exactly what
+    // we want for synthetic over-cap payloads.
+
+    let warnLines
+    let logSpy
+
+    beforeEach(() => {
+      warnLines = []
+      logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'claude-tui-session') {
+          warnLines.push(entry.message)
+        }
+      }
+      addLogListener(logSpy)
+    })
+
+    afterEach(() => {
+      if (logSpy) removeLogListener(logSpy)
+      logSpy = null
+      warnLines = null
+    })
+
+    async function sendOneTurn(sinkDir, prompt, attachments) {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-warn'
+      session._sinkDir = sinkDir
+      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+
+      session._term = {
+        write: () => {
+          // Drop the stop hook so the poll loop ends the turn.
+          writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({
+            last_assistant_message: 'ok',
+          }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+
+      await session.sendMessage(prompt, attachments)
+    }
+
+    it('emits a truncated warn when the full suffix exceeds the cap but a trimmed list fits', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-warn-trunc-'))
+      // 100 small attachments. Each materialized item produces a line
+      // like `<sinkDir>/attachments/<msgId>/att-N.png (img-N.png, image/png, 1B)`
+      // — roughly 130-160 bytes once the per-item separator is counted —
+      // so 100 items pushes the full suffix well past 8 KiB while
+      // leaving room for a trimmed list to fit.
+      const png = Buffer.from([0x89]).toString('base64')
+      const attachments = []
+      for (let i = 0; i < 100; i++) {
+        attachments.push({
+          type: 'image', mediaType: 'image/png',
+          data: png, name: `img-${String(i).padStart(3, '0')}.png`,
+        })
+      }
+
+      await sendOneTurn(sinkDir, 'lots of files', attachments)
+
+      const truncated = warnLines.find((m) => /TUI attachment suffix truncated/.test(m))
+      const bare = warnLines.find((m) => /bare-fallback fired/.test(m))
+      assert.ok(truncated, `expected a "truncated" warn, got warnLines=${JSON.stringify(warnLines)}`)
+      assert.ok(!bare, 'must NOT emit the bare-fallback warn when a trimmed list fits')
+      // Pin the structured fields the warn carries — these are what an
+      // operator greps for, so swapping in something less specific
+      // (e.g. dropping the "omitted=N of=M" tail) should fail this test.
+      assert.match(truncated, /msg=/, 'warn includes message id')
+      assert.match(truncated, /suffixBytes=\d+/, 'warn includes final suffix bytes')
+      assert.match(truncated, /cap=\d+B/, 'warn includes cap in bytes')
+      assert.match(truncated, /omitted=\d+ of=\d+/, 'warn includes omitted-of-total counts')
+
+      rmSync(sinkDir, { recursive: true, force: true })
+    })
+
+    it('emits the bare-fallback warn when even a single-entry suffix exceeds the cap', async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-warn-bare-'))
+      // mediaType is not length-capped inside materializeAttachments
+      // (sanitization happens at the WS boundary, not here), so a
+      // single attachment carrying a >8 KiB mediaType string is enough
+      // to push the single-entry suffix past the cap. The truncation
+      // loop pops the only item, sees the list is now empty, breaks,
+      // and falls through to the bare-fallback marker.
+      const png = Buffer.from([0x89]).toString('base64')
+      const giantMediaType = 'image/png' + ';x='.repeat(3000)   // ~9 KiB
+      const attachments = [{
+        type: 'image', mediaType: giantMediaType, data: png, name: 'one.png',
+      }]
+
+      await sendOneTurn(sinkDir, 'one giant-typed file', attachments)
+
+      const bare = warnLines.find((m) => /bare-fallback fired/.test(m))
+      const truncated = warnLines.find((m) => /TUI attachment suffix truncated/.test(m))
+      assert.ok(bare, `expected a bare-fallback warn, got warnLines=${JSON.stringify(warnLines)}`)
+      // The two branches are mutually exclusive in the source (if/else);
+      // pin that here so a future refactor that runs both can't slip in
+      // unnoticed.
+      assert.ok(!truncated, 'truncated warn must NOT fire on the bare-fallback path')
+      assert.match(bare, /msg=/, 'warn includes message id')
+      assert.match(bare, /count=\d+/, 'warn includes file count')
+      assert.match(bare, /cap=\d+B/, 'warn includes cap in bytes')
+      assert.match(bare, /file paths omitted/, 'warn explains the lossy outcome')
 
       rmSync(sinkDir, { recursive: true, force: true })
     })
