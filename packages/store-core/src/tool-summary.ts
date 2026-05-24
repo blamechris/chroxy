@@ -69,19 +69,16 @@ export function getInputSummary(input: Record<string, unknown> | string | null |
   if (!input) return ''
   if (typeof input === 'string') return input.slice(0, PREVIEW_MAX_LEN)
 
-  // Walk the priority list ourselves so the object-shaped fallback
-  // mirrors the existing dashboard behaviour: if `command` is present
-  // but it happens to be an object, JSON.stringify it rather than
-  // skipping past to `file_path`.
+  // Match the original dashboard `||`-chain: any falsy value (undefined
+  // / null / '' / 0 / false) is treated as "field not present" and the
+  // walk continues to the next field. Truthy non-string values
+  // (objects, arrays) get JSON-stringified so the summary is still
+  // informative rather than `[object Object]`.
+  const inputObj = input as Record<string, unknown>
   for (const field of PRIORITY_FIELDS) {
-    const value = (input as Record<string, unknown>)[field]
-    if (value === undefined || value === null) continue
-    if (typeof value === 'string') {
-      if (!value) continue
-      return value.slice(0, PREVIEW_MAX_LEN)
-    }
-    // Object-shaped recognised field — JSON-stringify so the summary
-    // is still informative rather than `[object Object]`.
+    const value = inputObj[field]
+    if (!value) continue
+    if (typeof value === 'string') return value.slice(0, PREVIEW_MAX_LEN)
     return JSON.stringify(value).slice(0, PREVIEW_MAX_LEN)
   }
   return ''
