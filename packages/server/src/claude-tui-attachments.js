@@ -298,8 +298,22 @@ export function buildAttachmentsPromptSuffix(files) {
   // Drop one entry at a time from the end, re-checking the rebuilt
   // suffix each iteration. A more efficient binary search isn't worth
   // the complexity for N≤5 in normal usage; even at N=20 this is fine.
+  //
+  // #4027: pop BEFORE checking. We only reach this branch because the
+  // full suffix already failed the cap (above). The pre-#4027 loop
+  // checked the candidate at length=files.length first — that candidate
+  // is by construction LONGER than fullSuffix (adds the `...and 0 more
+  // file(s) omitted` marker), so it cannot pass the cap either, and
+  // `omitted=0` in the marker would lie if it ever did return. Popping
+  // first guarantees `omitted >= 1` whenever this branch returns.
   const truncatedItems = items.slice()
   while (truncatedItems.length > 0) {
+    truncatedItems.pop()
+    // Empty list is degenerate ("...attached: ; ...and N more..." would
+    // fit the cap but reads as nonsense). Fall through to the bare-
+    // fallback marker below which is what the pre-#4027 single-file
+    // pathological path already produced.
+    if (truncatedItems.length === 0) break
     const omitted = files.length - truncatedItems.length
     const candidate = ` [I attached the following file(s) for you to read: ${truncatedItems.join('; ')}; ...and ${omitted} more file(s) omitted from this list due to size]`
     if (Buffer.byteLength(candidate, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
@@ -312,7 +326,6 @@ export function buildAttachmentsPromptSuffix(files) {
         cap: MAX_ATTACHMENT_SUFFIX_BYTES,
       }
     }
-    truncatedItems.pop()
   }
   // Even the single-entry fallback didn't fit (one path > 8KB —
   // pathological). Return the bare marker; the files are still on disk
