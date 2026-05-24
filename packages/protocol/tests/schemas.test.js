@@ -1365,6 +1365,60 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 
+  // #4141: BYOK credentials status — dashboard previously raw-cast the payload.
+  // The schema constrains status/source to enum values so a malformed server
+  // can't store unknown strings into the store.
+  describe('ServerByokCredentialsStatusSchema (#4141)', () => {
+    it('accepts the full documented shape', async () => {
+      const { ServerByokCredentialsStatusSchema } = await import('../src/schemas/server.ts')
+      const r = ServerByokCredentialsStatusSchema.safeParse({
+        type: 'byok_credentials_status',
+        requestId: 'req-1',
+        status: 'set',
+        source: 'file',
+        masked: 'sk-ant-***...xyz',
+        fileExists: true,
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.status, 'set')
+      assert.equal(r.data.source, 'file')
+      assert.equal(r.data.masked, 'sk-ant-***...xyz')
+      assert.equal(r.data.fileExists, true)
+    })
+
+    it('rejects unknown status values (enum constraint)', async () => {
+      const { ServerByokCredentialsStatusSchema } = await import('../src/schemas/server.ts')
+      const r = ServerByokCredentialsStatusSchema.safeParse({
+        type: 'byok_credentials_status',
+        status: 'unknown',
+        source: 'file',
+      })
+      assert.equal(r.success, false)
+    })
+
+    it('rejects unknown source values (enum constraint)', async () => {
+      const { ServerByokCredentialsStatusSchema } = await import('../src/schemas/server.ts')
+      const r = ServerByokCredentialsStatusSchema.safeParse({
+        type: 'byok_credentials_status',
+        status: 'missing',
+        source: 'magic',
+      })
+      assert.equal(r.success, false)
+    })
+
+    it('accepts minimal status without optional fields', async () => {
+      const { ServerByokCredentialsStatusSchema } = await import('../src/schemas/server.ts')
+      const r = ServerByokCredentialsStatusSchema.safeParse({
+        type: 'byok_credentials_status',
+        status: 'missing',
+        source: 'none',
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.masked, undefined)
+      assert.equal(r.data.fileExists, undefined)
+    })
+  })
+
   // #4192: ServerErrorEnvelopeMessage type alias — exported alongside the
   // schema so downstream consumers (mobile/dashboard/future tools) can write
   // `import type { ServerErrorEnvelopeMessage }` instead of re-running

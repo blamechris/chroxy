@@ -241,14 +241,31 @@ export function materializeAttachments(attachments, baseDir, turnSlug) {
  * attachment list is per-turn user content, not session-level system
  * prompt. So: keep it one line, semicolon-separated.
  *
- * Empty input → empty string (caller appends, so an empty suffix
- * produces the original prompt unchanged).
+ * Empty input → empty-suffix result (caller appends, so an empty
+ * suffix produces the original prompt unchanged).
+ *
+ * #4026: returns an AttachmentSuffixResult shape (not a string) so the
+ * caller can log a warn when the cap fires. Pre-#4026 this returned
+ * just the string and the truncation was silent.
+ *
+ * @typedef {Object} AttachmentSuffixResult
+ * @property {string}  suffix         The prompt suffix to append (empty for no files).
+ * @property {boolean} truncated      True when at least one file was dropped from the list.
+ * @property {number}  omitted        Number of files dropped from the list (0 when not truncated).
+ * @property {boolean} bareFallback   True when even the single-entry suffix didn't fit and we
+ *                                    fell back to the size-cap marker (the worst, most-lossy path).
+ * @property {number}  byteLength     Final UTF-8 byte length of the suffix string.
+ * @property {number}  cap            The byte cap (MAX_ATTACHMENT_SUFFIX_BYTES) in effect for this build —
+ *                                    populated whether or not truncation actually fired.
  *
  * @param {Array<{path: string, name: string, mediaType: string, size: number}>} files
- * @returns {string}
+ * @returns {AttachmentSuffixResult}
  */
+
 export function buildAttachmentsPromptSuffix(files) {
-  if (!Array.isArray(files) || files.length === 0) return ''
+  if (!Array.isArray(files) || files.length === 0) {
+    return { suffix: '', truncated: false, omitted: 0, bareFallback: false, byteLength: 0, cap: MAX_ATTACHMENT_SUFFIX_BYTES }
+  }
   const items = files.map((f) => {
     const meta = [f.name, f.mediaType, formatBytes(f.size)].filter(Boolean).join(', ')
     return meta ? `${f.path} (${meta})` : f.path
@@ -264,23 +281,62 @@ export function buildAttachmentsPromptSuffix(files) {
   // We drop trailing entries until the suffix fits, then mark the
   // truncation so the agent (and a human reading the transcript)
   // knows files were omitted.
-  if (Buffer.byteLength(fullSuffix, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
-    return fullSuffix
+  // Compute once: the cap-check below and the return-shape's byteLength
+  // both consume this. Pre-#4215 nit: it was computed twice on the
+  // happy path.
+  const fullSuffixBytes = Buffer.byteLength(fullSuffix, 'utf8')
+  if (fullSuffixBytes <= MAX_ATTACHMENT_SUFFIX_BYTES) {
+    return {
+      suffix: fullSuffix,
+      truncated: false,
+      omitted: 0,
+      bareFallback: false,
+      byteLength: fullSuffixBytes,
+      cap: MAX_ATTACHMENT_SUFFIX_BYTES,
+    }
   }
   // Drop one entry at a time from the end, re-checking the rebuilt
   // suffix each iteration. A more efficient binary search isn't worth
   // the complexity for N≤5 in normal usage; even at N=20 this is fine.
-  const truncated = items.slice()
-  while (truncated.length > 0) {
-    const omitted = files.length - truncated.length
-    const candidate = ` [I attached the following file(s) for you to read: ${truncated.join('; ')}; ...and ${omitted} more file(s) omitted from this list due to size]`
+  //
+  // #4027: pop BEFORE checking. We only reach this branch because the
+  // full suffix already failed the cap (above). The pre-#4027 loop
+  // checked the candidate at length=files.length first — that candidate
+  // is by construction LONGER than fullSuffix (adds the `...and 0 more
+  // file(s) omitted` marker), so it cannot pass the cap either, and
+  // `omitted=0` in the marker would lie if it ever did return. Popping
+  // first guarantees `omitted >= 1` whenever this branch returns.
+  const truncatedItems = items.slice()
+  while (truncatedItems.length > 0) {
+    truncatedItems.pop()
+    // Empty list is degenerate ("...attached: ; ...and N more..." would
+    // fit the cap but reads as nonsense). Fall through to the bare-
+    // fallback marker below which is what the pre-#4027 single-file
+    // pathological path already produced.
+    if (truncatedItems.length === 0) break
+    const omitted = files.length - truncatedItems.length
+    const candidate = ` [I attached the following file(s) for you to read: ${truncatedItems.join('; ')}; ...and ${omitted} more file(s) omitted from this list due to size]`
     if (Buffer.byteLength(candidate, 'utf8') <= MAX_ATTACHMENT_SUFFIX_BYTES) {
-      return candidate
+      return {
+        suffix: candidate,
+        truncated: true,
+        omitted,
+        bareFallback: false,
+        byteLength: Buffer.byteLength(candidate, 'utf8'),
+        cap: MAX_ATTACHMENT_SUFFIX_BYTES,
+      }
     }
-    truncated.pop()
   }
   // Even the single-entry fallback didn't fit (one path > 8KB —
   // pathological). Return the bare marker; the files are still on disk
   // and the agent will at least know attachments were intended.
-  return ` [Attachment list omitted: ${files.length} file(s) exceeded the suffix size cap of ${MAX_ATTACHMENT_SUFFIX_BYTES}B]`
+  const bare = ` [Attachment list omitted: ${files.length} file(s) exceeded the suffix size cap of ${MAX_ATTACHMENT_SUFFIX_BYTES}B]`
+  return {
+    suffix: bare,
+    truncated: true,
+    omitted: files.length,
+    bareFallback: true,
+    byteLength: Buffer.byteLength(bare, 'utf8'),
+    cap: MAX_ATTACHMENT_SUFFIX_BYTES,
+  }
 }

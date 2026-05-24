@@ -206,4 +206,66 @@ describe('ChatSettingsDropdown', () => {
       expect(title).toContain('200,000 tokens')
     })
   })
+
+  // #4019 / #4211 Copilot review: the description from
+  // availablePermissionModes flows onto the permission <select>'s title
+  // attribute so the user gets the mid-session trade-off hint on hover.
+  // Server's PERMISSION_MODES carries description for every mode; we surface
+  // the one for the currently-selected option.
+  describe('#4019 permission-mode description tooltip', () => {
+    const MODES_WITH_DESC = [
+      { id: 'approve', label: 'Approve', description: 'Default. Each tool call gates on your approval.' },
+      { id: 'auto', label: 'Auto (skip all prompts)', description: 'Auto-approve every tool call. Equivalent to claude --dangerously-skip-permissions.' },
+      { id: 'plan', label: 'Plan', description: 'Plan mode — Claude plans before acting; each tool call still gates on approval.' },
+    ]
+
+    it('select title reflects the description of the currently-selected mode', () => {
+      const { container } = renderDropdown({
+        availablePermissionModes: MODES_WITH_DESC,
+        permissionMode: 'auto',
+      })
+      const permSelect = container.querySelector('select[data-kind="permission"]')
+      expect(permSelect).toBeTruthy()
+      const title = permSelect!.getAttribute('title') || ''
+      expect(title).toContain('Auto-approve every tool call')
+      expect(title).toContain('claude --dangerously-skip-permissions')
+    })
+
+    it('select title updates when permissionMode prop changes', () => {
+      const { container, rerender } = renderDropdown({
+        availablePermissionModes: MODES_WITH_DESC,
+        permissionMode: 'approve',
+      })
+      const sel = () => container.querySelector('select[data-kind="permission"]')
+      expect(sel()!.getAttribute('title')).toContain('Default')
+      rerender(<ChatSettingsDropdown
+        availableModels={MODELS}
+        activeModel="sonnet"
+        defaultModelId={null}
+        onModelChange={vi.fn()}
+        availablePermissionModes={MODES_WITH_DESC}
+        permissionMode="plan"
+        onPermissionModeChange={vi.fn()}
+        showThinkingLevel={false}
+        thinkingLevel={null}
+        onThinkingLevelChange={vi.fn()}
+      />)
+      expect(sel()!.getAttribute('title')).toMatch(/Plan mode/i)
+    })
+
+    it('falls back gracefully when the selected mode has no description (old server)', () => {
+      const { container } = renderDropdown({
+        // Mix of with-/without-description; pre-#4018 servers ship none.
+        availablePermissionModes: [
+          { id: 'approve', label: 'Approve' },
+          { id: 'auto', label: 'Auto' },
+        ],
+        permissionMode: 'auto',
+      })
+      const permSelect = container.querySelector('select[data-kind="permission"]')
+      // No description → title is undefined / empty, not the literal string "undefined".
+      const title = permSelect!.getAttribute('title')
+      expect(title === null || title === '' || title === undefined).toBe(true)
+    })
+  })
 })

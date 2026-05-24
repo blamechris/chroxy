@@ -607,6 +607,26 @@ export const ServerErrorEnvelopeSchema = z.object({
   details: z.string().optional(),
 }).passthrough()
 
+// #4141: BYOK credentials status — emitted by handleByokGetCredentialsStatus /
+// handleByokSetCredentials / handleByokClearCredentials and broadcast to all
+// connected clients on set/clear (#4142). Dashboard previously type-cast the
+// payload with raw `as` casts at message-handler.ts:2660 which accepted any
+// status/source string from the wire — a malformed server could store
+// `status: 'unknown'` into the store. This schema constrains the shape.
+//
+// fileExists: tracks the on-disk credentials file presence (#4144). When
+// status === 'missing' but fileExists === true, the dashboard shows the
+// stale-file notice (#4175) — broaden contract handled separately.
+export const ServerByokCredentialsStatusSchema = z.object({
+  type: z.literal('byok_credentials_status'),
+  requestId: z.string().nullable().optional(),
+  status: z.enum(['set', 'missing']),
+  source: z.enum(['env', 'file', 'none']),
+  masked: z.string().optional(),
+  reason: z.string().optional(),
+  fileExists: z.boolean().optional(),
+}).passthrough()
+
 // #3544: cumulative stdin_dropped totals broadcast to clients bound to the
 // session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
 // tailing the server log (mobile users, dashboard-only operators) see a live
@@ -898,3 +918,5 @@ export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewrit
 export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>
+// #4141: typed BYOK credentials status payload.
+export type ServerByokCredentialsStatusMessage = z.infer<typeof ServerByokCredentialsStatusSchema>
