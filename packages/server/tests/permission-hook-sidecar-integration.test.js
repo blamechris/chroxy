@@ -15,17 +15,26 @@ const hookPath = join(__dirname, '../hooks/permission-hook.sh')
  * prevent the in-process mock HTTP server from accepting curl's request.
  */
 function runHook({ input, env, timeout = 10000 } = {}) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn('/bin/bash', [hookPath], { env })
     let stdout = ''
     let stderr = ''
     let timer = null
+    let settled = false
+    const settle = (fn, arg) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      fn(arg)
+    }
     child.stdout.on('data', (c) => { stdout += c.toString() })
     child.stderr.on('data', (c) => { stderr += c.toString() })
-    child.on('close', (status, signal) => {
-      if (timer) clearTimeout(timer)
-      resolve({ status, signal, stdout, stderr })
-    })
+    // Surface spawn failures (e.g. missing /bin/bash, ENOENT on hookPath)
+    // immediately instead of waiting for the timeout to fire. Without this,
+    // a misconfigured environment hangs for `timeout` ms then reports a
+    // misleading SIGKILL.
+    child.on('error', (err) => settle(reject, err))
+    child.on('close', (status, signal) => settle(resolve, { status, signal, stdout, stderr }))
     if (timeout) {
       timer = setTimeout(() => { child.kill('SIGKILL') }, timeout)
     }
@@ -234,36 +243,47 @@ describe('permission-hook.sh sidecar-file integration (#4020)', () => {
     const modes = ['auto', 'approve', 'plan', 'acceptEdits']
     writeFileSync(sidecarPath, 'auto')
 
-    // Sequence: write -> spawn -> write -> spawn... 20 iterations. Bounded
-    // and event-loop-friendly (each await yields), unlike a tight while-loop
-    // racing against parallel spawns which can starve the loop entirely.
-    const results = []
-    for (let i = 0; i < 20; i++) {
-      writeFileSync(sidecarPath, modes[i % modes.length])
-      results.push(await runHook({
-        input: bashPayload,
-        env: {
-          ...process.env,
-          CHROXY_PORT: '1', // unreachable port — approve mode fails curl -> ask
-          CHROXY_PERMISSION_MODE: 'plan',
-          CHROXY_PERMISSION_MODE_FILE: sidecarPath,
-        },
-        timeout: 5000,
-      }))
-    }
+    // Use the in-process mock server so approve/acceptEdits iterations route
+    // to a known-fast endpoint instead of relying on ECONNREFUSED on an
+    // unreachable port (which is sub-ms locally but can be dropped on
+    // firewalled CI runners, stalling curl past the kill timeout and
+    // producing empty stdout that breaks JSON.parse).
+    const mock = await startMockPermissionServer({ decision: 'allow' })
+    try {
+      // Sequence: write -> spawn -> write -> spawn... 20 iterations. Bounded
+      // and event-loop-friendly (each await yields), unlike a tight while-loop
+      // racing against parallel spawns which can starve the loop entirely.
+      const results = []
+      for (let i = 0; i < 20; i++) {
+        writeFileSync(sidecarPath, modes[i % modes.length])
+        results.push(await runHook({
+          input: bashPayload,
+          env: {
+            ...process.env,
+            CHROXY_PORT: String(mock.port),
+            CHROXY_HOOK_SECRET: 'race-test',
+            CHROXY_PERMISSION_MODE: 'plan',
+            CHROXY_PERMISSION_MODE_FILE: sidecarPath,
+          },
+          timeout: 5000,
+        }))
+      }
 
-    for (const { status, stdout, stderr } of results) {
-      assert.equal(status, 0, `hook exited non-zero (stderr: ${stderr})`)
-      // Output must be valid JSON with one of the legal decisions. The
-      // point is that NO read produced an unparseable output (which would
-      // happen if a mid-write race surfaced a garbled mode string that
-      // bypassed the case sanitizer).
-      const out = JSON.parse(stdout)
-      assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse')
-      assert.ok(
-        ['ask', 'allow', 'deny'].includes(out.hookSpecificOutput.permissionDecision),
-        `unexpected decision: ${out.hookSpecificOutput.permissionDecision}`
-      )
+      for (const { status, stdout, stderr } of results) {
+        assert.equal(status, 0, `hook exited non-zero (stderr: ${stderr})`)
+        // Output must be valid JSON with one of the legal decisions. The
+        // point is that NO read produced an unparseable output (which would
+        // happen if a mid-write race surfaced a garbled mode string that
+        // bypassed the case sanitizer).
+        const out = JSON.parse(stdout)
+        assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse')
+        assert.ok(
+          ['ask', 'allow', 'deny'].includes(out.hookSpecificOutput.permissionDecision),
+          `unexpected decision: ${out.hookSpecificOutput.permissionDecision}`
+        )
+      }
+    } finally {
+      await mock.close()
     }
   })
 
