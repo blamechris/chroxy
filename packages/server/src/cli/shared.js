@@ -51,6 +51,7 @@ export function addServerOptions(cmd) {
     .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
     .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
     .option('--log-format <format>', 'Log output format: text (default) or json')
+    .option('--dangerously-skip-permissions', 'TUI provider only: spawn claude with --dangerously-skip-permissions and disable chroxy permission gating (mirrors `chroxy resume` flag)')
     .option('-v, --verbose', 'Show detailed config sources and validation info')
     .option('--environments', 'Enable environment isolation providers (e.g. docker)')
 }
@@ -127,6 +128,11 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.provider !== undefined) cliOverrides.provider = options.provider
   if (options.logFormat !== undefined) cliOverrides.logFormat = options.logFormat
   if (options.environments) cliOverrides.environments = { enabled: true }
+  // #4209: only forward when the flag was explicitly passed. Commander
+  // sets the property to `true` when present and leaves it `undefined`
+  // when absent, so we never write a coerced `false` that would mask a
+  // pre-existing `skipPermissions: true` in the on-disk config file.
+  if (options.dangerouslySkipPermissions) cliOverrides.skipPermissions = true
 
   const defaults = {
     port: 8765,

@@ -1701,7 +1701,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId }) => {
+  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId, skipPermissions }) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
@@ -1712,6 +1712,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (permissionMode) msg.permissionMode = permissionMode;
       if (worktree) msg.worktree = true;
       if (environmentId) msg.environmentId = environmentId;
+      // #4208: TUI-only opt-in to claude --dangerously-skip-permissions.
+      // Forward only when strictly true so a missing/false field falls
+      // through to the SessionManager default (which respects
+      // `chroxy start --dangerously-skip-permissions` via #4209).
+      if (skipPermissions === true) msg.skipPermissions = true;
       wsSend(socket, msg);
     }
   },

@@ -243,6 +243,12 @@ export const CreateSessionSchema = z.object({
   sandbox: SandboxSchema.optional(),
   isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
   environmentId: z.string().max(256).optional(),
+  // #4208: opt-in to spawning the claude TUI with
+  // `--dangerously-skip-permissions`. Only the `claude-tui` provider honours
+  // this — other providers ignore it harmlessly. The dashboard surfaces it
+  // as a TUI-only checkbox with explicit warning copy; the server still
+  // applies the flag if a non-TUI provider request includes it (no-op).
+  skipPermissions: z.boolean().optional(),
 })
 
 export const DestroySessionSchema = z.object({

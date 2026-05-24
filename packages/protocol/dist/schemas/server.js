@@ -64,6 +64,15 @@ export const ServerAuthOkSchema = z.object({
     // to their hardcoded reference (DEFAULT_RESULT_TIMEOUT_MS = 20 min)
     // when absent.
     resultTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
+    // #3905: effective server hard-kill inactivity timeout in ms (the
+    // #3899 hard cap that follows the soft `resultTimeoutMs` warning).
+    // Surfaced so the check-in chip can render an accurate "kill in Xh"
+    // countdown instead of assuming the 2-hour default. Optional because
+    // servers from before #3905 don't emit it — clients fall back to a
+    // 2h default when absent. (The matching server-side constant is
+    // `DEFAULT_HARD_TIMEOUT_MS` exported from `base-session.js` but is
+    // not re-exported from this package.)
+    hardTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
 }).passthrough();
 export const ServerAuthFailSchema = z.object({
     type: z.literal('auth_fail'),
@@ -253,6 +262,29 @@ export const ServerPlanReadySchema = z.object({
     type: z.literal('plan_ready'),
     allowedPrompts: z.array(z.any()).optional(),
 });
+// #4091: cumulative per-session token + cost totals. Emitted by
+// _trackUsage on every priced result event; consumed by the dashboard
+// sidebar cost badge (#4073) and mobile session-header badge (#4074).
+//
+// Token counts + turnsBilled are non-negative integers — they are
+// monotonic counters that only grow on priced result events. costUsd
+// is finite but intentionally kept unconstrained-sign: a refund /
+// credit-adjustment turn (#4099) subtracts from the running total,
+// and a session that received only refunds could legitimately end up
+// with a negative cumulative.
+//
+// Declared up here (and not next to the other event-emit schemas
+// further down the file) so it can be reused inline by
+// `ServerSessionListEntrySchema` below — keeps the snapshot field and
+// the event-emit shape in lockstep when either changes.
+export const CumulativeUsageSchema = z.object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    cacheReadTokens: z.number().int().nonnegative(),
+    cacheCreationTokens: z.number().int().nonnegative(),
+    costUsd: z.number().finite(),
+    turnsBilled: z.number().int().nonnegative(),
+});
 /**
  * One entry in a `session_list` payload (and the equivalent shape returned
  * by `SessionManager.listSessions()` server-side).
@@ -306,6 +338,18 @@ export const ServerSessionListEntrySchema = z.object({
     // serialize as 0.
     stdinDroppedBytes: z.number().int().nonnegative().optional(),
     stdinDroppedCount: z.number().int().nonnegative().optional(),
+    // #4091: per-session running token + cost totals included in the
+    // session_list snapshot (#4072 / #4088). Optional because older
+    // servers omit it entirely; consumers should treat `undefined` as
+    // "no data yet" and an all-zero block as "session has had no priced
+    // turns yet" (e.g. subscription-billed providers).
+    //
+    // Token counts + turnsBilled are non-negative integers; cumulative
+    // costUsd is finite but intentionally allowed to be negative — a
+    // refund / credit-adjustment turn (#4099) can subtract from the
+    // running total, and a session that received only refunds could
+    // legitimately end up with a negative cumulative.
+    cumulativeUsage: CumulativeUsageSchema.optional(),
 }).passthrough();
 export const ServerSessionListSchema = z.object({
     type: z.literal('session_list'),
@@ -489,6 +533,52 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
     message: z.string(),
     actualAuthor: z.string(),
 });
+// #4178: generic server `error` envelope shape — the catch-all schema for
+// `type: 'error'` messages that aren't covered by a code-specific variant
+// like `ServerSkillTrustGrantInvalidAuthorSchema`. `fatal: false` was
+// introduced by #4145 (MAX_TOOL_ROUNDS_REACHED) and is consumed by
+// #4176's warning-toast branch in the dashboard. Declaring it here lets
+// other clients (mobile app, future tools) consume the same shape via
+// the shared store-core `handleError` parser. `fatal` defaults unset
+// (treated as `true` by consumers) so omitting it preserves the
+// pre-#4145 contract.
+//
+// `correlationId` + `details` are emitted by the server's INVALID_MESSAGE
+// schema-rejection path (`ws-server.js:1314`) and any handler that calls
+// `handler-utils.sendError(ws, requestId, code, message, data)` — the
+// `data` arg is merged onto the envelope (`handler-utils.js:420-435`)
+// after a reserved-field guard. `.passthrough()` matches the wire and
+// preserves code-specific fields (e.g. `actualAuthor` on INVALID_AUTHOR,
+// `boundSessionId` on SESSION_TOKEN_MISMATCH) so future consumers parsing
+// against this generic schema don't silently lose context.
+export const ServerErrorEnvelopeSchema = z.object({
+    type: z.literal('error'),
+    requestId: z.string().nullable().optional(),
+    code: z.string().optional(),
+    message: z.string(),
+    fatal: z.boolean().optional(),
+    correlationId: z.string().optional(),
+    details: z.string().optional(),
+}).passthrough();
+// #4141: BYOK credentials status — emitted by handleByokGetCredentialsStatus /
+// handleByokSetCredentials / handleByokClearCredentials and broadcast to all
+// connected clients on set/clear (#4142). Dashboard previously type-cast the
+// payload with raw `as` casts at message-handler.ts:2660 which accepted any
+// status/source string from the wire — a malformed server could store
+// `status: 'unknown'` into the store. This schema constrains the shape.
+//
+// fileExists: tracks the on-disk credentials file presence (#4144). When
+// status === 'missing' but fileExists === true, the dashboard shows the
+// stale-file notice (#4175) — broaden contract handled separately.
+export const ServerByokCredentialsStatusSchema = z.object({
+    type: z.literal('byok_credentials_status'),
+    requestId: z.string().nullable().optional(),
+    status: z.enum(['set', 'missing']),
+    source: z.enum(['env', 'file', 'none']),
+    masked: z.string().optional(),
+    reason: z.string().optional(),
+    fileExists: z.boolean().optional(),
+}).passthrough();
 // #3544: cumulative stdin_dropped totals broadcast to clients bound to the
 // session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
 // tailing the server log (mobile users, dashboard-only operators) see a live
@@ -533,6 +623,27 @@ export const ServerCostUpdateSchema = z.object({
     sessionCost: z.number().nullable().optional(),
     totalCost: z.number().nullable().optional(),
     budget: z.number().nullable().optional(),
+});
+export const ServerSessionUsageSchema = z.object({
+    type: z.literal('session_usage'),
+    // sessionId is injected by _broadcastToSession; optional in the schema
+    // so consumers can construct the message without it pre-broadcast.
+    sessionId: z.string().optional(),
+    cumulativeUsage: CumulativeUsageSchema,
+});
+// #4075: soft per-session cost-threshold crossing. Fires ONCE per
+// session when cumulativeUsage.costUsd >= the configured threshold.
+//
+// costUsd is finite but kept unconstrained-sign: in practice it's the
+// running cumulative at the crossing point so always positive, but the
+// schema doesn't enforce that to stay consistent with CumulativeUsage
+// where refunds (#4099) can in principle drive the cumulative
+// negative. thresholdUsd is non-negative by setter contract.
+export const ServerSessionCostThresholdCrossedSchema = z.object({
+    type: z.literal('session_cost_threshold_crossed'),
+    sessionId: z.string().optional(),
+    costUsd: z.number().finite(),
+    thresholdUsd: z.number().finite().nonnegative(),
 });
 export const ServerBudgetWarningSchema = z.object({
     type: z.literal('budget_warning'),
