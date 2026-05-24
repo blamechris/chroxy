@@ -29,6 +29,8 @@ export type {
   ContextUsage,
   ModelInfo,
   SessionInfo,
+  // #4213: typed permission-mode shape (includes optional `description`).
+  PermissionMode,
   DirectoryEntry,
   DirectoryListing,
   FileEntry,

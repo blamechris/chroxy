@@ -38,6 +38,10 @@ export type {
   Checkpoint,
   BaseSessionState,
   PendingPermissionConfirm,
+  // #4213: typed permission-mode shape — `description` flows through to the
+  // mobile SettingsBar so the chips share one source of truth with the server
+  // (matches the dashboard #4019 plumbing).
+  PermissionMode,
   // Re-export shared git result element types (#3132). Local definitions
   // are now redundant; canonical types live in @chroxy/store-core.
   GitFileStatus,
@@ -66,6 +70,9 @@ import type {
   MessageAttachment,
   ModelInfo,
   PendingPermissionConfirm,
+  // #4213: typed permission-mode shape used by the
+  // ModelsAndPermissionsData slice below.
+  PermissionMode,
   SearchResult,
   ServerError,
   SessionContext,
@@ -240,8 +247,12 @@ export interface ModelsAndPermissionsData {
   availableModels: ModelInfo[];
   // Server-reported default model short id (from SDK)
   defaultModelId: string | null;
-  // Available permission modes from server (CLI mode)
-  availablePermissionModes: { id: string; label: string }[];
+  // Available permission modes from server (CLI mode).
+  // #4213: typed PermissionMode from store-core; the optional `description`
+  // field flows through to the SettingsBar hint so the mobile picker shares
+  // one source of truth with the server's PERMISSION_MODES table (matches
+  // the dashboard #4019 plumbing).
+  availablePermissionModes: PermissionMode[];
   // Available providers from server (for session creation UI)
   availableProviders: ProviderInfo[];
   // Pending auto permission mode confirmation from server
