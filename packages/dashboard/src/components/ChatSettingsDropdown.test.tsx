@@ -267,5 +267,40 @@ describe('ChatSettingsDropdown', () => {
       const title = permSelect!.getAttribute('title')
       expect(title === null || title === '' || title === undefined).toBe(true)
     })
+
+    // #4212 ask 3 — per-<option> title parity. Most browsers don't surface
+    // option tooltips reliably, but the attribute should still match its
+    // mode's description verbatim so AT machinery (and future refactors of
+    // the picker into a non-native control) see consistent metadata. A
+    // future change that drops `title={m.description}` from the option map
+    // would silently regress this — pin it.
+    it('each <option> carries its mode description as title (and omits it when missing)', () => {
+      const MIXED = [
+        { id: 'approve', label: 'Approve', description: 'Default. Each tool call gates on your approval.' },
+        { id: 'auto', label: 'Auto', description: 'Auto-approve every tool call.' },
+        { id: 'legacy', label: 'Legacy' }, // pre-#4018 server: no description
+      ]
+      const { container } = renderDropdown({
+        availablePermissionModes: MIXED,
+        permissionMode: 'approve',
+      })
+      const permSelect = container.querySelector('select[data-kind="permission"]')
+      expect(permSelect).toBeTruthy()
+      const options = Array.from(permSelect!.querySelectorAll('option')) as HTMLOptionElement[]
+      expect(options).toHaveLength(MIXED.length)
+
+      const byValue = (v: string) => {
+        const opt = options.find(o => o.value === v)
+        expect(opt, `option[value="${v}"] missing`).toBeTruthy()
+        return opt!
+      }
+      expect(byValue('approve').getAttribute('title')).toBe(
+        'Default. Each tool call gates on your approval.',
+      )
+      expect(byValue('auto').getAttribute('title')).toBe('Auto-approve every tool call.')
+      // No description → attribute is absent or empty, never the string "undefined".
+      const legacyTitle = byValue('legacy').getAttribute('title')
+      expect(legacyTitle === null || legacyTitle === '').toBe(true)
+    })
   })
 })
