@@ -247,6 +247,7 @@ export type {
   MessagePayload,
   ToolStartPayload,
   ToolResultPayload,
+  ToolInputDeltaPayload,
   StreamStartPayload,
   StreamEndPayload,
   ResultUsagePayload,
