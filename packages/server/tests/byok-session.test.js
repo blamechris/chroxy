@@ -887,7 +887,12 @@ describe('ClaudeByokSession', () => {
       // `toolName` key.
       assert.equal(payload.tool, 'Read', 'tool field carries the tool name (normalizer-expected key)')
       assert.equal(payload.toolUseId, 'tu_42', 'toolUseId is propagated')
-      assert.ok('input' in payload, 'input field is present (may be null pre-delta, but the key must exist)')
+      // Pin the wire-safe value, not just presence. `undefined` would be
+      // stripped by JSON.stringify and re-trigger the original `tool:
+      // undefined`-class regression on the wire; `null` survives
+      // serialization and satisfies `ServerToolStartSchema.input:
+      // z.any()`. Matches sdk-session.js / cli-session.js.
+      assert.strictEqual(payload.input, null, 'input is null pre-delta (wire-safe placeholder, not undefined)')
       assert.equal(typeof payload.messageId, 'string', 'messageId is set')
       await session.destroy()
     })
@@ -913,8 +918,12 @@ describe('ClaudeByokSession', () => {
 
       const start = captured.find((e) => e.name === 'tool_start')
       assert.ok(start, 'tool_start event was emitted')
-      assert.equal(start.payload.toolName, undefined,
+      // Use `in` rather than `=== undefined` so an own-property
+      // `toolName: undefined` (which would still survive on the in-process
+      // EventEmitter payload and confuse future readers) is caught.
+      assert.ok(!('toolName' in start.payload),
         'legacy `toolName` key must not appear — normalizer reads `tool`, not `toolName`')
+      await session.destroy()
     })
   })
 
