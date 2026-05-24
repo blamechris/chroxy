@@ -3365,6 +3365,24 @@ export function handleToolResult(
 // tool_input_delta
 // ---------------------------------------------------------------------------
 
+/**
+ * Upper bound on the size of `toolInputPartial` after concatenation.
+ * Defence-in-depth backstop against an adversarial or runaway server
+ * `tool_input_delta` stream ballooning client `messages` state — the
+ * wire schema (`ServerToolInputDeltaSchema.partialJson`) declares no
+ * max length. 1 MiB is well above any realistic Anthropic SDK tool
+ * input (typically tens of KB at most) while small enough to bound
+ * per-bubble memory. See issue #4241.
+ */
+export const MAX_TOOL_INPUT_PARTIAL_LEN = 1024 * 1024
+
+/**
+ * Literal appended to `toolInputPartial` exactly once when the cap is
+ * hit. Renderers may detect the suffix to show a "truncated" indicator;
+ * the marker is also a UX breadcrumb when reading the buffer raw.
+ */
+const TOOL_INPUT_PARTIAL_TRUNCATED_MARKER = '...[truncated]'
+
 /** Result returned from {@link handleToolInputDelta} when the message is well-formed. */
 export interface ToolInputDeltaPayload {
   /** Resolved target session, or null when no session context exists. */
@@ -3406,6 +3424,13 @@ export interface ToolInputDeltaPayload {
  * error. Once `tool_result` arrives, the bubble's render switches to
  * the standard result view; `toolInputPartial` is kept for
  * history/replay but no longer drives the active display.
+ *
+ * The concatenated buffer is capped at {@link MAX_TOOL_INPUT_PARTIAL_LEN}
+ * bytes (defence-in-depth — see #4241). When a chunk would push past
+ * the cap, the buffer is sliced to the cap and `...[truncated]` is
+ * appended exactly once. Subsequent deltas land on an already-truncated
+ * buffer and are dropped silently, leaving the marker as the terminal
+ * state.
  */
 export function handleToolInputDelta(
   msg: Record<string, unknown>,
@@ -3429,9 +3454,22 @@ export function handleToolInputDelta(
       if (idx === -1) return messages
       const updated = [...messages]
       const existing = updated[idx]!
+      const prev = existing.toolInputPartial || ''
+      // Idempotent terminal state: once truncated, further deltas are
+      // dropped silently (matches the "silent drop on bad input" pattern
+      // already used by the malformed-payload guards above).
+      if (prev.endsWith(TOOL_INPUT_PARTIAL_TRUNCATED_MARKER)) {
+        return messages
+      }
+      const concatenated = prev + partialJson
+      const next =
+        concatenated.length > MAX_TOOL_INPUT_PARTIAL_LEN
+          ? concatenated.slice(0, MAX_TOOL_INPUT_PARTIAL_LEN) +
+            TOOL_INPUT_PARTIAL_TRUNCATED_MARKER
+          : concatenated
       updated[idx] = {
         ...existing,
-        toolInputPartial: (existing.toolInputPartial || '') + partialJson,
+        toolInputPartial: next,
       }
       return updated
     },
