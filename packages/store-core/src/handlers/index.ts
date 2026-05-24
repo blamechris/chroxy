@@ -3461,12 +3461,18 @@ export function handleToolInputDelta(
       if (prev.endsWith(TOOL_INPUT_PARTIAL_TRUNCATED_MARKER)) {
         return messages
       }
-      const concatenated = prev + partialJson
-      const next =
-        concatenated.length > MAX_TOOL_INPUT_PARTIAL_LEN
-          ? concatenated.slice(0, MAX_TOOL_INPUT_PARTIAL_LEN) +
-            TOOL_INPUT_PARTIAL_TRUNCATED_MARKER
-          : concatenated
+      // Length-first check avoids briefly allocating a giant string for
+      // the worst-case adversarial input (e.g. a single 100 MB chunk).
+      let next: string
+      if (prev.length + partialJson.length > MAX_TOOL_INPUT_PARTIAL_LEN) {
+        const headroom = MAX_TOOL_INPUT_PARTIAL_LEN - prev.length
+        next =
+          prev +
+          partialJson.slice(0, Math.max(0, headroom)) +
+          TOOL_INPUT_PARTIAL_TRUNCATED_MARKER
+      } else {
+        next = prev + partialJson
+      }
       updated[idx] = {
         ...existing,
         toolInputPartial: next,
