@@ -1713,10 +1713,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (worktree) msg.worktree = true;
       if (environmentId) msg.environmentId = environmentId;
       // #4208: TUI-only opt-in to claude --dangerously-skip-permissions.
-      // Forward only when strictly true so a missing/false field falls
-      // through to the SessionManager default (which respects
+      // Forward whenever the caller passes a strict boolean so an explicit
+      // `false` can override a server-wide `defaultSkipPermissions: true`
+      // on a per-session basis. Only `undefined` (caller omitted the field)
+      // falls through to the SessionManager default (which respects
       // `chroxy start --dangerously-skip-permissions` via #4209).
-      if (skipPermissions === true) msg.skipPermissions = true;
+      if (typeof skipPermissions === 'boolean') msg.skipPermissions = skipPermissions;
       wsSend(socket, msg);
     }
   },
