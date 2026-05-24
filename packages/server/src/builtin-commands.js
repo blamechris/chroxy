@@ -47,12 +47,20 @@ const CLAUDE_COMMON = [
  * Per-provider registry. Keys match provider names registered in providers.js.
  * Unknown providers fall back to an empty list — the picker still shows
  * user/project commands; built-ins just don't surface (safe default).
+ *
+ * Docker variants reuse the Claude registry: `docker-cli` extends `CliSession`
+ * and `docker-sdk` extends `SdkSession` (see docker-session.js / docker-sdk-
+ * session.js), so the in-container CLI/SDK accepts the same `/clear`,
+ * `/compact`, etc. The hidden `docker` alias (registered for backward compat
+ * in providers.js) is intentionally omitted — new sessions never resolve to it.
  */
 export const BUILTIN_COMMANDS = {
   'claude-sdk': CLAUDE_COMMON,
   'claude-cli': CLAUDE_COMMON,
   'claude-tui': CLAUDE_COMMON,
   'claude-byok': CLAUDE_COMMON,
+  'docker-cli': CLAUDE_COMMON,
+  'docker-sdk': CLAUDE_COMMON,
   'codex': [
     { name: 'clear', description: 'Clear conversation history' },
     { name: 'help', description: 'List all commands' },

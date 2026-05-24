@@ -13,7 +13,11 @@ import { BUILTIN_COMMANDS, getBuiltinCommands } from '../src/builtin-commands.js
 
 describe('builtin-commands registry', () => {
   it('exposes a non-empty list for every shipped provider', () => {
-    const expected = ['claude-sdk', 'claude-cli', 'claude-tui', 'claude-byok', 'codex', 'gemini']
+    const expected = [
+      'claude-sdk', 'claude-cli', 'claude-tui', 'claude-byok',
+      'docker-cli', 'docker-sdk',
+      'codex', 'gemini',
+    ]
     for (const name of expected) {
       assert.ok(Array.isArray(BUILTIN_COMMANDS[name]), `missing registry for ${name}`)
       assert.ok(BUILTIN_COMMANDS[name].length > 0, `${name} registry is empty`)
@@ -21,7 +25,9 @@ describe('builtin-commands registry', () => {
   })
 
   it('every Claude provider exposes /clear, /compact, /cost', () => {
-    for (const name of ['claude-sdk', 'claude-cli', 'claude-tui', 'claude-byok']) {
+    // Includes docker-cli / docker-sdk which run Claude Code in a container
+    // — the in-container CLI accepts the same slash commands.
+    for (const name of ['claude-sdk', 'claude-cli', 'claude-tui', 'claude-byok', 'docker-cli', 'docker-sdk']) {
       const names = BUILTIN_COMMANDS[name].map(c => c.name)
       assert.ok(names.includes('clear'), `${name} missing /clear`)
       assert.ok(names.includes('compact'), `${name} missing /compact`)
