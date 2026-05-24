@@ -30,6 +30,7 @@ const APP_COMMANDS: &[&str] = &[
     "stop_voice_input",
     "tile_window",
     "read_clipboard_image",
+    "reveal_in_finder",
 ];
 
 fn main() {

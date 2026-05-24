@@ -423,6 +423,81 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Reveal a path in the OS file manager (Finder on macOS, Explorer on
+/// Windows, the default xdg handler on Linux). Used by the sidebar
+/// right-click context menu (#4045) to jump to a session's cwd.
+///
+/// Selects the path itself (rather than opening its parent and leaving the
+/// item unselected) on macOS and Windows; Linux's xdg-open does not have a
+/// standard "select item" affordance, so we open the directory directly —
+/// if the path is a file, we fall back to its parent dir so xdg doesn't
+/// launch the default app for that file type.
+///
+/// Restricted to the `main` window via `require_main_window` so the
+/// `dashboard` / `qr_popup` capability surface can't silently shell out to
+/// `open` / `explorer` / `xdg-open` (#4045 review).
+#[tauri::command]
+fn reveal_in_finder(window: tauri::Window, path: String) -> Result<(), String> {
+    use std::path::Path;
+    use std::process::Command;
+
+    require_main_window(&window)?;
+
+    if path.is_empty() {
+        return Err("path is empty".into());
+    }
+    if !Path::new(&path).exists() {
+        return Err(format!("path does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| format!("failed to spawn open: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // `explorer /select,<path>` is parsed by explorer.exe itself, NOT
+        // by CommandLineToArgvW — Rust's normal arg quoting would wrap the
+        // whole `/select,...` string in quotes and break the parser. Use
+        // `raw_arg` to bypass quoting and wrap only the path in inner
+        // quotes so paths containing spaces (e.g. `C:\Program Files\...`)
+        // are selected as a single item. See #4045 review.
+        use std::os::windows::process::CommandExt;
+        Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.replace('"', "")))
+            .spawn()
+            .map_err(|e| format!("failed to spawn explorer: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if Path::new(&path).is_dir() {
+            path.clone()
+        } else {
+            Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(path.clone())
+        };
+        Command::new("xdg-open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("failed to spawn xdg-open: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+    {
+        Err("reveal_in_finder is not supported on this platform".into())
+    }
+}
+
 /// Reject an IPC call that did not originate from the `main` window.
 ///
 /// Used by commands that access privileged resources (microphone, clipboard
@@ -577,6 +652,7 @@ pub fn run() {
             stop_voice_input,
             tile_window,
             read_clipboard_image,
+            reveal_in_finder,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))

@@ -92,3 +92,22 @@ export async function setAllowAutoPermissionMode(value: boolean): Promise<void> 
   }
   await invoke('set_allow_auto_permission_mode', { value })
 }
+
+/**
+ * Reveal a path in the OS file manager (Finder / Explorer / xdg-open) via
+ * the `reveal_in_finder` Tauri command (#4045). Used by the sidebar
+ * right-click "Open in Finder" item.
+ *
+ * Tauri-only — returns silently in the browser dashboard so callers can wrap
+ * `isTauri()` for visibility gating without an extra try/catch. Throws when
+ * the Rust side errors (path missing, spawn failed) so the caller can show
+ * a toast.
+ */
+export async function revealInFinder(path: string): Promise<void> {
+  if (!isTauri()) return
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  await invoke('reveal_in_finder', { path })
+}
