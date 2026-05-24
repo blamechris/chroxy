@@ -181,6 +181,16 @@ export {
   formatToolName,
 } from './group-messages'
 
+// #4243: shared tool-input summary helpers — both dashboard and mobile
+// ToolBubble derive the collapsed-preview string from the same
+// field-priority extraction (`command` → `file_path` → `path` →
+// `description`) so the Bash early-abort UX (#4063) lights up
+// identically on web and React Native.
+export {
+  getPartialSummary,
+  getInputSummary,
+} from './tool-summary'
+
 export {
   PASTE_COLLAPSE_CHAR_THRESHOLD,
   PASTE_COLLAPSE_LINE_THRESHOLD,

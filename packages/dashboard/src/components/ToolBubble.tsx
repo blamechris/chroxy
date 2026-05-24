@@ -23,7 +23,7 @@
  * is one short chunk), we pretty-print it for legibility.
  */
 import { useState, useMemo } from 'react'
-import { tryParseCompleteJson } from '@chroxy/store-core'
+import { getInputSummary, getPartialSummary, tryParseCompleteJson } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
@@ -39,33 +39,13 @@ export interface ToolBubbleProps {
   result?: string
 }
 
-/**
- * #4081: extract the most useful single-field preview from a partial-
- * JSON buffer. Mirrors `getInputSummary` below: prefers `command`,
- * `file_path`, `path`, `description` in that order. Returns `null` when
- * the buffer isn't yet valid JSON (mid-stream) so the caller renders
- * the verbatim accumulator instead of the structured preview.
- *
- * #4242: gate the `JSON.parse` behind `tryParseCompleteJson` so we
- * skip the throw on every mid-stream delta (which by definition can't
- * end in `}` or `]` yet).
- */
-function getPartialSummary(partial: string): string | null {
-  const parsed = tryParseCompleteJson(partial) as Record<string, unknown> | undefined
-  if (!parsed || typeof parsed !== 'object') return null
-  const summary = (parsed.command || parsed.file_path || parsed.path || parsed.description || '') as unknown
-  if (typeof summary !== 'string' || !summary) return null
-  return summary.slice(0, 100)
-}
-
-function getInputSummary(input: ToolBubbleProps['input']): string {
-  if (!input) return ''
-  if (typeof input === 'string') return input.slice(0, 100)
-  // Show the most useful field
-  const summary = (input.command || input.file_path || input.path || input.description || '') as string
-  if (typeof summary !== 'string') return JSON.stringify(summary).slice(0, 100)
-  return summary.slice(0, 100)
-}
+// #4243: `getInputSummary` and `getPartialSummary` now live in
+// `@chroxy/store-core` so the mobile ToolBubble can derive the same
+// collapsed-preview from the same field-priority extraction
+// (`command` → `file_path` → `path` → `description`).
+// #4242: `getPartialSummary` routes its parse through
+// `tryParseCompleteJson` internally to amortise N-1 throws across a
+// streaming `tool_input_delta` accumulator.
 
 const capitalize = (word: string) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
 
