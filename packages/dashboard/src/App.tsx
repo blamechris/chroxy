@@ -1582,6 +1582,7 @@ export function App() {
           <StatusBar
             cost={sessionCost ?? undefined}
             context={formatContext(contextUsage)}
+            contextPercent={contextPercent}
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
@@ -1884,6 +1885,8 @@ export function App() {
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        contextWindow={(availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow) ?? DEFAULT_CONTEXT_WINDOW}
       />
 
       {/* Settings panel */}
