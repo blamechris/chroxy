@@ -147,4 +147,90 @@ describe('SlashCommandPicker', () => {
     )
     expect(screen.getByRole('listbox')).toBeInTheDocument()
   })
+
+  // -------------------------------------------------------------------------
+  // #3856 — built-ins must surface alongside user/project skills with a
+  // distinguishing badge and pinned-to-top ordering.
+  // -------------------------------------------------------------------------
+  describe('built-in commands (#3856)', () => {
+    const mixedCommands = [
+      // Server ranks built-ins first, then project, then user. We pass the
+      // commands in that exact order to mirror the real wire payload.
+      { name: 'clear', description: 'Clear conversation history', source: 'builtin' as const },
+      { name: 'compact', description: 'Compact conversation', source: 'builtin' as const },
+      { name: 'model', description: 'Switch model', source: 'builtin' as const },
+      { name: 'commit', description: 'Create a git commit', source: 'project' as const },
+      { name: 'learn', description: 'Capture learnings', source: 'user' as const },
+    ]
+
+    it('renders built-ins alongside user-defined commands', () => {
+      render(
+        <SlashCommandPicker
+          commands={mixedCommands}
+          filter=""
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+        />
+      )
+      // Both kinds present.
+      expect(screen.getByText('/clear')).toBeInTheDocument()
+      expect(screen.getByText('/compact')).toBeInTheDocument()
+      expect(screen.getByText('/model')).toBeInTheDocument()
+      expect(screen.getByText('/commit')).toBeInTheDocument()
+      expect(screen.getByText('/learn')).toBeInTheDocument()
+    })
+
+    it('shows a "built-in" badge on provider-baked rows', () => {
+      render(
+        <SlashCommandPicker
+          commands={mixedCommands}
+          filter=""
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+        />
+      )
+      // One badge per built-in (3 total). Project rows stay badge-less.
+      const badges = screen.getAllByText('built-in')
+      expect(badges.length).toBe(3)
+    })
+
+    it('renders built-ins above user/project entries in DOM order', () => {
+      render(
+        <SlashCommandPicker
+          commands={mixedCommands}
+          filter=""
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+        />
+      )
+      const items = screen.getAllByRole('option')
+      expect(items.length).toBe(5)
+      // First three options are the built-ins, in the order they were passed.
+      expect(items[0]?.textContent).toContain('/clear')
+      expect(items[1]?.textContent).toContain('/compact')
+      expect(items[2]?.textContent).toContain('/model')
+      // Project / user follow.
+      expect(items[3]?.textContent).toContain('/commit')
+      expect(items[4]?.textContent).toContain('/learn')
+    })
+
+    it('filter still narrows across built-ins and user commands', () => {
+      render(
+        <SlashCommandPicker
+          commands={mixedCommands}
+          filter="com"
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+        />
+      )
+      // "com" matches /compact (built-in) by name and /commit (project) by name.
+      // The picker filters on both name and description, but neither /clear
+      // ("Clear conversation history") nor /learn ("Capture learnings")
+      // contains "com" anywhere.
+      expect(screen.getByText('/compact')).toBeInTheDocument()
+      expect(screen.getByText('/commit')).toBeInTheDocument()
+      expect(screen.queryByText('/clear')).not.toBeInTheDocument()
+      expect(screen.queryByText('/learn')).not.toBeInTheDocument()
+    })
+  })
 })

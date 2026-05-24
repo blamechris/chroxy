@@ -2332,6 +2332,14 @@
   flex-shrink: 0;
 }
 
+/* #3856 — distinct chrome for provider-baked commands so the eye reads it
+   as "this comes from your CLI, you can't replace it" vs. user/project. */
+.slash-picker-badge-builtin {
+  color: var(--accent, var(--text-link, #4f8cff));
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
 .slash-picker-empty {
   padding: 12px;
   text-align: center;

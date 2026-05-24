@@ -2,6 +2,8 @@ import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { homedir } from 'os'
 import { join, resolve, normalize, relative } from 'path'
 import { createLogger } from '../logger.js'
+import { getBuiltinCommands } from '../builtin-commands.js'
+import { getProvider } from '../providers.js'
 
 const log = createLogger('ws')
 
@@ -371,10 +373,53 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     }
   }
 
-  /** List available slash commands from project and user command directories */
-  async function listSlashCommands(ws, cwd, sessionId) {
+  /**
+   * List available slash commands. Merges three sources:
+   *
+   *   1. Built-in commands baked into the active provider's CLI/SDK (e.g.
+   *      `/clear`, `/compact`, `/model`) — sourced from builtin-commands.js
+   *      and filtered by the provider's `capabilities` (#3856).
+   *   2. Project-scoped markdown skills in `<cwd>/.claude/commands/`.
+   *   3. User-scoped markdown skills in `~/.claude/commands/`.
+   *
+   * Precedence on name collision is built-in > project > user. Users can't
+   * shadow `/clear` with a markdown file of the same name — keeps the picker
+   * predictable across machines and matches the provider's actual behaviour
+   * (the built-in is what the CLI executes regardless of what we render).
+   *
+   * Sort order: built-ins first (alphabetical), then everything else
+   * (alphabetical). Surfaces the canonical provider commands at the top of
+   * the picker so newcomers see them before their custom skills.
+   *
+   * @param {*} ws - WebSocket client
+   * @param {string|null} cwd - Session working directory (scanned for .claude/commands)
+   * @param {string|null} sessionId - Session ID to include in the response
+   * @param {string|null} [providerName] - Active session's provider id; used
+   *   to look up built-ins. Null/unknown providers skip the built-in merge
+   *   (picker still shows project + user commands).
+   */
+  async function listSlashCommands(ws, cwd, sessionId, providerName = null) {
     const commands = []
     const seen = new Set()
+
+    // 1. Built-ins go in first so they win every name collision.
+    let capabilities = null
+    if (providerName && typeof providerName === 'string') {
+      try {
+        const ProviderClass = getProvider(providerName)
+        capabilities = ProviderClass?.capabilities || null
+      } catch {
+        // Unknown provider — fall through with null capabilities. This is
+        // expected for legacy single-cliSession mode (no provider field) and
+        // for sessions whose provider was unregistered between server starts.
+      }
+    }
+    const builtins = getBuiltinCommands(providerName, capabilities)
+    for (const cmd of builtins) {
+      if (seen.has(cmd.name)) continue
+      seen.add(cmd.name)
+      commands.push(cmd)
+    }
 
     const scanDir = async (dir, source) => {
       try {
@@ -412,7 +457,15 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     }
     await scanDir(join(homedir(), '.claude', 'commands'), 'user')
 
-    commands.sort((a, b) => a.name.localeCompare(b.name))
+    // Stable order: built-ins (alphabetical) first, then project/user
+    // (alphabetical) — using `source` as the primary key. `builtin` sorts
+    // before `project` and `user` lexically.
+    const sourceRank = (s) => (s === 'builtin' ? 0 : s === 'project' ? 1 : 2)
+    commands.sort((a, b) => {
+      const rankDiff = sourceRank(a.source) - sourceRank(b.source)
+      if (rankDiff !== 0) return rankDiff
+      return a.name.localeCompare(b.name)
+    })
 
     const response = { type: 'slash_commands', commands }
     if (sessionId) response.sessionId = sessionId
