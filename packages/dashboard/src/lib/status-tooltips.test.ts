@@ -14,6 +14,7 @@ import {
   contextTooltip,
   modelTooltip,
   agentCountTooltip,
+  tokenChipTooltip,
 } from './status-tooltips'
 
 describe('costTooltip (#3858)', () => {
@@ -121,5 +122,80 @@ describe('contextTooltip rounding (#4204 Copilot review)', () => {
     const t = contextTooltip({ percent: 45, contextSummary: '90k / 200k' })
     expect(t).toContain('45%')
     expect(t).not.toContain('45.0%')
+  })
+})
+
+describe('tokenChipTooltip (#4205)', () => {
+  it('formats in/out/total breakdown in kilo-tokens', () => {
+    const t = tokenChipTooltip({ inputTokens: 1200, outputTokens: 8000 })
+    expect(t).toContain('1.2k input')
+    expect(t).toContain('8k output')
+    expect(t).toContain('9.2k tokens')
+  })
+
+  it('trims trailing .0 for round multiples of 1000', () => {
+    const t = tokenChipTooltip({ inputTokens: 2000, outputTokens: 1000 })
+    expect(t).toContain('2k input')
+    expect(t).toContain('1k output')
+    expect(t).toContain('3k tokens')
+    expect(t).not.toContain('2.0k')
+  })
+
+  it('renders raw counts under 1000 without the "k" suffix', () => {
+    const t = tokenChipTooltip({ inputTokens: 450, outputTokens: 120 })
+    expect(t).toContain('450 input')
+    expect(t).toContain('120 output')
+    expect(t).toContain('570 tokens')
+  })
+
+  it('handles zero output (system / no reply yet)', () => {
+    const t = tokenChipTooltip({ inputTokens: 1500, outputTokens: 0 })
+    expect(t).toContain('1.5k input')
+    expect(t).toContain('0 output')
+    expect(t).toContain('1.5k tokens')
+  })
+})
+
+describe('contextTooltip + token breakdown (#4205)', () => {
+  it('appends the in/out/total breakdown when both token counts are present', () => {
+    const t = contextTooltip({
+      percent: 45,
+      contextSummary: '90k / 200k tokens',
+      inputTokens: 80000,
+      outputTokens: 10000,
+    })
+    // Percent still leads (the chip's main job is "how full?")…
+    expect(t).toContain('45%')
+    // …and the breakdown follows so the chip explains where the
+    // percent came from (the original #3858 acceptance criterion).
+    expect(t).toContain('80k input')
+    expect(t).toContain('10k output')
+    expect(t).toContain('90k tokens')
+  })
+
+  it('omits the breakdown when only inputTokens is known (defensive)', () => {
+    const t = contextTooltip({
+      percent: 45,
+      contextSummary: '90k / 200k tokens',
+      inputTokens: 80000,
+    })
+    expect(t).toContain('45%')
+    // Both must be present together — half a breakdown is misleading.
+    expect(t).not.toContain('input +')
+  })
+
+  it('omits the breakdown when only outputTokens is known (defensive)', () => {
+    const t = contextTooltip({
+      percent: 45,
+      contextSummary: '90k / 200k tokens',
+      outputTokens: 10000,
+    })
+    expect(t).toContain('45%')
+    expect(t).not.toContain('output =')
+  })
+
+  it('still returns the "no usage yet" fallback when ALL inputs are absent', () => {
+    const t = contextTooltip({ percent: null })
+    expect(t).toMatch(/no context usage yet|first turn/i)
   })
 })

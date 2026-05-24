@@ -1591,6 +1591,8 @@ export function App() {
             cost={sessionCost ?? undefined}
             context={formatContext(contextUsage)}
             contextPercent={contextPercent}
+            inputTokens={contextUsage?.inputTokens}
+            outputTokens={contextUsage?.outputTokens}
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
@@ -1889,6 +1891,8 @@ export function App() {
         cost={sessionCost ?? undefined}
         context={formatContext(contextUsage)}
         contextPercent={contextPercent}
+        inputTokens={contextUsage?.inputTokens}
+        outputTokens={contextUsage?.outputTokens}
         isBusy={!isIdle}
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}

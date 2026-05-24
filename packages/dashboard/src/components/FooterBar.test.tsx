@@ -152,6 +152,38 @@ describe('FooterBar', () => {
     })
   })
 
+  // #4205: context chip tooltip now appends the in/out/total token
+  // breakdown when raw counts are wired through from App.tsx
+  // (contextUsage.inputTokens / contextUsage.outputTokens). Closes
+  // the original #3858 acceptance criterion that #4204 left unwired.
+  describe('#4205 — context chip in/out token breakdown', () => {
+    it('appends the breakdown when both inputTokens and outputTokens are passed', () => {
+      const { container } = render(
+        <FooterBar
+          {...baseProps}
+          context="90k tokens"
+          contextPercent={45}
+          inputTokens={80000}
+          outputTokens={10000}
+        />,
+      )
+      const ctx = container.querySelector('.footer-context')
+      const title = ctx!.getAttribute('title') ?? ''
+      expect(title).toContain('45%')
+      expect(title).toContain('80k input')
+      expect(title).toContain('10k output')
+      expect(title).toContain('90k tokens')
+    })
+
+    it('falls back to the plain percent-only tooltip when token counts are absent', () => {
+      const { container } = render(<FooterBar {...baseProps} context="90k tokens" contextPercent={45} />)
+      const ctx = container.querySelector('.footer-context')
+      const title = ctx!.getAttribute('title') ?? ''
+      expect(title).toContain('45%')
+      expect(title).not.toMatch(/input \+/)
+    })
+  })
+
   it('uses singular for 1 agent', () => {
     render(<FooterBar {...baseProps} agentCount={1} />)
     expect(screen.getByText('1 agent')).toBeInTheDocument()
