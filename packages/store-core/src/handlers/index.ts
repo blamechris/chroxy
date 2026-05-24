@@ -141,6 +141,13 @@ export function handlePermissionModeChanged(msg: Record<string, unknown>): { mod
 export interface PermissionMode {
   id: string
   label: string
+  /**
+   * #4019: optional human-readable explainer for the mode (e.g. "Auto-approve
+   * every tool call without prompting"). The server's PERMISSION_MODES table
+   * exports a description for every mode; we keep the field optional here so
+   * older servers that pre-date the description plumbing still parse cleanly.
+   */
+  description?: string
 }
 
 /** Validate and extract permission modes from an `available_permission_modes` message. */
@@ -148,13 +155,22 @@ export function handleAvailablePermissionModes(
   msg: Record<string, unknown>,
 ): PermissionMode[] | null {
   if (!Array.isArray(msg.modes)) return null
-  return (msg.modes as unknown[]).filter(
-    (m): m is PermissionMode =>
-      typeof m === 'object' &&
-      m !== null &&
-      typeof (m as { id: unknown }).id === 'string' &&
-      typeof (m as { label: unknown }).label === 'string',
-  )
+  return (msg.modes as unknown[])
+    .filter(
+      (m): m is { id: string; label: string; description?: unknown } =>
+        typeof m === 'object' &&
+        m !== null &&
+        typeof (m as { id: unknown }).id === 'string' &&
+        typeof (m as { label: unknown }).label === 'string',
+    )
+    .map((m) => {
+      const out: PermissionMode = { id: m.id, label: m.label }
+      // #4019: pass through description when present + string-typed. Non-
+      // strings (number, object, etc.) get dropped at the type boundary
+      // rather than poisoning the typed shape downstream consumers see.
+      if (typeof m.description === 'string') out.description = m.description
+      return out
+    })
 }
 
 // ---------------------------------------------------------------------------

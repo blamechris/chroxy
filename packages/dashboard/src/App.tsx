@@ -234,6 +234,14 @@ export function App() {
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
   const serverVersion = useConnectionStore(s => s.serverVersion)
   const sessionCwd = useConnectionStore(s => s.sessionCwd)
+  // #4029: FooterBar cwd was static — set once at auth_ok and never updated
+  // on tab switch. Subscribe to the active session's cwd from the sessions
+  // list so the footer tracks the selected tab. Falls back to sessionCwd
+  // (the initial auth_ok value) when no sessions list has landed yet,
+  // then to undefined.
+  const activeSessionCwd = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.cwd ?? null,
+  )
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
   const sessionStates = useConnectionStore(s => s.sessionStates)
@@ -1582,6 +1590,7 @@ export function App() {
           <StatusBar
             cost={sessionCost ?? undefined}
             context={formatContext(contextUsage)}
+            contextPercent={contextPercent}
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
@@ -1875,7 +1884,7 @@ export function App() {
         serverPhase={serverPhase}
         tunnelProgress={tunnelProgress}
         serverVersion={serverVersion}
-        cwd={sessionCwd ?? undefined}
+        cwd={activeSessionCwd ?? sessionCwd ?? undefined}
         model={activeModel || undefined}
         cost={sessionCost ?? undefined}
         context={formatContext(contextUsage)}
@@ -1884,6 +1893,8 @@ export function App() {
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        contextWindow={(availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow) ?? DEFAULT_CONTEXT_WINDOW}
       />
 
       {/* Settings panel */}
