@@ -107,4 +107,37 @@ describe('StatusBar', () => {
     expect(badge.getAttribute('data-provider')).toBe('other')
     expect(badge.getAttribute('title')).toContain('Google')
   })
+
+  // #3858: every read-only status chip carries an explanatory tooltip
+  // (sourced from `lib/status-tooltips.ts`) so users understand what the
+  // number means — especially context %, which looks alarming at 100%
+  // red but is per-turn, not cumulative.
+  describe('#3858 status-chip tooltips', () => {
+    it('cost chip carries the costTooltip text + aria-label', () => {
+      const { container } = render(<StatusBar cost={0.0234} />)
+      const cost = container.querySelector('.status-cost')
+      expect(cost!.getAttribute('title')).toMatch(/total session cost/i)
+      expect(cost!.getAttribute('aria-label')).toMatch(/total session cost/i)
+    })
+
+    it('cost chip flags client-estimated value for Codex', () => {
+      const { container } = render(<StatusBar cost={0.5} provider="codex" />)
+      expect(container.querySelector('.status-cost')!.getAttribute('title'))
+        .toMatch(/estimated client-side/i)
+    })
+
+    it('context chip tooltip explicitly says per-turn and includes the percent', () => {
+      const { container } = render(<StatusBar context="90k tokens" contextPercent={45} />)
+      const ctx = container.querySelector('.status-context')
+      expect(ctx!.getAttribute('title')).toMatch(/per[- ]turn|most recent turn/i)
+      expect(ctx!.getAttribute('title')).toContain('45%')
+    })
+
+    it('agent badge carries a singular-aware tooltip + aria-label', () => {
+      const { container } = render(<StatusBar agentCount={1} />)
+      const b = container.querySelector('.agent-badge')
+      expect(b!.getAttribute('title')).toMatch(/1 background agent\b/)
+      expect(b!.getAttribute('aria-label')).toMatch(/1 background agent\b/)
+    })
+  })
 })
