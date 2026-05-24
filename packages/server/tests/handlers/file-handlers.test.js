@@ -205,6 +205,36 @@ describe('file-handlers', () => {
       assert.equal(callSid, 's1')
     })
 
+    it('list_slash_commands forwards the session provider (#3856)', () => {
+      const sessions = new Map()
+      sessions.set('s1', {
+        session: createMockSession(),
+        name: 'S',
+        cwd: '/proj',
+        provider: 'claude-sdk',
+      })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      fileHandlers.list_slash_commands(makeWs(), client, { sessionId: 's1' }, ctx)
+
+      const [, , , callProvider] = ctx.fileOps.listSlashCommands.lastCall
+      assert.equal(callProvider, 'claude-sdk')
+    })
+
+    it('list_slash_commands passes null provider when entry has none (#3856)', () => {
+      // Legacy single-cliSession mode: resolveSession returns null, so no
+      // provider is available. Built-ins shouldn't surface; project/user
+      // commands still do.
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      fileHandlers.list_slash_commands(makeWs(), client, {}, ctx)
+
+      const [, , , callProvider] = ctx.fileOps.listSlashCommands.lastCall
+      assert.equal(callProvider, null)
+    })
+
     it('list_agents passes cwd and session id', () => {
       const sessions = new Map()
       sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/proj' })

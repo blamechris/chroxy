@@ -298,7 +298,15 @@ export interface SearchResult {
 export interface SlashCommand {
   name: string;
   description: string;
-  source: 'project' | 'user';
+  /**
+   * Origin of the command.
+   * - `builtin`: provider-baked (e.g. `/clear`, `/compact`, `/model`) — see
+   *   packages/server/src/builtin-commands.js. Always rendered with a "built-in" badge
+   *   and pinned above project/user entries in the picker (#3856).
+   * - `project`: markdown file in `<cwd>/.claude/commands/`.
+   * - `user`: markdown file in `~/.claude/commands/`.
+   */
+  source: 'builtin' | 'project' | 'user';
 }
 
 // Git result element types (#3132). Concrete shapes used by the dashboard

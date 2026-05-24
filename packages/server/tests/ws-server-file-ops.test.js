@@ -606,6 +606,95 @@ describe('slash commands', () => {
       rmSync(tmpDir, { recursive: true, force: true })
     }
   })
+
+  // -------------------------------------------------------------------------
+  // #3856 — built-in commands surface in the picker alongside .md skills
+  // -------------------------------------------------------------------------
+  it('merges provider built-ins ahead of project skills (#3856)', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+    const { EventEmitter } = await import('events')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-slash-builtins-${Date.now()}`)
+    const cmdDir = join(tmpDir, '.claude', 'commands')
+    mkdirSync(cmdDir, { recursive: true })
+    // A user-authored skill that should ALSO appear, but ranked AFTER built-ins.
+    writeFileSync(join(cmdDir, 'deploy.md'), '# /deploy\n\nDeploy to production.\n')
+    // A name collision with a built-in (`/clear`). The built-in must win —
+    // a user can't shadow a provider command (would mismatch what the CLI
+    // actually does downstream).
+    writeFileSync(join(cmdDir, 'clear.md'), '# /clear\n\nUser-defined clear that should be SHADOWED.\n')
+
+    try {
+      const manager = new EventEmitter()
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      const sessionsMap = new Map()
+      sessionsMap.set('sess-1', {
+        session: mockSession,
+        name: 'Test',
+        cwd: tmpDir,
+        type: 'cli',
+        isBusy: false,
+        // The wired-through provider id — listSlashCommands keys built-ins off this.
+        provider: 'claude-sdk',
+      })
+      manager.getSession = (id) => sessionsMap.get(id)
+      manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
+      manager.getHistory = () => []
+      manager.recordUserInput = () => {}
+      manager.getFullHistoryAsync = async () => []
+      manager.isBudgetPaused = () => false
+      Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        sessionManager: manager,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_slash_commands' })
+      const result = await waitForMessage(messages, 'slash_commands', 2000)
+
+      assert.ok(result, 'Should receive slash_commands')
+      assert.ok(Array.isArray(result.commands))
+
+      const byName = new Map(result.commands.map(c => [c.name, c]))
+
+      // Built-ins surface.
+      assert.ok(byName.has('clear'), 'should include built-in /clear')
+      assert.ok(byName.has('compact'), 'should include built-in /compact')
+      assert.ok(byName.has('model'), 'should include built-in /model (sdk supports modelSwitch)')
+      assert.equal(byName.get('clear').source, 'builtin')
+
+      // Project skill still surfaces.
+      assert.ok(byName.has('deploy'), 'should include user-authored /deploy')
+      assert.equal(byName.get('deploy').source, 'project')
+
+      // Built-in wins the /clear collision (only one entry, sourced as builtin).
+      const clearEntries = result.commands.filter(c => c.name === 'clear')
+      assert.equal(clearEntries.length, 1, 'no duplicate /clear entries')
+      assert.equal(clearEntries[0].source, 'builtin', 'builtin /clear shadows the user .md')
+
+      // Order: every built-in appears before every project/user entry.
+      const builtinIdx = result.commands.findIndex(c => c.source === 'builtin')
+      const projectIdx = result.commands.findIndex(c => c.source === 'project')
+      assert.ok(builtinIdx >= 0 && projectIdx >= 0)
+      assert.ok(builtinIdx < projectIdx, 'built-ins should be ranked above project skills')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

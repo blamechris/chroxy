@@ -65,7 +65,12 @@ function handleGitCommit(ws, client, msg, ctx) {
 function handleListSlashCommands(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.listSlashCommands(ws, entry?.cwd || null, sid)
+  // #3856: pass the session's provider so listSlashCommands can merge in
+  // provider-specific built-ins (`/clear`, `/compact`, `/model`, etc.).
+  // Falls back to null in legacy single-cliSession mode — built-ins simply
+  // don't surface there (safe default; project/user .md skills still work).
+  const provider = entry?.provider || null
+  ctx.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider)
 }
 
 function handleListAgents(ws, client, msg, ctx) {
