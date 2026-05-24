@@ -34,7 +34,14 @@ function fakeStream(events, finalMessage) {
 
 function captureEvents(session) {
   const captured = []
-  const known = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'result', 'error', 'tool_start', 'tool_result']
+  const known = [
+    'ready', 'stream_start', 'stream_delta', 'stream_end', 'result', 'error',
+    'tool_start', 'tool_result',
+    // #4080: chroxy event re-emitted from the SDK's input_json_delta so
+    // the dashboard tool-call bubble can live-preview the model's
+    // evolving tool input (especially valuable for Bash early-abort).
+    'tool_input_delta',
+  ]
   for (const name of known) {
     session.on(name, (payload) => captured.push({ name, payload }))
   }
@@ -835,6 +842,236 @@ describe('ClaudeByokSession', () => {
       assert.ok(errorEvent, 'should warn about dropped attachments')
       const result = captured.find((e) => e.name === 'result')
       assert.ok(result, 'turn should still complete with text-only prompt')
+      await session.destroy()
+    })
+  })
+
+  describe('tool_input_delta event (#4080)', () => {
+    // The Anthropic SDK streams input JSON for each tool_use block as
+    // `input_json_delta` content_block_delta events. Pre-#4080
+    // byok-session no-op'd these, so the dashboard tool-call bubble
+    // showed nothing until finalMessage() resolved — defeating the
+    // value of streaming for long tool inputs (Bash command preview
+    // is the canonical case where the user wants to see "rm -rf"
+    // forming and abort BEFORE the round finishes).
+    //
+    // The translator emits `tool_input_delta` carrying ONLY the block
+    // index. byok-session is the source of truth for index→toolUseId
+    // (populated on content_block_start with type=tool_use, cleared
+    // on content_block_stop), per the #4059 translator-stays-pure
+    // boundary. These tests pin the wire shape and the surrounding
+    // contract.
+
+    it('emits 3 tool_input_delta events with matching toolUseId and concatenable partialJson', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_42', name: 'Read', input: {} } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_pa' } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'th":"/tm' } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'p/x"}' } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 5, output_tokens: 8 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'tool_use', id: 'tu_42', name: 'Read', input: { file_path: '/tmp/x' } }],
+              usage: { input_tokens: 5, output_tokens: 8 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const deltas = captured.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(deltas.length, 3, 'three input_json_delta chunks -> three tool_input_delta events')
+      // All deltas must carry the SAME toolUseId resolved from the
+      // index→toolUseId map seeded on content_block_start.
+      for (const d of deltas) {
+        assert.equal(d.payload.toolUseId, 'tu_42', 'toolUseId from the index map')
+        assert.equal(typeof d.payload.messageId, 'string', 'messageId is set')
+        assert.equal(typeof d.payload.partialJson, 'string', 'partialJson is a string')
+      }
+      // Concatenating the partials must reconstruct the input JSON
+      // the dashboard would parse on completion — the on-the-wire
+      // chunking is split arbitrarily by the SDK but the BYTES must
+      // be preserved in order.
+      const joined = deltas.map((d) => d.payload.partialJson).join('')
+      assert.equal(joined, '{"file_path":"/tmp/x"}', 'partials concatenate to the full input JSON')
+      await session.destroy()
+    })
+
+    it('does NOT emit tool_input_delta for non-tool-use content blocks (text or thinking)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+              { type: 'content_block_stop', index: 0 },
+              // A delta for an index we never saw a tool_use start for
+              // — translator emits tool_input_delta, but byok-session
+              // must drop it because the index→toolUseId map is empty
+              // for this index.
+              { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: 'orphan' } },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'hi' }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('hi')
+
+      const deltas = captured.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(deltas.length, 0, 'no tool_input_delta for text-only turns or unmapped indices')
+      // Sanity: the text_delta still flowed through stream_delta so
+      // we haven't broken the happy path while adding the gate.
+      const streamDeltas = captured.filter((e) => e.name === 'stream_delta')
+      assert.equal(streamDeltas.length, 1, 'text delta still surfaces on stream_delta')
+      await session.destroy()
+    })
+
+    it('suppresses tool_input_delta while a permission prompt is pending for the same toolUseId', async () => {
+      // Defensive-but-load-bearing: the issue's acceptance criterion
+      // calls out the flicker case. Today permission requests fire
+      // AFTER the stream completes (so the same toolUseId can't have
+      // a delta racing a pending permission within ONE round), but
+      // the gate must exist for any future mid-stream-permission
+      // refactor or a multi-round flow where the same toolUseId is
+      // re-streamed. Force the pending state by hand and verify the
+      // delta is dropped.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_99', name: 'Bash', input: {} } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"rm -rf"}' } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'tool_use', id: 'tu_99', name: 'Bash', input: { command: 'rm -rf' } }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+        },
+      }
+      // Pre-seed the pending set so the delta hits the gate.
+      session._pendingPermissionToolUseIds.add('tu_99')
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('do it')
+      const deltas = captured.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(deltas.length, 0, 'gate suppresses tool_input_delta while permission is pending')
+      await session.destroy()
+    })
+
+    it('clears the index→toolUseId map on the error path so stale entries do not leak into the next turn', async () => {
+      // Copilot review on #4233: pre-fix the per-round clear lived
+      // ONLY after finalMessage() resolved. An iteration /
+      // finalMessage() throw skipped it, so a stream that errored
+      // mid-tool-stream left index N → tu_X stuck in the map, and the
+      // NEXT turn's tool_input_delta for index N would resolve to the
+      // previous turn's tu_X — silently mis-tagging. Verify the
+      // finally block drains the map regardless of exit path.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () => ({
+            // eslint-disable-next-line require-yield
+            async *[Symbol.asyncIterator]() {
+              // Yield a tool_use start so the map gets populated,
+              // then throw — finalMessage() never runs, so the
+              // per-round clear after it never fires.
+              yield { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_pre_err', name: 'Read', input: {} } }
+              throw new Error('simulated mid-stream failure')
+            },
+            async finalMessage() {
+              throw new Error('finalMessage not reached')
+            },
+          }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('this turn will fail')
+      // The error path emits an error event and ends the turn.
+      const errors = captured.filter((e) => e.name === 'error')
+      assert.ok(errors.length >= 1, 'error event surfaces on the failure path')
+      // The map MUST be empty before the next turn starts. Reading
+      // private state is acceptable here because the alternative
+      // (running a SECOND fake stream and asserting no stale toolUseId
+      // leaks through) duplicates the existing per-round-clear test
+      // without proving the finally path actually ran.
+      assert.equal(session._streamingIndexToToolUseId.size, 0,
+        'finally must clear the map even when the stream throws')
+      await session.destroy()
+    })
+
+    it('clears the index→toolUseId map between rounds so a later index does not pick up a stale toolUseId', async () => {
+      // Round 1: tool_use at index 0 → tu_a, content_block_stop fires
+      // → map entry deleted. But the defensive clear after
+      // finalMessage() is the belt-and-suspenders: if a future SDK
+      // skipped content_block_stop, round 2's index 0 must NOT
+      // resolve to tu_a from round 1. Round 2's tool_use at index 0
+      // is tu_b, and its delta must carry tu_b.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let round = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            round += 1
+            if (round === 1) {
+              return fakeStream([
+                { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_a', name: 'Read', input: {} } },
+                { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/a"}' } },
+                // NOTE: deliberately omit content_block_stop here to
+                // force the finalMessage()-time clear (a real SDK
+                // would always emit stop; this is the defensive case
+                // the per-round clear was added for).
+                { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+              ], {
+                stop_reason: 'tool_use',
+                content: [{ type: 'tool_use', id: 'tu_a', name: 'Read', input: { file_path: '/a' } }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              })
+            }
+            return fakeStream([
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_b', name: 'Read', input: {} } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/b"}' } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'done' }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            })
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+      const deltas = captured.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(deltas.length, 2, 'one delta per round')
+      assert.equal(deltas[0].payload.toolUseId, 'tu_a', 'round 1 delta carries round-1 toolUseId')
+      assert.equal(deltas[1].payload.toolUseId, 'tu_b',
+        'round 2 delta MUST carry tu_b — not tu_a leaked from a missing content_block_stop')
       await session.destroy()
     })
   })
