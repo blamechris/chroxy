@@ -23,7 +23,7 @@
  * is one short chunk), we pretty-print it for legibility.
  */
 import { useState, useMemo } from 'react'
-import { getInputSummary, getPartialSummary } from '@chroxy/store-core'
+import { getInputSummary, getPartialSummary, tryParseCompleteJson } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
