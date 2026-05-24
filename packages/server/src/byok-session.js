@@ -747,6 +747,14 @@ export class ClaudeByokSession extends BaseSession {
     }
     this._history = []
     this._todos.clear()
+    // #4153: consistency with the existing _history/_todos teardown so
+    // every in-memory collection on this session is reset at destroy.
+    // Neither is a leak risk (both are bounded + small) — but if anything
+    // outside the session retains a reference (debugger, future export
+    // feature, tests that capture the instance) these collections would
+    // otherwise outlive the session.
+    this._cwdRealCache.clear()
+    this._pricingWarnedModels.clear()
     this._client = null
     this.removeAllListeners()
   }

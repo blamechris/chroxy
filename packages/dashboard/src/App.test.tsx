@@ -303,6 +303,36 @@ describe('App', () => {
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 
+  // #4029: FooterBar cwd was static — set once at auth_ok and never updated
+  // on tab switch. This regression test renders two sessions with different
+  // cwds, asserts the footer tracks the active session's cwd, then flips
+  // the active id and asserts the footer updates.
+  it('FooterBar cwd updates when activeSessionId changes (#4029)', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        { sessionId: 's1', name: 'Alpha', cwd: '/home/me/repo-alpha', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+        { sessionId: 's2', name: 'Beta', cwd: '/var/www/repo-beta', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+      sessionCwd: '/initial/auth_ok/cwd',
+    }
+    const { rerender } = render(<App />)
+    // The footer span has the full cwd in its `title` attribute; the visible
+    // text is abbreviated to the last two segments. Assert via title so the
+    // assertion isn't coupled to the abbreviation rules.
+    const footerBar = screen.getByTestId('footer-bar')
+    expect(within(footerBar).getByTitle('/home/me/repo-alpha')).toBeInTheDocument()
+    // Flip active id — same sessions list, just a different selection.
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    const footerBarAfter = screen.getByTestId('footer-bar')
+    expect(within(footerBarAfter).getByTitle('/var/www/repo-beta')).toBeInTheDocument()
+    // Pre-#4029 the initial sessionCwd would have leaked through after the
+    // switch — assert it's gone so a future revert can't pass this test.
+    expect(within(footerBarAfter).queryByTitle('/initial/auth_ok/cwd')).not.toBeInTheDocument()
+  })
+
   describe('Model selector onChange', () => {
     const modelsState = {
       connectionPhase: 'connected' as const,
