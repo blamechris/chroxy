@@ -284,10 +284,16 @@ describe('ChatSettingsDropdown', () => {
         availablePermissionModes: MIXED,
         permissionMode: 'approve',
       })
-      const permSelect = container.querySelector('select[data-kind="permission"]')!
-      const options = Array.from(permSelect.querySelectorAll('option')) as HTMLOptionElement[]
+      const permSelect = container.querySelector('select[data-kind="permission"]')
+      expect(permSelect).toBeTruthy()
+      const options = Array.from(permSelect!.querySelectorAll('option')) as HTMLOptionElement[]
+      expect(options).toHaveLength(MIXED.length)
 
-      const byValue = (v: string) => options.find(o => o.value === v)!
+      const byValue = (v: string) => {
+        const opt = options.find(o => o.value === v)
+        expect(opt, `option[value="${v}"] missing`).toBeTruthy()
+        return opt!
+      }
       expect(byValue('approve').getAttribute('title')).toBe(
         'Default. Each tool call gates on your approval.',
       )
