@@ -24,10 +24,12 @@
  * The `content_block_stop` event we emit carries only `{ kind, index }` — NOT
  * the block type (text / tool_use / thinking). PR 2 of the BYOK epic (#4047)
  * needs to know on `content_block_stop` whether the just-finished block was a
- * tool_use (so it can parse the accumulated `partial_json` deltas and dispatch
- * the tool) versus a text block (no action). The consumer (`byok-session.js`)
- * is expected to maintain its own `Map<index, blockType>` populated on
- * `content_block_start` and queried on `content_block_stop`.
+ * tool_use (so it can parse the accumulated `tool_input_delta.partial` strings
+ * and dispatch the tool) versus a text or thinking block (no action — those
+ * are already streamed live via `stream_delta` / `thinking_delta`). The
+ * consumer (`byok-session.js`) is expected to maintain its own
+ * `Map<index, blockType>` populated on `content_block_start` and queried on
+ * `content_block_stop`.
  *
  * Rationale for keeping this OUT of the translator:
  * - **Purity is the translator's best property.** Adding stateful tracking
