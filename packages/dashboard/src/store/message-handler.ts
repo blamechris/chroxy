@@ -94,6 +94,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
+import { ServerByokCredentialsStatusSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -2654,14 +2655,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // and the Remove button are both gated on it. Hand-picking fields
       // here silently dropped it before (caught by agent-review on
       // PR #4174).
-      const payload = msg as Record<string, unknown>;
+      // #4141: validate the wire payload via the protocol Zod schema
+      // instead of raw `as` casts. A malformed server can no longer
+      // store `status: 'unknown'` into the store; safeParse failure
+      // logs a warn and leaves the store unchanged.
+      const parsed = ServerByokCredentialsStatusSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('byok_credentials_status: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const payload = parsed.data;
       set({
         byokCredentialsStatus: {
-          status: payload.status as 'set' | 'missing',
-          source: payload.source as 'env' | 'file' | 'none',
-          masked: payload.masked as string | undefined,
-          reason: payload.reason as string | undefined,
-          fileExists: payload.fileExists as boolean | undefined,
+          status: payload.status,
+          source: payload.source,
+          masked: payload.masked,
+          reason: payload.reason,
+          fileExists: payload.fileExists,
         },
       });
       break;
