@@ -3365,6 +3365,31 @@ export function handleToolResult(
 // tool_input_delta
 // ---------------------------------------------------------------------------
 
+/**
+ * Upper bound on the size of `toolInputPartial` after concatenation,
+ * measured in JavaScript `String.length` units (UTF-16 code units, NOT
+ * bytes — a non-BMP character costs two code units). Defence-in-depth
+ * backstop against an adversarial or runaway server `tool_input_delta`
+ * stream ballooning client `messages` state — the wire schema
+ * (`ServerToolInputDeltaSchema.partialJson`) declares no max length.
+ * 1 MiB code units is well above any realistic Anthropic SDK tool
+ * input (typically tens of KB at most) while small enough to bound
+ * per-bubble memory.
+ *
+ * Note: the stored string can exceed this cap by exactly
+ * `'...[truncated]'.length` (14 code units) — the cap bounds the
+ * payload portion, and the marker is appended once on truncation. See
+ * issue #4241.
+ */
+export const MAX_TOOL_INPUT_PARTIAL_LEN = 1024 * 1024
+
+/**
+ * Literal appended to `toolInputPartial` exactly once when the cap is
+ * hit. Renderers may detect the suffix to show a "truncated" indicator;
+ * the marker is also a UX breadcrumb when reading the buffer raw.
+ */
+const TOOL_INPUT_PARTIAL_TRUNCATED_MARKER = '...[truncated]'
+
 /** Result returned from {@link handleToolInputDelta} when the message is well-formed. */
 export interface ToolInputDeltaPayload {
   /** Resolved target session, or null when no session context exists. */
@@ -3406,6 +3431,15 @@ export interface ToolInputDeltaPayload {
  * error. Once `tool_result` arrives, the bubble's render switches to
  * the standard result view; `toolInputPartial` is kept for
  * history/replay but no longer drives the active display.
+ *
+ * The payload portion of the concatenated buffer is capped at
+ * {@link MAX_TOOL_INPUT_PARTIAL_LEN} code units (defence-in-depth —
+ * see #4241). When a chunk would push past the cap, the payload is
+ * sliced to the cap and `...[truncated]` is appended exactly once —
+ * the final stored string is therefore at most
+ * `MAX_TOOL_INPUT_PARTIAL_LEN + '...[truncated]'.length` code units.
+ * Subsequent deltas land on an already-truncated buffer and are
+ * dropped silently, leaving the marker as the terminal state.
  */
 export function handleToolInputDelta(
   msg: Record<string, unknown>,
@@ -3427,11 +3461,37 @@ export function handleToolInputDelta(
         (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
       )
       if (idx === -1) return messages
+      const existing = messages[idx]!
+      const prev = existing.toolInputPartial || ''
+      // Idempotent terminal state: once truncated, further deltas are
+      // dropped silently (matches the "silent drop on bad input" pattern
+      // already used by the malformed-payload guards above). Checked
+      // before cloning so post-truncation deltas stay O(1) and allocation
+      // free — no spread of `messages`, no message-object copy.
+      if (prev.endsWith(TOOL_INPUT_PARTIAL_TRUNCATED_MARKER)) {
+        return messages
+      }
+      // Length-first check avoids briefly allocating a giant string for
+      // the worst-case adversarial input (e.g. a single 100 MB chunk).
+      let next: string
+      if (prev.length + partialJson.length > MAX_TOOL_INPUT_PARTIAL_LEN) {
+        // `Math.max(0, headroom)` defends against a `prev` that is
+        // already at or above the cap (e.g. rehydrated from persisted
+        // state under an older schema where the cap differed) — a
+        // negative slice index would otherwise take from the end of
+        // `partialJson` and silently corrupt the buffer.
+        const headroom = MAX_TOOL_INPUT_PARTIAL_LEN - prev.length
+        next =
+          prev +
+          partialJson.slice(0, Math.max(0, headroom)) +
+          TOOL_INPUT_PARTIAL_TRUNCATED_MARKER
+      } else {
+        next = prev + partialJson
+      }
       const updated = [...messages]
-      const existing = updated[idx]!
       updated[idx] = {
         ...existing,
-        toolInputPartial: (existing.toolInputPartial || '') + partialJson,
+        toolInputPartial: next,
       }
       return updated
     },

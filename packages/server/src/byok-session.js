@@ -372,12 +372,20 @@ export class ClaudeByokSession extends BaseSession {
               break
             case 'tool_start':
               // Surface the tool_use opening to the dashboard so it can
-              // render a tool-call bubble. Matches sdk-session.js custom
-              // event names.
+              // render a tool-call bubble. Matches sdk-session.js /
+              // cli-session.js shape — event-normalizer reads `tool`
+              // and `input` (ServerToolStartSchema requires `tool` as a
+              // non-null string). Pre-#4240 this emitted `toolName`,
+              // which the normalizer silently dropped, so the dashboard
+              // saw `tool: undefined` and rendered a generic bubble.
+              // `input` is null here because the model streams the
+              // tool's JSON input via subsequent input_json_delta
+              // events; tool_input_delta carries the partials.
               this.emit('tool_start', {
                 messageId,
                 toolUseId: t.toolUseId,
-                toolName: t.toolName,
+                tool: t.toolName,
+                input: null,
               })
               // #4080: track index→toolUseId so the upcoming
               // tool_input_delta events (which only carry the index)
