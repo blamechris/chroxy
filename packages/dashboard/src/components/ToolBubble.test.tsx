@@ -3,11 +3,14 @@
  *
  * Tests keyboard accessibility, ARIA attributes, and expand/collapse behavior.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ToolBubble } from './ToolBubble'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
 
 describe('ToolBubble', () => {
   const baseProps = {
@@ -244,6 +247,43 @@ describe('ToolBubble', () => {
         />,
       )
       expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('final-cmd')
+    })
+
+    // -------------------------------------------------------------------------
+    // #4242: amortise JSON.parse — the structural gate must short-circuit
+    // before the parse runs for mid-stream chunks. Pin both call sites
+    // (collapsed-summary path AND expanded partial-preview path).
+    // -------------------------------------------------------------------------
+    it('does not call JSON.parse for a mid-stream inputPartial (collapsed)', () => {
+      const parseSpy = vi.spyOn(JSON, 'parse')
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-perf-collapsed"
+          inputPartial='{"command":"rm -rf /tmp/'
+        />,
+      )
+      // Mid-stream buffer cannot end in `}` — the gate must reject before
+      // JSON.parse is called by the collapsed-summary path.
+      expect(parseSpy).not.toHaveBeenCalled()
+    })
+
+    it('does not call JSON.parse for a mid-stream inputPartial (expanded preview)', () => {
+      const parseSpy = vi.spyOn(JSON, 'parse')
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-perf-expanded"
+          inputPartial='{"command":"rm -rf /tmp/'
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      // Both code paths (getPartialSummary + partialPreview) must skip
+      // the parse on the mid-stream buffer.
+      expect(parseSpy).not.toHaveBeenCalled()
+      // Verbatim fallback still renders.
+      const preview = screen.getByTestId('tool-input-partial-tu-perf-expanded')
+      expect(preview).toHaveAttribute('data-parsed', 'false')
     })
   })
 })

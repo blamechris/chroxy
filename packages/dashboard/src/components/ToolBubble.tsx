@@ -23,6 +23,7 @@
  * is one short chunk), we pretty-print it for legibility.
  */
 import { useState, useMemo } from 'react'
+import { tryParseCompleteJson } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
@@ -44,17 +45,17 @@ export interface ToolBubbleProps {
  * `file_path`, `path`, `description` in that order. Returns `null` when
  * the buffer isn't yet valid JSON (mid-stream) so the caller renders
  * the verbatim accumulator instead of the structured preview.
+ *
+ * #4242: gate the `JSON.parse` behind `tryParseCompleteJson` so we
+ * skip the throw on every mid-stream delta (which by definition can't
+ * end in `}` or `]` yet).
  */
 function getPartialSummary(partial: string): string | null {
-  try {
-    const parsed = JSON.parse(partial) as Record<string, unknown>
-    if (!parsed || typeof parsed !== 'object') return null
-    const summary = (parsed.command || parsed.file_path || parsed.path || parsed.description || '') as unknown
-    if (typeof summary !== 'string' || !summary) return null
-    return summary.slice(0, 100)
-  } catch {
-    return null
-  }
+  const parsed = tryParseCompleteJson(partial) as Record<string, unknown> | undefined
+  if (!parsed || typeof parsed !== 'object') return null
+  const summary = (parsed.command || parsed.file_path || parsed.path || parsed.description || '') as unknown
+  if (typeof summary !== 'string' || !summary) return null
+  return summary.slice(0, 100)
 }
 
 function getInputSummary(input: ToolBubbleProps['input']): string {
@@ -118,14 +119,17 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }:
   // back to verbatim text on parse failure. Only shown when expanded
   // AND we have no result yet — once `result` arrives the standard
   // result panel takes over.
+  //
+  // #4242: gate the parse behind `tryParseCompleteJson` — a chunk
+  // whose tail isn't `}` or `]` can't be a complete document, so we
+  // skip the parse + throw entirely on the N-1 mid-stream deltas.
   const partialPreview = useMemo(() => {
     if (!expanded || result || !inputPartial) return null
-    try {
-      const parsed = JSON.parse(inputPartial)
+    const parsed = tryParseCompleteJson(inputPartial)
+    if (parsed !== undefined) {
       return { text: JSON.stringify(parsed, null, 2), parsed: true }
-    } catch {
-      return { text: inputPartial, parsed: false }
     }
+    return { text: inputPartial, parsed: false }
   }, [expanded, result, inputPartial])
 
   const toggle = () => setExpanded(prev => !prev)
