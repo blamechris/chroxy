@@ -342,8 +342,60 @@ EOF
   fi
 fi
 
-# Regenerate Cargo.lock
-(cd "$ROOT/packages/desktop/src-tauri" && cargo generate-lockfile 2>/dev/null)
+# Sync Cargo.lock with the new Cargo.toml version.
+#
+# CI runs `cargo test --locked`, which refuses to regenerate the lockfile
+# and fails when the `chroxy-desktop` entry doesn't match Cargo.toml. The
+# bump must therefore update Cargo.lock atomically with Cargo.toml — done
+# by hand for v0.8.3 in commit 43889e55e before this guard existed (#3864).
+#
+# Strategy: prefer a surgical `cargo update -p chroxy-desktop --precise`
+# so only the workspace stanza moves and unrelated dependency versions
+# stay pinned. Fall back to an awk-in-place edit of the single
+# `version = "…"` line under [[package]] name = "chroxy-desktop" when
+# cargo isn't on PATH (release machines without a Rust toolchain) — this
+# mirrors how the JS lockfiles above are patched without running npm.
+#
+# Both paths verify the lockfile lands on $NEW_VERSION; a silent miss
+# would re-introduce the CI break this guard exists to prevent.
+CARGO_LOCK="$ROOT/packages/desktop/src-tauri/Cargo.lock"
+if command -v cargo >/dev/null 2>&1; then
+  (cd "$ROOT/packages/desktop/src-tauri" && \
+    cargo update --workspace -p chroxy-desktop --precise "$NEW_VERSION" --offline >/dev/null 2>&1) || \
+    (cd "$ROOT/packages/desktop/src-tauri" && \
+      cargo update --workspace -p chroxy-desktop --precise "$NEW_VERSION" >/dev/null)
+else
+  # No cargo on PATH — patch the lockfile in place. Scope the awk edit to
+  # the `name = "chroxy-desktop"` stanza so we never touch a transitive
+  # dep that happens to share the same version string. Stanzas are
+  # delimited by blank lines in Cargo.lock.
+  track_tmp "$CARGO_LOCK.tmp"
+  awk -v new="$NEW_VERSION" '
+    /^\[\[package\]\]/ { in_pkg = 1; is_target = 0 }
+    in_pkg && /^name = "chroxy-desktop"$/ { is_target = 1 }
+    in_pkg && is_target && /^version = "/ {
+      sub(/^version = "[^"]*"/, "version = \"" new "\"")
+      is_target = 0
+    }
+    /^$/ { in_pkg = 0; is_target = 0 }
+    { print }
+  ' "$CARGO_LOCK" > "$CARGO_LOCK.tmp" && mv "$CARGO_LOCK.tmp" "$CARGO_LOCK"
+fi
+# Verify the chroxy-desktop stanza in Cargo.lock now matches $NEW_VERSION.
+# Scope the check to the [[package]] block whose name is chroxy-desktop —
+# a bare grep would false-pass on any transitive dep at the same version.
+LOCK_VERIFY=$(awk '
+  /^\[\[package\]\]/ { in_pkg = 1; is_target = 0; next }
+  in_pkg && /^name = "chroxy-desktop"$/ { is_target = 1; next }
+  in_pkg && is_target && /^version = "/ {
+    sub(/^version = "/, ""); sub(/".*$/, ""); print; exit
+  }
+  /^$/ { in_pkg = 0; is_target = 0 }
+' "$CARGO_LOCK")
+if [ "$LOCK_VERIFY" != "$NEW_VERSION" ]; then
+  echo "Error: Failed to sync $CARGO_LOCK chroxy-desktop entry to $NEW_VERSION (got: '$LOCK_VERIFY')" >&2
+  exit 1
+fi
 
 echo "Updated:"
 echo "  $ROOT_PKG"
@@ -357,7 +409,7 @@ echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
 echo "  $ROOT_LOCK (top-level + all workspace entries)"
 echo "  $SERVER_LOCK (standalone server package lockfile — no workspace entries)"
-echo "  Cargo.lock"
+echo "  $CARGO_LOCK (chroxy-desktop stanza only)"
 echo "  $IOS_INFO_PLIST"
 if [ "$CHANGELOG_UPDATED" -eq 1 ]; then
   echo "  $CHANGELOG (scaffolded section for $NEW_VERSION — replace the TODO lines before commit)"
