@@ -194,6 +194,34 @@ export class ClaudeByokSession extends BaseSession {
     // semantically-correct invariant is "one warn per (session, model)
     // pair" — not "one warn per current model."
     this._pricingWarnedModels = new Set()
+
+    // #4080: Per-stream index→toolUseId map. Populated on
+    // `content_block_start` with `block.type === 'tool_use'` (where the
+    // SDK emits both the block index and the tool_use id) and queried on
+    // `tool_input_delta`, which only carries the index. Entry is deleted
+    // on `content_block_stop` so the map stays small even on multi-tool
+    // turns. The full map is cleared after the for-await loop in case
+    // the stream terminated without emitting a final stop for every
+    // block — kept inside the session (not the translator) per #4059's
+    // boundary call: the translator stays pure, stateful tracking lives
+    // here.
+    this._streamingIndexToToolUseId = new Map()
+
+    // #4080: toolUseIds whose permission_request is currently pending.
+    // Populated when this session re-emits permission_request (line
+    // ~165), drained on permission_resolved (line ~167). Consulted on
+    // tool_input_delta — if the same toolUseId already has a pending
+    // permission prompt, suppress the delta so the dashboard tool-call
+    // bubble doesn't flicker between "running…" and a partial-input
+    // preview while the user is deciding. (In the current single-round
+    // BYOK flow this is defensive: permission requests fire AFTER the
+    // stream ends, so a delta cannot race with a pending permission for
+    // the SAME toolUseId within one round. The check exists so a future
+    // mid-stream permission gate — or a permission carried across
+    // rounds for the same toolUseId — can't accidentally flicker the
+    // UI.) The PermissionManager keys its pending map by requestId, not
+    // toolUseId, so we maintain a separate Set on the session.
+    this._pendingPermissionToolUseIds = new Set()
   }
 
   async start() {
@@ -346,12 +374,55 @@ export class ClaudeByokSession extends BaseSession {
                 toolUseId: t.toolUseId,
                 toolName: t.toolName,
               })
+              // #4080: track index→toolUseId so the upcoming
+              // tool_input_delta events (which only carry the index)
+              // can be re-tagged with the toolUseId before re-emit.
+              if (typeof t.index === 'number' && t.toolUseId) {
+                this._streamingIndexToToolUseId.set(t.index, t.toolUseId)
+              }
               break
-            case 'tool_input_delta':
-              // Streaming JSON for the tool input. We don't currently
-              // forward partial tool input to the UI (the final block
-              // arrives in finalMessage), but logging helps debug
-              // multi-tool turns.
+            case 'tool_input_delta': {
+              // #4080: stream the partial JSON to the dashboard so the
+              // tool-call bubble can live-preview the model's evolving
+              // input (especially valuable for Bash, where users can
+              // early-abort once they see a destructive `command`
+              // forming). The translator only carries the block index;
+              // resolve to toolUseId via the per-stream map we populated
+              // on tool_start.
+              const toolUseId = typeof t.index === 'number'
+                ? this._streamingIndexToToolUseId.get(t.index)
+                : undefined
+              if (!toolUseId) {
+                // Delta for a content block that wasn't a tool_use
+                // (text deltas already went through stream_delta) or
+                // for an index we never saw a start for (SDK reorder /
+                // malformed event). Drop quietly — the accepted shape
+                // for partial input is "may not arrive."
+                break
+              }
+              if (this._pendingPermissionToolUseIds.has(toolUseId)) {
+                // A permission prompt is pending for this exact
+                // toolUseId — suppress the delta so the bubble doesn't
+                // flicker between "running…" and partial-input while
+                // the user is mid-decision. See constructor comment.
+                break
+              }
+              this.emit('tool_input_delta', {
+                messageId,
+                toolUseId,
+                partialJson: t.partial,
+              })
+              break
+            }
+            case 'content_block_stop':
+              // #4080: free the per-index slot as soon as the block
+              // finishes so a long turn's map doesn't grow unbounded.
+              // Safe to delete even if index isn't in the map — that
+              // just means we never tracked this block (text /
+              // thinking) and the lookup is a no-op.
+              if (typeof t.index === 'number') {
+                this._streamingIndexToToolUseId.delete(t.index)
+              }
               break
             case 'message_delta':
               if (t.stopReason) lastStopReason = t.stopReason
@@ -369,6 +440,14 @@ export class ClaudeByokSession extends BaseSession {
         }
 
         const final = await stream.finalMessage()
+        // #4080: defensive cleanup. content_block_stop should have
+        // drained every entry above, but if the stream ended on an
+        // error path or the SDK ever skips the stop event for a
+        // block, the map would leak across rounds and a later
+        // tool_input_delta for index N could pick up a STALE
+        // toolUseId from the previous round. Clear here so each round
+        // starts with an empty per-stream map.
+        this._streamingIndexToToolUseId.clear()
         lastStopReason = final.stop_reason
         const roundUsage = final.usage || {}
         turnUsage.input_tokens += Number(roundUsage.input_tokens) || 0
@@ -588,6 +667,14 @@ export class ClaudeByokSession extends BaseSession {
 
     // Permission gate. PermissionManager handles all four modes
     // (approve / auto / acceptEdits / plan) and session rules.
+    // #4080: track that this toolUseId has a pending permission prompt
+    // so any tool_input_delta for the SAME toolUseId (e.g. a future
+    // mid-stream gate, or a re-streamed input in a later round) is
+    // suppressed until the prompt resolves. PermissionManager keys
+    // its own pending map by requestId, not toolUseId, so the
+    // tracking has to live here. Wrap the whole permission gate so
+    // both the allow-and-throw and deny-and-return paths drain.
+    this._pendingPermissionToolUseIds.add(toolUseId)
     let decision
     try {
       decision = await this._permissions.handlePermission(
@@ -598,6 +685,7 @@ export class ClaudeByokSession extends BaseSession {
       )
     } catch (err) {
       // permission_request was rejected (timeout, abort, etc.)
+      this._pendingPermissionToolUseIds.delete(toolUseId)
       return {
         type: 'tool_result',
         tool_use_id: toolUseId,
@@ -605,6 +693,7 @@ export class ClaudeByokSession extends BaseSession {
         is_error: true,
       }
     }
+    this._pendingPermissionToolUseIds.delete(toolUseId)
 
     if (decision.behavior !== 'allow') {
       const msg = decision.message || 'Permission denied by user.'
@@ -755,6 +844,11 @@ export class ClaudeByokSession extends BaseSession {
     // otherwise outlive the session.
     this._cwdRealCache.clear()
     this._pricingWarnedModels.clear()
+    // #4080: same-rationale teardown — both maps are bounded by the
+    // active stream / outstanding permission count, but any external
+    // reference (test capture, future export) would keep them alive.
+    this._streamingIndexToToolUseId.clear()
+    this._pendingPermissionToolUseIds.clear()
     this._client = null
     this.removeAllListeners()
   }
