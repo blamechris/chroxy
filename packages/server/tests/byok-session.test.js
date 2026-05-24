@@ -1837,6 +1837,27 @@ describe('ClaudeByokSession', () => {
       assert.equal(session._todos.size, 0)
     })
 
+    it('destroy() clears _cwdRealCache and _pricingWarnedModels (#4153)', async () => {
+      // Mirror #4137's teardown shape — every in-memory collection on
+      // this session should be reset at destroy so a held reference
+      // (debugger, future export feature, test introspection) doesn't
+      // outlive the session. Neither is a leak risk (both are bounded)
+      // but the rationale that motivated _todos.clear() in #4152 applies
+      // equally here.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      await session.start()
+      session._cwdRealCache.set('/tmp/a', { resolved: '/tmp/a', verifiedAt: Date.now() })
+      session._cwdRealCache.set('/tmp/b', { resolved: '/tmp/b', verifiedAt: Date.now() })
+      session._pricingWarnedModels.add('claude-future-model-1')
+      session._pricingWarnedModels.add('claude-future-model-2')
+      assert.equal(session._cwdRealCache.size, 2)
+      assert.equal(session._pricingWarnedModels.size, 2)
+      await session.destroy()
+      assert.equal(session._cwdRealCache.size, 0, '_cwdRealCache cleared')
+      assert.equal(session._pricingWarnedModels.size, 0, '_pricingWarnedModels cleared')
+    })
+
     it('setModel updates without restart (stateless SDK client)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
       session._client = { messages: { stream: () => fakeStream([]) } }
