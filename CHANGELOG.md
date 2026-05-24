@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-05-24
+
+A minor release covering ~85 commits across BYOK streaming UX, permissions plumbing, mobile parity, dashboard polish, and a handful of correctness fixes. Headline work: the `tool_input_delta` wire (#4080/#4081) is now end-to-end — server emits, normalizer routes, store-core accumulates with a length cap, and both dashboard and mobile bubbles render the assembling JSON with field-priority previews (`command` / `file_path` / `path` / `description`) so Bash early-abort (#4063) lights up identically on web and React Native. TUI `--dangerously-skip-permissions` is now plumbed end-to-end through SessionManager + CLI + modal (#4044/#4207/#4235), and the BYOK provider gained parallel `tool_use` execution (#4238) plus a corrected `tool_start` wire shape (#4240/#4257).
+
+### Added
+
+- **`tool_input_delta` end-to-end wire (#4080/#4081):** server emits `tool_input_delta` events with toolUseId tracking (#4233); store-core handler accumulates per-tool partial JSON with a length cap to prevent runaway growth (#4241/#4255); dashboard and mobile `ToolBubble` render the streaming buffer with field-priority preview extraction shared from `@chroxy/store-core` (#4242/#4256, #4243/#4258, #4254).
+- **TUI `--dangerously-skip-permissions` plumbing (#4044/#4207/#4235):** session option, SessionManager wiring, CLI flag, and create-session modal all support the per-session override of the server default.
+- **Sidebar right-click context menu (#4236):** Tauri-backed context menu with `reveal_in_finder` and `require_main_window` capability gate.
+- **Mobile TodoList renderer (#4180/#4194/#4195/#4200/#4201/#4202):** structured renderer for `TodoWrite` tool_results in the mobile chat view, with a Maestro flow + mock-server fixture pinning the wire path.
+- **Context-chip token breakdown tooltip (#4205/#4230):** input/output token split surfaces on hover in the dashboard.
+- **`PERMISSION_MODES.description` surfaced across surfaces (#4019/#4211/#4213/#4225/#4227/#4232):** descriptions render in dashboard picker, mobile SettingsBar, and create-session modal with per-option title parity.
+- **`ServerByokCredentialsStatus` Zod schema (#4141/#4220):** schema-validated BYOK credentials status with dashboard `safeParse` adoption.
+- **`ServerErrorEnvelope` typed `fatal` field (#4178/#4191/#4196):** discriminates fatal-vs-recoverable errors on the wire, exported as `ServerErrorEnvelopeMessage` type alias.
+- **WebFetch userinfo-source marker (#4183/#4198):** stripped-userinfo log marker names the source URL so cause-of-strip is traceable.
+- **Provider built-in slash commands in picker (#4237):** dashboard slash-command picker now surfaces provider-built-in commands alongside user commands.
+- **BYOK stale-file notice broadening (#4175/#4222):** stale-credential notice now covers the missing+fileExists case in addition to missing-entirely.
+
+### Changed
+
+- **Parallel `tool_use` execution in BYOK provider (#4238):** byok-session runs parallel tool_use blocks concurrently instead of serially.
+- **SSRF block-list refactor (#4185/#4186/#4187/#4197):** extracted to a dedicated module with boundary and IPv6-mapped address tests.
+- **Single source of truth for client-estimated-cost providers (#4229):** dashboard status-tooltips and message-handler share one set (`codex`, `gemini`).
+- **FooterBar cwd updates on tab switch (#4029/#4218):** dashboard footer cwd no longer goes stale when switching session tabs.
+- **`_cwdRealCache` + `_pricingWarnedModels` cleared on session destroy (#4153/#4221):** prevents cross-session bleed when a long-lived server destroys + recreates the same provider session.
+
+### Fixed
+
+- **BYOK `tool_start` wire shape (#4240/#4257):** byok-session emits now match what `event-normalizer` reads (`tool`/`input` rather than `toolName`) so the field arrives on the wire instead of as `undefined`.
+- **Explicit `--keychain` to `codesign` in build.rs (#4231):** Tauri desktop builds pass the keychain path explicitly so signing doesn't fall through to the default keychain in CI.
+- **`bump-version.sh` syncs Cargo.lock with Cargo.toml (#4228):** version bumps no longer leave the Rust lockfile pinned to the previous version.
+- **ActivityEntry images-only placeholder (#4203/#4223):** expanded body renders a placeholder when the entry contains images only (no text).
+- **Mobile TodoList wiring (#4201/#4202):** ActivityEntry routes through the new mobile TodoList renderer instead of falling back to raw text.
+- **`errFatal` typo degrade contract pinned (#4193/#4199):** test asserts the dispatch-level degrade behaviour so future typos in the fatal-flag don't silently change UX.
+
+### Internal
+
+- **Test backfill across packages:** TUI attachment-cap warn lines (#4216/#4224), CreateSessionModal description-vs-fallback precedence (#4214/#4225), per-option title parity on permission-mode picker (#4212/#4227), permission-hook.sh sidecar-file integration (#4020/#4234), block-type-tracking design boundary documented in translator JSDoc (#4059/#4219).
+- **Pop-first iteration in attachment truncation (#4027/#4217):** algorithmic cleanup, no behaviour change.
+- **README note on Linux Tauri dep resync (#3931/#4226):** maintainer-facing reminder for cross-distro builds.
+- **MAX_ATTACHMENT_SUFFIX_BYTES truncation logging (#4026/#4215):** logs when the cap is hit so silent truncation is observable.
+
 ## [0.8.7] - 2026-05-21
 
 End of the TUI readiness probe iteration series (#4014/#4031/#4035/#4039). The screen-scrape approach was fundamentally chasing a moving target — claude TUI renders its input prompt inside a bordered box with status widgets below it, so a "glyph at trailing edge" regex never matches, and a looser "glyph anywhere in window" regex false-positives on welcome text. Dogfood on v0.8.6 hit exactly this: every probe missed, the spawn warmup warn fired at 15s, the per-turn warn fired at 5s, the prompt bytes ended up in the input box but never submitted (the user's typed text "Hello this is a test..." sat there for ~4 minutes until they hit Stop).
