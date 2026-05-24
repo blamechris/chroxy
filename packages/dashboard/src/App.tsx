@@ -1488,6 +1488,7 @@ export function App() {
           toolName={storeMsg.tool || 'Tool'}
           toolUseId={storeMsg.toolUseId}
           input={storeMsg.toolInput}
+          inputPartial={storeMsg.toolInputPartial}
           result={storeMsg.toolResult}
         />
       )

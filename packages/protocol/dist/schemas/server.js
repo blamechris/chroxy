@@ -121,6 +121,19 @@ export const ServerToolResultSchema = z.object({
     result: z.any(),
     truncated: z.boolean().optional(),
 });
+// #4080 / #4081: incremental partial-JSON chunk for a streaming tool_use
+// `input`. Emitted between `tool_start` and `tool_result` while the
+// SDK's `input_json_delta` chunks arrive. `partialJson` is the raw
+// JSON fragment from that single SDK chunk — clients concatenate it
+// onto a per-toolUseId accumulator. Mid-stream partials are inherently
+// unparseable JSON; clients render verbatim until a chunk completes
+// the document or `tool_result` lands.
+export const ServerToolInputDeltaSchema = z.object({
+    type: z.literal('tool_input_delta'),
+    messageId: z.string(),
+    toolUseId: z.string(),
+    partialJson: z.string(),
+});
 export const ServerResultSchema = z.object({
     type: z.literal('result'),
     cost: z.number().optional(),

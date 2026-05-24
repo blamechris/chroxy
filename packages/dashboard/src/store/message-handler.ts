@@ -36,6 +36,7 @@ import {
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
+  handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
@@ -1435,6 +1436,32 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   }
 }
 
+function handleToolInputDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  // #4081: append the partialJson chunk to the matching tool_use
+  // bubble's `toolInputPartial` accumulator. sharedToolInputDelta
+  // validates the wire payload (toolUseId + partialJson string types),
+  // resolves sessionId, and returns an `applyTo` that no-ops when no
+  // matching tool_use is found (mirrors handleToolResult). Permission-
+  // pending suppression lives on the server (#4080) — by the time a
+  // delta reaches this handler the bubble is guaranteed to be the
+  // live target.
+  const result = sharedToolInputDelta(msg, get().activeSessionId);
+  if (!result) return;
+  const targetId = result.sessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss: SessionState) => {
+      const updated = result.applyTo(ss.messages);
+      if (updated === ss.messages) return {};
+      return { messages: updated };
+    });
+  } else {
+    const updated = result.applyTo(get().messages);
+    if (updated !== get().messages) {
+      set({ messages: updated });
+    }
+  }
+}
+
 function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const result = sharedToolResult(msg, get().activeSessionId);
   if (!result) return;
@@ -1719,6 +1746,7 @@ const HANDLERS: Record<string, Handler> = {
   stream_delta: handleStreamDelta,
   stream_end: handleStreamEnd,
   tool_start: handleToolStart,
+  tool_input_delta: handleToolInputDelta,
   tool_result: handleToolResult,
   permission_request: handlePermissionRequest,
   permission_resolved: handlePermissionResolved,

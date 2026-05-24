@@ -1002,6 +1002,190 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #4081 — server emits `tool_input_delta { messageId, toolUseId,
+  // partialJson }` chunks between tool_start and tool_result so the
+  // bubble can render the input field forming. The dispatcher must
+  // route the chunks to the matching tool_use bubble's
+  // `toolInputPartial` accumulator, concatenating across deltas.
+  describe('tool_input_delta dispatch (#4081)', () => {
+    function seedWithTool(toolUseId: string, sessionId = 's1') {
+      store = createMockStore(
+        baseState({
+          activeSessionId: sessionId,
+          sessions: [{ sessionId, name: 'S1' } as any],
+          sessionStates: {
+            [sessionId]: {
+              ...createEmptySessionState(),
+              messages: [
+                {
+                  id: 'tu-msg-1',
+                  type: 'tool_use',
+                  content: 'Bash',
+                  tool: 'Bash',
+                  toolUseId,
+                  timestamp: 1,
+                },
+              ],
+            },
+          },
+        }),
+      )
+      setStore(store)
+    }
+
+    it('appends partialJson to toolInputPartial on first delta', () => {
+      seedWithTool('tu-1')
+      handleMessage(
+        {
+          type: 'tool_input_delta',
+          messageId: 'msg-x',
+          toolUseId: 'tu-1',
+          partialJson: '{"command":"',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs[0].toolInputPartial).toBe('{"command":"')
+    })
+
+    it('concatenates 3 sequential deltas into the full buffer', () => {
+      seedWithTool('tu-1')
+      const chunks = ['{"command":"', 'rm -rf /tmp/', 'foo"}']
+      for (const partialJson of chunks) {
+        handleMessage(
+          {
+            type: 'tool_input_delta',
+            messageId: 'msg-x',
+            toolUseId: 'tu-1',
+            partialJson,
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+      }
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs[0].toolInputPartial).toBe('{"command":"rm -rf /tmp/foo"}')
+    })
+
+    it('renders accumulated buffer even when partial JSON is unparseable', () => {
+      // Acceptance criterion from the issue: partial JSON that can't yet
+      // parse must accumulate and surface, NOT raise an error.
+      seedWithTool('tu-1')
+      handleMessage(
+        {
+          type: 'tool_input_delta',
+          messageId: 'msg-x',
+          toolUseId: 'tu-1',
+          partialJson: '{"command":"rm -rf ',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msg = (store.getState() as any).sessionStates.s1.messages[0]
+      // Buffer is present even though it is mid-token-stream JSON.
+      expect(msg.toolInputPartial).toBe('{"command":"rm -rf ')
+      // The tool_use entry remains a tool_use — no error message inserted.
+      expect(msg.type).toBe('tool_use')
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+    })
+
+    it('drops the delta silently when no matching tool_use exists', () => {
+      seedWithTool('tu-1')
+      handleMessage(
+        {
+          type: 'tool_input_delta',
+          messageId: 'msg-x',
+          toolUseId: 'tu-missing',
+          partialJson: '{"a":1}',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].toolInputPartial).toBeUndefined()
+    })
+
+    it('drops malformed payloads (missing partialJson) without crashing', () => {
+      seedWithTool('tu-1')
+      handleMessage(
+        {
+          type: 'tool_input_delta',
+          messageId: 'msg-x',
+          toolUseId: 'tu-1',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs[0].toolInputPartial).toBeUndefined()
+    })
+
+    it('bubble keeps accumulated buffer when tool_result lands afterwards', () => {
+      // Acceptance criterion: bubble switches to the standard result
+      // view on tool_result. The buffer is preserved for replay/history;
+      // the renderer (ToolBubble) gates display on the presence of
+      // `result`. Here we just verify both fields coexist on the entry.
+      seedWithTool('tu-1')
+      handleMessage(
+        {
+          type: 'tool_input_delta',
+          messageId: 'msg-x',
+          toolUseId: 'tu-1',
+          partialJson: '{"command":"ls"}',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      handleMessage(
+        {
+          type: 'tool_result',
+          toolUseId: 'tu-1',
+          result: 'file1.ts\nfile2.ts',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const msg = (store.getState() as any).sessionStates.s1.messages[0]
+      expect(msg.toolInputPartial).toBe('{"command":"ls"}')
+      expect(msg.toolResult).toBe('file1.ts\nfile2.ts')
+    })
+
+    it('routes deltas to the correct tool_use when multiple are streaming', () => {
+      // Multi-tool turn: both bubbles streaming simultaneously. The
+      // dispatcher must use the toolUseId to disambiguate; no cross-
+      // contamination is allowed.
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: {
+              ...createEmptySessionState(),
+              messages: [
+                { id: 'm-a', type: 'tool_use', content: 'Bash', tool: 'Bash', toolUseId: 'tu-a', timestamp: 1 },
+                { id: 'm-b', type: 'tool_use', content: 'Read', tool: 'Read', toolUseId: 'tu-b', timestamp: 2 },
+              ],
+            },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'tool_input_delta', messageId: 'mx', toolUseId: 'tu-a', partialJson: '{"command":"ls"}', sessionId: 's1' },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'tool_input_delta', messageId: 'mx', toolUseId: 'tu-b', partialJson: '{"path":"/etc"}', sessionId: 's1' },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs[0].toolInputPartial).toBe('{"command":"ls"}')
+      expect(msgs[1].toolInputPartial).toBe('{"path":"/etc"}')
+    })
+  })
+
   // Regression for #3163: when a turn opens with a tool (no preamble text →
   // no stream_start), streamingMessageId is still 'pending' from sendInput.
   // The 5-second safety timer in sendInput would otherwise clear it, hiding

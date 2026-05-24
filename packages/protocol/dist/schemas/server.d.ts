@@ -106,6 +106,12 @@ export declare const ServerToolResultSchema: z.ZodObject<{
     result: z.ZodAny;
     truncated: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
+export declare const ServerToolInputDeltaSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tool_input_delta">;
+    messageId: z.ZodString;
+    toolUseId: z.ZodString;
+    partialJson: z.ZodString;
+}, z.core.$strip>;
 export declare const ServerResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"result">;
     cost: z.ZodOptional<z.ZodNumber>;
