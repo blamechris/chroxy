@@ -404,19 +404,36 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 {byokCredentialsStatus.reason}
               </p>
             )}
-            {/* #4144: stale-file notice. When the env var wins precedence
-                a previously-saved file is shadowed but still on disk —
-                show it so the user can clear it if they don't want it. */}
-            {byokCredentialsStatus?.source === 'env' && byokCredentialsStatus.fileExists && (
+            {/* #4144 / #4175: stale-file notice. Two cases:
+                1. source === 'env' — env var wins precedence; the saved
+                   file is shadowed but still on disk (will be used again
+                   if the env var is unset).
+                2. source === 'none' && fileExists — the file is on disk
+                   but cannot be read (e.g. mode 0644 fails the strict
+                   mode-0600 check); the user sees a Remove button with
+                   no context until #4175 broadened this gate.
+                Skip when source === 'file' (file IS being used — no
+                stale-state to surface). */}
+            {byokCredentialsStatus?.fileExists && byokCredentialsStatus.source !== 'file' && (
               <p
                 className="settings-hint"
                 data-testid="byok-stale-file-notice"
                 style={{ color: 'var(--warning-fg, #fbbf24)' }}
               >
-                Your <code>ANTHROPIC_API_KEY</code> environment variable is currently being
-                used. But a saved <code>credentials.json</code> file is still on disk and
-                will be used again the moment the env var is unset.
-                Click Remove to delete the file.
+                {byokCredentialsStatus.source === 'env' ? (
+                  <>
+                    Your <code>ANTHROPIC_API_KEY</code> environment variable is currently being
+                    used. But a saved <code>credentials.json</code> file is still on disk and
+                    will be used again the moment the env var is unset.
+                    Click Remove to delete the file.
+                  </>
+                ) : (
+                  <>
+                    A saved <code>credentials.json</code> file is on disk but cannot be read
+                    (see Status above for the reason). Click Remove to delete the unreadable
+                    file, then paste your key again to save a fresh, readable copy.
+                  </>
+                )}
               </p>
             )}
             <div className="settings-field">

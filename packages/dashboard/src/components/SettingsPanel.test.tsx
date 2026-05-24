@@ -486,6 +486,45 @@ describe('SettingsPanel', () => {
       expect(screen.getByTestId('byok-clear-button')).toBeInTheDocument()
     })
 
+    it('shows Remove + branched stale-file notice when missing+fileExists (#4175)', () => {
+      // The file is on disk but unreadable (e.g. mode 0644 — strict
+      // 0600 check fails). Pre-#4175 the gate was source === 'env'
+      // only, so the user saw a Remove button with no context about
+      // what it removes. Now the notice fires for source !== 'file'
+      // && fileExists, with branched copy explaining the unreadable case.
+      setMockState({
+        byokCredentialsStatus: {
+          status: 'missing', source: 'none',
+          reason: 'credentials.json mode 0644 — chroxy requires 0600',
+          fileExists: true,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const notice = screen.getByTestId('byok-stale-file-notice')
+      expect(notice).toBeInTheDocument()
+      // Branched copy: NOT the env-wins variant; the unreadable variant.
+      expect(notice.textContent).toMatch(/cannot be read/i)
+      expect(notice.textContent).toMatch(/Status above for the reason/i)
+      // No ANTHROPIC_API_KEY reference in this branch — only env-wins
+      // mentions the env var.
+      expect(notice.textContent).not.toMatch(/ANTHROPIC_API_KEY/)
+      // Remove button is offered so the user can clear the unreadable file.
+      expect(screen.getByTestId('byok-clear-button')).toBeInTheDocument()
+    })
+
+    it('does NOT show stale-file notice when source is file (file IS being used) (#4175)', () => {
+      // Defensive: notice gate must not fire when the file is the active
+      // source — there's nothing "stale" about it.
+      setMockState({
+        byokCredentialsStatus: {
+          status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]',
+          fileExists: true,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('byok-stale-file-notice')).not.toBeInTheDocument()
+    })
+
     it('disables Save until the input has content', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const save = screen.getByTestId('byok-save-button') as HTMLButtonElement
