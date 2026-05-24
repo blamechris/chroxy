@@ -19,19 +19,15 @@ const PERMISSION_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hoo
 
 const log = createLogger('claude-tui-session')
 
-// #4031: broaden ANSI strip beyond CSI to also handle the escape
-// categories that the claude TUI emits during startup + redraw:
+// ANSI strip pattern covering the escape categories claude TUI emits
+// during startup + redraw — keeps _outputTail readable for inline
+// diagnostics (#3919) and the timeout hex dump.
 //
 //   CSI:                ESC [ <params> <final byte 0x40..0x7E>
 //   OSC:                ESC ] <data> ( BEL | ESC \ )    e.g. title set
 //   SS3:                ESC O <byte>                    e.g. function keys
 //   Bracketed paste:    ESC [ ? 2004 [hl]               handled by CSI re
 //   Single-char:        ESC = | ESC > | ESC c | ...     terminal-mode bytes
-//
-// The previous regex only covered CSI, so OSC title-sets / SS3 cursor
-// keys interleaved with the "❯ " glyph would survive the strip and
-// leave control bytes in _outputTail, breaking the substring match.
-// Strip them all so the saved tail is plain printable text only.
 const ANSI_STRIP = new RegExp(
   [
     '\\x1b\\[[0-9;?]*[\\x40-\\x7E]', // CSI
@@ -325,85 +321,44 @@ export class ClaudeTuiSession extends BaseSession {
   static get PTY_TAIL_BYTES() { return 4096 }
   static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
 
-  // Glyphs the TUI may print to mark its input prompt. The original "❯ "
-  // (U+276F + space) was the only candidate before #4031; expanded to
-  // cover variants seen in different claude TUI builds and configs:
-  //   - "❯ "   — modern claude TUI, glyph followed by space
-  //   - "❯"    — same glyph without trailing space (cursor on top, some
-  //              terminal widths render without the pad)
-  //   - "> "   — ASCII fallback when the TUI detects a non-Unicode TERM
+  // Path to the per-PID session file claude TUI maintains. The file
+  // surfaces a `status` field (busy/idle/...) updated by claude itself
+  // on every state transition — `claude ps` consumes the same files.
+  // Polling this is the readiness signal #4040 adopted in place of the
+  // prior screen-scrape, which was fundamentally fragile (the TUI's
+  // input prompt is bordered + has status widgets rendered AFTER it,
+  // so any "glyph at trailing edge" regex misses, and any "glyph
+  // anywhere in window" regex false-positives on welcome text).
   //
-  // All three are required to appear at line-start (preceded by '\n' or
-  // the very beginning of the search window) — without that anchor,
-  // "> " false-positives against markdown blockquotes in assistant
-  // output, and bare "❯" false-positives against any text that happens
-  // to use the glyph as a list bullet. The match is line-anchored to
-  // mean "the TUI just rendered an empty prompt line", which is what
-  // we actually care about (#4031, #4033).
-  static get PROMPT_GLYPHS() { return ['❯ ', '❯', '> '] }
-  // Backwards-compatibility shim — tests imported PROMPT_GLYPH prior to
-  // #4031. Returns the primary candidate. New code should prefer the
-  // PROMPT_GLYPHS list directly.
-  static get PROMPT_GLYPH() { return this.PROMPT_GLYPHS[0] }
-
-  /**
-   * True iff `tail` ends with any PROMPT_GLYPHS candidate at line-start.
-   * The real claude TUI input prompt is always the LAST thing rendered
-   * — anything followed by more content is welcome-text, examples, or
-   * tool output, NOT the cursor's resting position.
-   *
-   * Match rules:
-   *   1. Trim trailing whitespace (the cursor sits in/after the glyph;
-   *      pure whitespace following the glyph is fine).
-   *   2. Find the rightmost candidate via lastIndexOf.
-   *   3. Require it to be at line-start (idx === 0 OR preceded by '\n').
-   *   4. Require everything after the glyph to be whitespace-only.
-   *
-   * This is tighter than the previous "line-anchored anywhere in
-   * window" rule, which #4035 proved was too permissive — claude TUI's
-   * welcome screen contains line-start `> ` and `❯` text that triggered
-   * a 563ms false-ready, well before the actual input box existed.
-   */
-  static promptGlyphAppearsIn(tail) {
-    if (typeof tail !== 'string' || tail.length === 0) return false
-    // Match: (start-of-string OR newline) + glyph + (optional trailing
-    // whitespace) + end-of-string. The whitespace tolerance handles
-    // cursor padding the TUI emits; the end-anchor enforces the glyph
-    // is the LAST thing on screen (the real input cursor's resting
-    // position). Trimming first would eat trailing spaces that are
-    // part of glyphs like "> " — instead encode the optional-trailing-
-    // whitespace into the regex.
-    return this.PROMPT_GLYPHS.some((g) => {
-      const escaped = g.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
-      const re = new RegExp(`(?:^|\\n)${escaped}\\s*$`)
-      return re.test(tail)
-    })
+  // Coupling worth flagging: claude only writes `status` when its
+  // entrypoint is `cli` (the plain `claude` binary we spawn). If a
+  // future refactor switches this provider to spawn via `sdk-cli` or
+  // a different entrypoint, the file may exist without a `status`
+  // field — `readSessionStatus` will return null forever, the probe
+  // will time out on every turn, and we degrade silently to "always
+  // not-ready" (the warn at the timeout site catches this at runtime).
+  static sessionFilePath(pid) {
+    return join(homedir(), '.claude', 'sessions', `${pid}.json`)
   }
-  // Window for the probe scan, in JS string code units (UTF-16, NOT
-  // UTF-8 bytes — see review note below). Widened from 256 → 1024 in
-  // #4031 because claude TUI's startup splash + redraw cycle is larger
-  // than the original budget assumed, leading to probe misses on cold
-  // sessions. The glyph from an earlier turn that's drifted past this
-  // window no longer counts as "current" — the same drift logic as
-  // before, just a more generous threshold.
-  //
-  // #4031 (review): the previous name "*_BYTES" was misleading. The
-  // probe slices a JS string (`_outputTail.slice(-N)`), so N counts
-  // UTF-16 code units. For ASCII output one code unit == one byte; for
-  // Unicode-heavy output (BMP supplementary, emoji, etc.) the actual
-  // byte window can be larger. That's fine for the probe — the glyphs
-  // we match are short and we want generosity — but the name is now
-  // accurate.
-  static get PROMPT_TAIL_WINDOW_CHARS() { return 1024 }
-  // Backwards-compatibility shim — tests + older callers imported the
-  // BYTES name prior to the #4031 review rename. Same value; new code
-  // should prefer PROMPT_TAIL_WINDOW_CHARS.
-  static get PROMPT_TAIL_WINDOW_BYTES() { return this.PROMPT_TAIL_WINDOW_CHARS }
-  // Upper bounds on how long we'll wait for the prompt before falling
+
+  // Read + parse the session file. Returns the `status` string when
+  // the file exists and is valid JSON with a string status; otherwise
+  // returns null. Any error is swallowed (file not yet written, mid-
+  // write JSON.parse failure, transient FS race) — callers re-poll.
+  static readSessionStatus(filePath) {
+    try {
+      const data = JSON.parse(readFileSync(filePath, 'utf8'))
+      return typeof data.status === 'string' ? data.status : null
+    } catch {
+      return null
+    }
+  }
+
+  // Upper bounds on how long we'll wait for status=idle before falling
   // through (and writing anyway, with a warn). Spawn warmup is generous
-  // because cold claude can take >5s on a fresh keychain unlock; per-turn
-  // is short because between-turn rendering is fast unless something is
-  // already broken.
+  // because cold claude can take a few seconds on a fresh keychain
+  // unlock; per-turn is short because between-turn idle->busy->idle
+  // transitions are sub-second once the session is up.
   static get SPAWN_WARMUP_MAX_MS() { return 15_000 }
   static get TURN_PROMPT_WAIT_MAX_MS() { return 5_000 }
 
@@ -559,10 +514,10 @@ export class ClaudeTuiSession extends BaseSession {
       // Keep a tail of recent output so we can surface diagnostics when
       // the TUI renders an error inline (#3919). Strip ANSI escape
       // sequences before storing so the saved tail is readable; we
-      // don't visual-render the PTY, so the colors aren't useful.
-      // Strip pattern broadened in #4031 to cover OSC/SS3/single-char
-      // codes that the original CSI-only regex left behind — those
-      // interleaved with the "❯ " glyph and broke the readiness probe.
+      // don't visual-render the PTY, so the colors aren't useful. Strip
+      // pattern covers CSI / OSC / SS3 / single-char terminal-mode codes
+      // (#4031 — broadened to keep the readable tail clean for error
+      // diagnostics and the hex dump).
       const rawStr = String(data)
       const stripped = rawStr.replace(ANSI_STRIP, '')
       this._outputTail = (this._outputTail + stripped).slice(-ClaudeTuiSession.PTY_TAIL_BYTES)
@@ -610,84 +565,102 @@ export class ClaudeTuiSession extends BaseSession {
       }
     })
 
-    // Wait for the TUI to render its input prompt before returning. The
-    // prior implementation used a hardcoded 3.5s sleep, which silently
-    // failed when claude took longer to come up — the first sendMessage
-    // would write bytes into a non-prompt buffer and the turn would stall
-    // indefinitely (#4014; same root-cause class as #4010). The probe
-    // watches _outputTail for the "❯ " glyph; on miss we still proceed so
-    // a tail-encoding edge case can't permanently brick the session.
+    // Wait for the TUI to reach status=idle before returning. The prior
+    // implementations (hardcoded sleep, then glyph screen-scrape across
+    // #4014/#4031/#4035/#4039) all failed silently when claude's render
+    // shape didn't match expectation. #4040 swaps to claude's own
+    // session file — `~/.claude/sessions/<pid>.json` carries a `status`
+    // field claude updates on every state transition. Atomic, kernel-
+    // backed, decoupled from TUI rendering changes. On miss we still
+    // proceed so a transient FS race doesn't brick the session.
     const ready = await this._waitForPrompt(ClaudeTuiSession.SPAWN_WARMUP_MAX_MS)
     if (!ready && !this._ptyExited) {
-      // #4031: dump what claude actually wrote so we can tell whether
-      // the glyph is missing, in a different encoding, or just past
-      // the search window. Pre-fix this was a guess-and-rebuild loop;
-      // the dump turns it into one round-trip.
+      const degraded = this._lastProbeSawStatus === false
+        ? ' — session file never appeared with a `status` field; if claude was spawned via a non-cli entrypoint or upstream changed the file format, the probe has degraded and will never see ready'
+        : ''
       log.warn(
-        `TUI prompt glyph not seen within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms — proceeding (first sendMessage may stall)\n` +
+        `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${degraded} — proceeding (first sendMessage may stall)\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
     }
   }
 
   /**
-   * Resolve `true` when the TUI input prompt is rendered, `false` on
-   * timeout or PTY exit. The probe scans only the trailing
-   * PROMPT_TAIL_WINDOW_CHARS of _outputTail: an older prompt glyph from
-   * an earlier turn will still be in the buffer for a while but says
-   * nothing about *current* readiness — when the TUI is mid-render the
-   * recent bytes are response/animation frames, not the prompt.
+   * Resolve `true` when the TUI is ready for input (claude's per-PID
+   * session file reports a status other than 'busy'), `false` on
+   * timeout or PTY exit.
    *
-   * Tries each candidate in PROMPT_GLYPHS to handle TUI variants
-   * (modern unicode prompt, no-trailing-space cursor placement, ASCII
-   * fallback). Win if ANY candidate matches.
+   * Reads `~/.claude/sessions/<pty.pid>.json` — the same file
+   * `claude ps` consumes. Claude TUI writes this file at startup and
+   * updates `status` on every state transition: 'busy' while processing
+   * a turn, 'idle' (or other non-busy variants) when waiting for input.
    *
    * Used by _spawnPty (one-time, generous timeout) and sendMessage
-   * (per-turn, short timeout). The per-turn call closes the
-   * between-turn race that produced #4014 — Stop hook fires before the
-   * TUI re-renders its input box, and the next prompt's bytes arrive
-   * during that transient render and get dropped.
+   * (per-turn, short timeout). Replaces the #4014/#4031/#4035 screen-
+   * scrape approaches, which never had a stable signal to anchor on:
+   * the input box is followed by status widgets in the trailing buffer,
+   * so a trailing-edge match never fires, and a looser line-anchored
+   * match false-positives on welcome text. The session file is what
+   * claude itself uses for the `claude ps` state machine, so it's
+   * decoupled from rendering and survives TUI redraw changes (#4040).
    */
   async _waitForPrompt(timeoutMs) {
-    // windowChars (NOT windowBytes) — slicing a JS string counts UTF-16
-    // code units, not UTF-8 bytes. For ASCII output the two are equal;
-    // for Unicode-heavy output the actual byte window may be larger,
-    // which is harmless here (we only need to find a short glyph). See
-    // PROMPT_TAIL_WINDOW_CHARS docstring (#4031 review).
-    const windowChars = ClaudeTuiSession.PROMPT_TAIL_WINDOW_CHARS
+    // No usable PTY pid — treat as not-ready and fall through to the
+    // existing warn-and-write path. Returning true here would silently
+    // disable readiness gating on any platform/runtime where node-pty
+    // doesn't populate `pid` (Copilot review on #4040). Tests that
+    // explicitly want to skip the probe stub `_waitForPrompt` directly
+    // rather than rely on this guard.
+    const pid = this._term && this._term.pid
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    const sessFile = ClaudeTuiSession.sessionFilePath(pid)
     const start = Date.now()
-    const matches = (tail) => ClaudeTuiSession.promptGlyphAppearsIn(tail)
-    while (Date.now() - start < timeoutMs) {
-      if (this._ptyExited) return false
-      if (matches(this._outputTail.slice(-windowChars))) return true
-      await new Promise((r) => setTimeout(r, 50))
+    // Track whether we ever read a non-null status. Distinguishes
+    // "claude wrote status but never reached idle" (real busy/stuck)
+    // from "status field never appeared" (probe degraded — see the
+    // entrypoint:cli note on sessionFilePath). The warn sites read
+    // `_lastProbeSawStatus` to surface the difference in logs.
+    let sawStatus = false
+    const checkReady = () => {
+      const status = ClaudeTuiSession.readSessionStatus(sessFile)
+      if (status !== null) sawStatus = true
+      return status !== null && status !== 'busy'
     }
-    return matches(this._outputTail.slice(-windowChars))
+    while (Date.now() - start < timeoutMs) {
+      if (this._ptyExited) {
+        this._lastProbeSawStatus = sawStatus
+        return false
+      }
+      if (checkReady()) {
+        this._lastProbeSawStatus = sawStatus
+        return true
+      }
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    const ready = checkReady()
+    this._lastProbeSawStatus = sawStatus
+    return ready
   }
 
   /**
-   * #4031: dump the trailing bytes of the UNSTRIPPED PTY tail as a
-   * hex+ASCII block for a log line. Called when the readiness probe
-   * times out so the actual TUI output is visible — saves a debugging
-   * round-trip where we'd otherwise have to guess whether the glyph
-   * was missing, mangled by an unstripped control byte, or just past
-   * the search window. Public-ish (single underscore) so tests can
-   * assert on the format without re-implementing it.
+   * Dump the trailing bytes of the UNSTRIPPED PTY tail as a hex+ASCII
+   * block for a log line (#4031). Called on readiness timeout or any
+   * other diagnostic surface where seeing what claude actually wrote —
+   * including escape/control sequences — saves a debugging round-trip.
+   * Public-ish (single underscore) so tests can assert on the format
+   * without re-implementing it.
    *
-   * Sourced from `_outputTailRaw` (a Buffer of raw, un-ANSI-stripped
-   * bytes) so escape/control sequences land in the log; sourcing from
-   * the stripped `_outputTail` would silently hide the very bytes the
-   * diagnostic exists to surface (#4031 review).
+   * Sourced from `_outputTailRaw` rather than the ANSI-stripped tail so
+   * 0x1b / OSC / SS3 bytes land in the log; the stripped variant would
+   * hide the very bytes the diagnostic exists to surface (#4031 review).
    */
   _outputTailHexDump() {
-    // Cap at the probe-scan window so the dump is the same SIZE the
-    // probe scanned — but since the raw buffer carries un-stripped
-    // bytes (escape sequences + their printable payload), the actual
-    // visible content here is a strict superset of what the probe saw
-    // and may include bytes the probe never had a chance to match.
-    // That's the point: the dump should expose them.
-    const windowChars = ClaudeTuiSession.PROMPT_TAIL_WINDOW_CHARS
-    return formatHexDump(this._outputTailRaw, windowChars)
+    // Cap at PTY_TAIL_DIAGNOSTIC_BYTES so logs stay bounded while still
+    // showing enough context to identify a TUI-rendered error inline.
+    // The raw (un-stripped) buffer is used so escape/control bytes
+    // survive into the diagnostic — sourcing from the stripped tail
+    // would hide the very bytes we want to see (#4031 review).
+    return formatHexDump(this._outputTailRaw, ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
   }
 
   async sendMessage(prompt, attachments, _options = {}) {
@@ -763,21 +736,22 @@ export class ClaudeTuiSession extends BaseSession {
     // and the user has no UI escape hatch from a stuck session.
     this.emit('stream_start', { messageId })
 
-    // #4014: wait for the TUI to be at its input prompt before writing.
-    // Between turns the TUI re-renders "❯ " after Stop hook fires, and
-    // if our bytes arrive during that transient render they get dropped
-    // and the turn stalls indefinitely. On the first turn this also
-    // catches the case where _spawnPty's warmup window expired without
-    // ever seeing the glyph. We still write if the probe misses — the
-    // glyph might be encoded unexpectedly on some terminals and we'd
-    // rather risk a stall than refuse to deliver any prompt.
+    // #4014/#4040: wait for the TUI to report status=idle before writing.
+    // Between turns the TUI flips back to idle after the Stop hook fires
+    // (it must — claude updates its own session file on every transition,
+    // and `claude ps` relies on the same field). If our bytes arrive
+    // mid-busy the keystrokes get dropped or queued behind the in-flight
+    // turn. On the first turn this also catches the case where
+    // _spawnPty's warmup window expired before claude wrote idle. We
+    // still write if the probe misses — a transient FS race shouldn't
+    // refuse to deliver the prompt.
     const ready = await this._waitForPrompt(ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS)
     if (!ready && !this._ptyExited) {
-      // #4031: dump the trailing tail so the next dogfood failure
-      // tells us WHY the probe missed (missing glyph, mangled bytes,
-      // glyph past window) instead of forcing a guess-and-rebuild loop.
+      const degraded = this._lastProbeSawStatus === false
+        ? ' — and the probe has never seen a `status` field this session, suggesting a degraded probe (see sessionFilePath docs)'
+        : ''
       log.warn(
-        `TUI not at prompt before turn (msg=${messageId}) — writing anyway\n` +
+        `TUI session file not at status=idle before turn (msg=${messageId})${degraded} — writing anyway\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
     }

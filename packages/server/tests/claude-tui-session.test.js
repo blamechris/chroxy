@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
@@ -238,15 +238,13 @@ describe('ClaudeTuiSession', () => {
     it('emits stream_start at turn start, not at completion', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
-      // Pre-seed the prompt glyph so the #4014 readiness probe resolves
-      // immediately — the probe's per-turn budget would otherwise force
-      // every sendMessage test to wait the full TURN_PROMPT_WAIT_MAX_MS.
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
-      // Capture the write so we can assert stream_start fires BEFORE the
-      // PTY write (i.e. before we hand the turn to claude). Pre-#4010 the
-      // emit happened only after the Stop hook came back — for a stuck
-      // turn that never returned, agent_busy never fired and the user had
-      // no Stop button.
+      // Skip readiness gating — this test pins event-emit ORDER, not
+      // probe behavior. The probe gets its own coverage under the
+      // readiness-probe describe block. Stubbing the probe (rather than
+      // relying on a side effect of the no-pid path) keeps the test's
+      // intent explicit and survives the #4040 review hardening that
+      // made invalid-pid a not-ready signal.
+      session._waitForPrompt = async () => true
       const events = []
       session._term = {
         write: () => { events.push('pty_write') },
@@ -280,9 +278,8 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-uuid'
       session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-busy-'))
-      // Satisfy the #4014 readiness probe so we don't burn the full
-      // TURN_PROMPT_WAIT_MAX_MS budget on every assertion.
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      // Skip readiness gating — see note in the prior test.
+      session._waitForPrompt = async () => true
       session._term = {
         write: () => {
           // Drop a stop hook immediately so the poll loop completes.
@@ -393,226 +390,261 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
-  describe('readiness probe (#4014)', () => {
-    // The probe replaces the hardcoded 3.5s warmup sleep. It scans the
-    // trailing slice of _outputTail for the "❯ " glyph that the TUI
-    // prints at its input prompt; until that glyph is visible, writing
-    // bytes to the PTY gets them dropped by whatever transient state the
-    // TUI is in (intro animation, response render, between-turn refresh).
-    // Pre-probe, that race produced the #4014 turn-2-stall and the
-    // first-send-stall class behind #4010.
+  describe('readiness probe (#4040)', () => {
+    // The probe watches claude's per-PID session file at
+    // ~/.claude/sessions/<pid>.json. Claude TUI writes this file at
+    // startup and updates the `status` field on every transition
+    // (busy/idle/...) — the same field `claude ps` reads. When
+    // status !== 'busy' the TUI is ready for input. This replaces the
+    // glyph screen-scrape in #4014/#4031/#4035/#4039, which all had
+    // false-positive vs. false-negative tradeoffs against the rendered
+    // TUI and were fundamentally unstable across claude releases.
+    //
+    // Each test sets HOME to a temp dir so the fake session file lives
+    // somewhere we can write without touching the real ~/.claude.
 
-    it('_waitForPrompt resolves true when glyph is in trailing window', async () => {
+    let fakeHome
+    let origHome
+    let fakePid
+
+    beforeEach(() => {
+      fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-sess-'))
+      mkdirSync(join(fakeHome, '.claude', 'sessions'), { recursive: true })
+      origHome = process.env.HOME
+      process.env.HOME = fakeHome
+      // node-pty assigns pids as kernel pids; for tests any positive
+      // integer suffices, the probe only uses it to build the file path.
+      fakePid = 9999
+    })
+
+    afterEach(() => {
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+    })
+
+    function writeSessionFile(pid, status) {
+      const path = join(fakeHome, '.claude', 'sessions', `${pid}.json`)
+      writeFileSync(path, JSON.stringify({
+        pid, sessionId: 'fake', status, updatedAt: Date.now(),
+      }))
+      return path
+    }
+
+    it('_waitForPrompt resolves true when session file reports status=idle', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTail = 'some intro text\n' + ClaudeTuiSession.PROMPT_GLYPH
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'idle')
       const ready = await session._waitForPrompt(100)
-      assert.equal(ready, true, 'glyph in last 256 bytes counts as ready')
+      assert.equal(ready, true, 'status=idle counts as ready')
     })
 
-    it('_waitForPrompt resolves false when glyph is older than the trailing window', async () => {
+    it('_waitForPrompt resolves false when session file reports status=busy', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      // Glyph at the head, then enough non-glyph content to push it
-      // outside the trailing window — represents "the TUI was at a
-      // prompt earlier but is now mid-render of a tool result". Pad
-      // length is derived from the constant so the test stays correct
-      // regardless of #4031's window widening.
-      const padLen = ClaudeTuiSession.PROMPT_TAIL_WINDOW_BYTES + 50
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH + 'X'.repeat(padLen)
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'busy')
       const ready = await session._waitForPrompt(50)
-      assert.equal(ready, false, 'an old glyph past the window does not count as ready')
+      assert.equal(ready, false, 'status=busy must NOT count as ready')
     })
 
-    it('_waitForPrompt returns false when PTY exited even if glyph is present', async () => {
+    it('_waitForPrompt resolves false when session file is absent (claude not yet up)', async () => {
+      // First few hundred ms after spawn the file may not exist yet.
+      // The probe must keep polling, not crash, and return false on
+      // timeout if it never appears (caller falls through with a warn).
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'absent session file is treated as not-ready')
+    })
+
+    it('_waitForPrompt returns false when pid is missing or invalid (Copilot review on #4040)', async () => {
+      // Returning true on a missing/invalid pid would silently disable
+      // readiness gating on any platform/runtime where node-pty fails to
+      // populate pid, reintroducing the race the probe exists to prevent.
+      // Tests that explicitly want to skip the probe stub
+      // `_waitForPrompt` directly rather than relying on this guard.
+      const cases = [
+        { pid: undefined, label: 'undefined' },
+        { pid: null, label: 'null' },
+        { pid: NaN, label: 'NaN' },
+        { pid: -1, label: 'negative' },
+        { pid: 0, label: 'zero' },
+        { pid: 1.5, label: 'non-integer' },
+        { pid: '12345', label: 'string' },
+      ]
+      for (const { pid, label } of cases) {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._term = { write: () => {}, kill: () => {}, pid }
+        const ready = await session._waitForPrompt(20)
+        assert.equal(ready, false,
+          `pid=${label} must NOT count as ready (would silently disable gating)`)
+      }
+    })
+
+    it('_waitForPrompt returns false when PTY exited even if status=idle', async () => {
+      // PTY death overrides a stale idle marker — otherwise we'd write
+      // bytes to a corpse and report success.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'idle')
       session._ptyExited = true
       const ready = await session._waitForPrompt(100)
-      assert.equal(ready, false, 'PTY death overrides a stale prompt glyph')
+      assert.equal(ready, false, 'PTY exit overrides idle status')
     })
 
-    it('_waitForPrompt polls until glyph appears, not just at start', async () => {
+    it('_waitForPrompt polls until status transitions to idle', async () => {
+      // Cold start: file appears mid-poll, status flips from absent ->
+      // busy -> idle. The probe must continue past the first read miss.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTail = 'no prompt yet'
-      setTimeout(() => {
-        session._outputTail = session._outputTail + '\n' + ClaudeTuiSession.PROMPT_GLYPH
-      }, 80)
-      const ready = await session._waitForPrompt(500)
-      assert.equal(ready, true, 'probe sees the glyph once it lands in the tail')
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      setTimeout(() => writeSessionFile(fakePid, 'busy'), 50)
+      setTimeout(() => writeSessionFile(fakePid, 'idle'), 200)
+      const ready = await session._waitForPrompt(800)
+      assert.equal(ready, true, 'probe sees idle once it lands')
     })
 
-    it('_waitForPrompt accepts any candidate glyph from PROMPT_GLYPHS (#4031)', async () => {
-      // Pre-#4031 the probe only matched "❯ " (U+276F + space). Real TUI
-      // builds also use the bare "❯" (cursor pad ate the trailing space)
-      // and an ASCII "> " fallback when TERM doesn't grok Unicode. Any
-      // candidate must count.
-      for (const glyph of ClaudeTuiSession.PROMPT_GLYPHS) {
-        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-        session._outputTail = `intro text\n${glyph}`
-        const ready = await session._waitForPrompt(50)
-        assert.equal(ready, true, `glyph ${JSON.stringify(glyph)} must trigger ready=true`)
-      }
-    })
-
-    it('_waitForPrompt rejects candidate glyphs mid-line (#4031 review)', async () => {
-      // The "> " candidate would false-positive against markdown
-      // blockquotes ("> some text") in assistant output, and bare "❯"
-      // false-positives against any text using it as a bullet ("- ❯
-      // important note"). The matcher is line-anchored to mean "the
-      // TUI just rendered an empty prompt line" — without that anchor,
-      // claude responses containing these glyphs would trigger a false
-      // ready and we'd write the next prompt mid-response.
-      const cases = [
-        '\nSome paragraph > with a blockquote-ish marker',
-        '\nLine one\nLine two with ❯ as a bullet in prose',
-        '\nMixed > and ❯ in narrative text\n',
-      ]
-      for (const tail of cases) {
-        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-        session._outputTail = tail
-        const ready = await session._waitForPrompt(50)
-        assert.equal(ready, false, `mid-line glyph must NOT count as ready, tail=${JSON.stringify(tail)}`)
-      }
-    })
-
-    it('_waitForPrompt accepts glyph at position 0 (no leading newline)', async () => {
-      // Edge case: glyph at the very start of the buffer (or start of
-      // the slice we scan). The line-anchor logic accepts position 0 as
-      // line-start, matching the natural intuition that "first char of
-      // the window" is at the start of a line.
+    it('_waitForPrompt treats unknown non-busy statuses as ready', async () => {
+      // Claude may introduce new statuses (waiting, paused, etc.) over
+      // time. The probe's job is "not actively running a turn" — any
+      // string other than "busy" counts. This is the forward-compat
+      // choice and matches how `claude ps` already treats the field.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTail = '❯ '
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'waiting')
       const ready = await session._waitForPrompt(50)
-      assert.equal(ready, true, 'glyph at position 0 must trigger ready')
+      assert.equal(ready, true, 'status=waiting counts as ready')
     })
 
-    it('_waitForPrompt rejects line-start glyph that is NOT the trailing line (#4035)', async () => {
-      // The dogfood failure that prompted #4035: claude TUI's welcome
-      // screen contains line-start `> ` and `❯` text (examples, bullets,
-      // instructions) that triggered a 563ms false-ready, well before
-      // the actual input box existed. The probe now requires the glyph
-      // to be at the END of the buffer (whitespace-only after it) so a
-      // line-start match deep in the welcome text doesn't fool it.
-      const cases = [
-        '\n> Use this command to start\nMore welcome text\n', // line-start > but more content after
-        '\n❯ example bullet\nfollowed by paragraph text\n',   // line-start ❯ but content follows
-        '\nLine A\n> Line B\nLine C',                          // line-start > sandwiched in the middle
-        '\n❯ first welcome line\n\n❯ second welcome line\n actual junk',
-      ]
-      for (const tail of cases) {
+    it('_waitForPrompt sets _lastProbeSawStatus=false when session file never appeared', async () => {
+      // Silent-degrade signal: if the probe runs full-duration without
+      // ever reading a non-null status, the file format/path has likely
+      // changed (e.g. claude entrypoint switched away from `cli` and no
+      // longer writes `status`). The warn site at the timeout reads
+      // `_lastProbeSawStatus` to surface this case distinctly from a
+      // genuinely busy session.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'absent file → not-ready')
+      assert.equal(session._lastProbeSawStatus, false,
+        '_lastProbeSawStatus must be false when no readable status was ever seen')
+    })
+
+    it('_waitForPrompt sets _lastProbeSawStatus=true once a status is read, even on busy timeout', async () => {
+      // Distinguish "stuck on busy" from "file never appeared". A long
+      // busy stretch is normal during a real turn; the warn site should
+      // NOT mention degraded probe in that case.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'busy')
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'busy → not-ready')
+      assert.equal(session._lastProbeSawStatus, true,
+        '_lastProbeSawStatus must be true once any status was successfully read')
+    })
+
+    it('_waitForPrompt tolerates a malformed session file (transient mid-write race)', async () => {
+      // Atomic-write races: claude rewrites the file by truncate+write
+      // (not rename), so a JSON.parse can hit a half-written body. The
+      // probe swallows the error and keeps polling, not crash.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      const path = join(fakeHome, '.claude', 'sessions', `${fakePid}.json`)
+      writeFileSync(path, '{not-valid-json')
+      setTimeout(() => writeSessionFile(fakePid, 'idle'), 80)
+      const ready = await session._waitForPrompt(400)
+      assert.equal(ready, true, 'probe survives JSON.parse errors and resolves once the file is sane')
+    })
+
+    it('readSessionStatus returns null for missing/invalid files', () => {
+      // Static helper isolation: covers the file-absent, JSON-invalid,
+      // and missing-field branches without going through the polling
+      // loop. The probe relies on this returning null on every error so
+      // it keeps polling instead of throwing.
+      assert.equal(ClaudeTuiSession.readSessionStatus('/no/such/path'), null,
+        'missing file → null')
+      const bad = join(fakeHome, 'bad.json')
+      writeFileSync(bad, 'not json')
+      assert.equal(ClaudeTuiSession.readSessionStatus(bad), null,
+        'invalid JSON → null')
+      const noStatus = join(fakeHome, 'no-status.json')
+      writeFileSync(noStatus, JSON.stringify({ pid: 1, updatedAt: 0 }))
+      assert.equal(ClaudeTuiSession.readSessionStatus(noStatus), null,
+        'missing status field → null')
+    })
+
+    it('sessionFilePath uses ~/.claude/sessions/<pid>.json', () => {
+      // The path must match claude's own convention (the file `claude ps`
+      // reads). If claude ever moves this directory, the probe needs a
+      // visible failure (this test) — silently reading the wrong path
+      // would degrade us back to "never ready, always falls through".
+      const path = ClaudeTuiSession.sessionFilePath(12345)
+      assert.ok(path.endsWith(join('.claude', 'sessions', '12345.json')),
+        `expected ~/.claude/sessions/12345.json, got: ${path}`)
+      assert.ok(path.startsWith(fakeHome),
+        `path should be under HOME, got: ${path}`)
+    })
+
+    describe('output tail hex dump (#4031)', () => {
+      // The dump survives the #4040 probe rewrite because it's still
+      // useful diagnostics for any TUI-rendered error inline. It's no
+      // longer tied to a probe-scan window — it caps at
+      // PTY_TAIL_DIAGNOSTIC_BYTES (1024) so log lines stay bounded.
+
+      it('returns a readable hex+ascii dump for log lines', () => {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-        session._outputTail = tail
-        const ready = await session._waitForPrompt(50)
-        assert.equal(ready, false,
-          `glyph not at trailing edge must NOT count as ready, tail=${JSON.stringify(tail)}`)
-      }
-    })
+        session._outputTailRaw = Buffer.from('hello', 'utf8')
+        const dump = session._outputTailHexDump()
+        assert.match(dump, /\(5 bytes\)/, `dump should report byte count, got: ${JSON.stringify(dump)}`)
+        assert.match(dump, /68 65 6c 6c 6f/, `hex side missing, got: ${JSON.stringify(dump)}`)
+        assert.match(dump, /\|hello\|/, `ascii side missing, got: ${JSON.stringify(dump)}`)
+      })
 
-    it('_waitForPrompt accepts a trailing-edge glyph with whitespace after it (#4035)', async () => {
-      // The real claude TUI input prompt is the LAST line. The probe
-      // must still accept trailing-whitespace variants because the
-      // cursor sits in/after the glyph and may emit padding spaces /
-      // newlines as it draws.
-      const cases = [
-        '\nWelcome\n❯ ',                          // glyph + space, nothing else
-        '\nSome intro\n❯',                        // bare glyph at end
-        '\nWelcome\n> ',                          // ASCII fallback at end
-        '\nWelcome\n❯ \n',                        // trailing newline ok (cursor drew it)
-        '\nWelcome\n❯ \n\n  \t  ',                // mixed trailing whitespace
-        '> ',                                       // glyph at position 0, only whitespace after
-      ]
-      for (const tail of cases) {
+      it('handles empty buffer', () => {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-        session._outputTail = tail
-        const ready = await session._waitForPrompt(50)
-        assert.equal(ready, true,
-          `trailing-edge glyph must count as ready, tail=${JSON.stringify(tail)}`)
-      }
+        session._outputTailRaw = Buffer.alloc(0)
+        assert.equal(session._outputTailHexDump(), '<empty>')
+      })
+
+      it('surfaces UNSTRIPPED escape/control bytes (#4031 review)', () => {
+        // The original implementation sourced from the ANSI-stripped
+        // _outputTail, so the diagnostic could never surface the very
+        // escape sequences ("0x1b ...") we wanted to see. Lock in that
+        // the dump reads from the raw buffer.
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._outputTail = '❯ '
+        session._outputTailRaw = Buffer.from('\x1b]0;claude\x07❯ ', 'utf8')
+        const dump = session._outputTailHexDump()
+        assert.match(dump, /1b 5d/, `dump should surface raw ESC byte, got: ${JSON.stringify(dump)}`)
+      })
+
+      it('caps the dump at PTY_TAIL_DIAGNOSTIC_BYTES with a truncation header', () => {
+        // Honesty invariant: large buffers must be truncated to a
+        // bounded size with a header that names how much was elided.
+        // Without the cap, a multi-KB tail could produce log lines that
+        // get truncated by the logger itself and lose the diagnostic.
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const cap = ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES
+        const totalBytes = cap * 3
+        const omitted = totalBytes - cap
+        session._outputTailRaw = Buffer.from('X'.repeat(totalBytes), 'utf8')
+        const dump = session._outputTailHexDump()
+        assert.ok(
+          dump.includes(`(${cap} of ${totalBytes} bytes; first ${omitted} omitted)`),
+          `dump should report cap with truncation header, got: ${dump.slice(0, 120)}`,
+        )
+      })
     })
 
-    it('_outputTailHexDump returns a readable hex+ascii dump for log lines (#4031)', () => {
-      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      // #4031 review: dump reads from _outputTailRaw (the UNSTRIPPED
-      // parallel buffer) so escape/control bytes survive into the log.
-      session._outputTailRaw = Buffer.from('hello', 'utf8')
-      const dump = session._outputTailHexDump()
-      // Header reports byte count.
-      assert.match(dump, /\(5 bytes\)/, `dump should report byte count, got: ${JSON.stringify(dump)}`)
-      // Hex side has the bytes for "hello" (68 65 6c 6c 6f).
-      assert.match(dump, /68 65 6c 6c 6f/, `hex side missing, got: ${JSON.stringify(dump)}`)
-      // ASCII side shows the printable chars wrapped in pipes.
-      assert.match(dump, /\|hello\|/, `ascii side missing, got: ${JSON.stringify(dump)}`)
-    })
-
-    it('_outputTailHexDump handles empty buffer', () => {
-      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session._outputTailRaw = Buffer.alloc(0)
-      assert.equal(session._outputTailHexDump(), '<empty>')
-    })
-
-    it('_outputTailHexDump surfaces UNSTRIPPED escape/control bytes (#4031 review)', () => {
-      // The original implementation sourced from the ANSI-stripped
-      // _outputTail, so the diagnostic could never surface the very
-      // escape sequences ("0x1b ...") we wanted to see when the probe
-      // missed. Lock in that the dump reads from the raw buffer.
-      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      // Raw output as the PTY emits it: OSC title-set followed by the
-      // glyph. The stripped tail would have only "❯ "; the raw dump
-      // must show the leading 0x1b 0x5d (ESC ]) bytes.
-      session._outputTail = '❯ '
-      session._outputTailRaw = Buffer.from('\x1b]0;claude\x07❯ ', 'utf8')
-      const dump = session._outputTailHexDump()
-      // Hex side must include the ESC byte that the strip would have
-      // hidden.
-      assert.match(dump, /1b 5d/, `dump should surface raw ESC byte, got: ${JSON.stringify(dump)}`)
-    })
-
-    it('_outputTailHexDump covers the FULL probe-scan window (#4031 review)', () => {
-      // Regression test for a review-caught bug: the dump originally
-      // hardcoded a 256-byte cap while the probe scanned 1024 bytes, so
-      // a glyph in the [-1024, -257] range would be in the search
-      // window but hidden from the diagnostic. Assert that the dump
-      // size matches the window — if someone widens the window again
-      // without widening the dump, this fails.
-      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      const windowChars = ClaudeTuiSession.PROMPT_TAIL_WINDOW_CHARS
-      // Fill the raw tail with EXACTLY window-size ASCII content so the
-      // dump should report ALL of it (no truncation header). ASCII so
-      // bytes == chars and the assertion stays exact.
-      session._outputTailRaw = Buffer.from('A'.repeat(windowChars), 'utf8')
-      const dump = session._outputTailHexDump()
-      // Should report the full window size, not a smaller hardcoded cap.
-      assert.ok(dump.includes(`(${windowChars} bytes)`),
-        `dump should report full window size ${windowChars}, got header: ${dump.slice(0, 80)}`)
-    })
-
-    it('_outputTailHexDump never reports MORE bytes than the probe window scanned', () => {
-      // Honesty invariant: the dump should never claim to show bytes the
-      // probe didn't actually check. If the raw tail is huge but the
-      // probe only scans the trailing window, the dump must report
-      // window-many bytes, not the full tail. When the source buffer
-      // exceeds the window, the dump uses the "(N of M bytes; first K
-      // omitted)" form to be honest about what was elided.
-      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-      const windowChars = ClaudeTuiSession.PROMPT_TAIL_WINDOW_CHARS
-      const totalBytes = windowChars * 3
-      const omitted = totalBytes - windowChars
-      session._outputTailRaw = Buffer.from('X'.repeat(totalBytes), 'utf8')
-      const dump = session._outputTailHexDump()
-      assert.ok(
-        dump.includes(`(${windowChars} of ${totalBytes} bytes; first ${omitted} omitted)`),
-        `dump should report exactly the window size with truncation header, got: ${dump.slice(0, 120)}`,
-      )
-    })
-
-    it('sendMessage waits for the prompt before writing to the PTY', async () => {
+    it('sendMessage waits for status=idle before writing to the PTY', async () => {
       // The whole point of the probe — bytes must not hit the PTY until
-      // the input box is ready. We delay the glyph appearance and assert
-      // the write fires AFTER the delay, not before.
+      // claude reports itself ready. We delay the idle transition and
+      // assert the write fires AFTER it, not before.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
       session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-probe-'))
-      session._outputTail = 'rendering...'   // no glyph yet
+      writeSessionFile(fakePid, 'busy')   // not ready yet
       let writeAt = null
       session._term = {
         write: () => {
@@ -620,28 +652,28 @@ describe('ClaudeTuiSession', () => {
           writeFileSync(join(session._sinkDir, 'stop-x.json'), JSON.stringify({ last_assistant_message: 'ok' }))
         },
         kill: () => {},
+        pid: fakePid,
       }
       session._hardTimeoutMs = 5000
       session._resultTimeoutMs = 5000
       session.on('error', () => {})
 
       const sendStart = Date.now()
-      const glyphAt = sendStart + 80
-      setTimeout(() => {
-        session._outputTail = session._outputTail + ClaudeTuiSession.PROMPT_GLYPH
-      }, 80)
+      const idleAt = sendStart + 150
+      setTimeout(() => writeSessionFile(fakePid, 'idle'), 150)
 
       await session.sendMessage('hello')
 
       assert.ok(writeAt, 'PTY write happened')
-      assert.ok(writeAt >= glyphAt - 20,
-        `PTY write must wait for prompt glyph (write@${writeAt - sendStart}ms, glyph@${glyphAt - sendStart}ms)`)
+      assert.ok(writeAt >= idleAt - 30,
+        `PTY write must wait for status=idle (write@${writeAt - sendStart}ms, idle@${idleAt - sendStart}ms)`)
     })
 
     it('sendMessage falls through and writes anyway on probe timeout', async () => {
-      // A timeout is logged but never blocks the write — if our heuristic
-      // is wrong on some terminal encoding we'd rather risk a stall than
-      // silently swallow every prompt the user types.
+      // A timeout is logged but never blocks the write — if claude's
+      // session-file convention changes or the file is unreadable for
+      // some reason, we'd rather risk a stall than silently swallow
+      // every prompt the user types.
       session = new ClaudeTuiSession({
         cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
         hardTimeoutMs: 5000, resultTimeoutMs: 5000,
@@ -649,7 +681,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test'
       session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-probe-to-'))
-      session._outputTail = ''   // no glyph, will stay absent
+      // No session file at all — probe will keep returning false.
       let wrote = false
       session._term = {
         write: () => {
@@ -657,6 +689,7 @@ describe('ClaudeTuiSession', () => {
           writeFileSync(join(session._sinkDir, 'stop-y.json'), JSON.stringify({ last_assistant_message: 'ok' }))
         },
         kill: () => {},
+        pid: fakePid,
       }
       session.on('error', () => {})
 
@@ -683,8 +716,9 @@ describe('ClaudeTuiSession', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
-      session._outputTail = ''
-      session._term = { write: () => {}, kill: () => {} }
+      // No session file → probe stays in its polling loop until either
+      // _ptyExited flips or the timeout elapses.
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
       session._hardTimeoutMs = 5000
       session._resultTimeoutMs = 5000
 
@@ -711,7 +745,7 @@ describe('ClaudeTuiSession', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
-      session._outputTail = ''   // probe will keep polling
+      // No session file → probe stays in its polling loop.
       let promptWritten = false
       session._term = {
         write: (bytes) => {
@@ -720,6 +754,7 @@ describe('ClaudeTuiSession', () => {
           if (typeof bytes === 'string' && bytes.length > 1) promptWritten = true
         },
         kill: () => {},
+        pid: fakePid,
       }
       session._hardTimeoutMs = 5000
       session._resultTimeoutMs = 5000
@@ -727,8 +762,8 @@ describe('ClaudeTuiSession', () => {
       const errors = []
       session.on('error', (e) => errors.push(e))
 
-      // Fire interrupt() partway through the probe wait. _outputTail
-      // never gains the glyph, so the probe is still polling when this
+      // Fire interrupt() partway through the probe wait. No session
+      // file is ever written so the probe is still polling when this
       // runs.
       setTimeout(() => session.interrupt(), 40)
 
@@ -769,9 +804,10 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-att'
       session._sinkDir = sinkDir
-      // Pre-seed the prompt glyph so the readiness probe resolves
-      // immediately (otherwise sendMessage burns the full 5s budget).
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      // Skip readiness gating — attachment behavior is independent of
+      // the #4040 probe. Probe-specific tests live under their own
+      // describe block.
+      session._waitForPrompt = async () => true
 
       let writtenToPty = ''
       // Inspect attachment state DURING the turn (before the success path
@@ -840,7 +876,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test'
       session._sinkDir = sinkDir
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       let writtenToPty = ''
       session._term = {
@@ -870,7 +906,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test'
       session._sinkDir = `${sinkDir}\0invalid`   // mkdirSync will reject
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       let writtenToPty = ''
       session._term = {
@@ -1044,7 +1080,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-cleanup-success'
       session._sinkDir = sinkDir
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       session._term = {
         write: () => {
@@ -1153,7 +1189,7 @@ describe('ClaudeTuiSession', () => {
       session._processReady = true
       session._sessionId = 'test-cleanup-skipped'
       session._sinkDir = sinkDir
-      session._outputTail = ClaudeTuiSession.PROMPT_GLYPH
+      session._waitForPrompt = async () => true
 
       let midTurnSubdirCount = -1
       session._term = {
