@@ -562,7 +562,18 @@ export function App() {
           id: 'reveal',
           label: 'Open in Finder',
           onClick: tauriRuntime && session.cwd
-            ? () => { void revealInFinder(session.cwd) }
+            ? () => {
+                // #4045: surface Rust-side errors (missing path, spawn
+                // failure, restricted-window rejection) as a toast so the
+                // user knows the action failed instead of getting an
+                // unhandled promise rejection in the console.
+                const cwd = session.cwd
+                revealInFinder(cwd).catch((err: unknown) => {
+                  useConnectionStore.getState().addServerError(
+                    `Failed to reveal in Finder: ${err instanceof Error ? err.message : String(err)}`,
+                  )
+                })
+              }
             : undefined,
         },
         {
@@ -590,7 +601,16 @@ export function App() {
           id: 'reveal',
           label: 'Open in Finder',
           onClick: tauriRuntime
-            ? () => { void revealInFinder(repoPath) }
+            ? () => {
+                // #4045: see session-row reveal — same pattern, surface
+                // Rust-side errors as a toast instead of an unhandled
+                // promise rejection.
+                revealInFinder(repoPath).catch((err: unknown) => {
+                  useConnectionStore.getState().addServerError(
+                    `Failed to reveal in Finder: ${err instanceof Error ? err.message : String(err)}`,
+                  )
+                })
+              }
             : undefined,
         },
       ]

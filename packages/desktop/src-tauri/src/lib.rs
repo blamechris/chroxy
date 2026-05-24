@@ -432,10 +432,16 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
 /// standard "select item" affordance, so we open the directory directly —
 /// if the path is a file, we fall back to its parent dir so xdg doesn't
 /// launch the default app for that file type.
+///
+/// Restricted to the `main` window via `require_main_window` so the
+/// `dashboard` / `qr_popup` capability surface can't silently shell out to
+/// `open` / `explorer` / `xdg-open` (#4045 review).
 #[tauri::command]
-fn reveal_in_finder(path: String) -> Result<(), String> {
+fn reveal_in_finder(window: tauri::Window, path: String) -> Result<(), String> {
     use std::path::Path;
     use std::process::Command;
+
+    require_main_window(&window)?;
 
     if path.is_empty() {
         return Err("path is empty".into());
@@ -455,8 +461,15 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        // `explorer /select,<path>` is parsed by explorer.exe itself, NOT
+        // by CommandLineToArgvW — Rust's normal arg quoting would wrap the
+        // whole `/select,...` string in quotes and break the parser. Use
+        // `raw_arg` to bypass quoting and wrap only the path in inner
+        // quotes so paths containing spaces (e.g. `C:\Program Files\...`)
+        // are selected as a single item. See #4045 review.
+        use std::os::windows::process::CommandExt;
         Command::new("explorer")
-            .arg(format!("/select,{}", path))
+            .raw_arg(format!("/select,\"{}\"", path.replace('"', "")))
             .spawn()
             .map_err(|e| format!("failed to spawn explorer: {}", e))?;
         return Ok(());

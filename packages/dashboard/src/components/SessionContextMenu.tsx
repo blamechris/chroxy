@@ -130,8 +130,15 @@ export function SessionContextMenu({
           data-testid={`session-context-menu-item-${item.id}`}
           className={`session-context-menu-item${item.destructive ? ' destructive' : ''}${item.separatorAbove ? ' separator-above' : ''}`}
           onClick={() => {
-            item.onClick?.()
-            onDismiss()
+            // #4045 review: try/finally so a throwing item handler doesn't
+            // leave the menu stuck open. The error still propagates to the
+            // React error boundary / window.onerror — we only guarantee
+            // dismissal here.
+            try {
+              item.onClick?.()
+            } finally {
+              onDismiss()
+            }
           }}
         >
           {item.label}

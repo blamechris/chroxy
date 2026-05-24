@@ -72,6 +72,39 @@ describe('SessionContextMenu', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1)
   })
 
+  it('still calls onDismiss when the item onClick throws (try/finally)', () => {
+    // Regression for #4045 review — if a click handler throws (e.g. an
+    // async error surfaced synchronously), the menu must still dismiss so
+    // it does not stay stuck on screen. We silence React's error logging
+    // and listen for the synthetic-event error so the test doesn't fail
+    // on an "unhandled" exception that the production setup would route
+    // to window.onerror / the React error boundary.
+    const onDismiss = vi.fn()
+    const throwing = vi.fn(() => {
+      throw new Error('boom')
+    })
+    const errorListener = vi.fn((e: ErrorEvent) => e.preventDefault())
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    window.addEventListener('error', errorListener)
+    try {
+      render(
+        <SessionContextMenu
+          x={0}
+          y={0}
+          items={[{ id: 'duplicate', label: 'Duplicate', onClick: throwing }]}
+          onDismiss={onDismiss}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('session-context-menu-item-duplicate'))
+      expect(throwing).toHaveBeenCalledTimes(1)
+      // The whole point — dismiss still fires from the `finally` branch.
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('error', errorListener)
+      consoleError.mockRestore()
+    }
+  })
+
   it('applies destructive class for destructive items', () => {
     render(
       <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
