@@ -108,6 +108,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const availableModels = useConnectionStore(s => s.availableModels) || EMPTY_MODELS
   const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
   const availableProviders = useConnectionStore(s => s.availableProviders)
+  // #4019: read the server's PERMISSION_MODES list (including the
+  // `description` field) so the picker + hint stay in lockstep with the
+  // server's source of truth. Pre-#4019 the modal hardcoded its own copy
+  // of the description strings as a ternary chain, which drifted.
+  const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
@@ -537,21 +542,45 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               aria-describedby="permission-mode-hint"
             >
               <option value="">Server default</option>
-              <option value="approve">Approve — gate every tool call</option>
-              <option value="acceptEdits">Accept Edits — auto-approve file ops</option>
-              <option value="auto">Auto — skip all prompts (`--dangerously-skip-permissions`)</option>
-              <option value="plan">Plan — Claude plans before acting; each tool gates on approval</option>
+              {/* #4019: options driven by availablePermissionModes from the
+                  store so the labels stay in sync with the server's
+                  PERMISSION_MODES table. Cold-start fallback labels match
+                  server PERMISSION_MODES (handler-utils.js:19-22) exactly
+                  — so the selected option text doesn't flicker mid-init
+                  when the available_permission_modes message lands.
+                  (#4211 Copilot review.) */}
+              {(availablePermissionModes.length > 0 ? availablePermissionModes : [
+                { id: 'approve', label: 'Approve' },
+                { id: 'acceptEdits', label: 'Accept Edits' },
+                { id: 'auto', label: 'Auto (skip all prompts)' },
+                { id: 'plan', label: 'Plan' },
+              ]).map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
             </select>
             <span id="permission-mode-hint" className="form-hint">
-              {permissionMode === 'auto'
-                ? 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.'
-                : permissionMode === 'acceptEdits'
-                ? 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.'
-                : permissionMode === 'plan'
-                ? 'Claude is asked to plan before acting; each tool call still gates on your approval.'
-                : permissionMode === 'approve'
-                ? 'Default. Each tool call gates on your approval in the dashboard or mobile app.'
-                : 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'}
+              {/* #4019: hint sourced from availablePermissionModes[].description
+                  (server's PERMISSION_MODES table). Falls back to the
+                  pre-#4019 hardcoded strings when the server didn't send a
+                  description for the selected mode (older server or empty
+                  selection). */}
+              {(() => {
+                const selected = availablePermissionModes.find((m) => m.id === permissionMode)
+                if (selected?.description) return selected.description
+                if (permissionMode === 'auto') {
+                  return 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.'
+                }
+                if (permissionMode === 'acceptEdits') {
+                  return 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.'
+                }
+                if (permissionMode === 'plan') {
+                  return 'Claude is asked to plan before acting; each tool call still gates on your approval.'
+                }
+                if (permissionMode === 'approve') {
+                  return 'Default. Each tool call gates on your approval in the dashboard or mobile app.'
+                }
+                return 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'
+              })()}
             </span>
           </div>
           <div className="form-field form-field--checkbox">

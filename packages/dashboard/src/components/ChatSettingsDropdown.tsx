@@ -6,6 +6,7 @@
  */
 import { useCallback, useMemo } from 'react'
 import type { ModelInfo } from '../store/types'
+import type { PermissionMode } from '@chroxy/store-core'
 
 /**
  * Compose the hover tooltip for the active-model select (#3888).
@@ -41,7 +42,10 @@ export interface ChatSettingsDropdownProps {
   activeModel: string | null
   defaultModelId: string | null
   onModelChange: (id: string) => void
-  availablePermissionModes: { id: string; label: string }[]
+  // #4019: PermissionMode carries an optional `description` field server-side
+  // (PERMISSION_MODES exports it for every mode). Use the typed import from
+  // store-core so the title-attribute hint stays in lockstep with the wire shape.
+  availablePermissionModes: PermissionMode[]
   permissionMode: string | null
   onPermissionModeChange: (mode: string) => void
   // Hide the permission-mode picker when the active provider doesn't expose
@@ -121,9 +125,17 @@ export function ChatSettingsDropdown({
           data-kind="permission"
           value={permissionMode || ''}
           onChange={e => onPermissionModeChange(e.target.value)}
+          // #4019: server-side PERMISSION_MODES carries a `description` for
+          // every mode (e.g. "Auto-approve every tool call without prompting").
+          // Surface the description for the currently-selected option as a
+          // title so the user gets the same trade-off explanation mid-session
+          // they get at creation time. Each <option> also carries its own
+          // title — most browsers don't show option tooltips reliably, but
+          // it's harmless and feeds AT-friendly machinery for those that do.
+          title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
         >
           {availablePermissionModes.map(m => (
-            <option key={m.id} value={m.id}>{m.label}</option>
+            <option key={m.id} value={m.id} title={m.description}>{m.label}</option>
           ))}
         </select>
       )}

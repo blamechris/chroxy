@@ -6,6 +6,13 @@
  * Spans full width across sidebar + main content (grid-column: 1 / -1).
  */
 
+import {
+  costTooltip,
+  contextTooltip,
+  modelTooltip,
+  agentCountTooltip,
+} from '../lib/status-tooltips'
+
 declare const __APP_VERSION__: string
 
 export interface FooterBarProps {
@@ -24,6 +31,10 @@ export interface FooterBarProps {
   onShowQr?: () => void
   /** #3070: per-session "Share this session" QR. Undefined hides the button. */
   onShareSession?: () => void
+  /** #3858: provider id so the cost tooltip can flag client-estimated values. */
+  provider?: string
+  /** #3858: model context window in tokens for the model tooltip. */
+  contextWindow?: number
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -55,6 +66,8 @@ export function FooterBar({
   agentCount,
   onShowQr,
   onShareSession,
+  provider,
+  contextWindow,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -71,6 +84,13 @@ export function FooterBar({
     statusLabel = STATUS_LABELS[connectionPhase] ?? connectionPhase
   }
   const dotClass = settingUpTunnel ? 'connecting' : connectionPhase
+
+  // #4204 Copilot review: compute each chip's tooltip once so the
+  // `title` + `aria-label` mirror pair stays in lockstep.
+  const costTip = costTooltip({ cost: cost ?? undefined, provider })
+  const contextTip = contextTooltip({ percent: contextPercent ?? null, contextSummary: context })
+  const modelTip = modelTooltip({ model, contextWindow })
+  const agentTip = agentCountTooltip(agentCount)
 
   return (
     <footer className="footer-bar" data-testid="footer-bar">
@@ -104,16 +124,38 @@ export function FooterBar({
         )}
         {isBusy && <span className="footer-busy" />}
         {agentCount != null && agentCount > 0 && (
-          <span className="footer-agents">
+          <span
+            className="footer-agents"
+            title={agentTip}
+            aria-label={agentTip}
+          >
             {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
           </span>
         )}
-        {model && <span className="footer-model">{model}</span>}
+        {model && (
+          <span
+            className="footer-model"
+            title={modelTip}
+            aria-label={modelTip}
+          >
+            {model}
+          </span>
+        )}
         {cost != null && (
-          <span className="footer-cost">${cost.toFixed(4)}</span>
+          <span
+            className="footer-cost"
+            title={costTip}
+            aria-label={costTip}
+          >
+            ${cost.toFixed(4)}
+          </span>
         )}
         {context && (
-          <span className="footer-context" title={context}>
+          <span
+            className="footer-context"
+            title={contextTip}
+            aria-label={contextTip}
+          >
             {contextPercent != null ? (
               <>
                 <span
