@@ -104,15 +104,37 @@ function ActivityEntry({
           {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
         </Text>
       </View>
-      {expanded && (
-        todoParsed ? (
-          <TodoList parsed={todoParsed} />
-        ) : (
-          <Text selectable style={styles.activityEntryExpanded}>
-            {hasResult ? (message.toolResult || '') : (message.content || '')}
+      {expanded && (() => {
+        if (todoParsed) return <TodoList parsed={todoParsed} />
+        // #4203: prefer toolResult text when present; otherwise fall back to
+        // content (pre-result/pending state). When toolResult is undefined
+        // but images are attached (e.g. screenshot tool with no text body),
+        // the pre-#4203 expression resolved to an empty string and the
+        // expanded body was visually blank even though the row's image
+        // badge said 'N images'. Render an explicit placeholder so the
+        // user sees what's there. Inline image rendering can land later
+        // — the placeholder is the minimum signal.
+        const resultText = hasResult ? (message.toolResult || '') : (message.content || '')
+        if (resultText.length > 0) {
+          return (
+            <Text selectable style={styles.activityEntryExpanded}>
+              {resultText}
+            </Text>
+          )
+        }
+        if (imageCount > 0) {
+          return (
+            <Text style={styles.activityEntryExpanded}>
+              {imageCount === 1 ? '1 image attached (preview not yet rendered inline)' : `${imageCount} images attached (preview not yet rendered inline)`}
+            </Text>
+          )
+        }
+        return (
+          <Text style={styles.activityEntryExpanded}>
+            (no output)
           </Text>
         )
-      )}
+      })()}
     </TouchableOpacity>
   );
 }

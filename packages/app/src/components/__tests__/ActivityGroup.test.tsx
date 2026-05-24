@@ -277,4 +277,51 @@ describe('ActivityGroup / ActivityEntry — structured-renderer wiring (#4201)',
       .join(' ');
     expect(afterAll).toMatch(/MARKER-IN-EXPANDED-ONLY/);
   });
+
+  // #4203: tool returns images-only (toolResult === undefined, toolResultImages
+  // has entries). Pre-fix the expanded body resolved to '' because hasResult
+  // is true via images but the text-rendering expression used toolResult ||
+  // '' which is the empty string. Now the expanded body falls back to an
+  // explicit "N images attached" placeholder so the user sees something.
+  it('renders an images-attached placeholder when toolResult is undefined and images are present (#4203)', () => {
+    const root = renderGroup([
+      makeToolMessage({
+        id: 'm1',
+        tool: 'Screenshot',
+        toolResult: undefined,
+        toolResultImages: [
+          { mediaType: 'image/png', data: 'AAAA' },
+          { mediaType: 'image/png', data: 'BBBB' },
+        ],
+      } as ChatMessage),
+    ]);
+    expandGroup(root);
+    expandEntry(root, 'activity-entry-m1');
+    const texts = root.root.findAllByType(Text);
+    const allText = texts
+      .flatMap((t) => (Array.isArray(t.props.children) ? t.props.children : [t.props.children]))
+      .filter((c): c is string => typeof c === 'string')
+      .join(' ');
+    expect(allText).toMatch(/2 images attached/);
+  });
+
+  it('renders the singular placeholder when exactly 1 image is attached (#4203)', () => {
+    const root = renderGroup([
+      makeToolMessage({
+        id: 'm1',
+        tool: 'Screenshot',
+        toolResult: undefined,
+        toolResultImages: [{ mediaType: 'image/png', data: 'AAAA' }],
+      } as ChatMessage),
+    ]);
+    expandGroup(root);
+    expandEntry(root, 'activity-entry-m1');
+    const texts = root.root.findAllByType(Text);
+    const allText = texts
+      .flatMap((t) => (Array.isArray(t.props.children) ? t.props.children : [t.props.children]))
+      .filter((c): c is string => typeof c === 'string')
+      .join(' ');
+    expect(allText).toMatch(/1 image attached/);
+    expect(allText).not.toMatch(/2 images attached/);
+  });
 });
