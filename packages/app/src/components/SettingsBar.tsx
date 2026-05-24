@@ -4,7 +4,7 @@ import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
-import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
+import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
@@ -24,7 +24,11 @@ export interface SettingsBarProps {
   defaultModelId?: string | null;
   availableModels: ModelInfo[];
   permissionMode: string | null;
-  availablePermissionModes: { id: string; label: string }[];
+  // #4213: typed PermissionMode from store-core — the optional `description`
+  // field drives the hint text rendered under the chip row so the mobile UI
+  // shares one source of truth with the server (matches the dashboard
+  // #4019 plumbing).
+  availablePermissionModes: PermissionMode[];
   lastResultCost: number | null;
   lastResultDuration: number | null;
   sessionCost?: number | null;
@@ -353,6 +357,37 @@ export function SettingsBar({
                   })}
                 </View>
               )}
+              {/* #4213: surface the selected permission mode's description
+                  from the server's PERMISSION_MODES table. Falls back to the
+                  pre-#4213 hardcoded copy when the server didn't send a
+                  description (older server) so mobile users still get the
+                  trade-off explanation. Mirrors CreateSessionModal's #4019
+                  hint pattern. */}
+              {permissionMode && availablePermissionModes.length > 0 && (() => {
+                const selected = availablePermissionModes.find((m) => m.id === permissionMode);
+                let hint = selected?.description;
+                if (!hint) {
+                  if (permissionMode === 'auto') {
+                    hint = 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.';
+                  } else if (permissionMode === 'acceptEdits') {
+                    hint = 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.';
+                  } else if (permissionMode === 'plan') {
+                    hint = 'Claude is asked to plan before acting; each tool call still gates on your approval.';
+                  } else if (permissionMode === 'approve') {
+                    hint = 'Default. Each tool call gates on your approval in the dashboard or mobile app.';
+                  }
+                }
+                if (!hint) return null;
+                return (
+                  <Text
+                    style={styles.permissionModeHint}
+                    testID="permission-mode-hint"
+                    accessibilityLabel={`Permission mode: ${hint}`}
+                  >
+                    {hint}
+                  </Text>
+                );
+              })()}
               {(lastResultCost != null || sessionCost != null || contextUsage) && (
                 <View style={styles.contextRow}>
                   {sessionCost != null ? (
@@ -640,6 +675,15 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // #4213: small muted hint rendered under the permission-mode chip row.
+  // Uses the same sizing as contextText but without the monospace font so
+  // the prose description reads as descriptive copy rather than data.
+  permissionModeHint: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    lineHeight: 14,
+    marginTop: -2,
   },
   qualityBadge: {
     flexDirection: 'row',
