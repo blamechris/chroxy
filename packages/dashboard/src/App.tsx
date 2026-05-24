@@ -20,7 +20,8 @@ import type { ChatMessage } from './store/connection'
 import type { BaseSessionState } from '@chroxy/store-core'
 import type { ChatViewMessage } from './components/ChatView'
 
-import { Sidebar, type RepoNode } from './components/Sidebar'
+import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
+import { SessionContextMenu, type ContextMenuItem } from './components/SessionContextMenu'
 import { CommandPalette } from './components/CommandPalette'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
@@ -60,7 +61,7 @@ import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { readClipboardImage } from './utils/clipboard-image'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
-import { startServer } from './hooks/useTauriIPC'
+import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab } from './store/persistence'
@@ -421,6 +422,12 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
+  // #4045: sidebar right-click context menu state. `null` when closed.
+  const [sidebarContextMenu, setSidebarContextMenu] = useState<{
+    target: ContextMenuTarget
+    x: number
+    y: number
+  } | null>(null)
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
 
@@ -510,6 +517,87 @@ export function App() {
     evictSessionComposerState(sessionId)
     destroySession(sessionId)
   }, [sessions, destroySession, createSession])
+
+  // #4045: sidebar right-click context menu open + dismiss handlers. The
+  // open path stashes the click target + viewport coordinates so the
+  // SessionContextMenu can render at the cursor. Dismiss clears state.
+  const handleSidebarContextMenu = useCallback((target: ContextMenuTarget, event: React.MouseEvent) => {
+    setSidebarContextMenu({ target, x: event.clientX, y: event.clientY })
+  }, [])
+  const dismissSidebarContextMenu = useCallback(() => {
+    setSidebarContextMenu(null)
+  }, [])
+
+  // #4045: build the menu item list for the currently-targeted sidebar row.
+  // Items are capability-gated:
+  //   - "Open in Finder" only appears under Tauri (we shell out to `open`
+  //     / `explorer` / `xdg-open` via the reveal_in_finder Rust command —
+  //     no server-side endpoint exists for the browser dashboard).
+  //   - "Archive" is intentionally omitted; the server has no archive
+  //     store yet (#4045 splits this into a follow-up).
+  const sidebarContextMenuItems = useMemo<ContextMenuItem[]>(() => {
+    if (!sidebarContextMenu) return []
+    const { target } = sidebarContextMenu
+    const tauriRuntime = isTauri()
+
+    if (target.type === 'session' && target.sessionId) {
+      const session = sessions.find(s => s.sessionId === target.sessionId)
+      if (!session) return []
+      return [
+        {
+          id: 'duplicate',
+          label: 'Duplicate Session',
+          onClick: () => {
+            createSession({
+              name: session.name,
+              cwd: session.cwd || undefined,
+              provider: session.provider,
+              model: session.model || undefined,
+              permissionMode: session.permissionMode || undefined,
+              worktree: session.worktree,
+            })
+          },
+        },
+        {
+          id: 'reveal',
+          label: 'Open in Finder',
+          onClick: tauriRuntime && session.cwd
+            ? () => { void revealInFinder(session.cwd) }
+            : undefined,
+        },
+        {
+          id: 'close',
+          label: 'Close Session',
+          destructive: true,
+          separatorAbove: true,
+          onClick: () => handleCloseSession(session.sessionId),
+        },
+      ]
+    }
+
+    if (target.type === 'repo' && target.path) {
+      const repoPath = target.path
+      return [
+        {
+          id: 'new-session',
+          label: 'New Session Here',
+          onClick: () => {
+            setPendingCwd(repoPath)
+            setShowCreateSession(true)
+          },
+        },
+        {
+          id: 'reveal',
+          label: 'Open in Finder',
+          onClick: tauriRuntime
+            ? () => { void revealInFinder(repoPath) }
+            : undefined,
+        },
+      ]
+    }
+
+    return []
+  }, [sidebarContextMenu, sessions, createSession, handleCloseSession])
 
   /**
    * Append processed image attachments to the composer's pending-image
@@ -1618,9 +1706,7 @@ export function App() {
           }}
           onToggle={() => setSidebarOpen(prev => !prev)}
           onWidthChange={(w: number) => { setSidebarWidth(w); persistSidebarWidth(w) }}
-          onContextMenu={() => {
-            /* Context menus will be added in a follow-up */
-          }}
+          onContextMenu={handleSidebarContextMenu}
           searchResults={searchResults}
           searchLoading={searchLoading}
           searchQuery={searchQuery}
@@ -1955,6 +2041,19 @@ export function App() {
           capabilities={{ skillTrustGrant: skillTrustGrantSupported }}
           pendingTrustGrants={activePendingTrustGrants}
           onClose={() => setSkillsPanelOpen(false)}
+        />
+      )}
+
+      {/* #4045: sidebar right-click context menu. Rendered at top level so
+          it floats above the sidebar without inheriting clip/overflow from
+          ancestor containers; SessionContextMenu handles its own outside-
+          click / Esc / blur dismissal. */}
+      {sidebarContextMenu && (
+        <SessionContextMenu
+          x={sidebarContextMenu.x}
+          y={sidebarContextMenu.y}
+          items={sidebarContextMenuItems}
+          onDismiss={dismissSidebarContextMenu}
         />
       )}
 
