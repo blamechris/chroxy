@@ -846,6 +846,78 @@ describe('ClaudeByokSession', () => {
     })
   })
 
+  describe('tool_start event (#4240)', () => {
+    // Wire-shape parity with sdk-session.js and cli-session.js. The
+    // event-normalizer reads `data.tool` / `data.input` (matching the
+    // protocol ServerToolStartSchema, where `tool: z.string()` is
+    // REQUIRED). The legacy byok-session emit used `{toolName}` only,
+    // so the dashboard saw `tool: undefined` on the wire and the
+    // tool-call bubble rendered a generic placeholder instead of the
+    // tool name (#4240). These tests pin the canonical shape against
+    // future regressions.
+
+    it('emits tool_start with {tool, input} matching the normalizer wire shape', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_42', name: 'Read', input: {} } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'tool_use', id: 'tu_42', name: 'Read', input: { file_path: '/tmp/x' } }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const starts = captured.filter((e) => e.name === 'tool_start')
+      assert.equal(starts.length, 1, 'one tool_use content block -> one tool_start event')
+      const payload = starts[0].payload
+      // The wire-facing fields the normalizer reads. ServerToolStartSchema
+      // requires `tool: z.string()` (non-null), so `tool` MUST be the
+      // tool name string here — not undefined and not the legacy
+      // `toolName` key.
+      assert.equal(payload.tool, 'Read', 'tool field carries the tool name (normalizer-expected key)')
+      assert.equal(payload.toolUseId, 'tu_42', 'toolUseId is propagated')
+      assert.ok('input' in payload, 'input field is present (may be null pre-delta, but the key must exist)')
+      assert.equal(typeof payload.messageId, 'string', 'messageId is set')
+      await session.destroy()
+    })
+
+    it('does NOT emit the legacy {toolName} key', async () => {
+      // Belt-and-braces against a future revert: if anyone reintroduces
+      // `toolName` the normalizer will silently drop it and the wire
+      // shape regresses to `tool: undefined`.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_stop' },
+            ]),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const start = captured.find((e) => e.name === 'tool_start')
+      assert.ok(start, 'tool_start event was emitted')
+      assert.equal(start.payload.toolName, undefined,
+        'legacy `toolName` key must not appear — normalizer reads `tool`, not `toolName`')
+    })
+  })
+
   describe('tool_input_delta event (#4080)', () => {
     // The Anthropic SDK streams input JSON for each tool_use block as
     // `input_json_delta` content_block_delta events. Pre-#4080
