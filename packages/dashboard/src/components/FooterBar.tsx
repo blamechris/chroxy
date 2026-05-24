@@ -26,6 +26,10 @@ export interface FooterBarProps {
   cost?: number
   context?: string
   contextPercent?: number | null
+  /** #4205: raw input tokens for the most-recent turn (drives the tooltip breakdown). */
+  inputTokens?: number
+  /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
+  outputTokens?: number
   isBusy?: boolean
   agentCount?: number
   onShowQr?: () => void
@@ -62,6 +66,8 @@ export function FooterBar({
   cost,
   context,
   contextPercent,
+  inputTokens,
+  outputTokens,
   isBusy,
   agentCount,
   onShowQr,
@@ -88,7 +94,15 @@ export function FooterBar({
   // #4204 Copilot review: compute each chip's tooltip once so the
   // `title` + `aria-label` mirror pair stays in lockstep.
   const costTip = costTooltip({ cost: cost ?? undefined, provider })
-  const contextTip = contextTooltip({ percent: contextPercent ?? null, contextSummary: context })
+  // #4205: thread input/output tokens through so the chip's tooltip
+  // carries the in/out/total breakdown (the #3858 acceptance criterion
+  // PR #4204 added the helper for but left unwired).
+  const contextTip = contextTooltip({
+    percent: contextPercent ?? null,
+    contextSummary: context,
+    inputTokens,
+    outputTokens,
+  })
   const modelTip = modelTooltip({ model, contextWindow })
   const agentTip = agentCountTooltip(agentCount)
 

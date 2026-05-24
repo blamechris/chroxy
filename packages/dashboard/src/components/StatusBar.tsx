@@ -13,6 +13,10 @@ export interface StatusBarProps {
   context?: string
   /** #3858: percent of model window the last turn used (drives contextTooltip). */
   contextPercent?: number | null
+  /** #4205: raw input tokens for the most-recent turn (drives the tooltip breakdown). */
+  inputTokens?: number
+  /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
+  outputTokens?: number
   isBusy?: boolean
   agentCount?: number
   provider?: string
@@ -23,13 +27,23 @@ export interface StatusBarProps {
 // miss / get auto-reformatted).
 const NBSP = '\u00A0'
 
-export function StatusBar({ cost, context, contextPercent, isBusy, agentCount, provider }: StatusBarProps) {
+export function StatusBar({
+  cost, context, contextPercent, inputTokens, outputTokens,
+  isBusy, agentCount, provider,
+}: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
   // #4204 Copilot review: compute each chip's tooltip once so the
   // `title` + `aria-label` mirror pair can't drift if the formatter
   // ever takes a code path with side effects.
   const costTip = costTooltip({ cost, provider })
-  const contextTip = contextTooltip({ percent: contextPercent ?? null, contextSummary: context })
+  // #4205: pass through input/output tokens so the context chip's
+  // tooltip carries the in/out/total breakdown alongside the percent.
+  const contextTip = contextTooltip({
+    percent: contextPercent ?? null,
+    contextSummary: context,
+    inputTokens,
+    outputTokens,
+  })
   const agentTip = agentCountTooltip(agentCount)
   return (
     <div className="status-bar" data-testid="status-bar">
