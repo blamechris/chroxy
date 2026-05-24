@@ -168,15 +168,26 @@ fn main() {
                 // without any Apple credentials.
                 if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
                     if !identity.is_empty() && identity != "-" {
+                        // Optional explicit keychain (#3832). When set, scopes
+                        // codesign's identity lookup to that keychain — avoids
+                        // ambiguity in CI if login.keychain remains on the
+                        // search path alongside the temp signing keychain.
+                        let keychain = std::env::var("APPLE_KEYCHAIN_PATH").ok();
+                        let mut args: Vec<&str> = vec![
+                            "--force",
+                            "--options", "runtime",
+                            "--timestamp",
+                            "--sign", &identity,
+                        ];
+                        if let Some(ref kc) = keychain {
+                            if !kc.is_empty() {
+                                args.extend_from_slice(&["--keychain", kc]);
+                            }
+                        }
+                        args.push(&swift_out);
                         run(
                             "codesign (speech-helper)",
-                            std::process::Command::new("codesign").args([
-                                "--force",
-                                "--options", "runtime",
-                                "--timestamp",
-                                "--sign", &identity,
-                                &swift_out,
-                            ]),
+                            std::process::Command::new("codesign").args(&args),
                         );
                         // Fail-fast verification: catches bad signatures here instead of
                         // letting them propagate to a ~15-minute Apple notarytool rejection.
@@ -243,18 +254,27 @@ fn main() {
 
                 if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
                     if !identity.is_empty() && identity != "-" {
+                        // Optional explicit keychain (#3832). See speech-helper
+                        // block above for rationale.
+                        let keychain = std::env::var("APPLE_KEYCHAIN_PATH").ok();
                         for bin in ["pty.node", "spawn-helper"] {
                             let path = format!("{}/{}", arch_dir, bin);
                             if !std::path::Path::new(&path).exists() { continue }
+                            let mut args: Vec<&str> = vec![
+                                "--force",
+                                "--options", "runtime",
+                                "--timestamp",
+                                "--sign", &identity,
+                            ];
+                            if let Some(ref kc) = keychain {
+                                if !kc.is_empty() {
+                                    args.extend_from_slice(&["--keychain", kc]);
+                                }
+                            }
+                            args.push(&path);
                             run(
                                 &format!("codesign (node-pty {bin} {arch})"),
-                                std::process::Command::new("codesign").args([
-                                    "--force",
-                                    "--options", "runtime",
-                                    "--timestamp",
-                                    "--sign", &identity,
-                                    &path,
-                                ]),
+                                std::process::Command::new("codesign").args(&args),
                             );
                             run(
                                 &format!("codesign --verify (node-pty {bin} {arch})"),

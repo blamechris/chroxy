@@ -215,6 +215,11 @@ jobs:
           # speech-helper for macOS and signs it with hardened runtime +
           # timestamp). When unset/'-', both paths fall through to adhoc.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          # Explicit keychain for build.rs codesign calls (#3832). Scopes
+          # identity lookup to the temp signing keychain created in the
+          # "Import signing certificate" step, instead of relying on the
+          # default user search path.
+          APPLE_KEYCHAIN_PATH: ${{ runner.temp }}/app-signing.keychain-db
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg -c "$TAURI_CONFIG_OVERRIDE"
 
