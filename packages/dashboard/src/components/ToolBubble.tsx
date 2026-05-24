@@ -97,9 +97,12 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }:
     if (!inputPartial) return ''
     const parsed = getPartialSummary(inputPartial)
     if (parsed) return parsed
-    // Mid-stream: render the verbatim tail so the user sees the JSON
-    // assembling. Capped at 100 chars to keep the collapsed bubble
-    // compact like the structured-summary path.
+    // Mid-stream: render the verbatim head (first 100 chars) so the
+    // user sees the JSON assembling from the start. Capped to keep the
+    // collapsed bubble compact like the structured-summary path. We
+    // show the head rather than the tail so the buffer's prefix
+    // (\`{"command":"\` …) is always visible — the structurally-meaningful
+    // start of the JSON document, not its still-arriving end.
     return inputPartial.slice(0, 100)
   }, [input, inputPartial])
   const resultId = `tool-result-${toolUseId}`
