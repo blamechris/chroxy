@@ -1151,28 +1151,44 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
-    it('fills synthetic tool_result blocks for unexecuted tool_use on mid-loop abort (#4061)', async () => {
-      // Three tool_use blocks. Inside block 1's executor stub we abort
-      // the session's AbortController and then return a normal
-      // tool_result. The agent loop's next iteration sees signal.aborted
-      // and runs the synthetic-fill for blocks 2 and 3. Without the
-      // fix, history.push would land 1 tool_result for 3 tool_use ids
-      // and the next sendMessage would 400. With the fix:
-      //   - History carries N=3 tool_result blocks (1 real + 2 synthetic)
-      //   - The dashboard receives N=3 tool_result events too, so the
-      //     tool-call bubbles for blocks 2 and 3 don't hang on 'running…'
+    it('fills synthetic tool_result blocks for unexecuted tool_use on mid-loop abort (#4061, #4062)', async () => {
+      // Three tool_use blocks. We abort during PHASE 1 (sequential
+      // permission gating) — between block 1's and block 2's gate. The
+      // gate loop's next iteration observes signal.aborted, stops
+      // gating, and runs the synthetic-fill for the unscheduled
+      // remainder. Execution of block 1 (the only successfully-gated
+      // block) still happens via Promise.all in phase 2.
+      //
+      // Pre-#4062 this test aborted from inside block 1's executor in
+      // sequential mode. After the parallelism refactor, executions
+      // fan out via Promise.all so a mid-exec abort no longer prevents
+      // siblings from running — the only deterministic path to the
+      // synthetic-fill is to trip the signal during the gate phase. The
+      // assertions on the history invariant (N tool_use → N tool_result)
+      // and the closing tool_result events remain identical.
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
+      // Stub the gate so block 1 auto-allows and triggers the abort.
+      // Blocks 2 and 3 never enter the gate — the loop sees aborted at
+      // the top and breaks. Phase 2 still executes block 1.
+      let gateCalls = 0
+      session._gateToolBlock = async function ({ block }) {
+        gateCalls += 1
+        if (gateCalls === 1) {
+          // Trip the abort BEFORE returning so the next gate-loop
+          // iteration sees signal.aborted and bails into the
+          // synthetic-fill. The already-resolved decision for block 1
+          // still goes through to phase 2.
+          this._abortController.abort()
+          return { behavior: 'allow', updatedInput: block.input || {} }
+        }
+        throw new Error('gate should not run after abort')
+      }
       let executeCalls = 0
+      // Wrap the original executor so we still emit the real tool_result
+      // event for block 1 (mirrors the production code path).
       session._executeToolBlock = async function ({ block, messageId }) {
         executeCalls += 1
-        // On block 1, abort the controller so the next loop iteration
-        // observes signal.aborted and triggers the synthetic-fill.
-        if (executeCalls === 1) {
-          this._abortController.abort()
-        }
-        // Mirror real _executeToolBlock's event emission so we can
-        // assert end-to-end event counts.
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
@@ -1234,6 +1250,224 @@ describe('ClaudeByokSession', () => {
         assert.equal(ev.payload.isError, true)
         assert.match(ev.payload.result, /[Ii]nterrupted/)
         assert.equal(ev.payload.toolName, 'Read', 'synthetic event carries the original tool name')
+      }
+      await session.destroy()
+    })
+
+    it('executes parallel tool_use blocks concurrently — wall clock < sequential (#4062)', async () => {
+      // Three Read tool_use blocks in one assistant turn. Each executor
+      // sleeps 100ms. Sequential would take ~300ms; Promise.all should
+      // collapse to ~100ms + a small scheduler margin. Assert the total
+      // is comfortably under the sequential floor.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      const SLEEP_MS = 100
+      const startTimes = []
+      const endTimes = []
+      session._executeToolBlock = async function ({ block, messageId, decision }) {
+        // Sanity check: orchestrator passes the pre-resolved decision.
+        assert.ok(decision, 'orchestrator must pass a pre-resolved decision into _executeToolBlock')
+        assert.equal(decision.behavior, 'allow', 'auto mode resolves to allow')
+        startTimes.push(Date.now())
+        await new Promise((r) => setTimeout(r, SLEEP_MS))
+        endTimes.push(Date.now())
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: block.id,
+          toolName: block.name,
+          result: 'ok',
+          isError: false,
+        })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCall = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCall += 1
+            if (streamCall === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [
+                    { type: 'tool_use', id: 'tu_a', name: 'Read', input: { file_path: '/a' } },
+                    { type: 'tool_use', id: 'tu_b', name: 'Read', input: { file_path: '/b' } },
+                    { type: 'tool_use', id: 'tu_c', name: 'Read', input: { file_path: '/c' } },
+                  ],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }, { type: 'message_stop' }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      const turnStart = Date.now()
+      await session.sendMessage('parallel reads')
+      const turnTotal = Date.now() - turnStart
+      // Sequential would be 3 * 100ms = 300ms (minimum). Parallel should
+      // finish in ~100ms plus a generous CI scheduler margin. Tight
+      // upper bound at 250ms — proves concurrency without flakiness on
+      // overloaded runners.
+      assert.equal(startTimes.length, 3, 'all three executors fire')
+      assert.ok(
+        turnTotal < 250,
+        `expected parallel turn < 250ms, got ${turnTotal}ms — sequential floor is ~300ms`,
+      )
+      // Additional concurrency check: each executor's start should be
+      // within the lifetime of the others (overlap, not back-to-back).
+      const lastStart = Math.max(...startTimes)
+      const firstEnd = Math.min(...endTimes)
+      assert.ok(
+        lastStart < firstEnd,
+        `executors must overlap — last start (${lastStart}) should precede first end (${firstEnd})`,
+      )
+      await session.destroy()
+    })
+
+    it('preserves tool_result order when one block is denied amid approvals (#4062)', async () => {
+      // Three tool_use blocks. Middle one (tu_b) gets denied by a
+      // session rule; the others auto-allow. Even though execution is
+      // parallel, the tool_result content array must preserve the
+      // source ordering [tu_a, tu_b-denied, tu_c] so the Anthropic API
+      // sees a strict tool_use ↔ tool_result alignment.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('approve')
+      let gateCallIndex = 0
+      session._gateToolBlock = async function ({ block }) {
+        const idx = gateCallIndex++
+        if (idx === 1) {
+          // Block b: deny.
+          return { behavior: 'deny', message: 'Denied by session rule' }
+        }
+        return { behavior: 'allow', updatedInput: block.input || {} }
+      }
+      // Add a small variable delay so any naive ordering bug surfaces.
+      const delays = { tu_a: 60, tu_c: 20 }
+      session._executeToolBlock = async function ({ block, messageId, decision }) {
+        if (decision?.behavior !== 'allow') {
+          // Mirror the production deny short-circuit so this stub
+          // behaves identically to the real implementation for denied
+          // blocks — important because the orchestrator passes the
+          // decision through.
+          const msg = decision.message || 'Permission denied by user.'
+          this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: msg, isError: true })
+          return { type: 'tool_result', tool_use_id: block.id, content: msg, is_error: true }
+        }
+        const sleep = delays[block.id] || 0
+        if (sleep) await new Promise((r) => setTimeout(r, sleep))
+        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCall = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCall += 1
+            if (streamCall === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [
+                    { type: 'tool_use', id: 'tu_a', name: 'Bash', input: { command: 'echo a' } },
+                    { type: 'tool_use', id: 'tu_b', name: 'Bash', input: { command: 'echo b' } },
+                    { type: 'tool_use', id: 'tu_c', name: 'Bash', input: { command: 'echo c' } },
+                  ],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }, { type: 'message_stop' }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('mixed approval')
+      // History: user-prompt, assistant tool_use, user tool_result, assistant final.
+      const toolResultTurn = session._history.find((m) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result')
+      assert.ok(toolResultTurn, 'tool_result user-turn must be present')
+      const ids = toolResultTurn.content.map((b) => b.tool_use_id)
+      assert.deepEqual(ids, ['tu_a', 'tu_b', 'tu_c'],
+        'tool_result order must match tool_use source order even with parallel execution + variable latency')
+      // The denied block carries the denial.
+      const denied = toolResultTurn.content[1]
+      assert.equal(denied.tool_use_id, 'tu_b')
+      assert.equal(denied.is_error, true)
+      assert.match(denied.content, /[Dd]enied/)
+      // The two approved blocks succeeded.
+      assert.equal(toolResultTurn.content[0].is_error, false)
+      assert.equal(toolResultTurn.content[2].is_error, false)
+      await session.destroy()
+    })
+
+    it('serialises permission gating across parallel tool_use blocks (#4062 UX)', async () => {
+      // The acceptance criterion: permission prompts must surface one
+      // at a time, not all-at-once, even though execution fans out.
+      // Stub _gateToolBlock to record the order in which it's CALLED
+      // (start) and RESOLVED (end). Real gates are async (await user
+      // tap on phone); we simulate with a 30ms delay each. If the
+      // orchestrator parallelised gates, the calls would overlap — i.e.
+      // call 2 starts before call 1 resolves.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('approve')
+      const events = []
+      let counter = 0
+      session._gateToolBlock = async function ({ block }) {
+        const id = ++counter
+        events.push({ kind: 'start', id, block: block.id, t: Date.now() })
+        await new Promise((r) => setTimeout(r, 30))
+        events.push({ kind: 'end', id, block: block.id, t: Date.now() })
+        return { behavior: 'allow', updatedInput: block.input || {} }
+      }
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let streamCall = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCall += 1
+            if (streamCall === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [
+                    { type: 'tool_use', id: 'tu_a', name: 'Read', input: {} },
+                    { type: 'tool_use', id: 'tu_b', name: 'Read', input: {} },
+                    { type: 'tool_use', id: 'tu_c', name: 'Read', input: {} },
+                  ],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      // Strict alternation: start1, end1, start2, end2, start3, end3 —
+      // no two starts back-to-back without an end in between. Anything
+      // else means gates overlapped (parallel prompts — bad UX).
+      assert.equal(events.length, 6, 'three gates → six start/end events')
+      for (let i = 0; i < 3; i++) {
+        assert.equal(events[i * 2].kind, 'start', `event ${i * 2} should be a start`)
+        assert.equal(events[i * 2 + 1].kind, 'end', `event ${i * 2 + 1} should be the matching end`)
+        assert.equal(events[i * 2].id, events[i * 2 + 1].id, 'start and end ids must pair up — gates cannot interleave')
       }
       await session.destroy()
     })

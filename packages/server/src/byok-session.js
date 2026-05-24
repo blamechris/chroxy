@@ -479,41 +479,31 @@ export class ClaudeByokSession extends BaseSession {
         // tool_use id. If the user aborts mid-loop, we have to synthesize
         // tool_result blocks for the unexecuted remainder so the next
         // sendMessage doesn't 400 on a mismatched history.
+        //
+        // #4062: when the model emits multiple tool_use blocks in one
+        // turn (parallel tool calls — common for 3 unrelated Reads), we
+        // execute them concurrently to save wall-clock latency. Two
+        // distinct phases:
+        //
+        //   1. PERMISSION GATE — strictly sequential. The user can't
+        //      answer N prompts simultaneously on the phone, and the
+        //      dashboard's permission_request handler assumes one prompt
+        //      at a time. Auto-allow / session-rule decisions resolve
+        //      synchronously, so this phase is effectively free when no
+        //      real prompt fires.
+        //
+        //   2. EXECUTION — fanned out via Promise.all on every approved
+        //      block. Denied blocks short-circuit to a synthetic
+        //      tool_result. Order is preserved by index so the API sees
+        //      tool_results in the same order as the tool_uses.
+        //
+        // Abort handling: if the signal trips DURING the gate phase, we
+        // stop gating and the unscheduled remainder gets a synthetic
+        // 'Interrupted' tool_result (same #4061 invariant). If it trips
+        // mid-execution, the shared AbortSignal propagates to
+        // executeBuiltinTool and any in-flight tool aborts cleanly.
         const toolBlocks = (final.content || []).filter((b) => b?.type === 'tool_use')
-        const toolResults = []
-        for (let i = 0; i < toolBlocks.length; i++) {
-          const block = toolBlocks[i]
-          const result = await this._executeToolBlock({ block, messageId })
-          toolResults.push(result)
-          if (this._abortController?.signal?.aborted) {
-            // User pressed Stop mid-tool-loop. Fill synthetic
-            // tool_result blocks for every remaining tool_use so the
-            // history invariant holds — N tool_use → N tool_result.
-            // Emit a matching `tool_result` event for each synthetic so
-            // the dashboard / mobile tool-call bubble closes out (the
-            // `tool_start` event already fired when the SDK streamed
-            // the block; without a closing tool_result, the bubble
-            // would hang in 'running…' state forever — #4108 review).
-            const interrupted = 'Interrupted by user before execution'
-            for (let j = i + 1; j < toolBlocks.length; j++) {
-              const remaining = toolBlocks[j]
-              this.emit('tool_result', {
-                messageId,
-                toolUseId: remaining.id,
-                toolName: remaining.name,
-                result: interrupted,
-                isError: true,
-              })
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: remaining.id,
-                content: interrupted,
-                is_error: true,
-              })
-            }
-            break
-          }
-        }
+        const toolResults = await this._processToolBlocks({ toolBlocks, messageId })
         if (toolResults.length === 0) {
           // stop_reason was tool_use but no tool_use blocks — defensive
           // bailout to avoid an empty user message that the SDK rejects.
@@ -668,48 +658,158 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   /**
-   * Run one tool_use block: permission gate, dispatch to executor, emit
-   * tool_result events, return the {type:'tool_result', ...} content
-   * block to append to the next user message.
+   * Orchestrate one round's tool_use blocks (#4062).
+   *
+   * Phase 1: Gate ALL blocks sequentially in source order so the
+   *   permission prompts surface one-at-a-time (UX guarantee — the user
+   *   can only answer one prompt at a time on the phone).
+   * Phase 2: Execute approved blocks in parallel via Promise.all to
+   *   collapse wall-clock latency on multi-Read turns.
+   *
+   * Preserves the #4061 history invariant: returns a tool_result content
+   * block for EVERY tool_use, in the same order. Aborts during gating
+   * synthesise 'Interrupted' tool_results for the unscheduled remainder.
    */
-  async _executeToolBlock({ block, messageId }) {
+  async _processToolBlocks({ toolBlocks, messageId }) {
+    const signal = this._abortController?.signal
+    // Pre-allocate result slots so we can write by index from parallel
+    // executions while preserving model-emit order in the final array.
+    const toolResults = new Array(toolBlocks.length)
+    const gateDecisions = new Array(toolBlocks.length)
+    let abortedDuringGate = false
+    let firstUngatedIndex = toolBlocks.length
+
+    // PHASE 1 — sequential permission gating.
+    for (let i = 0; i < toolBlocks.length; i++) {
+      if (signal?.aborted) {
+        abortedDuringGate = true
+        firstUngatedIndex = i
+        break
+      }
+      gateDecisions[i] = await this._gateToolBlock({
+        block: toolBlocks[i],
+        messageId,
+      })
+    }
+
+    // If abort fired mid-gate, fill synthetic 'Interrupted' tool_results
+    // for the unscheduled remainder. The early-aborted blocks never
+    // emitted a tool_start (we didn't even get to the executor), but
+    // the SDK already emitted tool_start when streaming the assistant
+    // turn — so the bubble would hang in 'running…' without a closing
+    // tool_result event (#4108 review).
+    if (abortedDuringGate) {
+      const interrupted = 'Interrupted by user before execution'
+      for (let j = firstUngatedIndex; j < toolBlocks.length; j++) {
+        const remaining = toolBlocks[j]
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: remaining.id,
+          toolName: remaining.name,
+          result: interrupted,
+          isError: true,
+        })
+        toolResults[j] = {
+          type: 'tool_result',
+          tool_use_id: remaining.id,
+          content: interrupted,
+          is_error: true,
+        }
+      }
+    }
+
+    // PHASE 2 — parallel execution of every successfully-gated block.
+    // Promise.all preserves array order, but we write by index to
+    // double-guard against any future reordering refactor.
+    const executions = []
+    for (let i = 0; i < firstUngatedIndex; i++) {
+      const block = toolBlocks[i]
+      const decision = gateDecisions[i]
+      executions.push(
+        this._executeToolBlock({ block, messageId, decision }).then(
+          (result) => { toolResults[i] = result },
+        ),
+      )
+    }
+    await Promise.all(executions)
+
+    return toolResults
+  }
+
+  /**
+   * Resolve the permission decision for a single tool_use block. Split
+   * out from _executeToolBlock so the orchestrator can serialize gating
+   * across all blocks in a turn before fanning out execution (#4062).
+   *
+   * Returns the PermissionManager decision shape directly, or a synthetic
+   * deny-shaped object if the gate itself rejected (timeout/abort). The
+   * caller distinguishes by checking `decision.behavior !== 'allow'`.
+   */
+  async _gateToolBlock({ block, messageId }) {
+    // messageId is currently unused here, but kept in the signature so
+    // future telemetry (e.g. emitting a permission_pending event tied to
+    // the round) can hook in without changing every call site.
+    void messageId
     const toolUseId = block.id
     const toolName = block.name
     const input = block.input || {}
     const signal = this._abortController?.signal
-
-    // Permission gate. PermissionManager handles all four modes
-    // (approve / auto / acceptEdits / plan) and session rules.
     // #4080: track that this toolUseId has a pending permission prompt
     // so any tool_input_delta for the SAME toolUseId (e.g. a future
     // mid-stream gate, or a re-streamed input in a later round) is
     // suppressed until the prompt resolves. PermissionManager keys
     // its own pending map by requestId, not toolUseId, so the
     // tracking has to live here. Wrap the whole permission gate so
-    // both the allow-and-throw and deny-and-return paths drain.
+    // both the allow-and-deny paths drain.
     this._pendingPermissionToolUseIds.add(toolUseId)
-    let decision
     try {
-      decision = await this._permissions.handlePermission(
+      return await this._permissions.handlePermission(
         toolName,
         input,
         signal,
         this.permissionMode,
       )
     } catch (err) {
-      // permission_request was rejected (timeout, abort, etc.)
-      this._pendingPermissionToolUseIds.delete(toolUseId)
+      // permission_request was rejected (timeout, abort, etc.). Surface
+      // as a deny so the executor short-circuits to a tool_result.
       return {
-        type: 'tool_result',
-        tool_use_id: toolUseId,
-        content: `Permission gate error: ${err?.message || String(err)}`,
-        is_error: true,
+        behavior: 'deny',
+        message: `Permission gate error: ${err?.message || String(err)}`,
       }
+    } finally {
+      this._pendingPermissionToolUseIds.delete(toolUseId)
     }
-    this._pendingPermissionToolUseIds.delete(toolUseId)
+  }
 
-    if (decision.behavior !== 'allow') {
-      const msg = decision.message || 'Permission denied by user.'
+  /**
+   * Run one tool_use block: permission gate, dispatch to executor, emit
+   * tool_result events, return the {type:'tool_result', ...} content
+   * block to append to the next user message.
+   *
+   * #4062: When called from the orchestrator, a pre-resolved `decision`
+   * is supplied so we skip the gate (it already ran sequentially in
+   * _processToolBlocks). When called directly (legacy callers and tests
+   * that stub the seam) the gate runs inline — preserves backwards
+   * compatibility with the original single-phase contract.
+   */
+  async _executeToolBlock({ block, messageId, decision }) {
+    const toolUseId = block.id
+    const toolName = block.name
+    const input = block.input || {}
+    const signal = this._abortController?.signal
+
+    // Permission gate. PermissionManager handles all four modes
+    // (approve / auto / acceptEdits / plan) and session rules. The
+    // _pendingPermissionToolUseIds tracking (#4080) lives inside
+    // _gateToolBlock so it covers both the orchestrator (#4062) path
+    // and the legacy inline-gate path used by direct callers/tests.
+    let resolvedDecision = decision
+    if (!resolvedDecision) {
+      resolvedDecision = await this._gateToolBlock({ block, messageId })
+    }
+
+    if (resolvedDecision.behavior !== 'allow') {
+      const msg = resolvedDecision.message || 'Permission denied by user.'
       this.emit('tool_result', {
         messageId,
         toolUseId,
@@ -726,7 +826,7 @@ export class ClaudeByokSession extends BaseSession {
     }
 
     // Execute locally.
-    const effectiveInput = decision.updatedInput || input
+    const effectiveInput = resolvedDecision.updatedInput || input
     const { content, isError } = await executeBuiltinTool({
       toolName,
       input: effectiveInput,
