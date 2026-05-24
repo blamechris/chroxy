@@ -9,6 +9,11 @@
  * Platform-specific types (SessionState, ConnectionState) are defined here.
  */
 
+// #4019: PermissionMode imported for local use at line 466 (re-export below
+// puts it on the public surface but doesn't bring it into this file's
+// type-name scope).
+import type { PermissionMode } from '@chroxy/store-core'
+
 // Re-export shared protocol types from store-core
 export type {
   MessageAttachment,
@@ -38,6 +43,9 @@ export type {
   SlashCommand,
   CustomAgent,
   ConnectionPhase,
+  // #4019: typed permission-mode shape — `description` flows through to the
+  // dashboard pickers so they share one source of truth with the server.
+  PermissionMode,
   ConnectionContext,
   QueuedMessage,
   Checkpoint,
@@ -456,8 +464,11 @@ export interface ConnectionState {
   // Server-reported default model short id (from SDK)
   defaultModelId: string | null;
 
-  // Available permission modes from server (CLI mode)
-  availablePermissionModes: { id: string; label: string }[];
+  // Available permission modes from server (CLI mode).
+  // #4019: PermissionMode is the typed shape from store-core; the optional
+  // `description` field flows through to the chat dropdown + creation modal
+  // so the two surfaces share one source of truth.
+  availablePermissionModes: PermissionMode[];
 
   // Previous permission mode (for Shift+Tab plan mode toggle)
   previousPermissionMode: string | null;
