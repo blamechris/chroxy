@@ -729,10 +729,23 @@ export class ClaudeTuiSession extends BaseSession {
         // for short sessions, an on-disk drip for long-lived ones.
         this._activeTurn.attachmentsDir = join(baseDir, messageId)
         const files = materializeAttachments(attachments, baseDir, messageId)
-        const suffix = buildAttachmentsPromptSuffix(files)
-        if (suffix) {
-          promptToSend = (prompt || '') + suffix
+        const suffixResult = buildAttachmentsPromptSuffix(files)
+        if (suffixResult.suffix) {
+          promptToSend = (prompt || '') + suffixResult.suffix
           log.info(`TUI attachments materialized (msg=${messageId} count=${files.length} dir=${this._activeTurn.attachmentsDir})`)
+          // #4026: cap-firing diagnostic. The whole point of
+          // MAX_ATTACHMENT_SUFFIX_BYTES is to catch pathological path-
+          // generation regressions (deterministic hashes, deeper base
+          // dirs) before users hit the PTY's silent ~4KB truncation —
+          // a quiet truncation here defeats the cap's purpose. Two
+          // distinct warn lines so ops can grep for either degradation:
+          //   - regular truncation: some files dropped from the list
+          //   - bareFallback: even one entry exceeded the cap (worst)
+          if (suffixResult.bareFallback) {
+            log.warn(`TUI attachment suffix bare-fallback fired (msg=${messageId} count=${files.length} cap=${suffixResult.cap}B) — all file paths omitted from prompt suffix; agent will only see the size-cap marker. Pathological path-generation regression?`)
+          } else if (suffixResult.truncated) {
+            log.warn(`TUI attachment suffix truncated (msg=${messageId} suffixBytes=${suffixResult.byteLength} cap=${suffixResult.cap}B omitted=${suffixResult.omitted} of=${files.length})`)
+          }
         }
       } catch (err) {
         log.warn(`TUI attachment materialization failed (msg=${messageId}): ${err.message} — sending prompt without attachments`)
