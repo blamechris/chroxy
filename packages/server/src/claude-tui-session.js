@@ -773,7 +773,19 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     try {
-      this._term.write(promptToSend + '\r')
+      // #4269: claude TUI v2.1.147 treats any rapid programmatic write
+      // (or input containing a newline) as a paste, collapsing it into
+      // a "[Pasted text #1 +N lines] paste again to expand" placeholder
+      // that requires user confirmation. chroxy never sends that
+      // confirmation, so the prompt sits in claude's input buffer
+      // forever and the turn hangs silently — no streaming, no tool
+      // calls, no error. Wrap the write with bracketed-paste mode
+      // disable (`ESC [ ? 2004 l`) so claude processes the bytes as
+      // typed input, then re-enable (`ESC [ ? 2004 h`) so subsequent
+      // human-pasted content (e.g. via a terminal multiplexer attached
+      // to the same PTY) still gets the paste UX. One write so the
+      // disable / content / re-enable arrive atomically.
+      this._term.write(`\x1b[?2004l${promptToSend}\r\x1b[?2004h`)
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
       return

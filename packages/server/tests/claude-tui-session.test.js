@@ -786,6 +786,125 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  describe('bracketed-paste suppression on prompt write (#4269)', () => {
+    // claude TUI v2.1.147 treats a rapid programmatic write (or any
+    // multi-line input) as a paste — collapsing it into a
+    // "[Pasted text #1 +1 lines] paste again to expand" placeholder
+    // that the user has to confirm. chroxy's writes never get that
+    // confirmation, so the prompt sits in claude's input buffer
+    // forever and the turn hangs with no output and no claude
+    // activity. Fix is to bracket the write with the bracketed-paste
+    // disable/enable sequences (`ESC [ ? 2004 l` / `h`) so claude
+    // processes the bytes as typed input. We re-enable afterwards so
+    // any subsequent human-pasted content (e.g. via a terminal
+    // multiplexer attached to the same PTY) still gets the paste UX.
+    let fakeHome
+    let origHome
+    let fakePid
+
+    beforeEach(() => {
+      fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-'))
+      mkdirSync(join(fakeHome, '.claude', 'sessions'), { recursive: true })
+      origHome = process.env.HOME
+      process.env.HOME = fakeHome
+      fakePid = 8765
+    })
+
+    afterEach(() => {
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+    })
+
+    function writeIdleSessionFile(pid) {
+      const path = join(fakeHome, '.claude', 'sessions', `${pid}.json`)
+      writeFileSync(path, JSON.stringify({
+        pid, sessionId: 'fake', status: 'idle', updatedAt: Date.now(),
+      }))
+      return path
+    }
+
+    it('wraps the prompt write with bracketed-paste disable + re-enable sequences', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-sink-'))
+      writeIdleSessionFile(fakePid)
+      const writes = []
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          // Synthesize a stop file so the poll loop unblocks.
+          writeFileSync(join(session._sinkDir, 'stop-x.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+        pid: fakePid,
+      }
+      session._hardTimeoutMs = 2000
+      session._resultTimeoutMs = 2000
+      session.on('error', () => {})
+
+      await session.sendMessage('a test prompt with no newlines')
+
+      // The fix issues a SINGLE write so the disable + content + carriage
+      // return + re-enable arrive atomically — otherwise claude could
+      // observe the disable, process the prompt, observe the re-enable
+      // in three distinct frames and the heuristic could still fire in
+      // the gap. Assert both that the writes happened and that the
+      // disable + content + re-enable appear in the expected order
+      // inside a single buffer.
+      assert.equal(writes.length, 1, `expected one write, got ${writes.length}`)
+      const written = writes[0]
+      const disableIdx = written.indexOf('\x1b[?2004l')
+      const promptIdx = written.indexOf('a test prompt with no newlines')
+      const submitIdx = written.indexOf('\r')
+      const enableIdx = written.indexOf('\x1b[?2004h')
+      assert.ok(disableIdx >= 0, `expected ESC[?2004l (disable bracketed paste) in write, got: ${JSON.stringify(written)}`)
+      assert.ok(promptIdx > disableIdx, 'prompt body must come after the disable sequence')
+      assert.ok(submitIdx > promptIdx, '\\r submit must come after the prompt body')
+      assert.ok(enableIdx > submitIdx, 'ESC[?2004h re-enable must come after the submit')
+    })
+
+    it('preserves multi-line prompts inside the bracketed-paste-disabled window', async () => {
+      // The original symptom was triggered by multi-line input — claude
+      // sees an embedded \n while bracketed-paste mode is on and shows
+      // "+1 lines paste again to expand". With the mode disabled, the
+      // \n should pass through as part of the typed input. We don't
+      // strip or rewrite the prompt — that would silently mangle the
+      // user's text.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-sink-ml-'))
+      writeIdleSessionFile(fakePid)
+      const writes = []
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          writeFileSync(join(session._sinkDir, 'stop-ml.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+        pid: fakePid,
+      }
+      session._hardTimeoutMs = 2000
+      session._resultTimeoutMs = 2000
+      session.on('error', () => {})
+
+      const multiline = 'line one\nline two\nline three'
+      await session.sendMessage(multiline)
+
+      assert.equal(writes.length, 1)
+      const written = writes[0]
+      assert.ok(written.includes(multiline), `multi-line prompt body must appear verbatim in the write, got: ${JSON.stringify(written)}`)
+      // Disable must come before the prompt, re-enable after the submit.
+      const disableIdx = written.indexOf('\x1b[?2004l')
+      const promptIdx = written.indexOf(multiline)
+      const enableIdx = written.indexOf('\x1b[?2004h')
+      assert.ok(disableIdx >= 0 && disableIdx < promptIdx, 'disable bracketed paste before the multi-line content')
+      assert.ok(enableIdx > promptIdx, 're-enable bracketed paste after the multi-line content')
+    })
+  })
+
   describe('attachment passthrough (#4012)', () => {
     // Pre-fix, sendMessage's second positional was `_attachments` (the
     // underscore meaning "intentionally unused") and attachments were
@@ -850,12 +969,18 @@ describe('ClaudeTuiSession', () => {
       assert.ok(writtenToPty.includes('attached the following file'),
         `expected suffix in PTY write, got: ${JSON.stringify(writtenToPty.slice(0, 200))}`)
       assert.ok(writtenToPty.includes('shot.png'), 'display name appears in suffix')
-      // PTY writes always end with \r so claude interprets it as Enter.
-      assert.ok(writtenToPty.endsWith('\r'), 'still terminated with carriage return')
-      // The whole-prompt MUST have exactly one trailing \r and no other
-      // line breaks — embedded \n would prematurely-submit the prompt
-      // mid-suffix and split the user's turn (#4012 review finding).
-      const body = writtenToPty.slice(0, -1)   // strip trailing \r
+      // #4269: the write is now `ESC [ ? 2004 l <prompt body> \r ESC [ ? 2004 h`
+      // so the submit \r is no longer the trailing byte. The contract is
+      // unchanged in spirit: exactly one \r submit, no embedded \r/\n in
+      // the prompt body that would prematurely-submit or split the turn
+      // (#4012 review finding).
+      const disableIdx = writtenToPty.indexOf('\x1b[?2004l')
+      const submitIdx = writtenToPty.indexOf('\r')
+      const enableIdx = writtenToPty.indexOf('\x1b[?2004h')
+      assert.ok(disableIdx === 0, 'write begins with bracketed-paste-disable')
+      assert.ok(submitIdx > disableIdx, '\\r submit appears after the disable + body')
+      assert.ok(enableIdx > submitIdx, 're-enable appears after the submit')
+      const body = writtenToPty.slice(disableIdx + '\x1b[?2004l'.length, submitIdx)
       assert.ok(!body.includes('\n'), `no embedded LF in prompt body, got ${JSON.stringify(body)}`)
       assert.ok(!body.includes('\r'), 'no embedded CR in prompt body either')
 
@@ -890,8 +1015,12 @@ describe('ClaudeTuiSession', () => {
 
       await session.sendMessage('Just a plain prompt')
 
-      assert.equal(writtenToPty, 'Just a plain prompt\r',
-        'no attachments → byte-for-byte identical to pre-#4012 behaviour')
+      // #4269: write is now wrapped with bracketed-paste mode toggles so
+      // claude TUI doesn't collapse the input into a "paste again to
+      // expand" placeholder. The prompt body itself is still
+      // byte-for-byte identical to the user input.
+      assert.equal(writtenToPty, '\x1b[?2004lJust a plain prompt\r\x1b[?2004h',
+        'plain prompt is wrapped in bracketed-paste-disable / re-enable with body unmodified')
     })
 
     it('logs and proceeds with unaugmented prompt when materialization throws', async () => {
@@ -932,7 +1061,10 @@ describe('ClaudeTuiSession', () => {
       queueMicrotask(() => { session._sinkDir = realSinkDir })
       await send
 
-      assert.equal(writtenToPty, 'Important message\r',
+      // #4269: write is wrapped with bracketed-paste mode toggles. The
+      // user's prompt body itself is still preserved verbatim — that's
+      // the invariant this test pins.
+      assert.equal(writtenToPty, '\x1b[?2004lImportant message\r\x1b[?2004h',
         'materialization failure must NOT drop the user prompt')
 
       rmSync(sinkDir, { recursive: true, force: true })
