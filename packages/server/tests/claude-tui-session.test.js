@@ -1908,6 +1908,43 @@ describe('ClaudeTuiSession', () => {
       assert.equal(charWrites.join(''), text, 'chars reproduce the freeform answer')
     })
 
+    // #4293 (review of #4290): boundary check on the index lookup.
+    // First option → "1"; ninth option → "9" (the last single-digit
+    // index supported per the #4292 guard). Pre-fix an off-by-one in
+    // the index → string conversion would shift every selection.
+    it('respondToQuestion: first option → "1", ninth option → "9" (boundary)', async () => {
+      const options = Array.from({ length: 9 }, (_, i) => ({ label: `opt-${i}` }))
+      session._term = { write: () => {}, kill: () => {} }
+
+      const expectations = [
+        { label: 'opt-0', digit: '1' },
+        { label: 'opt-8', digit: '9' },
+      ]
+      for (const { label, digit } of expectations) {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = { toolUseId: 'toolu-boundary', options }
+        session.respondToQuestion(label)
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        assert.equal(writes[1], digit, `option "${label}" maps to digit "${digit}"`)
+      }
+    })
+
+    it('respondToQuestion falls through to label text when matchIdx >= 9 (multi-digit hotkey guard #4292)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
+      session._pendingUserAnswer = { toolUseId: 'toolu-10', options }
+      // opt-9 is index 9 (would be "10" — multi-digit), so we must NOT
+      // write "10\\r" (most single-keystroke menus commit on the first
+      // digit). Fall through to label-text path.
+      session.respondToQuestion('opt-9')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      // First write is mode-disable; second is the first char of "opt-9".
+      assert.equal(writes[0], '\x1b[?2004l')
+      assert.equal(writes[1], 'o', 'multi-digit hotkey not used; falls through to label text')
+    })
+
     it('respondToQuestion writes the text when options array is missing or empty (free-text-only AskUserQuestion)', async () => {
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }

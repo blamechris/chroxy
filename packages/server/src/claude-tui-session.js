@@ -1322,7 +1322,15 @@ export class ClaudeTuiSession extends BaseSession {
     let payload = text
     if (Array.isArray(options) && options.length > 0) {
       const matchIdx = options.findIndex((o) => o && o.label === text)
-      if (matchIdx >= 0) {
+      // #4292: single-digit guard (1..9). Multi-digit hotkeys
+      // (10+) are NOT assumed to work on claude TUI's prompt — most
+      // single-keystroke menus commit on the first digit and the
+      // second char would either be a spurious next-prompt input
+      // or get dropped. Falling through to the label-text path for
+      // 10+ options preserves v0.9.3 behavior (broken in the same
+      // mode-jump way) without silently sending a hotkey we can't
+      // trust. Vanishingly rare in practice.
+      if (matchIdx >= 0 && matchIdx < 9) {
         payload = String(matchIdx + 1)
       }
     }
