@@ -786,18 +786,18 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
-  describe('bracketed-paste suppression on prompt write (#4269)', () => {
-    // claude TUI v2.1.147 treats a rapid programmatic write (or any
-    // multi-line input) as a paste — collapsing it into a
-    // "[Pasted text #1 +1 lines] paste again to expand" placeholder
-    // that the user has to confirm. chroxy's writes never get that
-    // confirmation, so the prompt sits in claude's input buffer
-    // forever and the turn hangs with no output and no claude
-    // activity. Fix is to bracket the write with the bracketed-paste
-    // disable/enable sequences (`ESC [ ? 2004 l` / `h`) so claude
-    // processes the bytes as typed input. We re-enable afterwards so
-    // any subsequent human-pasted content (e.g. via a terminal
-    // multiplexer attached to the same PTY) still gets the paste UX.
+  describe('throttled prompt write + bracketed-paste suppression (#4269)', () => {
+    // claude TUI's paste detector triggers on byte-arrival rate, not DEC
+    // mode 2004 — a single bulk write of the whole prompt is collapsed
+    // into a "[Pasted text #1 +N lines] paste again to expand"
+    // placeholder that the user has to confirm. chroxy's writes never
+    // get that confirmation, so the prompt sits in claude's input
+    // buffer forever and the turn hangs with no output and no claude
+    // activity. Fix is to throttle the write character-by-character so
+    // the bytes look like typed input. The bracketed-paste-disable /
+    // re-enable wrap (`ESC [ ? 2004 l` / `h`) is kept as
+    // defense-in-depth for any claude version that DOES honor mode
+    // 2004 — the throttle is what actually fixes the bug.
     let fakeHome
     let origHome
     let fakePid
@@ -824,7 +824,7 @@ describe('ClaudeTuiSession', () => {
       return path
     }
 
-    it('wraps the prompt write with bracketed-paste disable + re-enable sequences', async () => {
+    it('writes the prompt character-by-character so claude does not see a bulk paste', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
@@ -844,34 +844,33 @@ describe('ClaudeTuiSession', () => {
       session._resultTimeoutMs = 2000
       session.on('error', () => {})
 
-      await session.sendMessage('a test prompt with no newlines')
+      const prompt = 'a test prompt with no newlines'
+      await session.sendMessage(prompt)
 
-      // The fix issues a SINGLE write so the disable + content + carriage
-      // return + re-enable arrive atomically — otherwise claude could
-      // observe the disable, process the prompt, observe the re-enable
-      // in three distinct frames and the heuristic could still fire in
-      // the gap. Assert both that the writes happened and that the
-      // disable + content + re-enable appear in the expected order
-      // inside a single buffer.
-      assert.equal(writes.length, 1, `expected one write, got ${writes.length}`)
-      const written = writes[0]
-      const disableIdx = written.indexOf('\x1b[?2004l')
-      const promptIdx = written.indexOf('a test prompt with no newlines')
-      const submitIdx = written.indexOf('\r')
-      const enableIdx = written.indexOf('\x1b[?2004h')
-      assert.ok(disableIdx >= 0, `expected ESC[?2004l (disable bracketed paste) in write, got: ${JSON.stringify(written)}`)
-      assert.ok(promptIdx > disableIdx, 'prompt body must come after the disable sequence')
-      assert.ok(submitIdx > promptIdx, '\\r submit must come after the prompt body')
-      assert.ok(enableIdx > submitIdx, 'ESC[?2004h re-enable must come after the submit')
+      // The fix issues N+3 writes: one for the bracketed-paste-disable
+      // prefix, one per prompt character, one for the \r submit, and
+      // one for the bracketed-paste re-enable suffix. The throttle
+      // between char writes is what actually defeats claude's paste
+      // detector (which fires on byte-arrival rate, not mode 2004).
+      assert.equal(writes.length, prompt.length + 3,
+        `expected ${prompt.length + 3} writes (disable + N chars + \\r + enable), got ${writes.length}`)
+      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
+      assert.equal(writes.slice(1, 1 + prompt.length).join(''), prompt,
+        'chars 1..N concatenate back to the original prompt')
+      for (let i = 0; i < prompt.length; i++) {
+        assert.equal(writes[1 + i].length, 1, `write index ${1 + i} is a single character`)
+      }
+      assert.equal(writes[1 + prompt.length], '\r', 'penultimate write is the submit')
+      assert.equal(writes[2 + prompt.length], '\x1b[?2004h', 'final write is bracketed-paste re-enable')
     })
 
-    it('preserves multi-line prompts inside the bracketed-paste-disabled window', async () => {
+    it('throttles multi-line prompts too — embedded \\n passes through as a single-char write', async () => {
       // The original symptom was triggered by multi-line input — claude
-      // sees an embedded \n while bracketed-paste mode is on and shows
-      // "+1 lines paste again to expand". With the mode disabled, the
-      // \n should pass through as part of the typed input. We don't
-      // strip or rewrite the prompt — that would silently mangle the
-      // user's text.
+      // sees an embedded \n in a bulk write and shows "+1 lines paste
+      // again to expand". With per-char throttling the \n arrives at
+      // typing speed, the same way a human typing Enter mid-prompt
+      // would. We do not strip or rewrite the prompt — that would
+      // silently mangle the user's text.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
@@ -893,15 +892,13 @@ describe('ClaudeTuiSession', () => {
       const multiline = 'line one\nline two\nline three'
       await session.sendMessage(multiline)
 
-      assert.equal(writes.length, 1)
-      const written = writes[0]
-      assert.ok(written.includes(multiline), `multi-line prompt body must appear verbatim in the write, got: ${JSON.stringify(written)}`)
-      // Disable must come before the prompt, re-enable after the submit.
-      const disableIdx = written.indexOf('\x1b[?2004l')
-      const promptIdx = written.indexOf(multiline)
-      const enableIdx = written.indexOf('\x1b[?2004h')
-      assert.ok(disableIdx >= 0 && disableIdx < promptIdx, 'disable bracketed paste before the multi-line content')
-      assert.ok(enableIdx > promptIdx, 're-enable bracketed paste after the multi-line content')
+      assert.equal(writes.length, multiline.length + 3)
+      // Char writes must reproduce the multi-line content verbatim,
+      // including the embedded \n bytes as their own single-char writes.
+      const charWrites = writes.slice(1, 1 + multiline.length)
+      assert.equal(charWrites.join(''), multiline, 'multi-line prompt body reproduced verbatim')
+      const newlineWrites = charWrites.filter((c) => c === '\n')
+      assert.equal(newlineWrites.length, 2, 'each embedded \\n is its own single-char write')
     })
   })
 
@@ -938,7 +935,10 @@ describe('ClaudeTuiSession', () => {
       let midTurnFiles = []
       session._term = {
         write: (s) => {
-          writtenToPty = s
+          // #4269: writes are now per-character throttled. Accumulate
+          // so the final string equals what would have been a single
+          // pre-throttle write — keeps existing assertions valid.
+          writtenToPty += s
           // Snapshot the attachments dir contents at the moment the
           // prompt is being written to the PTY. This is the state claude
           // sees when it tries to Read the file path from the suffix.
@@ -1006,7 +1006,10 @@ describe('ClaudeTuiSession', () => {
       let writtenToPty = ''
       session._term = {
         write: (s) => {
-          writtenToPty = s
+          // #4269: writes are now per-character throttled. Accumulate
+          // so the final string equals what would have been a single
+          // pre-throttle write — keeps existing assertions valid.
+          writtenToPty += s
           writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
         },
         kill: () => {},
@@ -1040,7 +1043,10 @@ describe('ClaudeTuiSession', () => {
       let writtenToPty = ''
       session._term = {
         write: (s) => {
-          writtenToPty = s
+          // #4269: writes are now per-character throttled. Accumulate
+          // so the final string equals what would have been a single
+          // pre-throttle write — keeps existing assertions valid.
+          writtenToPty += s
           // The stop hook needs to land in a VALID sink dir for the
           // poll loop to read it. Use the real sinkDir for that.
           writeFileSync(join(sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
