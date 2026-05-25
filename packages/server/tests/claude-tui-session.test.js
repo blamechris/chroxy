@@ -1840,43 +1840,125 @@ describe('ClaudeTuiSession', () => {
       assert.equal(toolStartEvents[0].tool, 'AskUserQuestion')
     })
 
-    it('tracks _pendingUserAnswer so respondToQuestion knows the pending toolUseId', () => {
+    it('tracks _pendingUserAnswer with toolUseId AND the options array (#4290)', () => {
+      // The options array is needed at respondToQuestion time so we can
+      // look up the chosen label's index and write the numbered shortcut
+      // (e.g. "2\\r") rather than the raw label text. v0.9.3 wrote the
+      // label text and claude TUI's prompt parser mis-resolved it to
+      // "Other" — see #4288.
+      const options = [{ label: 'App runners only (2)' }, { label: 'App + docs (all 3)' }]
       session._emitToolHookEvent('PreToolUse', {
         tool_use_id: 'toolu_aq_2',
         tool_name: 'AskUserQuestion',
-        tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
+        tool_input: { questions: [{ question: 'Q?', options }] },
       }, 'msg-aq')
       assert.ok(session._pendingUserAnswer, 'pending answer tracked')
       assert.equal(session._pendingUserAnswer.toolUseId, 'toolu_aq_2')
+      assert.deepEqual(session._pendingUserAnswer.options, options, 'options stashed for index lookup')
     })
 
-    it('respondToQuestion writes the answer character-by-character to the PTY then \\r, and clears pending', async () => {
+    // #4290 — the v0.9.3 strategy (write the label text) caused claude
+    // TUI's prompt to single-character-jump-navigate through the menu,
+    // landing on "Other" with empty custom text. New strategy: when the
+    // chosen answer matches an option label exactly, write the 1-indexed
+    // option number — most TUI menus map "1", "2", "3" as direct hotkeys.
+    it('respondToQuestion writes the 1-indexed option number when the answer matches a label (#4290)', async () => {
       const writes = []
-      session._term = {
-        write: (data) => { writes.push(data) },
-        kill: () => {},
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._pendingUserAnswer = {
+        toolUseId: 'toolu_aq_idx',
+        options: [
+          { label: 'App runners only (2)' },
+          { label: 'App + docs (all 3)' },
+          { label: 'Other' },
+        ],
       }
-      session._pendingUserAnswer = { toolUseId: 'toolu_aq_3' }
 
-      session.respondToQuestion('Patch')
-      // Drain the throttled write loop. PROMPT_CHAR_DELAY_MS = 1, so wait
-      // 'Patch'.length + a little extra for the trailing \r + mode toggle.
+      session.respondToQuestion('App + docs (all 3)')
       await new Promise((resolve) => setTimeout(resolve, 50))
 
-      // Same shape as the prompt-write tests in this file: disable + N chars
-      // + \r + enable. The throttle is what defeats claude's paste detector
-      // (#4269) — reusing it for the answer write too.
-      assert.ok(writes.length >= 5 + 3, `expected per-char writes, got ${writes.length}: ${JSON.stringify(writes)}`)
-      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
-      // Find the chars 'P','a','t','c','h' in order
-      const expectChars = 'Patch'.split('')
-      const charWrites = writes.slice(1, 1 + expectChars.length)
-      assert.equal(charWrites.join(''), 'Patch', 'chars reproduce the answer text')
-      assert.equal(writes[1 + expectChars.length], '\r', 'submit comes after the answer')
-      assert.equal(writes[2 + expectChars.length], '\x1b[?2004h', 're-enable comes last')
+      // disable + '2' + \\r + enable = 4 writes
+      assert.equal(writes.length, 4, `expected 4 writes for index path, got ${writes.length}: ${JSON.stringify(writes)}`)
+      assert.equal(writes[0], '\x1b[?2004l', 'first is bracketed-paste-disable')
+      assert.equal(writes[1], '2', 'second is the 1-indexed option number as a single char')
+      assert.equal(writes[2], '\r', 'third is submit')
+      assert.equal(writes[3], '\x1b[?2004h', 'fourth is re-enable')
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
 
-      // _pendingUserAnswer cleared so a second response is a no-op.
-      assert.equal(session._pendingUserAnswer, null)
+    it('respondToQuestion writes the label text when the answer does NOT match any option (custom / Other path)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._pendingUserAnswer = {
+        toolUseId: 'toolu_aq_other',
+        options: [{ label: 'Patch' }, { label: 'Minor' }],
+      }
+
+      session.respondToQuestion('Brand new freeform answer')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // No match → fall through to typing the text per the v0.9.3 behavior.
+      // (claude TUI's Other-path may still mis-parse this; tracked at #4288
+      // as a separate problem. The point of THIS PR is to make the
+      // happy-path label-match case work.)
+      assert.ok(writes.length > 4, `expected per-char writes for fallback path, got ${writes.length}`)
+      assert.equal(writes[0], '\x1b[?2004l', 'disable mode first')
+      const text = 'Brand new freeform answer'
+      const charWrites = writes.slice(1, 1 + text.length)
+      assert.equal(charWrites.join(''), text, 'chars reproduce the freeform answer')
+    })
+
+    // #4293 (review of #4290): boundary check on the index lookup.
+    // First option → "1"; ninth option → "9" (the last single-digit
+    // index supported per the #4292 guard). Pre-fix an off-by-one in
+    // the index → string conversion would shift every selection.
+    it('respondToQuestion: first option → "1", ninth option → "9" (boundary)', async () => {
+      const options = Array.from({ length: 9 }, (_, i) => ({ label: `opt-${i}` }))
+      session._term = { write: () => {}, kill: () => {} }
+
+      const expectations = [
+        { label: 'opt-0', digit: '1' },
+        { label: 'opt-8', digit: '9' },
+      ]
+      for (const { label, digit } of expectations) {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = { toolUseId: 'toolu-boundary', options }
+        session.respondToQuestion(label)
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        assert.equal(writes[1], digit, `option "${label}" maps to digit "${digit}"`)
+      }
+    })
+
+    it('respondToQuestion falls through to label text when matchIdx >= 9 (multi-digit hotkey guard #4292)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
+      session._pendingUserAnswer = { toolUseId: 'toolu-10', options }
+      // opt-9 is index 9 (would be "10" — multi-digit), so we must NOT
+      // write "10\\r" (most single-keystroke menus commit on the first
+      // digit). Fall through to label-text path.
+      session.respondToQuestion('opt-9')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      // First write is mode-disable; second is the first char of "opt-9".
+      assert.equal(writes[0], '\x1b[?2004l')
+      assert.equal(writes[1], 'o', 'multi-digit hotkey not used; falls through to label text')
+    })
+
+    it('respondToQuestion writes the text when options array is missing or empty (free-text-only AskUserQuestion)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_free' /* no options */ }
+
+      session.respondToQuestion('hello')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Same shape as a regular throttled write — disable + 5 chars + \\r + enable.
+      assert.ok(writes.length >= 5 + 3)
+      assert.equal(writes[0], '\x1b[?2004l')
+      const text = 'hello'
+      const charWrites = writes.slice(1, 1 + text.length)
+      assert.equal(charWrites.join(''), text)
     })
 
     it('respondToQuestion is a no-op when no pending answer (defensive)', () => {

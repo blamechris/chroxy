@@ -1050,7 +1050,19 @@ export class ClaudeTuiSession extends BaseSession {
         const questions = (payload.tool_input && Array.isArray(payload.tool_input.questions))
           ? payload.tool_input.questions
           : []
-        this._pendingUserAnswer = { toolUseId }
+        // #4290: stash the options array alongside toolUseId so
+        // respondToQuestion() can look up the chosen label's index and
+        // write the numbered TUI shortcut instead of the label text.
+        // claude TUI's prompt single-character-jump-navigates when fed
+        // raw label text (v0.9.3 finding) — the index hits the
+        // shortcut path directly. Pull options off the FIRST question
+        // (claude TUI shows one question at a time; multi-question
+        // AskUserQuestion would need per-prompt sequencing which is
+        // out of scope here).
+        const options = (questions[0] && Array.isArray(questions[0].options))
+          ? questions[0].options
+          : []
+        this._pendingUserAnswer = { toolUseId, options }
         this.emit('user_question', { toolUseId, questions })
       }
       return
@@ -1294,12 +1306,38 @@ export class ClaudeTuiSession extends BaseSession {
   respondToQuestion(text, _answersMap) {
     if (!this._pendingUserAnswer) return
     if (typeof text !== 'string' || text.length === 0) return
+    const { options } = this._pendingUserAnswer
     this._pendingUserAnswer = null
     if (!this._term) return
+    // #4290: if the chosen label matches one of the structured options
+    // exactly, write the 1-indexed TUI shortcut (e.g. "2") instead of
+    // the label text. v0.9.3 wrote the raw label and claude TUI's
+    // prompt parser single-character-jump-navigated through the menu,
+    // landing on "Other" (see #4288 for the empirical trace). Numbered
+    // shortcuts hit claude TUI's hotkey path directly. When no exact
+    // match is found (user picked "Other" in the dashboard and typed
+    // freeform text), fall through to typing the answer literally —
+    // claude TUI's Other-path may still mis-parse that, tracked in
+    // #4288 as a separate concern.
+    let payload = text
+    if (Array.isArray(options) && options.length > 0) {
+      const matchIdx = options.findIndex((o) => o && o.label === text)
+      // #4292: single-digit guard (1..9). Multi-digit hotkeys
+      // (10+) are NOT assumed to work on claude TUI's prompt — most
+      // single-keystroke menus commit on the first digit and the
+      // second char would either be a spurious next-prompt input
+      // or get dropped. Falling through to the label-text path for
+      // 10+ options preserves v0.9.3 behavior (broken in the same
+      // mode-jump way) without silently sending a hotkey we can't
+      // trust. Vanishingly rare in practice.
+      if (matchIdx >= 0 && matchIdx < 9) {
+        payload = String(matchIdx + 1)
+      }
+    }
     // Fire-and-forget — the write is async due to the per-char throttle,
     // but the caller (handleUserQuestionResponse) is sync. Errors here
     // are non-fatal; worst case the user re-sends the answer.
-    this._writePtyTextThrottled(text).catch((err) => {
+    this._writePtyTextThrottled(payload).catch((err) => {
       log.warn(`respondToQuestion PTY write failed: ${err.message}`)
     })
   }
