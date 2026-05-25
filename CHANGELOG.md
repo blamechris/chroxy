@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-05-26
+
+Same-day follow-on to v0.9.3 fixing the actual-answer-resolution side of the AskUserQuestion handler. v0.9.3 surfaced the question via the dashboard's QuestionPrompt UI and unblocked the silent-hang, but writing the chosen label text to the PTY caused claude TUI's prompt parser to single-character-jump-navigate through the menu and resolve to the wrong option ("Other" with empty custom text). Empirical trace + diagnosis in #4288.
+
+### Fixed
+
+- **TUI AskUserQuestion now resolves to the correct option (#4290 / #4291):** `respondToQuestion` writes the **1-indexed option number** (e.g. `2\r`) when the chosen label matches one of the structured options. claude TUI accepts numbered shortcuts as direct hotkey selection; label text triggered the jump-navigation bug. Single-digit guard limits the index strategy to options 1–9 (10+ falls through to label text since multi-digit hotkeys are unsafe to assume — most single-keystroke menus commit on the first digit) (#4292). Custom / Other path (user picked "Other" in the dashboard and typed freeform text) is unchanged — still falls through to writing the text literally, which may still mis-parse; tracked separately at #4288.
+
 ## [0.9.3] - 2026-05-25
 
 Same-day patch surfacing two dogfood findings from v0.9.2 — both surfaced once the #4269 char-throttle landed and TUI sessions actually started streaming long prompts. One server bug (turn hang on AskUserQuestion), one dashboard UX gap (couldn't inspect tool calls in the chat group). v0.9.3 is intentionally a "test these in dogfood" release; full polish lives in follow-up issues.
