@@ -1623,30 +1623,28 @@
   gap: 6px;
   padding: 4px 2px;
   border-radius: 4px;
-  cursor: pointer;
 }
 
-.tool-group-entry:hover {
-  background: color-mix(in srgb, var(--border-primary) 25%, transparent);
-}
-
-.tool-group-entry:focus-visible {
-  outline: 2px solid var(--accent-blue);
-  outline-offset: 2px;
-}
-
-.tool-group-entry--thinking {
-  cursor: default;
-}
-
-.tool-group-entry--thinking:hover {
-  background: transparent;
-}
-
+/*
+ * #4281: cursor + hover + focus belong on the interactive ROW only.
+ * Putting them on the outer .tool-group-entry made the detail panel feel
+ * clickable too — and clicks on the panel bubbled into a collapse.
+ */
 .tool-group-entry-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.tool-group-entry-row:hover {
+  background: color-mix(in srgb, var(--border-primary) 25%, transparent);
+}
+
+.tool-group-entry-row:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
 }
 
 .tool-group-entry-toggle {
@@ -1692,7 +1690,12 @@
   border-radius: 4px;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 240px;
+  /*
+   * #4283: outer .tool-group-list caps at 220px; the inner scroller has to
+   * sit comfortably under that so the outer wins first instead of nesting
+   * scrollbars (which clips the bottom of the panel awkwardly).
+   */
+  max-height: 180px;
   overflow: auto;
 }
 

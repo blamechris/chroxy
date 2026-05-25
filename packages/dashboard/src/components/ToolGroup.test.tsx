@@ -188,7 +188,7 @@ describe('ToolGroup', () => {
       render(<ToolGroup messages={messages} isActive={true} />)
       const group = screen.getByTestId('tool-group')
       expect(group).toHaveAttribute('aria-expanded', 'true')
-      fireEvent.click(screen.getByTestId('tool-group-entry-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       // Group stays open. Entry is now in its expanded state.
       expect(group).toHaveAttribute('aria-expanded', 'true')
     })
@@ -206,7 +206,7 @@ describe('ToolGroup', () => {
       expect(screen.queryByTestId('tool-group-entry-detail-1')).not.toBeInTheDocument()
 
       // Expand by clicking the entry.
-      fireEvent.click(screen.getByTestId('tool-group-entry-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       const detail = screen.getByTestId('tool-group-entry-detail-1')
       expect(detail).toBeInTheDocument()
       expect(detail).toHaveTextContent('ls -la /tmp')
@@ -217,7 +217,7 @@ describe('ToolGroup', () => {
       expect(detail).toHaveTextContent('drwx------ 3 root root')
 
       // Click again to collapse.
-      fireEvent.click(screen.getByTestId('tool-group-entry-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       expect(screen.queryByTestId('tool-group-entry-detail-1')).not.toBeInTheDocument()
     })
 
@@ -227,8 +227,8 @@ describe('ToolGroup', () => {
         tool('2', 'Bash', { toolInput: { command: 'whoami' }, toolResult: 'root' }),
       ]
       render(<ToolGroup messages={messages} isActive={true} />)
-      fireEvent.click(screen.getByTestId('tool-group-entry-1'))
-      fireEvent.click(screen.getByTestId('tool-group-entry-2'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-2'))
       expect(screen.getByTestId('tool-group-entry-detail-1')).toHaveTextContent('pwd')
       expect(screen.getByTestId('tool-group-entry-detail-1')).toHaveTextContent('/home')
       expect(screen.getByTestId('tool-group-entry-detail-2')).toHaveTextContent('whoami')
@@ -253,7 +253,7 @@ describe('ToolGroup', () => {
         }),
       ]
       render(<ToolGroup messages={messages} isActive={true} />)
-      fireEvent.click(screen.getByTestId('tool-group-entry-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       const detail = screen.getByTestId('tool-group-entry-detail-1')
       expect(detail).toHaveTextContent('Which release strategy?')
       expect(detail).toHaveTextContent('Patch')
@@ -270,26 +270,47 @@ describe('ToolGroup', () => {
       expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
     })
 
-    it('keyboard: Enter on a focused entry toggles its detail without collapsing the group', () => {
+    it('keyboard: Enter on a focused row toggles its detail without collapsing the group', () => {
       const messages = [
         tool('1', 'Bash', { toolInput: { command: 'ls' }, toolResult: 'a b c' }),
       ]
       render(<ToolGroup messages={messages} isActive={true} />)
-      const entry = screen.getByTestId('tool-group-entry-1')
-      fireEvent.keyDown(entry, { key: 'Enter' })
+      const row = screen.getByTestId('tool-group-entry-row-1')
+      fireEvent.keyDown(row, { key: 'Enter' })
       expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
       expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
-      fireEvent.keyDown(entry, { key: 'Enter' })
+      fireEvent.keyDown(row, { key: 'Enter' })
       expect(screen.queryByTestId('tool-group-entry-detail-1')).not.toBeInTheDocument()
     })
 
     it('shows "(no result yet)" placeholder when expanding an entry that has not finished', () => {
       const messages = [tool('1', 'Bash', { toolInput: { command: 'sleep 5' } })]
       render(<ToolGroup messages={messages} isActive={true} />)
-      fireEvent.click(screen.getByTestId('tool-group-entry-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       const detail = screen.getByTestId('tool-group-entry-detail-1')
       expect(detail).toHaveTextContent('sleep 5')
       expect(detail).toHaveTextContent('(no result yet)')
+    })
+
+    // #4281: agent-review caught that the previous implementation made the
+    // OUTER entry the click target, so a click inside the expanded detail
+    // panel (e.g. selecting `<pre>` text to copy a Bash output) bubbled to
+    // the outer onClick and collapsed the entry — same shape of bug as the
+    // top-level #4279 one level deeper. Fix is row-as-button: only the
+    // header row is interactive; the detail panel sits outside the button.
+    it('clicking inside the expanded detail panel does NOT collapse the entry', () => {
+      const messages = [
+        tool('1', 'Bash', { toolInput: { command: 'ls' }, toolResult: 'a\nb\nc' }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      // Expand by clicking the header row, not the outer entry container.
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).toBeInTheDocument()
+      // Now click inside the detail panel as if selecting text. The detail
+      // panel must NOT toggle the entry — only the row is the click target.
+      fireEvent.click(detail)
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
     })
   })
 })

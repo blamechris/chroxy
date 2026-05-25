@@ -109,13 +109,25 @@ function ToolGroupEntry({
     <div
       className={`tool-group-entry${expanded ? ' tool-group-entry--expanded' : ''}`}
       data-testid={`tool-group-entry-${message.id}`}
-      role="button"
-      tabIndex={0}
-      aria-expanded={expanded}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
     >
-      <div className="tool-group-entry-row">
+      {/*
+        #4281: the click target is the ROW, not the outer entry container.
+        Otherwise clicks inside the expanded detail panel (e.g. selecting
+        `<pre>` text to copy a Bash output) bubble to the entry's onClick
+        and collapse it — same shape of bug as the top-level #4279 one
+        level deeper. Keeping the role="button" and the keyboard handler
+        on the row also avoids nesting interactive roles inside the entry
+        container, which the previous shape did.
+      */}
+      <div
+        className="tool-group-entry-row"
+        data-testid={`tool-group-entry-row-${message.id}`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
+      >
         <span className={markerClass} aria-hidden="true">
           {hasResult ? '✓' : '›'}
         </span>
@@ -129,6 +141,11 @@ function ToolGroupEntry({
         <div
           className="tool-group-entry-detail"
           data-testid={`tool-group-entry-detail-${message.id}`}
+          // Detail clicks must not bubble to the outer group's
+          // onClick={toggle} — otherwise selecting/copying `<pre>` text
+          // collapses the entire group. The row already handles its own
+          // toggle clicks; the detail panel is purely a presentation area.
+          onClick={(e) => e.stopPropagation()}
         >
           <div className="tool-group-entry-detail-section">
             <div className="tool-group-entry-detail-label">Input</div>
