@@ -1281,6 +1281,57 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     get().appendTerminalData(msg.delta);
   }
 
+  // #4297 — TUI fires stream_start at turn-start (#4010), creating an empty
+  // response slot. Tool events that follow append AFTER the slot. If the
+  // turn ends with a summary stream_delta, the text would otherwise materialize
+  // at the early slot position — making claude's wrap-up appear ABOVE the tool
+  // groups it summarized. On the first delta for an empty response slot, move
+  // it to the current end of the messages array. We gate on content === '' so
+  // a reconnect-replayed response (already populated) is never shifted, and
+  // run BEFORE the post-permission / collision branches below so their
+  // suffixed-response paths (which already append at the end) skip the
+  // reorder by virtue of the deltaId remap.
+  if (typeof deltaId === 'string'
+      && !_postPermissionSplits.has(deltaId)
+      && !_deltaIdRemaps.has(deltaId)
+      && !pendingDeltas.has(deltaId)) {
+    const targetForReorder = (capturedSessionId && get().sessionStates[capturedSessionId])
+      ? capturedSessionId
+      : null;
+    if (targetForReorder) {
+      const ss = get().sessionStates[targetForReorder]!;
+      const idx = ss.messages.findIndex((m) => m.id === deltaId);
+      if (idx >= 0 && idx < ss.messages.length - 1) {
+        const slot = ss.messages[idx]!;
+        if (slot.type === 'response' && slot.content === '') {
+          updateSession(targetForReorder, (s) => ({
+            messages: [
+              ...s.messages.slice(0, idx),
+              ...s.messages.slice(idx + 1),
+              slot,
+            ],
+          }));
+        }
+      }
+    } else {
+      // Flat-messages fallback (pre-session bootstrap)
+      const flat = get().messages;
+      const idx = flat.findIndex((m) => m.id === deltaId);
+      if (idx >= 0 && idx < flat.length - 1) {
+        const slot = flat[idx]!;
+        if (slot.type === 'response' && slot.content === '') {
+          set((state) => ({
+            messages: [
+              ...state.messages.slice(0, idx),
+              ...state.messages.slice(idx + 1),
+              slot,
+            ],
+          }));
+        }
+      }
+    }
+  }
+
   // Permission boundary split: first delta after a split creates a new message
   if (_postPermissionSplits.has(deltaId)) {
     _postPermissionSplits.delete(deltaId);

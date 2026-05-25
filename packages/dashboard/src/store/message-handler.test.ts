@@ -662,6 +662,228 @@ describe('dashboard message-handler dispatch', () => {
       const ids = ss.messages.map((m: any) => m.id)
       expect(new Set(ids).size).toBe(ids.length)
     })
+
+    // #4297 — claude TUI fires stream_start at turn-start (per #4010), creating
+    // an empty response slot at position 0. Tool events that follow append at
+    // positions 1, 2, … . Then the final summary stream_delta arrives and the
+    // text accumulates into the position-0 slot — making claude's wrap-up
+    // appear ABOVE the tool groups it summarized. Fix: on the first delta for
+    // an empty response slot, move that slot to the current end of the
+    // messages array so chat order matches Output-tab order.
+    describe('first-delta reorders empty response slot (#4297)', () => {
+      it('moves the empty response slot to the end on first delta when tools were appended after stream_start', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        // Turn opens: stream_start fires first (#4010), creating empty response.
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        // Tools fire while response slot is still empty.
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: { command: 'ls' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'tool_result',
+            toolUseId: 'toolu_a',
+            result: 'foo bar',
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_b',
+            tool: 'Read',
+            toolUseId: 'toolu_b',
+            input: { path: '/tmp' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'tool_result',
+            toolUseId: 'toolu_b',
+            result: 'baz',
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        // Finally, the summary text streams in.
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'All done.' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        // Response message must sit AFTER the two tool bubbles, not at index 0.
+        const lastMsg = ss.messages[ss.messages.length - 1]
+        expect(lastMsg.id).toBe('resp-1')
+        expect(lastMsg.type).toBe('response')
+        expect(lastMsg.content).toBe('All done.')
+        // Tool bubbles preserved in order before the response.
+        expect(ss.messages[0].id).toBe('toolu_a')
+        expect(ss.messages[1].id).toBe('toolu_b')
+      })
+
+      it('leaves response slot in place when text streams immediately (no interleaved tools)', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-2', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-2', sessionId: 's1', delta: 'hi' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        expect(ss.messages).toHaveLength(1)
+        expect(ss.messages[0].id).toBe('resp-2')
+        expect(ss.messages[0].content).toBe('hi')
+      })
+
+      it('does not reorder when a tool fires AFTER the first delta', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-3', sessionId: 's1' },
+          ctx() as any,
+        )
+        // Preamble text streams BEFORE any tool — response anchors at index 0.
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-3', sessionId: 's1', delta: 'Let me check…' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_after',
+            tool: 'Bash',
+            toolUseId: 'toolu_after',
+            input: { command: 'ls' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+
+        const ss = (store.getState() as any).sessionStates.s1
+        // Preamble response at index 0, tool at index 1 — chronological order
+        // matches the wire arrival.
+        expect(ss.messages[0].id).toBe('resp-3')
+        expect(ss.messages[1].id).toBe('toolu_after')
+      })
+
+      it('does not reorder a non-empty (reconnect-replayed) response slot', () => {
+        // Simulate reconnect replay where a previous turn's response is
+        // already populated. A subsequent delta on it should NOT reorder.
+        const replayedResp = {
+          id: 'resp-replay',
+          type: 'response' as const,
+          content: 'Existing replayed content. ',
+          timestamp: 1,
+        }
+        const tool = { id: 'toolu_x', type: 'tool_use' as const, content: 'ls', timestamp: 2 }
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: {
+              s1: { ...createEmptySessionState(), messages: [replayedResp, tool] },
+            },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-replay', sessionId: 's1', delta: 'more text' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        // Response stays at index 0 (the reorder gate is content === '').
+        expect(ss.messages[0].id).toBe('resp-replay')
+        expect(ss.messages[0].content).toBe('Existing replayed content. more text')
+        expect(ss.messages[1].id).toBe('toolu_x')
+      })
+
+      it('reorders empty response slot in flat-state branch (legacy/pre-session bootstrap)', () => {
+        const flatBase = baseState({
+          activeSessionId: null,
+          sessions: [],
+          sessionStates: {},
+          messages: [],
+        }) as Record<string, unknown>
+        flatBase.addMessage = (m: unknown) => {
+          const s = store.getState() as { messages: unknown[] }
+          ;(store as { setState: (p: Record<string, unknown>) => void }).setState({
+            messages: [...s.messages, m],
+          })
+        }
+        store = createMockStore(flatBase)
+        setStore(store)
+
+        handleMessage({ type: 'stream_start', messageId: 'flat-resp' }, ctx() as any)
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'flat-tool',
+            tool: 'Bash',
+            toolUseId: 'flat-tool',
+            input: { command: 'ls' },
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'flat-resp', delta: 'flat summary' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const flat = (store.getState() as any).messages
+        const last = flat[flat.length - 1]
+        expect(last.id).toBe('flat-resp')
+        expect(last.content).toBe('flat summary')
+        expect(flat[0].id).toBe('flat-tool')
+      })
+    })
   })
 
   describe('malformed input', () => {
