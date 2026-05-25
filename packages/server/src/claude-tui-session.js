@@ -1117,6 +1117,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #4286: symmetry with interrupt() / destroy(). A turn failing or
+    // timing out while AskUserQuestion is pending must clear the answer
+    // slot — otherwise a late user_question_response (e.g. the user
+    // clicked the QuestionPrompt right as the hard timeout fired) would
+    // attempt a PTY write that no longer matches a live turn.
+    this._pendingUserAnswer = null
   }
 
   /**
@@ -1195,6 +1201,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #4286: clear any pending AskUserQuestion answer slot — same
+    // reason as in _finishTurnError. A user_question_response arriving
+    // after we've already fired Ctrl-C and emitted error/result has
+    // nowhere meaningful to go.
+    this._pendingUserAnswer = null
     this.emit('error', { message: `Response timed out after ${friendly}` })
     // #4010: emit result so the dashboard receives agent_idle and clears
     // the Stop button. stream_end on its own only clears streamingMessageId.

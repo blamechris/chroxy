@@ -1921,6 +1921,32 @@ describe('ClaudeTuiSession', () => {
         'unrelated PostToolUse leaves the pending question alone',
       )
     })
+
+    // #4286 (review-caught): _finishTurnError and _handleHardTimeout
+    // were the two asymmetric exits that left the answer slot dirty
+    // (interrupt/destroy already clear it). Pin both so a regression
+    // doesn't re-introduce a late user_question_response writing into
+    // a dead turn.
+    it('_finishTurnError clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_finish' }
+      session.on('error', () => {})  // swallow
+      session._currentMessageId = 'msg-x'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._finishTurnError('test-error', 'msg-x')
+      assert.equal(session._pendingUserAnswer, null, 'finishTurnError clears pending answer')
+    })
+
+    it('_handleHardTimeout clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_hard' }
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-y'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session._hardTimeoutMs = 1000
+      session._handleHardTimeout()
+      assert.equal(session._pendingUserAnswer, null, 'hard timeout clears pending answer')
+    })
   })
 
   // #4044: per-session option that spawns claude TUI with the literal
