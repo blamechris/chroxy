@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-05-25
+
+Same-day patch surfacing two dogfood findings from v0.9.2 — both surfaced once the #4269 char-throttle landed and TUI sessions actually started streaming long prompts. One server bug (turn hang on AskUserQuestion), one dashboard UX gap (couldn't inspect tool calls in the chat group). v0.9.3 is intentionally a "test these in dogfood" release; full polish lives in follow-up issues.
+
+### Added
+
+- **TUI AskUserQuestion handling (#4278 / #4285):** TUI sessions previously had zero handling for AskUserQuestion — claude TUI called the tool through its own TTY-style prompt inside the PTY; chroxy emitted only a generic tool_start; no QuestionPrompt UI ever rendered; the turn hung until the inactivity hard timeout fired ~2 hours later. Now PreToolUse for AskUserQuestion emits a `user_question` event alongside the tool_start so the dashboard renders its existing QuestionPrompt UI, and a new `respondToQuestion(text)` on `ClaudeTuiSession` writes the chosen answer back to the PTY using the same per-character throttle from #4269. Lifecycle exits (`interrupt`, `destroy`, `_finishTurnError`, `_handleHardTimeout`) all clear the answer slot for symmetry (#4286). MVP — we write the chosen label text and hope claude TUI's prompt accepts it; #4288 tracks the empirical question for follow-up if rejected in practice.
+
+### Changed
+
+- **Per-entry expansion in ToolGroup (#4279 / #4280):** inner ToolGroup entries are now individually expandable to reveal the full `toolInput` and `toolResult` for each tool call — and crucially, clicking an entry no longer collapses the whole group. Pre-fix the entry row had no `onClick`, so every click bubbled to the parent group's toggle, and entries only rendered a truncated `getInputSummary(toolInput)` with `toolResult` never shown anywhere. Now each entry is a row-as-button with stop-propagation; the detail panel renders both input (JSON-formatted) and result (raw text, or `(no result yet)` placeholder), and multiple entries can be open simultaneously. Detail panel max-height tuned to sit below the outer list's scroller (#4281, #4283). Follow-ups: #4282 (nested role="button" a11y), #4284 (dead onKeyDown on Thinking row).
+
 ## [0.9.2] - 2026-05-25
 
 Same-day patch fixing #4269 for real. v0.9.1's bracketed-paste-mode toggle (#4270) did not work — claude TUI does not respect DEC mode 2004 and runs its own paste detector based on byte-arrival rate. A single bulk write of the whole prompt collapses into a `[Pasted text #1 +N lines] paste again to expand` placeholder that chroxy never confirms, hanging the turn silently. Diagnostic confirmation came from dogfood: a single-word prompt (`hi`) submitted fine through the same code path, while a 600-char prompt hung every time — isolating the trigger to byte-arrival rate, not multi-line content, not mode toggles.
