@@ -173,4 +173,144 @@ describe('ToolGroup', () => {
     rerender(<ToolGroup messages={messages} isActive={true} />)
     expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
   })
+
+  // #4279: per-entry expansion. Clicking an inner entry must reveal the full
+  // toolInput + toolResult for that entry WITHOUT collapsing the whole group
+  // — pre-fix the entry click bubbled to the outer `onClick={toggle}` and
+  // shut the entire list. Entries also had no place to render `toolResult`,
+  // so even if the click hadn't bubbled the user still couldn't see the
+  // command output.
+  describe('per-entry expansion (#4279)', () => {
+    it('clicking an entry does NOT collapse the parent group', () => {
+      const messages = [
+        tool('1', 'Bash', { toolInput: { command: 'ls' }, toolResult: 'out' }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const group = screen.getByTestId('tool-group')
+      expect(group).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      // Group stays open. Entry is now in its expanded state.
+      expect(group).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('expanded entry renders toolInput + toolResult; collapsed entry hides them', () => {
+      const messages = [
+        tool('1', 'Bash', {
+          toolInput: { command: 'ls -la /tmp' },
+          toolResult: 'total 0\ndrwx------  3 root root',
+        }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+
+      // Collapsed by default: detail panel not in the DOM.
+      expect(screen.queryByTestId('tool-group-entry-detail-1')).not.toBeInTheDocument()
+
+      // Expand by clicking the entry.
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).toBeInTheDocument()
+      expect(detail).toHaveTextContent('ls -la /tmp')
+      expect(detail).toHaveTextContent('total 0')
+      // testing-library collapses runs of whitespace before comparing, so we
+      // match the collapsed shape — the source value still has the double
+      // space, the equality is just normalized.
+      expect(detail).toHaveTextContent('drwx------ 3 root root')
+
+      // Click again to collapse.
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      expect(screen.queryByTestId('tool-group-entry-detail-1')).not.toBeInTheDocument()
+    })
+
+    it('multiple entries can be expanded simultaneously', () => {
+      const messages = [
+        tool('1', 'Bash', { toolInput: { command: 'pwd' }, toolResult: '/home' }),
+        tool('2', 'Bash', { toolInput: { command: 'whoami' }, toolResult: 'root' }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-2'))
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toHaveTextContent('pwd')
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toHaveTextContent('/home')
+      expect(screen.getByTestId('tool-group-entry-detail-2')).toHaveTextContent('whoami')
+      expect(screen.getByTestId('tool-group-entry-detail-2')).toHaveTextContent('root')
+    })
+
+    it('renders the structured AskUserQuestion input verbatim so the user can see the question + options', () => {
+      // The bug surfaced via #4278: AskUserQuestion in a TUI session ends
+      // up in the tool group with no way to see what was asked. Until the
+      // server-side fix lands (#4278), at least the dashboard must let the
+      // user expand the entry to read the structured question.
+      const messages = [
+        tool('1', 'AskUserQuestion', {
+          toolInput: {
+            questions: [
+              {
+                question: 'Which release strategy?',
+                options: [{ label: 'Patch' }, { label: 'Minor' }],
+              },
+            ],
+          },
+        }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).toHaveTextContent('Which release strategy?')
+      expect(detail).toHaveTextContent('Patch')
+      expect(detail).toHaveTextContent('Minor')
+    })
+
+    it('Thinking entries are not expandable (no marker, no detail panel even on click)', () => {
+      render(<ToolGroup messages={[thinking('t1')]} isActive={true} />)
+      const entry = screen.getByTestId('tool-group-entry-t1')
+      fireEvent.click(entry)
+      expect(screen.queryByTestId('tool-group-entry-detail-t1')).not.toBeInTheDocument()
+      // And the parent group is still open — the click neither collapsed
+      // it nor produced a detail panel.
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('keyboard: Enter on a focused row toggles its detail without collapsing the group', () => {
+      const messages = [
+        tool('1', 'Bash', { toolInput: { command: 'ls' }, toolResult: 'a b c' }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const row = screen.getByTestId('tool-group-entry-row-1')
+      fireEvent.keyDown(row, { key: 'Enter' })
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.keyDown(row, { key: 'Enter' })
+      expect(screen.queryByTestId('tool-group-entry-detail-1')).not.toBeInTheDocument()
+    })
+
+    it('shows "(no result yet)" placeholder when expanding an entry that has not finished', () => {
+      const messages = [tool('1', 'Bash', { toolInput: { command: 'sleep 5' } })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).toHaveTextContent('sleep 5')
+      expect(detail).toHaveTextContent('(no result yet)')
+    })
+
+    // #4281: agent-review caught that the previous implementation made the
+    // OUTER entry the click target, so a click inside the expanded detail
+    // panel (e.g. selecting `<pre>` text to copy a Bash output) bubbled to
+    // the outer onClick and collapsed the entry — same shape of bug as the
+    // top-level #4279 one level deeper. Fix is row-as-button: only the
+    // header row is interactive; the detail panel sits outside the button.
+    it('clicking inside the expanded detail panel does NOT collapse the entry', () => {
+      const messages = [
+        tool('1', 'Bash', { toolInput: { command: 'ls' }, toolResult: 'a\nb\nc' }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      // Expand by clicking the header row, not the outer entry container.
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).toBeInTheDocument()
+      // Now click inside the detail panel as if selecting text. The detail
+      // panel must NOT toggle the entry — only the row is the click target.
+      fireEvent.click(detail)
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
+    })
+  })
 })
