@@ -1796,6 +1796,159 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4278: TUI sessions previously had ZERO handling for AskUserQuestion.
+  // claude TUI calls the tool through its own prompt mechanism in the PTY;
+  // chroxy's PreToolUse hook fired but only emitted a generic tool_start.
+  // The dashboard rendered the tool_use inside the collapsed tool group
+  // with no interactive way to answer, and claude sat on its own TTY-style
+  // prompt waiting for stdin input — until the inactivity hard timeout.
+  describe('AskUserQuestion handling (#4278)', () => {
+    beforeEach(() => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { uuid: 'test', synthSeq: 0 }
+    })
+
+    it('PreToolUse for AskUserQuestion emits user_question with toolUseId + questions', () => {
+      const questionEvents = []
+      const toolStartEvents = []
+      session.on('user_question', (e) => questionEvents.push(e))
+      session.on('tool_start', (e) => toolStartEvents.push(e))
+
+      const questions = [
+        {
+          question: 'Which release strategy?',
+          options: [{ label: 'Patch' }, { label: 'Minor' }],
+        },
+      ]
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_aq_1',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions },
+      }, 'msg-aq')
+
+      assert.equal(questionEvents.length, 1, 'user_question emitted exactly once')
+      assert.equal(questionEvents[0].toolUseId, 'toolu_aq_1')
+      assert.deepEqual(questionEvents[0].questions, questions)
+
+      // tool_start STILL emits so the dashboard's tool-pairing (tool_use →
+      // tool_result on PostToolUse) continues to work after the user
+      // answers. We accept the duplicate display (tool_use bubble in the
+      // group AND the QuestionPrompt UI outside) — #4279 makes the bubble
+      // usefully expandable so this is acceptable for MVP.
+      assert.equal(toolStartEvents.length, 1, 'tool_start still emitted')
+      assert.equal(toolStartEvents[0].toolUseId, 'toolu_aq_1')
+      assert.equal(toolStartEvents[0].tool, 'AskUserQuestion')
+    })
+
+    it('tracks _pendingUserAnswer so respondToQuestion knows the pending toolUseId', () => {
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_aq_2',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
+      }, 'msg-aq')
+      assert.ok(session._pendingUserAnswer, 'pending answer tracked')
+      assert.equal(session._pendingUserAnswer.toolUseId, 'toolu_aq_2')
+    })
+
+    it('respondToQuestion writes the answer character-by-character to the PTY then \\r, and clears pending', async () => {
+      const writes = []
+      session._term = {
+        write: (data) => { writes.push(data) },
+        kill: () => {},
+      }
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_3' }
+
+      session.respondToQuestion('Patch')
+      // Drain the throttled write loop. PROMPT_CHAR_DELAY_MS = 1, so wait
+      // 'Patch'.length + a little extra for the trailing \r + mode toggle.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Same shape as the prompt-write tests in this file: disable + N chars
+      // + \r + enable. The throttle is what defeats claude's paste detector
+      // (#4269) — reusing it for the answer write too.
+      assert.ok(writes.length >= 5 + 3, `expected per-char writes, got ${writes.length}: ${JSON.stringify(writes)}`)
+      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
+      // Find the chars 'P','a','t','c','h' in order
+      const expectChars = 'Patch'.split('')
+      const charWrites = writes.slice(1, 1 + expectChars.length)
+      assert.equal(charWrites.join(''), 'Patch', 'chars reproduce the answer text')
+      assert.equal(writes[1 + expectChars.length], '\r', 'submit comes after the answer')
+      assert.equal(writes[2 + expectChars.length], '\x1b[?2004h', 're-enable comes last')
+
+      // _pendingUserAnswer cleared so a second response is a no-op.
+      assert.equal(session._pendingUserAnswer, null)
+    })
+
+    it('respondToQuestion is a no-op when no pending answer (defensive)', () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._pendingUserAnswer = null
+
+      session.respondToQuestion('whatever')
+      assert.equal(writes.length, 0, 'no PTY writes when there is no pending answer')
+    })
+
+    it('PostToolUse for AskUserQuestion clears _pendingUserAnswer if it was still set', () => {
+      // Cleanup invariant: claude eventually resolved its own prompt
+      // (maybe via the underlying terminal multiplexer, maybe via the
+      // answer chroxy wrote). Either way, once PostToolUse fires the
+      // chroxy-side pending state has to be cleared — otherwise the next
+      // user_question_response would write into a dead PTY context.
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_4' }
+      const resultEvents = []
+      session.on('tool_result', (e) => resultEvents.push(e))
+
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_aq_4',
+        tool_name: 'AskUserQuestion',
+        tool_response: { selectedLabel: 'Patch' },
+      }, 'msg-aq')
+
+      assert.equal(resultEvents.length, 1, 'tool_result still emitted as normal')
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared after PostToolUse')
+    })
+
+    it('PostToolUse for a non-AskUserQuestion tool does NOT touch _pendingUserAnswer (defensive)', () => {
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_5' }
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_bash',
+        tool_name: 'Bash',
+        tool_response: 'ok',
+      }, 'msg-mixed')
+      assert.deepEqual(
+        session._pendingUserAnswer,
+        { toolUseId: 'toolu_aq_5' },
+        'unrelated PostToolUse leaves the pending question alone',
+      )
+    })
+
+    // #4286 (review-caught): _finishTurnError and _handleHardTimeout
+    // were the two asymmetric exits that left the answer slot dirty
+    // (interrupt/destroy already clear it). Pin both so a regression
+    // doesn't re-introduce a late user_question_response writing into
+    // a dead turn.
+    it('_finishTurnError clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_finish' }
+      session.on('error', () => {})  // swallow
+      session._currentMessageId = 'msg-x'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._finishTurnError('test-error', 'msg-x')
+      assert.equal(session._pendingUserAnswer, null, 'finishTurnError clears pending answer')
+    })
+
+    it('_handleHardTimeout clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+      session._pendingUserAnswer = { toolUseId: 'toolu_aq_hard' }
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-y'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session._hardTimeoutMs = 1000
+      session._handleHardTimeout()
+      assert.equal(session._pendingUserAnswer, null, 'hard timeout clears pending answer')
+    })
+  })
+
   // #4044: per-session option that spawns claude TUI with the literal
   // --dangerously-skip-permissions flag and elides chroxy's permission
   // hook entirely. Distinct from `permissionMode: 'auto'`, which still
