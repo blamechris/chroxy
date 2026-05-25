@@ -321,6 +321,16 @@ export class ClaudeTuiSession extends BaseSession {
   static get PTY_TAIL_BYTES() { return 4096 }
   static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
 
+  // #4269: per-character delay when writing the prompt to the PTY.
+  // claude TUI's paste detector triggers on byte-arrival rate, not DEC
+  // mode 2004 — a single bulk write of ~hundreds of bytes is collapsed
+  // into a "[Pasted text #1 +N lines] paste again to expand" placeholder
+  // that chroxy never confirms, hanging the turn silently. Throttling to
+  // ~1 ms per char makes the bytes look like typed input. A 600-char
+  // prompt costs ~600 ms of one-time latency before claude starts —
+  // imperceptible during interactive use.
+  static get PROMPT_CHAR_DELAY_MS() { return 1 }
+
   // Path to the per-PID session file claude TUI maintains. The file
   // surfaces a `status` field (busy/idle/...) updated by claude itself
   // on every state transition — `claude ps` consumes the same files.
@@ -773,19 +783,27 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     try {
-      // #4269: claude TUI v2.1.147 treats any rapid programmatic write
-      // (or input containing a newline) as a paste, collapsing it into
-      // a "[Pasted text #1 +N lines] paste again to expand" placeholder
-      // that requires user confirmation. chroxy never sends that
-      // confirmation, so the prompt sits in claude's input buffer
-      // forever and the turn hangs silently — no streaming, no tool
-      // calls, no error. Wrap the write with bracketed-paste mode
-      // disable (`ESC [ ? 2004 l`) so claude processes the bytes as
-      // typed input, then re-enable (`ESC [ ? 2004 h`) so subsequent
-      // human-pasted content (e.g. via a terminal multiplexer attached
-      // to the same PTY) still gets the paste UX. One write so the
-      // disable / content / re-enable arrive atomically.
-      this._term.write(`\x1b[?2004l${promptToSend}\r\x1b[?2004h`)
+      // #4269: claude TUI's paste detector triggers on byte-arrival rate,
+      // not DEC mode 2004 — a single bulk write of the whole prompt is
+      // collapsed into "[Pasted text #1 +N lines] paste again to expand"
+      // and chroxy never confirms, hanging the turn silently. Throttling
+      // each char with PROMPT_CHAR_DELAY_MS makes the bytes look like
+      // typed input. The bracketed-paste-disable / re-enable wrap is
+      // kept as defense-in-depth for any claude version that DOES honor
+      // mode 2004; the throttle is what actually fixes the bug.
+      this._term.write('\x1b[?2004l')
+      for (const ch of promptToSend) {
+        if (this._activeTurn?.aborted) {
+          this._finishTurnError('Turn aborted during prompt write', messageId)
+          return
+        }
+        this._term.write(ch)
+        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+        }
+      }
+      this._term.write('\r')
+      this._term.write('\x1b[?2004h')
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
       return
