@@ -315,6 +315,15 @@ export class ClaudeTuiSession extends BaseSession {
     // UTF-8 strings already decoded, but the relevant control bytes
     // are 7-bit ASCII and survive the decode unchanged.
     this._outputTailRaw = Buffer.alloc(0)
+    // #4278: when claude TUI calls AskUserQuestion, chroxy's PreToolUse
+    // hook emits user_question and stashes the toolUseId here. The
+    // dashboard's QuestionPrompt UI eventually sends a
+    // `user_question_response` which routes to respondToQuestion() —
+    // that method writes the chosen answer back to the PTY (claude's
+    // own TTY-style prompt is waiting on stdin). Cleared on response,
+    // on PostToolUse (claude resolved the prompt some other way), or
+    // on session destroy.
+    this._pendingUserAnswer = null
   }
 
   // Tail length to keep + length to include in error diagnostics.
@@ -786,24 +795,17 @@ export class ClaudeTuiSession extends BaseSession {
       // #4269: claude TUI's paste detector triggers on byte-arrival rate,
       // not DEC mode 2004 — a single bulk write of the whole prompt is
       // collapsed into "[Pasted text #1 +N lines] paste again to expand"
-      // and chroxy never confirms, hanging the turn silently. Throttling
-      // each char with PROMPT_CHAR_DELAY_MS makes the bytes look like
-      // typed input. The bracketed-paste-disable / re-enable wrap is
-      // kept as defense-in-depth for any claude version that DOES honor
-      // mode 2004; the throttle is what actually fixes the bug.
-      this._term.write('\x1b[?2004l')
-      for (const ch of promptToSend) {
-        if (this._activeTurn?.aborted) {
-          this._finishTurnError('Turn aborted during prompt write', messageId)
-          return
-        }
-        this._term.write(ch)
-        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
-          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
-        }
-      }
-      this._term.write('\r')
-      this._term.write('\x1b[?2004h')
+      // and chroxy never confirms, hanging the turn silently. The
+      // shared _writePtyTextThrottled() helper writes the text one char
+      // at a time with PROMPT_CHAR_DELAY_MS between each so the bytes
+      // look like typed input. The bracketed-paste-disable / re-enable
+      // wrap is kept as defense-in-depth for any claude version that
+      // DOES honor mode 2004; the throttle is what actually fixes the
+      // bug. Same helper also serves respondToQuestion() (#4278).
+      const completed = await this._writePtyTextThrottled(promptToSend, {
+        onAbort: () => this._finishTurnError('Turn aborted during prompt write', messageId),
+      })
+      if (!completed) return
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
       return
@@ -954,6 +956,41 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * Write a string to the PTY one character at a time with
+   * PROMPT_CHAR_DELAY_MS between each, wrapped in bracketed-paste-disable
+   * / re-enable so claude TUI's paste detector accepts it as typed input
+   * (#4269). Returns true on completion, false if `_activeTurn.aborted`
+   * tripped mid-write (in which case `onAbort` was called).
+   *
+   * Used by both sendMessage's prompt write and respondToQuestion's
+   * answer write (#4278). The control sequences (\x1b[?2004l/h, \r) are
+   * single writes — only the visible text is throttled, since that's
+   * what claude's heuristic measures.
+   *
+   * @param {string} text — the text to write (no trailing CR; \r appended)
+   * @param {object} [opts]
+   * @param {() => void} [opts.onAbort] — called if abort tripped; caller
+   *   typically uses this to surface a turn-level error.
+   * @returns {Promise<boolean>} true if completed, false if aborted.
+   */
+  async _writePtyTextThrottled(text, { onAbort } = {}) {
+    this._term.write('\x1b[?2004l')
+    for (const ch of text) {
+      if (this._activeTurn?.aborted) {
+        onAbort?.()
+        return false
+      }
+      this._term.write(ch)
+      if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+        await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+      }
+    }
+    this._term.write('\r')
+    this._term.write('\x1b[?2004h')
+    return true
+  }
+
+  /**
    * Translate one PreToolUse / PostToolUse hook payload into BaseSession tool
    * events. Hook payloads carry tool_use_id (when Claude Code provides it),
    * tool_name, tool_input, and on Post a tool_response. The dashboard pairs
@@ -997,7 +1034,35 @@ export class ClaudeTuiSession extends BaseSession {
         tool: toolName,
         input: payload.tool_input ?? null,
       })
+      // #4278: AskUserQuestion in TUI sessions previously had no special
+      // path — the tool_use bubble appeared in the chat with no
+      // interactive way to answer, and claude sat on its own TTY-style
+      // prompt waiting for stdin until the inactivity hard timeout. Now
+      // we ALSO emit user_question (same shape sdk-session emits) so
+      // the dashboard renders its QuestionPrompt UI. The user's answer
+      // arrives via respondToQuestion() which writes it back to the PTY.
+      //
+      // tool_start above still fires so the existing tool-pairing path
+      // works once PostToolUse arrives — we accept the duplicate display
+      // (collapsed bubble + standalone QuestionPrompt) as MVP; #4279
+      // makes the bubble usefully expandable so this is acceptable.
+      if (toolName === 'AskUserQuestion') {
+        const questions = (payload.tool_input && Array.isArray(payload.tool_input.questions))
+          ? payload.tool_input.questions
+          : []
+        this._pendingUserAnswer = { toolUseId }
+        this.emit('user_question', { toolUseId, questions })
+      }
       return
+    }
+
+    // #4278 (PostToolUse half): claude resolved its own AskUserQuestion
+    // prompt — either via the answer chroxy wrote in respondToQuestion()
+    // or via the underlying terminal multiplexer if a human typed into
+    // the same PTY. Either way, clear the pending state so the next
+    // user_question_response doesn't write into a stale context.
+    if (toolName === 'AskUserQuestion' && this._pendingUserAnswer) {
+      this._pendingUserAnswer = null
     }
 
     // PostToolUse — extract a string-ish result for the dashboard.
@@ -1192,6 +1257,40 @@ export class ClaudeTuiSession extends BaseSession {
       // sendMessage() works normally. Matches _handleHardTimeout.
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
+    // #4278: also drop any pending AskUserQuestion so a subsequent
+    // user_question_response can't write into a torn-down context.
+    this._pendingUserAnswer = null
+  }
+
+  /**
+   * Send a response to an AskUserQuestion prompt (#4278). The dashboard's
+   * QuestionPrompt UI fires this when the user picks an option. The
+   * answer text is written character-by-character to the PTY (using the
+   * same throttle as the prompt write — claude TUI's paste detector
+   * rejects bulk writes, see #4269), followed by \r. claude's own
+   * TTY-style prompt is sitting on stdin; the throttled input satisfies
+   * it and the tool completes, firing PostToolUse → tool_result.
+   *
+   * No-op when no pending answer. `answersMap` is the per-question form
+   * used by the SDK; the TUI path uses the single answer text directly
+   * (claude TUI only ever surfaces one question at a time via its
+   * prompt, so the map shape is redundant here — receive it for
+   * interface compatibility but ignore it for now).
+   *
+   * @param {string} text — the chosen answer (typically the option label)
+   * @param {object} [_answersMap] — reserved; unused in TUI mode
+   */
+  respondToQuestion(text, _answersMap) {
+    if (!this._pendingUserAnswer) return
+    if (typeof text !== 'string' || text.length === 0) return
+    this._pendingUserAnswer = null
+    if (!this._term) return
+    // Fire-and-forget — the write is async due to the per-char throttle,
+    // but the caller (handleUserQuestionResponse) is sync. Errors here
+    // are non-fatal; worst case the user re-sends the answer.
+    this._writePtyTextThrottled(text).catch((err) => {
+      log.warn(`respondToQuestion PTY write failed: ${err.message}`)
+    })
   }
 
   async destroy() {
@@ -1199,6 +1298,9 @@ export class ClaudeTuiSession extends BaseSession {
     this._processReady = false
     this._isBusy = false
     this._activeTurn = null
+    // #4278: drop any pending AskUserQuestion so a late
+    // user_question_response can't write into a dead PTY.
+    this._pendingUserAnswer = null
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._term) {
