@@ -219,6 +219,26 @@ describe('ToolGroup', () => {
       rerender(<ToolGroup messages={messages} isActive={false} isTail={false} />)
       expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'false')
     })
+
+    // #4314 — same-commit flip. If a single store update both ends the
+    // stream (isActive: true -> false) AND shifts the tail away from this
+    // group (isTail: true -> false) — e.g. a `response` message arrives in
+    // the same batch as `stream_end` — the on-completion collapse must
+    // still respect the *prior* tail status. Reading isTail via a ref
+    // updated on every render snapshots the post-flip value (false), so
+    // without a guard the group collapses immediately — the same UX bug
+    // #4309 was meant to fix, just on a faster turn.
+    it('does not collapse when isActive and isTail flip false in the same render', () => {
+      const messages = [tool('1', 'Bash'), tool('2', 'Read')]
+      const { rerender } = render(
+        <ToolGroup messages={messages} isActive={true} isTail={true} />,
+      )
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+      // Both flips land in a single render — the response and stream_end
+      // arrived in the same batched store update.
+      rerender(<ToolGroup messages={messages} isActive={false} isTail={false} />)
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
   })
 
   // #4279: per-entry expansion. Clicking an inner entry must reveal the full
@@ -315,6 +335,18 @@ describe('ToolGroup', () => {
       // And the parent group is still open — the click neither collapsed
       // it nor produced a detail panel.
       expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    // #4284: the Thinking entry is a plain <div> with no role/tabIndex, so
+    // it can never receive keyboard focus — any onKeyDown handler attached
+    // to it would be dead code. Assert the entry is non-focusable so future
+    // refactors don't reintroduce an unreachable keyboard handler without
+    // also making the row focusable + announced.
+    it('Thinking entry is non-focusable (no tabIndex, no role=button)', () => {
+      render(<ToolGroup messages={[thinking('t1')]} isActive={true} />)
+      const entry = screen.getByTestId('tool-group-entry-t1')
+      expect(entry).not.toHaveAttribute('tabindex')
+      expect(entry).not.toHaveAttribute('role', 'button')
     })
 
     it('keyboard: Enter on a focused row toggles its detail without collapsing the group', () => {
