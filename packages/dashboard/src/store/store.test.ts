@@ -1435,6 +1435,55 @@ describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #4312 — optimistic busy-state bump on answer send
+// ---------------------------------------------------------------------------
+// sendInput (the regular chat path) implicitly puts the dashboard into a
+// "running" visual state via the input-bump path; sendUserQuestionResponse
+// historically skipped this, so the per-session activity dot + ActivityIndicator
+// stayed idle in the gap between answer-send and the next server-emitted
+// stream/tool event. The fix mirrors sendInput by flipping isIdle:false and
+// stamping lastClientActivityAt on the active session before the wire send.
+describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
+  it('flips active session to running (isIdle:false) and bumps lastClientActivityAt', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const mockSocket = {
+      readyState: 1,
+      send: () => { /* swallow */ },
+    };
+
+    const beforeNow = Date.now();
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          isIdle: true,
+          lastClientActivityAt: null,
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu_abc');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.isIdle).toBe(false);
+    expect(ss.lastClientActivityAt).not.toBeNull();
+    expect(ss.lastClientActivityAt!).toBeGreaterThanOrEqual(beforeNow);
+
+    // Clean up so unrelated tests don't see stale active session state.
+    useConnectionStore.setState({
+      activeSessionId: null,
+      sessionStates: {},
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PTY dead code removal (#1759)
 // ---------------------------------------------------------------------------
 describe('PTY dead code removal', () => {

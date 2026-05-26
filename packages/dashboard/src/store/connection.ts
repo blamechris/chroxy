@@ -1288,7 +1288,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => {
-    const { socket } = get();
+    const { socket, activeSessionId, sessionStates } = get();
     const payload: Record<string, string> = { type: 'user_question_response', answer };
     if (toolUseId) payload.toolUseId = toolUseId;
     // #4296: echo the resolved answer to the terminal buffer so the Output
@@ -1299,6 +1299,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // wire send so the echo is present even when the socket queues.
     if (answer) {
       get().appendTerminalData(`\r\n\x1b[36m> User answered: ${answer}\x1b[0m\r\n`);
+    }
+    // #4312: optimistically flip the active session into "running" so the
+    // ActivityIndicator + per-session busy dot light up immediately on
+    // answer-send, matching the symmetry of sendInput. Without this, the
+    // dashboard reads idle in the gap between answer-send and the next
+    // server-emitted stream/tool event, making the answer look dropped.
+    // Once a server event arrives, the bump is a no-op (server is
+    // authoritative); the timestamp is overwritten in dispatch-activity.
+    if (activeSessionId && sessionStates[activeSessionId]) {
+      updateActiveSession(() => ({
+        isIdle: false,
+        lastClientActivityAt: Date.now(),
+      }));
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);

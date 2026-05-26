@@ -317,5 +317,138 @@ describe('ToolBubble', () => {
       )
       expect(screen.queryByTestId('tool-bubble-pulse-tu-3')).toBeNull()
     })
+
+    // #4317: tools that resolve with images-only (computer-use
+    // screenshots, browser tools returning base64 PNGs) leave
+    // `result === undefined` but populate `resultImages`. Pre-fix the
+    // pulse rendered forever; the predicate now mirrors ToolGroup's
+    // `hasResult` and ActivityIndicator's in-flight check.
+    it('omits the pulse dot when result is images-only (no text result)', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-4"
+          input={{ url: 'https://example.com' }}
+          resultImages={[{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }]}
+        />,
+      )
+      expect(screen.queryByTestId('tool-bubble-pulse-tu-4')).toBeNull()
+    })
+
+    it('still renders the pulse dot when resultImages is an empty array (not resolved)', () => {
+      // Defensive: an empty array should be treated like no images at
+      // all — the tool is still in-flight.
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-5"
+          input={{ url: 'https://example.com' }}
+          resultImages={[]}
+        />,
+      )
+      expect(screen.getByTestId('tool-bubble-pulse-tu-5')).toBeInTheDocument()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // #4313 — tail-bubble behavior. Singleton trailing tool_use rows bypass
+  // the ToolGroup path entirely (`chatToolGroupPayloads` only collapses runs
+  // of 2+ — App.tsx:894-902), so the #4309 ToolGroup tail mitigation never
+  // fires for 1-tool tails. Mirroring the prop on ToolBubble closes that gap.
+  // ---------------------------------------------------------------------------
+  describe('tail-bubble behavior (#4313)', () => {
+    it('mounts expanded when isTail is true (singleton trailing tool with result)', () => {
+      render(
+        <ToolBubble
+          toolName="Read"
+          toolUseId="tu-tail-1"
+          input="/file"
+          result="contents"
+          isTail
+        />,
+      )
+      expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+      // Result panel renders immediately — no click needed.
+      expect(screen.getByText('contents')).toBeInTheDocument()
+    })
+
+    it('mounts expanded when isTail is true and tool is still in-flight (no result)', () => {
+      // Tail singleton with no result yet — bubble should still mount
+      // expanded so the user sees what is running. Mirrors the #4309
+      // behavior for groups where the trailing tool may still be active.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-tail-pending"
+          inputPartial='{"command":"ls"}'
+          isTail
+        />,
+      )
+      expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+      // Partial preview is visible without a click.
+      expect(screen.getByTestId('tool-input-partial-tu-tail-pending')).toBeInTheDocument()
+    })
+
+    it('mounts collapsed when isTail is false (default behavior)', () => {
+      // Regression: non-tail bubbles must still mount collapsed.
+      render(
+        <ToolBubble
+          toolName="Read"
+          toolUseId="tu-non-tail"
+          input="/file"
+          result="contents"
+        />,
+      )
+      expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByText('contents')).not.toBeInTheDocument()
+    })
+
+    it('does not retroactively collapse when isTail flips to false later', () => {
+      // Turn ends on a singleton tool (tail, expanded). A follow-up
+      // response message then arrives and the bubble is no longer tail.
+      // The expansion state must NOT retroactively change — the user
+      // may have already seen and engaged with the expanded result.
+      // Matches the `isTailRef` shape from ToolGroup.tsx:181-187.
+      const { rerender } = render(
+        <ToolBubble
+          toolName="Read"
+          toolUseId="tu-tail-flip"
+          input="/file"
+          result="contents"
+          isTail
+        />,
+      )
+      expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+      rerender(
+        <ToolBubble
+          toolName="Read"
+          toolUseId="tu-tail-flip"
+          input="/file"
+          result="contents"
+          isTail={false}
+        />,
+      )
+      expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('user-collapsed tail bubble stays collapsed after a re-render', () => {
+      // Tail bubble mounts expanded; user clicks to collapse. The
+      // collapsed state must survive subsequent re-renders even while
+      // isTail remains true — initial-state-only semantics.
+      render(
+        <ToolBubble
+          toolName="Read"
+          toolUseId="tu-tail-toggle"
+          input="/file"
+          result="contents"
+          isTail
+        />,
+      )
+      const toggle = screen.getByRole('button')
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByText('contents')).not.toBeInTheDocument()
+    })
   })
 })
