@@ -48,6 +48,13 @@ vi.mock('../store/connection', () => ({
   },
 }))
 
+// #4336 — ActivityIndicator now wraps its store selector in `useShallow`.
+// Stub the hook to a pass-through so the mocked `useConnectionStore` above
+// still drives the selector directly (matches App.test.tsx's pattern).
+vi.mock('zustand/react/shallow', () => ({
+  useShallow: (fn: unknown) => fn,
+}))
+
 const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 afterEach(() => cleanup())

@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
-import { ActivityIndicator } from './ActivityIndicator'
+import { ActivityIndicator, findInFlightToolUse, type InFlightMessage } from './ActivityIndicator'
 
 let storeState: Record<string, unknown> = {}
 
@@ -26,6 +26,14 @@ vi.mock('../store/connection', () => ({
     }
     return selector(store)
   },
+}))
+
+// #4336 — the production component reads via `useShallow`. Stub the hook to
+// a pass-through so the mocked store-selector path above continues to work
+// unchanged — `useShallow(fn)` is invoked as the selector itself, and the
+// test mock calls it once with our snapshot. Same pattern App.test.tsx uses.
+vi.mock('zustand/react/shallow', () => ({
+  useShallow: (fn: unknown) => fn,
 }))
 
 afterEach(() => cleanup())
@@ -183,103 +191,164 @@ describe('ActivityIndicator — in-flight tool naming (#4308)', () => {
     // formatToolName converts `mcp__github__list_repos` → `Github: List Repos`.
     expect(label.textContent).toMatch(/Running\s+Github: List Repos/)
   })
+
+  // #4339 — the MCP test above only exercises the `mcp__`-prefix branch of
+  // `formatToolName`, which IGNORES the second `serverName` arg entirely.
+  // The non-MCP branch is the only path where `serverName` is observable in
+  // the output (`${serverName} ${formatted}`). These fixtures lock that path
+  // in so a regression that drops `serverName` propagation fails loudly.
+  it('prefixes a non-MCP tool name with serverName when provided (#4339)', () => {
+    const now = Date.now()
+    setStore([
+      {
+        id: 'm1',
+        type: 'tool_use',
+        tool: 'list_files',
+        serverName: 'fs',
+        timestamp: now - 5_000,
+        content: '',
+        toolUseId: 'tu-1',
+      },
+    ])
+    render(<ActivityIndicator />)
+    const label = screen.getByTestId('activity-indicator-label')
+    // formatToolName('list_files', 'fs') → 'fs List Files'.
+    expect(label.textContent).toMatch(/Running\s+fs List Files/)
+  })
+
+  it('renders a non-MCP tool name without prefix when serverName is omitted (#4339 control)', () => {
+    // Control fixture for the case above: same tool, no `serverName` → the
+    // server prefix must NOT appear. Pins the conditional in
+    // `formatToolName(name, serverName)` so a default-on regression flips this test.
+    const now = Date.now()
+    setStore([
+      {
+        id: 'm1',
+        type: 'tool_use',
+        tool: 'list_files',
+        timestamp: now - 5_000,
+        content: '',
+        toolUseId: 'tu-1',
+      },
+    ])
+    render(<ActivityIndicator />)
+    const label = screen.getByTestId('activity-indicator-label')
+    expect(label.textContent).toMatch(/Running\s+List Files/)
+    expect(label.textContent).not.toMatch(/fs/)
+  })
 })
 
 /**
- * #4319 — Narrow-selector contract for ActivityIndicator.
+ * #4319 / #4336 — Narrow-selector contract for ActivityIndicator.
  *
- * Pre-fix the component subscribed to `sessionStates[id]?.messages` — every
+ * Pre-#4319 the component subscribed to `sessionStates[id]?.messages` — every
  * `stream_delta` / `tool_input_delta` swapped the array reference and forced
- * a re-render even when the in-flight tool was unchanged. The fix replaces
- * that with two primitive selectors that project the messages array down to
- * `inFlightTool: string | null` and `inFlightStartedAt: number | null`.
+ * a re-render even when the in-flight tool was unchanged. The fix narrows
+ * the subscription to a `useShallow` projection of `{ tool, startedAt,
+ * serverName }` — React only re-renders when those primitives change.
  *
  * We can't measure React render count from here without wrapping the export,
  * but we CAN lock in the contract that drives the perf win: when a no-op
  * store update happens (a brand-new messages array with the same in-flight
- * tool), both selector return values are stable under ===. That is the
- * mechanism by which zustand bails out and skips the render — so this test
+ * tool), the projection's primitives are === stable. That is the mechanism
+ * by which `useShallow` bails out and skips the render — so this test
  * indirectly guarantees the perf property the issue calls out.
+ *
+ * #4337 — These assertions now run against the REAL exported
+ * `findInFlightToolUse` predicate so a change to the production resolved /
+ * in-flight gate (e.g. a new `toolError` field counted as resolved) breaks
+ * the test rather than silently keeping a stale inline copy passing.
  */
-describe('ActivityIndicator — narrow in-flight selectors (#4319)', () => {
-  it('selectors return === stable primitives when messages[] reference changes but the in-flight tool does not', async () => {
-    // Reach for the unmocked module path so we test the real component's
-    // selector wiring, not the test-file's static `storeState` shim. We
-    // import the source's selector helper indirectly by re-running the
-    // same predicate the component uses.
+describe('ActivityIndicator — narrow in-flight selector (#4319, #4336)', () => {
+  it('findInFlightToolUse returns === stable primitives when messages[] reference changes (#4337)', async () => {
     const mod = await import('./ActivityIndicator')
-    // Sanity: the export should still exist (smoke check the refactor
-    // didn't rename the component).
+    // Sanity: both exports the test depends on must still exist.
     expect(typeof mod.ActivityIndicator).toBe('function')
+    expect(typeof mod.findInFlightToolUse).toBe('function')
 
-    // Simulate two consecutive "store snapshots" that differ ONLY in the
-    // messages[] reference — same in-flight tool object semantics, fresh
-    // array (e.g. a `stream_delta` that appended text but didn't change
-    // the running tool). Run the same selectors the component runs.
+    // Two snapshots differ ONLY in the messages[] reference — same in-flight
+    // tool object semantics, fresh array (the `stream_delta` perf case).
+    // Both run through the production predicate so any divergence between
+    // the test's expectations and the real walk surfaces here.
     const now = Date.now()
-    const toolMsg = {
-      id: 'm1',
-      type: 'tool_use' as const,
+    const toolMsg: InFlightMessage = {
+      type: 'tool_use',
       tool: 'Bash',
       timestamp: now - 5_000,
-      content: '',
-      toolUseId: 'tu-1',
     }
-    type Snapshot = {
-      activeSessionId: string
-      sessionStates: Record<string, { messages: Array<typeof toolMsg> }>
-    }
-    const snapshotA: Snapshot = {
-      activeSessionId: 'sess-1',
-      sessionStates: { 'sess-1': { messages: [toolMsg] } },
-    }
-    const snapshotB: Snapshot = {
-      activeSessionId: 'sess-1',
-      // Brand-new array reference, same logical content.
-      sessionStates: { 'sess-1': { messages: [{ ...toolMsg }] } },
-    }
+    const messagesA: InFlightMessage[] = [toolMsg]
+    // Brand-new array reference, same logical content.
+    const messagesB: InFlightMessage[] = [{ ...toolMsg }]
 
-    // Re-implement the component's two selectors inline. This is the
-    // contract under test: regardless of the messages[] reference,
-    // the projected primitives stay ===.
-    const toolSel = (s: Snapshot): string | null => {
-      const id = s.activeSessionId
-      const messages = id ? s.sessionStates[id]?.messages : undefined
-      if (!messages) return null
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i]!
-        if (m.type !== 'tool_use') continue
-        const hasResult = (m as { toolResult?: unknown }).toolResult !== undefined
-        if (!hasResult) return m.tool ?? 'tool'
-      }
-      return null
-    }
-    const startedAtSel = (s: Snapshot): number | null => {
-      const id = s.activeSessionId
-      const messages = id ? s.sessionStates[id]?.messages : undefined
-      if (!messages) return null
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i]!
-        if (m.type !== 'tool_use') continue
-        const hasResult = (m as { toolResult?: unknown }).toolResult !== undefined
-        if (!hasResult) return m.timestamp
-      }
-      return null
-    }
+    const a = findInFlightToolUse(messagesA)
+    const b = findInFlightToolUse(messagesB)
 
-    // Selectors return identical primitive values across both snapshots —
-    // this is what zustand checks via === to skip a re-render.
-    expect(toolSel(snapshotA)).toBe(toolSel(snapshotB))
-    expect(startedAtSel(snapshotA)).toBe(startedAtSel(snapshotB))
-    expect(toolSel(snapshotA)).toBe('Bash')
-    expect(startedAtSel(snapshotA)).toBe(now - 5_000)
+    // Primitives projected by the production predicate are === stable
+    // across the no-op messages[] reference swap — this is the property
+    // the `useShallow` projection in the component relies on.
+    expect(a?.tool).toBe(b?.tool)
+    expect(a?.startedAt).toBe(b?.startedAt)
+    expect(a?.tool).toBe('Bash')
+    expect(a?.startedAt).toBe(now - 5_000)
+  })
+
+  it('findInFlightToolUse skips resolved tools and returns the most-recent in-flight one (#4337)', () => {
+    // Locks in the predicate's walk semantics: earlier resolved tool is
+    // skipped, later unresolved tool is returned. Mirrors the top-of-file
+    // "names the most-recent tool_use" render test — but against the
+    // predicate directly so a regression in the resolved-gate breaks here,
+    // not just in the rendered label.
+    const now = Date.now()
+    const result = findInFlightToolUse([
+      { type: 'tool_use', tool: 'Read', timestamp: now - 60_000, toolResult: 'contents' },
+      { type: 'tool_use', tool: 'Bash', timestamp: now - 5_000 },
+    ])
+    expect(result?.tool).toBe('Bash')
+    expect(result?.startedAt).toBe(now - 5_000)
+  })
+
+  it('findInFlightToolUse treats empty-string toolResult AND images-only resolutions as resolved (#4337)', () => {
+    // Pin the two "non-obvious resolved" branches against the imported
+    // predicate. If the gate changes (e.g. images-only is suddenly NOT
+    // counted as resolved), the test fails directly on the predicate.
+    expect(
+      findInFlightToolUse([
+        { type: 'tool_use', tool: 'Bash', timestamp: 0, toolResult: '' },
+      ]),
+    ).toBeNull()
+    expect(
+      findInFlightToolUse([
+        {
+          type: 'tool_use',
+          tool: 'screenshot',
+          timestamp: 0,
+          toolResultImages: [{ data: 'x', mediaType: 'image/png' }],
+        },
+      ]),
+    ).toBeNull()
+  })
+
+  it('findInFlightToolUse returns null for null/undefined/empty input (#4337)', () => {
+    expect(findInFlightToolUse(null)).toBeNull()
+    expect(findInFlightToolUse(undefined)).toBeNull()
+    expect(findInFlightToolUse([])).toBeNull()
+  })
+
+  it('findInFlightToolUse preserves serverName on the in-flight tool (#4337, #4339)', () => {
+    // The predicate must propagate `serverName` so the component can pass
+    // it into `formatToolName` for the non-MCP prefix path (#4339).
+    const result = findInFlightToolUse([
+      { type: 'tool_use', tool: 'list_files', serverName: 'fs', timestamp: 0 },
+    ])
+    expect(result?.tool).toBe('list_files')
+    expect(result?.serverName).toBe('fs')
   })
 
   it('rendering across no-op store updates yields the same label text (proxy for stable selectors)', () => {
     // Stronger end-to-end check: render the component, swap the messages
     // array for a fresh-reference copy with the same logical content, and
     // re-render. The visible label must be identical — which is only true
-    // if the selectors produced the same primitives both times.
+    // if the `useShallow` projection produced the same primitives both times.
     const now = Date.now()
     const baseTool = { id: 'm1', type: 'tool_use', tool: 'Bash', timestamp: now - 5_000, content: '', toolUseId: 'tu-1' }
     setStore([baseTool])

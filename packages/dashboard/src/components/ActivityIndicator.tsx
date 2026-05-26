@@ -22,6 +22,7 @@
  * (30 min) when connected to an older server that doesn't broadcast it.
  */
 import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
 
@@ -31,20 +32,28 @@ import { useConnectionStore } from '../store/connection'
  * tool (typical case: the in-flight tool is at the tail of the array, so the
  * walk is O(1) in practice). Returns `null` when every tool has resolved.
  *
- * Used by the in-flight selectors below — the selectors project the result
- * down to primitives (`tool`, `startedAt`) so React only re-renders when
- * those primitives change, not on every `messages[]` reference churn from
- * `stream_delta` / `tool_input_delta` updates.
+ * Used by the in-flight selector below — the selector projects the result
+ * down to primitives (`tool`, `startedAt`, `serverName`) so React only
+ * re-renders when those primitives change, not on every `messages[]`
+ * reference churn from `stream_delta` / `tool_input_delta` updates.
+ *
+ * #4337 — Exported so the in-flight tests
+ * (`ActivityIndicator.inflight.test.tsx`) exercise the production predicate
+ * directly instead of re-implementing the same shape inline. A change to
+ * the "resolved" gate (e.g. a new `toolError` field counted as resolved)
+ * must cause the imported assertions to fail.
  */
-function findInFlightToolUse(
-  messages: ReadonlyArray<{
-    type: string
-    tool?: string
-    serverName?: string
-    timestamp: number
-    toolResult?: unknown
-    toolResultImages?: ReadonlyArray<unknown>
-  }> | null | undefined,
+export type InFlightMessage = {
+  type: string
+  tool?: string
+  serverName?: string
+  timestamp: number
+  toolResult?: unknown
+  toolResultImages?: ReadonlyArray<unknown>
+}
+
+export function findInFlightToolUse(
+  messages: ReadonlyArray<InFlightMessage> | null | undefined,
 ): { tool: string; serverName?: string; startedAt: number } | null {
   if (!messages) return null
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -101,36 +110,32 @@ export function ActivityIndicator() {
     const id = s.activeSessionId
     return id ? s.sessionStates[id]?.lastClientActivityAt ?? null : null
   })
-  // #4319 — Narrow selectors that project the active session's in-flight
-  // tool down to two primitives. Subscribing to the whole `messages` array
-  // (the #4308 approach) re-rendered this component on every stream_delta /
-  // tool_input_delta because the store immutably swaps the array reference
-  // on each update. By selecting only the primitives we depend on, React
-  // re-renders ONLY when the in-flight tool actually changes — the walk
-  // still happens, but inside the selector, and zustand bails on === checks
-  // so no render is triggered when the primitive output is stable.
+  // #4319 / #4336 — Single `useShallow` selector that projects the active
+  // session's in-flight tool down to a plain object of primitives. Subscribing
+  // to the whole `messages` array (the #4308 approach) re-rendered this
+  // component on every stream_delta / tool_input_delta because the store
+  // immutably swaps the array reference on each update. By selecting only
+  // the primitives we depend on, React re-renders ONLY when the in-flight
+  // tool actually changes.
   //
-  // Why two selectors instead of one returning an object: returning a fresh
-  // `{ tool, startedAt }` object from a selector defeats zustand's default
-  // === equality and triggers a render on every store update. We could fix
-  // that with `useShallow`, but two primitive selectors are simpler and
-  // every consumer below uses the values independently anyway.
-  const inFlightTool = useConnectionStore((s) => {
-    const id = s.activeSessionId
-    return id ? findInFlightToolUse(s.sessionStates[id]?.messages)?.tool ?? null : null
-  })
-  const inFlightStartedAt = useConnectionStore((s) => {
-    const id = s.activeSessionId
-    return id ? findInFlightToolUse(s.sessionStates[id]?.messages)?.startedAt ?? null : null
-  })
-  // #4318 — capture serverName via a third narrowed selector so MCP tools
-  // (e.g. `mcp__github__list_repos`) render with the server prefix
-  // preserved in the chip label. Kept as its own primitive selector for
-  // consistency with the other two narrowed reads above (#4319).
-  const inFlightServerName = useConnectionStore((s) => {
-    const id = s.activeSessionId
-    return id ? findInFlightToolUse(s.sessionStates[id]?.messages)?.serverName ?? null : null
-  })
+  // Why one `useShallow` object instead of N primitive selectors: pre-#4336
+  // this called `findInFlightToolUse` three separate times (once per primitive
+  // selector), walking the messages array three times per store update. The
+  // `useShallow` selector runs the walk ONCE and lets zustand do a shallow
+  // compare on the returned object — same re-render guarantee, one walk per
+  // update, and a cleaner consumer shape.
+  const { tool: inFlightTool, startedAt: inFlightStartedAt, serverName: inFlightServerName } =
+    useConnectionStore(
+      useShallow((s) => {
+        const id = s.activeSessionId
+        const inFlight = id ? findInFlightToolUse(s.sessionStates[id]?.messages) : null
+        return {
+          tool: inFlight?.tool ?? null,
+          startedAt: inFlight?.startedAt ?? null,
+          serverName: inFlight?.serverName ?? null,
+        }
+      }),
+    )
   const referenceTimeoutMs = useConnectionStore(
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   )

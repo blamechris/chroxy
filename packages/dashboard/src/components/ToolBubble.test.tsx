@@ -142,6 +142,34 @@ describe('ToolBubble', () => {
       render(<ToolBubble toolName="mcp__fs__read_file" toolUseId="tool-fmt-mcp-1" />)
       expect(screen.getByText('Fs: Read File')).toBeInTheDocument()
     })
+
+    // #4339 — the existing MCP test uses an `mcp__`-prefixed name, which
+    // exercises the prefix branch of `formatToolName` and IGNORES the
+    // second `serverName` arg entirely. These fixtures pin the non-MCP
+    // branch — the only path where `serverName` is observable in the
+    // rendered header — so a regression that drops `serverName`
+    // propagation through ToolBubble fails loudly here.
+    it('prefixes a non-MCP tool name with serverName when provided (#4339)', () => {
+      render(
+        <ToolBubble
+          toolName="list_files"
+          toolUseId="tool-fmt-server-1"
+          serverName="fs"
+        />,
+      )
+      // formatToolName('list_files', 'fs') → 'fs List Files'.
+      expect(screen.getByText('fs List Files')).toBeInTheDocument()
+    })
+
+    it('renders a non-MCP tool name without prefix when serverName is omitted (#4339 control)', () => {
+      // Control fixture for the case above: same tool, no `serverName` → the
+      // prefix must NOT appear. Pins the
+      // `serverName ? ${serverName} ${formatted} : formatted`
+      // conditional so a default-on regression flips this test.
+      render(<ToolBubble toolName="list_files" toolUseId="tool-fmt-server-2" />)
+      expect(screen.getByText('List Files')).toBeInTheDocument()
+      expect(screen.queryByText(/^fs /)).not.toBeInTheDocument()
+    })
   })
 
   // ---------------------------------------------------------------------------
