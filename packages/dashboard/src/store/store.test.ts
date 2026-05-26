@@ -1271,6 +1271,117 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #4296 — Output tab visibility for AskUserQuestion answers
+// ---------------------------------------------------------------------------
+// The Output tab is synthesized from a narrow set of sources (user-prompt
+// echo via appendTerminalData + chat-text deltas). Pre-#4296, picking an
+// option in QuestionPrompt sent the answer over the wire but left NO trace
+// in the Output tab — the question JSON appeared, then immediately the next
+// tool fired with no record of what the user picked. Fix: echo the resolved
+// answer to the terminal buffer in cyan so the Output tab shows a visible
+// "User answered: <label>" line in the chronological stream.
+describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
+  it('echoes "User answered: <answer>" to the terminal buffer in cyan when the wire send succeeds', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('All three', 'toolu_abc');
+
+    // Wire payload still goes out unchanged
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'All three',
+      toolUseId: 'toolu_abc',
+    });
+
+    // Raw buffer carries the cyan-tinted echo so xterm.js renders it
+    const { terminalBuffer, terminalRawBuffer } = useConnectionStore.getState();
+    expect(terminalRawBuffer).toContain('\x1b[36m');
+    expect(terminalRawBuffer).toContain('> User answered: All three');
+    expect(terminalRawBuffer).toContain('\x1b[0m');
+    // Stripped buffer (for plain-text consumers) carries the message without ANSI
+    expect(terminalBuffer).toContain('User answered: All three');
+    expect(terminalBuffer).not.toContain('\x1b[');
+  });
+
+  it('echoes freeform "Other" custom-text answers identically', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('something else entirely', 'toolu_xyz');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: something else entirely');
+  });
+
+  it('still echoes when the wire send is queued (socket not open)', async () => {
+    // Queued path: when the socket is not OPEN, the response is enqueued for
+    // replay on reconnect. The Output-tab echo must still fire so the user
+    // sees their answer locally even before the server roundtrips it back.
+    const { useConnectionStore } = await import('./connection');
+
+    useConnectionStore.setState({
+      socket: null,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const result = useConnectionStore.getState().sendUserQuestionResponse('queued answer', 'toolu_q');
+    expect(result).toBe('queued');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: queued answer');
+  });
+
+  it('does not echo when the answer string is empty (defensive)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('', 'toolu_empty');
+
+    const { terminalRawBuffer } = useConnectionStore.getState();
+    // No echo for an empty answer — the wire send still happens (server
+    // schema may accept it) but we don't render an "answered:" line for
+    // nothing.
+    expect(terminalRawBuffer).not.toContain('User answered:');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PTY dead code removal (#1759)
 // ---------------------------------------------------------------------------
 describe('PTY dead code removal', () => {

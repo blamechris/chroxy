@@ -1291,6 +1291,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     const payload: Record<string, string> = { type: 'user_question_response', answer };
     if (toolUseId) payload.toolUseId = toolUseId;
+    // #4296: echo the resolved answer to the terminal buffer so the Output
+    // tab shows a visible "User answered: X" line between the AskUserQuestion
+    // tool_input JSON and the next event. Cyan (\x1b[36m) distinguishes the
+    // line from yellow user-prompt echoes (\x1b[33m in sendInput). Skipped
+    // for empty answers — nothing meaningful to render. Fires before the
+    // wire send so the echo is present even when the socket queues.
+    if (answer) {
+      get().appendTerminalData(`\r\n\x1b[36m> User answered: ${answer}\x1b[0m\r\n`);
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
       return 'sent';
