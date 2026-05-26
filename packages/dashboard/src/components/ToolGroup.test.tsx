@@ -337,6 +337,18 @@ describe('ToolGroup', () => {
       expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
     })
 
+    // #4284: the Thinking entry is a plain <div> with no role/tabIndex, so
+    // it can never receive keyboard focus — any onKeyDown handler attached
+    // to it would be dead code. Assert the entry is non-focusable so future
+    // refactors don't reintroduce an unreachable keyboard handler without
+    // also making the row focusable + announced.
+    it('Thinking entry is non-focusable (no tabIndex, no role=button)', () => {
+      render(<ToolGroup messages={[thinking('t1')]} isActive={true} />)
+      const entry = screen.getByTestId('tool-group-entry-t1')
+      expect(entry).not.toHaveAttribute('tabindex')
+      expect(entry).not.toHaveAttribute('role', 'button')
+    })
+
     it('keyboard: Enter on a focused row toggles its detail without collapsing the group', () => {
       const messages = [
         tool('1', 'Bash', { toolInput: { command: 'ls' }, toolResult: 'a b c' }),
