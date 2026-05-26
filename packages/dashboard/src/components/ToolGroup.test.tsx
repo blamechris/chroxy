@@ -371,6 +371,79 @@ describe('ToolGroup', () => {
       expect(detail).toHaveTextContent('(no result yet)')
     })
 
+    // #4341 — in-flight streaming tools (e.g. Agent / Task) accumulate
+    // chunks into `toolInputPartial` but `toolInput` stays empty until
+    // the final delta arrives. Pre-fix the expanded detail showed
+    // "(no input)" even though the buffer was filling — same UX gap
+    // ToolBubble closed for the collapsed-summary path in #4081.
+    describe('streaming input (#4341)', () => {
+      it('renders toolInputPartial verbatim while toolInput is undefined', () => {
+        const messages = [
+          tool('1', 'Task', { toolInputPartial: '{"description":"Investigate' }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        expect(detail).toHaveTextContent('{"description":"Investigate')
+        expect(detail).not.toHaveTextContent('(no input)')
+        // Marks the panel as streaming so styling can hint "still
+        // arriving" — same affordance ToolBubble uses via data-parsed.
+        expect(detail).toHaveAttribute('data-streaming', 'true')
+      })
+
+      it('pretty-prints toolInputPartial when the buffer is already complete JSON', () => {
+        const messages = [
+          tool('1', 'Task', { toolInputPartial: '{"command":"ls"}' }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        // Pretty-printed (two-space indent) when the partial happens
+        // to be a complete JSON document — matches ToolBubble's
+        // `tryParseCompleteJson` path.
+        expect(detail).toHaveTextContent('"command": "ls"')
+      })
+
+      it('prefers structured toolInput when present, ignoring toolInputPartial', () => {
+        // Once the final input lands, the structured render takes over —
+        // the partial buffer becomes informational only and must not
+        // override the canonical structured panel.
+        const messages = [
+          tool('1', 'Task', {
+            toolInput: { command: 'ls -la' },
+            toolInputPartial: '{"command":"ls', // stale half-buffer
+          }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        expect(detail).toHaveTextContent('"command": "ls -la"')
+        // The streaming attribute is only for the partial-only path.
+        expect(detail).not.toHaveAttribute('data-streaming', 'true')
+      })
+
+      it('still shows "(no input)" when both toolInput and toolInputPartial are absent', () => {
+        // Regression guard for the existing placeholder behavior — a
+        // truly inputless tool still shows the placeholder.
+        const messages = [tool('1', 'Bash')]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        expect(detail).toHaveTextContent('(no input)')
+      })
+
+      it('still shows "(no input)" when toolInputPartial is an empty string', () => {
+        // Empty-string partials must not flip the panel into the
+        // streaming path — only content counts.
+        const messages = [tool('1', 'Bash', { toolInputPartial: '' })]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        expect(detail).toHaveTextContent('(no input)')
+        expect(detail).not.toHaveAttribute('data-streaming', 'true')
+      })
+    })
+
     // #4281: agent-review caught that the previous implementation made the
     // OUTER entry the click target, so a click inside the expanded detail
     // panel (e.g. selecting `<pre>` text to copy a Bash output) bubbled to

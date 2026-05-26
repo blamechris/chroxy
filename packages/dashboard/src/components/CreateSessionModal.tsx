@@ -91,6 +91,40 @@ const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, s
   ['terminal', 'Terminal'],
 ]
 
+/**
+ * Render a hint string with backtick-wrapped tokens promoted to `<code>` so
+ * snippets like `codex login` or `OPENAI_API_KEY` format as code rather
+ * than rendering as literal backticks (#4340). A pure helper so the parsed
+ * tree is easy to unit-test.
+ *
+ * Only single-backtick code spans are recognised — that's all the server
+ * hint strings use today. Backtick handling is intentionally tolerant: an
+ * unmatched trailing backtick falls back to literal text so an
+ * accidentally-malformed hint still renders.
+ */
+export function renderHintWithCode(hint: string): Array<string | { code: string }> {
+  if (!hint) return []
+  const out: Array<string | { code: string }> = []
+  let i = 0
+  while (i < hint.length) {
+    const start = hint.indexOf('`', i)
+    if (start === -1) {
+      out.push(hint.slice(i))
+      break
+    }
+    if (start > i) out.push(hint.slice(i, start))
+    const end = hint.indexOf('`', start + 1)
+    if (end === -1) {
+      // Unmatched backtick — fall back to literal text, including the tick.
+      out.push(hint.slice(start))
+      break
+    }
+    out.push({ code: hint.slice(start + 1, end) })
+    i = end + 1
+  }
+  return out
+}
+
 export function resolveCreateSessionModel(
   provider: string,
   defaultModel: string | null | undefined,
@@ -213,12 +247,26 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [open, availableProviders, provider])
 
+  // #4340: gate the Create button on the selected provider being ready.
+  // Pre-#4340 the dropdown disabled unready options so they couldn't be
+  // selected; now we let the user navigate to any provider to read its
+  // fix-hint, but still refuse to submit until auth.ready === true. We
+  // resolve `selectedProviderUnready` once and reuse it for the panel +
+  // submit gate + button disabled state.
+  const selectedProviderInfo = availableProviders.find(p => p.name === provider)
+  const selectedProviderUnready = selectedProviderInfo?.auth?.ready === false
+
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
     if (!trimmed) {
       flushSync(() => setNameError('Session name is required'))
       return
     }
+    // #4340: refuse to create a session against an unready provider. The
+    // fix-hint panel tells the user what to do; the Create button is also
+    // visually disabled, but the click path checks here for defence in
+    // depth (e.g. keyboard activation racing a store update).
+    if (selectedProviderUnready) return
     const model = resolveCreateSessionModel(provider, defaultModel, availableModels, availableModelsProvider)
     // #4208: gate on the TUI provider at submit time as well as in the UI.
     // The checkbox is hidden for non-TUI providers, but a user who flips
@@ -228,7 +276,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // braces: undefined unless the active provider is `claude-tui`.
     const skipPermissionsOut = provider === 'claude-tui' && skipPermissions ? true : undefined
     onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut })
-  }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId, skipPermissions])
+  }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId, skipPermissions, selectedProviderUnready])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -494,22 +542,26 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             {availableProviders.length > 0
               ? availableProviders.map(p => {
                   const unready = p.auth?.ready === false
-                  // #4301: surface the diagnostic (auth.detail / auth.hint)
-                  // for disabled options too — a disabled <option> can't be
-                  // selected so the user wouldn't otherwise see the live
-                  // billing-hint line below. We append the hint inline AND
-                  // mirror it via title= so hover tooltips also work.
+                  // #4340: keep <option> labels short. Pre-#4340 the full
+                  // auth.hint was inlined here ("Codex (CLI) — set
+                  // OPENAI_API_KEY or run `codex login`"); native <select>
+                  // rendering truncated long labels in some browser/OS
+                  // combos and backticks rendered as literal characters.
+                  // The hint now surfaces in the help panel below the
+                  // dropdown — see provider-fix-hint. We keep the option
+                  // enabled (vs the pre-#4340 disabled=true) so the user
+                  // can navigate to any provider to read its fix-hint;
+                  // submit is gated separately on auth.ready.
                   const baseLabel = PROVIDER_LABELS[p.name] || p.name
-                  const unreadyHint = unready ? (p.auth?.hint || 'credentials missing') : ''
-                  const optionLabel = unready
-                    ? `${baseLabel} — ${unreadyHint}`
-                    : baseLabel
-                  const tooltip = unready ? (p.auth?.detail || unreadyHint) : undefined
+                  const optionLabel = unready ? `${baseLabel} (unavailable)` : baseLabel
+                  // Mirror the live detail via title= so desktop hover
+                  // tooltips still work for users who don't navigate to
+                  // the option. Mobile/touch users see the panel instead.
+                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : undefined
                   return (
                     <option
                       key={p.name}
                       value={p.name}
-                      disabled={unready}
                       title={tooltip}
                     >
                       {optionLabel}
@@ -524,8 +576,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </select>
           {/* Live auth detail from the server (#3404 audit F5) wins over the
               static PROVIDER_BILLING fallback so the user sees the actual
-              billing identity, not a generic "uses API credits" hint. */}
-          {(() => {
+              billing identity, not a generic "uses API credits" hint.
+              Suppressed when the selected provider is unready — the
+              fix-hint panel below replaces it so the user isn't reading
+              billing copy for a provider they can't even launch. */}
+          {selectedProviderUnready ? null : (() => {
             const live = availableProviders.find(p => p.name === provider)?.auth
             const text = live?.detail || PROVIDER_BILLING[provider]
             if (!text) return null
@@ -540,6 +595,44 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             )
           })()}
         </div>
+        {/* #4340: richer fix-hint affordance for disabled providers. The
+            pre-#4340 inline `<option>` label couldn't render long hints
+            cleanly (truncation + literal backticks + hover-only title).
+            This panel appears under the dropdown when the selected
+            provider is unready, surfacing the full auth.detail / auth.hint
+            with backtick-wrapped tokens promoted to `<code>` so commands
+            like `codex login` look like commands. */}
+        {selectedProviderUnready && (() => {
+          const live = availableProviders.find(p => p.name === provider)?.auth
+          const hint = live?.hint || 'credentials missing'
+          const detail = live?.detail
+          return (
+            <div
+              className="provider-fix-hint"
+              data-testid="provider-fix-hint"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="provider-fix-hint-label">How to enable:</span>{' '}
+              <span className="provider-fix-hint-body">
+                {renderHintWithCode(hint).map((part, i) =>
+                  typeof part === 'string'
+                    ? <span key={i}>{part}</span>
+                    : <code key={i}>{part.code}</code>,
+                )}
+              </span>
+              {detail && detail !== hint && (
+                <span className="provider-fix-hint-detail">
+                  {renderHintWithCode(detail).map((part, i) =>
+                    typeof part === 'string'
+                      ? <span key={i}>{part}</span>
+                      : <code key={i}>{part.code}</code>,
+                  )}
+                </span>
+              )}
+            </div>
+          )
+        })()}
         {availableProviders.length > 0 && (() => {
           const selected = availableProviders.find(p => p.name === provider)
           if (!selected?.capabilities) return null
@@ -692,7 +785,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         <button className="btn-modal-cancel" onClick={onClose} type="button">
           Cancel
         </button>
-        <button className="btn-modal-create" onClick={submit} type="button" disabled={isCreating}>
+        <button
+          className="btn-modal-create"
+          onClick={submit}
+          type="button"
+          disabled={isCreating || selectedProviderUnready}
+          title={selectedProviderUnready ? 'Selected provider is not configured — see fix-hint above' : undefined}
+        >
           {isCreating ? 'Creating...' : 'Create'}
         </button>
       </div>
