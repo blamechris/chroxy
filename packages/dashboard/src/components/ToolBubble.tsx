@@ -23,7 +23,12 @@
  * is one short chunk), we pretty-print it for legibility.
  */
 import { useState, useMemo } from 'react'
-import { getInputSummary, getPartialSummary, tryParseCompleteJson } from '@chroxy/store-core'
+import {
+  formatToolName,
+  getInputSummary,
+  getPartialSummary,
+  tryParseCompleteJson,
+} from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
@@ -37,6 +42,13 @@ export interface ToolBubbleProps {
    */
   inputPartial?: string
   result?: string
+  /**
+   * #4318: MCP server name from the wire message (`storeMsg.serverName`).
+   * Forwarded to the shared `formatToolName` so MCP tools render with the
+   * server prefix preserved — same source-of-truth used by the
+   * ActivityIndicator chip and ToolGroup header.
+   */
+  serverName?: string
 }
 
 // #4243: `getInputSummary` and `getPartialSummary` now live in
@@ -46,24 +58,11 @@ export interface ToolBubbleProps {
 // #4242: `getPartialSummary` routes its parse through
 // `tryParseCompleteJson` internally to amortise N-1 throws across a
 // streaming `tool_input_delta` accumulator.
+// #4318: `formatToolName` is the shared store-core helper too —
+// previously this file had a local copy that ignored `serverName`, so
+// MCP-tool headers could disagree with the ActivityIndicator chip.
 
-const capitalize = (word: string) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
-
-function formatToolName(name: string): string {
-  const MCP_PREFIX = 'mcp__'
-  if (name.startsWith(MCP_PREFIX)) {
-    const withoutPrefix = name.slice(MCP_PREFIX.length)
-    const sep = withoutPrefix.indexOf('__')
-    if (sep > 0) {
-      const server = withoutPrefix.slice(0, sep).split('_').filter(Boolean).map(capitalize).join(' ')
-      const tool = withoutPrefix.slice(sep + 2).split('_').filter(Boolean).map(capitalize).join(' ')
-      return tool ? `${server}: ${tool}` : server
-    }
-  }
-  return name.split('_').filter(Boolean).map(capitalize).join(' ')
-}
-
-export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }: ToolBubbleProps) {
+export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName }: ToolBubbleProps) {
   const [expanded, setExpanded] = useState(false)
   // #4081: prefer the structured `input` summary when present (server
   // gave us the full final input, e.g. via legacy non-streaming
@@ -149,7 +148,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }:
           aria-hidden="true"
         />
       )}
-      <span className="tool-name">{formatToolName(toolName)}</span>
+      <span className="tool-name">{formatToolName(toolName, serverName)}</span>
       {summary && (
         <span className="tool-input" data-testid="tool-input-summary" style={{ color: '#666' }}>
           {summary}
