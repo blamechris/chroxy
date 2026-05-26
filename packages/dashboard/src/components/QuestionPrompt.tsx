@@ -6,6 +6,11 @@
  * When no options are provided, shows a free-text input (#1245).
  * The "Other" sentinel option (#3746) swaps the button row for a
  * free-text input so the user can always supply a custom answer.
+ *
+ * After an answer is recorded (#4312), the option block collapses to a
+ * one-line "✓ <chosen>" summary with a chevron to re-expand the full
+ * disabled-button list for inspection. Claude's prose preamble is
+ * rendered by the parent and remains visible at all times.
  */
 import { useState, useRef, useEffect } from 'react'
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core'
@@ -20,6 +25,11 @@ export interface QuestionPromptProps {
 export function QuestionPrompt({ question, options, answered, onSelect }: QuestionPromptProps) {
   const [text, setText] = useState('')
   const [otherActive, setOtherActive] = useState(false)
+  // #4312: post-answer the option block collapses to a one-line summary;
+  // user can re-expand to inspect the full disabled-button list. Default
+  // collapsed once `answered` is set, including the remote-answered case
+  // (markPromptAnsweredByRequestId) since render keys off `answered`.
+  const [optionsExpanded, setOptionsExpanded] = useState(false)
   const submittedRef = useRef(false)
 
   // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
@@ -72,23 +82,61 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
     options.length > 0 && !isFreeTextAnswered &&
     (answered != null || !otherActive)
 
+  // #4312: once answered, default to a collapsed one-line summary. The
+  // disabled-button list still renders behind a chevron toggle for users
+  // who want to re-inspect the original options.
+  const isAnsweredWithOption = answered != null && answeredMatchesOption
+  const chosenLabel = isAnsweredWithOption
+    ? (options.find((o) => o.value === answered)?.label ?? answered)
+    : undefined
+  const showCollapsedSummary = isAnsweredWithOption && !optionsExpanded
+  const showExpandedOptions = showOptions && (answered == null || optionsExpanded)
+
   return (
     <div className="question-prompt" data-testid="question-prompt">
       <div className="question-text">{question}</div>
-      {showOptions && (
-        <div className="question-options">
-          {options.map((opt) => (
+      {showCollapsedSummary && (
+        <button
+          type="button"
+          className="question-answered-summary"
+          data-testid="question-answered-summary"
+          aria-expanded={false}
+          onClick={() => setOptionsExpanded(true)}
+        >
+          <span className="question-answered-marker" aria-hidden="true">✓</span>
+          <span className="question-answered-label">{chosenLabel}</span>
+          <span className="question-answered-chevron" aria-hidden="true">▸</span>
+        </button>
+      )}
+      {showExpandedOptions && (
+        <>
+          {isAnsweredWithOption && (
             <button
-              key={opt.value}
-              className={`question-option${answered === opt.value ? ' chosen' : ''}`}
-              disabled={answered != null}
-              onClick={() => handleOptionClick(opt.value)}
               type="button"
+              className="question-answered-summary question-answered-summary--expanded"
+              data-testid="question-answered-summary"
+              aria-expanded={true}
+              onClick={() => setOptionsExpanded(false)}
             >
-              {opt.label}
+              <span className="question-answered-marker" aria-hidden="true">✓</span>
+              <span className="question-answered-label">{chosenLabel}</span>
+              <span className="question-answered-chevron" aria-hidden="true">▾</span>
             </button>
-          ))}
-        </div>
+          )}
+          <div className="question-options">
+            {options.map((opt) => (
+              <button
+                key={opt.value}
+                className={`question-option${answered === opt.value ? ' chosen' : ''}`}
+                disabled={answered != null}
+                onClick={() => handleOptionClick(opt.value)}
+                type="button"
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </>
       )}
       {showFreeText && (
         <div className="question-freetext">
@@ -120,7 +168,10 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
         </div>
       )}
       {isFreeTextAnswered && (
-        <div className="question-answered">{answered}</div>
+        <div className="question-answered" data-testid="question-answered-summary">
+          <span className="question-answered-marker" aria-hidden="true">✓</span>
+          <span className="question-answered-label">{answered}</span>
+        </div>
       )}
     </div>
   )
