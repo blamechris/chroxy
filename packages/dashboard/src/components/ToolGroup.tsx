@@ -14,6 +14,7 @@ import {
   summarizeToolCounts,
   formatToolBreakdown,
   formatToolName,
+  tryParseCompleteJson,
 } from '@chroxy/store-core'
 
 export interface ToolGroupProps {
@@ -49,6 +50,22 @@ function formatInputForDetail(input: ChatMessage['toolInput']): string {
     // String() so the user still sees something instead of an empty panel.
     return String(input)
   }
+}
+
+/**
+ * #4341: format the streaming `toolInputPartial` accumulator for the
+ * expanded detail panel. Mirrors `ToolBubble`'s partial-preview path
+ * (#4081): if the buffer happens to be a complete JSON document, pretty-
+ * print it via `tryParseCompleteJson` (cheap gate avoids the N-1 throws
+ * #4242 amortised); otherwise render verbatim so the user sees the
+ * field assembling. Returns '' for empty/whitespace input so the caller
+ * can preserve the "(no input)" placeholder for truly inputless tools.
+ */
+function formatPartialForDetail(partial: string | undefined): string {
+  if (!partial) return ''
+  const parsed = tryParseCompleteJson(partial)
+  if (parsed !== undefined) return JSON.stringify(parsed, null, 2)
+  return partial
 }
 
 function ToolGroupEntry({
@@ -107,7 +124,20 @@ function ToolGroupEntry({
     }
   }
 
-  const inputDetail = formatInputForDetail(message.toolInput)
+  const structuredInputDetail = formatInputForDetail(message.toolInput)
+  // #4341: fall through to the streaming `toolInputPartial` accumulator
+  // when the structured `toolInput` is empty. Pre-fix the expanded panel
+  // showed "(no input)" for in-flight Agent/Task tools even though
+  // `tool_input_delta` chunks were piling into `toolInputPartial` —
+  // ToolBubble had already closed this gap for the collapsed summary
+  // (#4081), so the expanded view now mirrors the same fallback.
+  // `isStreamingInput` flags the panel as still arriving so styling can
+  // hint at the in-flight state (data-streaming="true").
+  const partialInputDetail = structuredInputDetail
+    ? ''
+    : formatPartialForDetail(message.toolInputPartial)
+  const inputDetail = structuredInputDetail || partialInputDetail
+  const isStreamingInput = !structuredInputDetail && partialInputDetail !== ''
   const resultDetail = message.toolResult ?? ''
   // Distinguish "tool finished with empty output" from "tool still running".
   // hasResult covers both toolResult presence and image results.
@@ -149,6 +179,12 @@ function ToolGroupEntry({
         <div
           className="tool-group-entry-detail"
           data-testid={`tool-group-entry-detail-${message.id}`}
+          // #4341: surfaces the in-flight state to styling so a CSS
+          // hook can hint "still arriving" (e.g. subtle pulse on the
+          // Input section). Only set when the panel is rendering the
+          // streaming partial buffer rather than the final structured
+          // input.
+          data-streaming={isStreamingInput ? 'true' : undefined}
           // Detail clicks must not bubble to the outer group's
           // onClick={toggle} — otherwise selecting/copying `<pre>` text
           // collapses the entire group. The row already handles its own
