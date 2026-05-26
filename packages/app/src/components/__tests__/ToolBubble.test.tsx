@@ -150,3 +150,53 @@ describe('ToolBubble — TodoWrite integration (#4180)', () => {
     expect(findByTestId(root, 'todo-list-header')).toHaveLength(0);
   });
 });
+
+/**
+ * In-flight pulse marker tests (#4321 / #4308 mobile parity).
+ *
+ * Mirrors the dashboard ToolBubble pulse tests — the pulse dot renders
+ * only when `toolResult === undefined` (and no images have arrived).
+ * An empty-string `toolResult` is a legitimate finished state and must
+ * NOT render as in-flight. Same predicate the ActivityIndicator uses
+ * so the two surfaces stay in sync.
+ */
+describe('ToolBubble — in-flight pulse marker (#4321 / #4308)', () => {
+  function makeInflightMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
+    return {
+      id: 'tool-inflight',
+      type: 'tool_use',
+      content: 'Bash',
+      tool: 'Bash',
+      toolUseId: 'tu-inflight',
+      // toolResult intentionally omitted — that's what "in flight" means.
+      timestamp: 0,
+      ...overrides,
+    };
+  }
+
+  it('renders the pulse dot when no result has arrived', () => {
+    const root = renderBubble(makeInflightMessage());
+    expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')[0]).toBeTruthy();
+  });
+
+  it('omits the pulse dot once a result has arrived', () => {
+    const root = renderBubble(makeInflightMessage({ toolResult: 'total 0' }));
+    expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
+  });
+
+  it('omits the pulse dot for an empty-string result (tool finished, no output)', () => {
+    // toolResult: '' is a legitimate finished state — the tool ran and
+    // produced no output. Must not look in-flight.
+    const root = renderBubble(makeInflightMessage({ toolResult: '' }));
+    expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
+  });
+
+  it('omits the pulse dot when the tool resolved with images only (no toolResult string)', () => {
+    // Mirrors the ActivityIndicator + dashboard predicate — image-only
+    // resolution counts as resolved.
+    const root = renderBubble(
+      makeInflightMessage({ toolResultImages: [{ data: 'x', mediaType: 'image/png' }] }),
+    );
+    expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
+  });
+});
