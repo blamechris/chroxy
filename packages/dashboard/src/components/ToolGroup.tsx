@@ -19,6 +19,11 @@ import {
 export interface ToolGroupProps {
   messages: ChatMessage[]
   isActive: boolean
+  // #4305 — when true, the group is the last item in the chat list and has
+  // no follow-up assistant text summarizing it. Skips the on-completion
+  // auto-collapse so trailing tool runs stay visible (matching the Output
+  // tab's chronology) until the user explicitly collapses them.
+  isTail?: boolean
 }
 
 function getInputSummary(input: ChatMessage['toolInput']): string {
@@ -165,14 +170,25 @@ function ToolGroupEntry({
   )
 }
 
-export function ToolGroup({ messages, isActive }: ToolGroupProps) {
+export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps) {
   // Auto-collapse on completion: expand while active, collapse when the
   // run ends. Subsequent expand state lives in component state so a user
   // who toggled stays toggled until the run lifecycle flips again.
-  const [expanded, setExpanded] = useState(isActive)
+  // #4305 — tail groups (no follow-up summary) start expanded and skip
+  // the on-completion collapse, so trailing tools remain visible.
+  const [expanded, setExpanded] = useState(isActive || isTail)
   const wasActiveRef = useRef(isActive)
+  // Read isTail at the moment of the activity flip via a ref so changing
+  // isTail later (e.g. a response message arrives after the user has
+  // already seen the group expanded) doesn't retroactively collapse it.
+  const isTailRef = useRef(isTail)
   useEffect(() => {
-    if (wasActiveRef.current && !isActive) setExpanded(false)
+    isTailRef.current = isTail
+  })
+  useEffect(() => {
+    if (wasActiveRef.current && !isActive) {
+      if (!isTailRef.current) setExpanded(false)
+    }
     if (!wasActiveRef.current && isActive) setExpanded(true)
     wasActiveRef.current = isActive
   }, [isActive])

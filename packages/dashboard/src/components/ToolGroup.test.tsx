@@ -174,6 +174,53 @@ describe('ToolGroup', () => {
     expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
   })
 
+  // #4305 — when a turn ends on a tool run with no follow-up assistant
+  // text, the trailing group must stay visible so the Chat tab matches
+  // Output-tab chronology. Pre-fix the on-completion auto-collapse
+  // silently hid the user's most recent action.
+  describe('tail-group behavior (#4305)', () => {
+    it('keeps the group expanded after isActive flips to false when isTail', () => {
+      const messages = [tool('1', 'Bash'), tool('2', 'Read')]
+      const { rerender } = render(
+        <ToolGroup messages={messages} isActive={true} isTail={true} />,
+      )
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+      rerender(<ToolGroup messages={messages} isActive={false} isTail={true} />)
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('starts expanded even when not active if the group is tail', () => {
+      const messages = [tool('1', 'Bash'), tool('2', 'Read')]
+      render(<ToolGroup messages={messages} isActive={false} isTail={true} />)
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('does not retroactively collapse when isTail later flips to false', () => {
+      // Turn ends on tool run (tail, expanded). Then a response message
+      // arrives and the group is no longer tail. Expansion state must
+      // not retroactively change — the user might have left it open.
+      const messages = [tool('1', 'Bash'), tool('2', 'Read')]
+      const { rerender } = render(
+        <ToolGroup messages={messages} isActive={false} isTail={true} />,
+      )
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+      rerender(<ToolGroup messages={messages} isActive={false} isTail={false} />)
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('still auto-collapses when isActive flips to false and isTail is false', () => {
+      // Regression: the existing on-completion collapse must still fire
+      // when the group is NOT the tail (i.e., a response follows).
+      const messages = [tool('1', 'Bash')]
+      const { rerender } = render(
+        <ToolGroup messages={messages} isActive={true} isTail={false} />,
+      )
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+      rerender(<ToolGroup messages={messages} isActive={false} isTail={false} />)
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'false')
+    })
+  })
+
   // #4279: per-entry expansion. Clicking an inner entry must reveal the full
   // toolInput + toolResult for that entry WITHOUT collapsing the whole group
   // — pre-fix the entry click bubbled to the outer `onClick={toggle}` and

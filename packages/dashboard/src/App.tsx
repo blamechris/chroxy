@@ -1431,12 +1431,24 @@ export function App() {
   )
 
   // Custom message renderer for permission prompts and tool bubbles
+  const chatTailMessageId = chatMessages.length > 0
+    ? chatMessages[chatMessages.length - 1]!.id
+    : null
   const renderMessage = useCallback((msg: ChatViewMessage) => {
     // Tool-group synthetic row (#3747) — id is a group key, not a store id.
     if (msg.type === 'tool_group') {
       const payload = chatToolGroupPayloads.get(msg.id)
       if (!payload) return null
-      return <ToolGroup messages={payload.messages} isActive={payload.isActive} />
+      // #4305 — keep the trailing group expanded so the Chat tab matches
+      // Output-tab chronology when a turn ends on a tool run with no
+      // follow-up summary.
+      return (
+        <ToolGroup
+          messages={payload.messages}
+          isActive={payload.isActive}
+          isTail={msg.id === chatTailMessageId}
+        />
+      )
     }
     const storeMsg = storeMsgMap.get(msg.id)
     if (!storeMsg) return null
@@ -1506,7 +1518,7 @@ export function App() {
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
 
   const SHORTCUTS: ShortcutEntry[] = useMemo(() => {
     // #2883: author entries with canonical `Cmd+...` labels and rewrite to
