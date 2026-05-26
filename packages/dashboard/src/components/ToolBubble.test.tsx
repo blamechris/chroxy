@@ -286,4 +286,36 @@ describe('ToolBubble', () => {
       expect(preview).toHaveAttribute('data-parsed', 'false')
     })
   })
+
+  // #4308 — header pulse marker distinguishes an in-flight tool from a
+  // completed one. Pre-fix the collapsed header rendered identically in
+  // both states; the only signal was implicit (expanding to see whether
+  // a result panel rendered).
+  describe('in-flight pulse marker (#4308)', () => {
+    it('renders the pulse dot when no result has arrived', () => {
+      render(<ToolBubble toolName="Bash" toolUseId="tu-1" input="ls /tmp" />)
+      expect(screen.getByTestId('tool-bubble-pulse-tu-1')).toBeInTheDocument()
+    })
+
+    it('omits the pulse dot once a result has arrived', () => {
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-2"
+          input="ls /tmp"
+          result="total 0"
+        />,
+      )
+      expect(screen.queryByTestId('tool-bubble-pulse-tu-2')).toBeNull()
+    })
+
+    it('omits the pulse dot for an empty-string result (tool finished, no output)', () => {
+      // toolResult: '' is a legitimate finished state — the tool ran and
+      // produced no output. Must not look in-flight.
+      render(
+        <ToolBubble toolName="Bash" toolUseId="tu-3" input="true" result="" />,
+      )
+      expect(screen.queryByTestId('tool-bubble-pulse-tu-3')).toBeNull()
+    })
+  })
 })
