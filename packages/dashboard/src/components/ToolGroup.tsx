@@ -178,16 +178,21 @@ export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps
   // the on-completion collapse, so trailing tools remain visible.
   const [expanded, setExpanded] = useState(isActive || isTail)
   const wasActiveRef = useRef(isActive)
-  // Read isTail at the moment of the activity flip via a ref so changing
-  // isTail later (e.g. a response message arrives after the user has
-  // already seen the group expanded) doesn't retroactively collapse it.
-  const isTailRef = useRef(isTail)
-  useEffect(() => {
-    isTailRef.current = isTail
-  })
+  // Latch isTail while the group is still active so the on-completion
+  // collapse path reads the *pre-flip* tail status. #4314 — if a single
+  // render flips both isActive: true -> false AND isTail: true -> false
+  // (response message arrives in the same batched store update as
+  // stream_end), an effect-updated ref would already reflect the new
+  // isTail=false by the time the [isActive] effect runs (effects fire in
+  // declaration order on the same commit), and the trailing group would
+  // collapse immediately — the same symptom #4309 fixed. Updating inline
+  // during render guarantees the latch only advances while the group is
+  // observably the tail of an active run.
+  const wasTailRef = useRef(isTail)
+  if (isActive) wasTailRef.current = isTail
   useEffect(() => {
     if (wasActiveRef.current && !isActive) {
-      if (!isTailRef.current) setExpanded(false)
+      if (!wasTailRef.current) setExpanded(false)
     }
     if (!wasActiveRef.current && isActive) setExpanded(true)
     wasActiveRef.current = isActive
