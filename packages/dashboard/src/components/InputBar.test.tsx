@@ -985,6 +985,109 @@ describe('InputBar slash command picker (#1281)', () => {
     fireEvent.change(textarea, { target: { value: '/' } })
     expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
   })
+
+  // #4342 — when the filtered command list is empty (e.g. "/no-such-command"),
+  // the picker was swallowing Enter: the keydown handler always preventDefault'd
+  // and returned, without selecting a command and without falling through to
+  // the standard send path. The user got stuck — Enter did nothing, and the
+  // only way out was clicking Send with the mouse or hitting Escape. The fix:
+  // when the filter yields zero matches, close the picker and let the regular
+  // Enter handling decide (sendOnEnter / modifier / newline).
+  describe('Enter on empty filter must not be swallowed (#4342)', () => {
+    it('plain Enter on empty-filter list does NOT call selectCommand and closes picker', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      // Picker is open with "No commands found" state
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      // Text was not replaced with "/commit " (or any other selected command).
+      // The default `sendOnEnter=false` means plain Enter is a newline, not a
+      // send — so the only requirement is that nothing got swallowed.
+      expect(textarea.value).toBe('/unknown')
+      // Picker is closed so the user can keep typing without further swallows.
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('Cmd+Enter on empty-filter list sends the typed text and closes picker', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+      expect(onSend).toHaveBeenCalledWith('/unknown')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('plain Enter on empty-filter list with sendOnEnter sends the typed text and closes picker', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+          sendOnEnter
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('/unknown')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('happy path: Enter with matching filter still picks the command (regression guard)', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/com' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      // Picker selected the matching command rather than sending the text
+      expect(textarea.value).toBe('/commit ')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('Escape on empty-filter list still closes the picker without sending', () => {
+      const onSend = vi.fn()
+      const onInterrupt = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Escape' })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      expect(onSend).not.toHaveBeenCalled()
+      // Escape inside the slash picker is consumed by the picker handler — it
+      // closes the picker and returns early, so onInterrupt must NOT fire.
+      expect(onInterrupt).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('InputBar paste/drop (#1288)', () => {
