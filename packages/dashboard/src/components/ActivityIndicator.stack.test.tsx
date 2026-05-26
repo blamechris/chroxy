@@ -168,7 +168,7 @@ describe('ActivityIndicator + CheckInChip stacked layout (#3912)', () => {
           .replace(/Agent quiet for [^<]+/g, 'Agent quiet for TIME')
 
       expect(stripDynamicText(container.innerHTML)).toMatchInlineSnapshot(
-        `"<div class="activity-indicator activity-indicator--green" aria-label="Agent is working"><span class="activity-indicator__dot" aria-hidden="true"></span><span class="activity-indicator__label">Working… last activity TIME</span></div><div class="check-in-chip"><span class="check-in-chip__sr" role="status" aria-live="polite">Agent has gone quiet. Status update?</span><span class="check-in-chip__dot" aria-hidden="true"></span><span class="check-in-chip__label" aria-hidden="true">Agent quiet for TIME</span><button type="button" class="check-in-chip__action" aria-label="Send check-in: Status update?">Status update?</button></div>"`,
+        `"<div class="activity-indicator activity-indicator--green" aria-label="Agent is working"><span class="activity-indicator__dot" aria-hidden="true"></span><span class="activity-indicator__label" data-testid="activity-indicator-label">Working… last activity TIME</span></div><div class="check-in-chip"><span class="check-in-chip__sr" role="status" aria-live="polite">Agent has gone quiet. Status update?</span><span class="check-in-chip__dot" aria-hidden="true"></span><span class="check-in-chip__label" aria-hidden="true">Agent quiet for TIME</span><button type="button" class="check-in-chip__action" aria-label="Send check-in: Status update?">Status update?</button></div>"`,
       )
     })
   })

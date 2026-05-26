@@ -136,6 +136,19 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }:
       onClick={toggle}
       onKeyDown={handleKeyDown}
     >
+      {/* #4308 — running marker: a pulse dot in the header when the tool
+          has no result yet. Distinguishes an in-flight tool from a
+          completed one at a glance; pre-fix the collapsed header looked
+          identical in both states. Tested with `result === undefined`
+          (not `!result`) so an empty-string result — a tool that
+          finished with no output — does not render as in-flight. */}
+      {result === undefined && (
+        <span
+          className="tool-bubble-pulse"
+          data-testid={`tool-bubble-pulse-${toolUseId}`}
+          aria-hidden="true"
+        />
+      )}
       <span className="tool-name">{formatToolName(toolName)}</span>
       {summary && (
         <span className="tool-input" data-testid="tool-input-summary" style={{ color: '#666' }}>

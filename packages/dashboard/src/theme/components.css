@@ -1749,6 +1749,21 @@
   flex-shrink: 0;
 }
 
+/* #4308 — in-flight tool pulse on individual ToolBubble headers. Shares
+   the same visual language as `.tool-group-pulse` so a running solo
+   tool reads the same as a running tool group. */
+.tool-bubble-pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  opacity: 0.8;
+  margin-right: 6px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
 .tool-group-summary {
   flex: 1;
   color: var(--accent-purple);
