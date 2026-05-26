@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-05-26
+
+Same-day patch bundling two visibility fixes from v0.9.4 dogfood. Both surfaced once AskUserQuestion was actually resolving correctly (#4290 / v0.9.4) and the rest of the chat flow could be observed end-to-end. Neither is a hard blocker — they're "the data was right, the rendering wasn't" — but together they made the Chat and Output tabs mutually contradict each other after every TUI turn that used tools.
+
+### Fixed
+
+- **Chat tab now renders claude's summary AFTER the tools it summarizes (#4297 / #4298):** `claude-tui-session.js` fires `stream_start` at turn-start (#4010) so the Stop button shows up the moment a turn begins, even when the turn opens with a tool call. The dashboard's `handleStreamStart` was appending an empty response slot at the front of `messages[]` right away; subsequent `tool_start` / `tool_result` events appended *after* that slot. When the final summary `stream_delta` arrived, the text materialized at the early slot's array position — making claude's wrap-up render *above* the tool groups it had just summarized. Fix: on the first `stream_delta` for a response slot whose `content === ''`, move that slot to the current end of `messages[]`. Gated tightly — reconnect-replayed slots (`content !== ''`) are never shifted; the post-permission-split and tool_use-collision paths already append at the end so they skip via the deltaId-remap check. Chat tab now matches Output-tab chronological order.
+
+### Added
+
+- **Output tab now echoes the user's AskUserQuestion answer (#4296 / #4299):** Pre-fix, the Output tab showed the AskUserQuestion tool_input JSON, then immediately the next tool fired with no record of which option the user picked. The `user_question_response` wire send happened invisibly. Fix: in `sendUserQuestionResponse`, append a cyan-tinted `> User answered: <answer>` line to the terminal buffer (matches the existing yellow user-prompt echo shape from `sendInput`) before the wire send, so the echo is present even when the socket queues. Works identically for option-pick (resolved label) and freeform "Other" (custom text). Empty answers skip the echo defensively.
+
 ## [0.9.4] - 2026-05-26
 
 Same-day follow-on to v0.9.3 fixing the actual-answer-resolution side of the AskUserQuestion handler. v0.9.3 surfaced the question via the dashboard's QuestionPrompt UI and unblocked the silent-hang, but writing the chosen label text to the PTY caused claude TUI's prompt parser to single-character-jump-navigate through the menu and resolve to the wrong option ("Other" with empty custom text). Empirical trace + diagnosis in #4288.
