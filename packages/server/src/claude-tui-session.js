@@ -1325,7 +1325,7 @@ export class ClaudeTuiSession extends BaseSession {
     // freeform text), fall through to typing the answer literally —
     // claude TUI's Other-path may still mis-parse that, tracked in
     // #4288 as a separate concern.
-    let payload = text
+    let writeText = text
     if (Array.isArray(options) && options.length > 0) {
       const matchIdx = options.findIndex((o) => o && o.label === text)
       // #4292: single-digit guard (1..9). Multi-digit hotkeys
@@ -1337,13 +1337,13 @@ export class ClaudeTuiSession extends BaseSession {
       // mode-jump way) without silently sending a hotkey we can't
       // trust. Vanishingly rare in practice.
       if (matchIdx >= 0 && matchIdx < 9) {
-        payload = String(matchIdx + 1)
+        writeText = String(matchIdx + 1)
       }
     }
     // Fire-and-forget — the write is async due to the per-char throttle,
     // but the caller (handleUserQuestionResponse) is sync. Errors here
     // are non-fatal; worst case the user re-sends the answer.
-    this._writePtyTextThrottled(payload).catch((err) => {
+    this._writePtyTextThrottled(writeText).catch((err) => {
       log.warn(`respondToQuestion PTY write failed: ${err.message}`)
     })
   }
