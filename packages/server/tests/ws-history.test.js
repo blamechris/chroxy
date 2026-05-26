@@ -570,7 +570,9 @@ describe('sendSessionInfo', () => {
     it('uses a null provider when the session entry has none', () => {
       // No mock provider — getRegistryForProvider falls back to the
       // Claude default registry, and the payload's provider is null so
-      // the dashboard handler skips overwriting availableModelsProvider.
+      // the dashboard handler resets availableModelsProvider to null,
+      // which unblocks the picker via the `availableModelsProvider == null`
+      // branch in App.tsx:326.
       const { manager } = createMockSessionManager([
         { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
       ])
