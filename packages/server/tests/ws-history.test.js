@@ -544,6 +544,47 @@ describe('sendSessionInfo', () => {
     assert.equal(modelMsg.model, 'sonnet')
   })
 
+  // #4302 — sendSessionInfo runs on every switch_session. Pre-fix it did
+  // not push available_models, so the dashboard's availableModelsProvider
+  // stayed tagged with whichever provider sendPostAuthInfo set at auth.
+  // A claude-cli session created after a TUI/SDK session lost its model
+  // picker via the modelsMatchProvider guard in App.tsx.
+  describe('available_models on session switch (#4302)', () => {
+    it('sends available_models tagged with the switched-to session provider', () => {
+      const { manager, sessionsMap } = createMockSessionManager([
+        { id: 'sess-cli', name: 'CLI', cwd: '/cli' },
+      ])
+      sessionsMap.get('sess-cli').provider = 'claude-cli'
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      sendSessionInfo(ctx, ws, 'sess-cli')
+      const modelsMsg = ctx._sends.find(m => m.type === 'available_models')
+      assert.ok(modelsMsg, 'available_models was not sent on session switch')
+      assert.equal(modelsMsg.provider, 'claude-cli')
+      assert.ok(Array.isArray(modelsMsg.models), 'models must be an array')
+      assert.ok(modelsMsg.models.length > 0, 'claude-cli registry must yield non-empty models')
+    })
+
+    it('uses a null provider when the session entry has none', () => {
+      // No mock provider — getRegistryForProvider falls back to the
+      // Claude default registry, and the payload's provider is null so
+      // the dashboard handler skips overwriting availableModelsProvider.
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+      ])
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      sendSessionInfo(ctx, ws, 'sess-1')
+      const modelsMsg = ctx._sends.find(m => m.type === 'available_models')
+      assert.ok(modelsMsg, 'available_models was not sent on session switch')
+      assert.equal(modelsMsg.provider, null)
+    })
+  })
+
   it('sends model_changed with null when session has no model', () => {
     const { manager, sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },

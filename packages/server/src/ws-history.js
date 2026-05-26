@@ -267,6 +267,21 @@ export function sendSessionInfo(ctx, ws, sessionId) {
   if (session.isReady) {
     send(ws, { type: 'claude_ready', sessionId })
   }
+  // #4302: push the new session's provider-scoped model list on every
+  // switch. Without this, the dashboard's `availableModelsProvider` stays
+  // tagged with whichever provider the client saw last (set on auth via
+  // `sendPostAuthInfo`), and `modelsMatchProvider` in App.tsx suppresses
+  // the model picker for any session whose provider differs from the
+  // initial one — most visibly, a claude-cli session created after a
+  // TUI/SDK session loses its picker entirely.
+  const activeProvider = entry.provider || null
+  const activeRegistry = getRegistryForProvider(activeProvider)
+  send(ws, {
+    type: 'available_models',
+    models: activeRegistry.getModels(),
+    defaultModel: activeRegistry.getDefaultModelId(),
+    provider: activeProvider,
+  })
   send(ws, {
     type: 'model_changed',
     // #3687: prefer the user's explicit override (`model`) so a later
