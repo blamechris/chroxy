@@ -23,7 +23,13 @@
  * is one short chunk), we pretty-print it for legibility.
  */
 import { useState, useMemo } from 'react'
-import { getInputSummary, getPartialSummary, tryParseCompleteJson } from '@chroxy/store-core'
+import {
+  formatToolName,
+  getInputSummary,
+  getPartialSummary,
+  tryParseCompleteJson,
+} from '@chroxy/store-core'
+import type { ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 
 export interface ToolBubbleProps {
@@ -37,6 +43,28 @@ export interface ToolBubbleProps {
    */
   inputPartial?: string
   result?: string
+  /**
+   * #4318: MCP server name from the wire message (`storeMsg.serverName`).
+   * Forwarded to the shared `formatToolName` so MCP tools render with the
+   * server prefix preserved — same source-of-truth used by the
+   * ActivityIndicator chip and ToolGroup header.
+   */
+  serverName?: string
+  /**
+   * #4313 — when true, this bubble is the last item in the chat list
+   * (a trailing singleton tool_use, not a multi-tool group). Mounted
+   * expanded to match #4309 tail-group behavior. Initial-state only;
+   * later flips do not retroactively re-collapse. See ToolGroup.tsx:181-187.
+   */
+  isTail?: boolean
+  /**
+   * #4317: tools can resolve with images-only (e.g. computer-use
+   * screenshots, browser tools returning base64 PNGs) and leave
+   * `result === undefined`. The pulse marker must treat that as
+   * resolved — mirror the `hasResult` predicate used by ToolGroup
+   * (#3794) and ActivityIndicator (#4311) so all three surfaces agree.
+   */
+  resultImages?: ToolResultImage[]
 }
 
 // #4243: `getInputSummary` and `getPartialSummary` now live in
@@ -46,25 +74,21 @@ export interface ToolBubbleProps {
 // #4242: `getPartialSummary` routes its parse through
 // `tryParseCompleteJson` internally to amortise N-1 throws across a
 // streaming `tool_input_delta` accumulator.
+// #4318: `formatToolName` is the shared store-core helper too —
+// previously this file had a local copy that ignored `serverName`, so
+// MCP-tool headers could disagree with the ActivityIndicator chip.
 
-const capitalize = (word: string) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
-
-function formatToolName(name: string): string {
-  const MCP_PREFIX = 'mcp__'
-  if (name.startsWith(MCP_PREFIX)) {
-    const withoutPrefix = name.slice(MCP_PREFIX.length)
-    const sep = withoutPrefix.indexOf('__')
-    if (sep > 0) {
-      const server = withoutPrefix.slice(0, sep).split('_').filter(Boolean).map(capitalize).join(' ')
-      const tool = withoutPrefix.slice(sep + 2).split('_').filter(Boolean).map(capitalize).join(' ')
-      return tool ? `${server}: ${tool}` : server
-    }
-  }
-  return name.split('_').filter(Boolean).map(capitalize).join(' ')
-}
-
-export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }: ToolBubbleProps) {
-  const [expanded, setExpanded] = useState(false)
+export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages }: ToolBubbleProps) {
+  // #4313 — tail bubbles mount expanded so the singleton trailing-tool
+  // case matches the #4309 tail-group behavior. Initial-state only via
+  // the lazy `useState` initializer.
+  const [expanded, setExpanded] = useState(isTail)
+  // #4317: a tool that resolved with images-only (no text) still leaves
+  // `result === undefined`. Treat that as resolved so the pulse marker
+  // hides — same shape as ToolGroup's `hasResult` and
+  // ActivityIndicator's in-flight predicate. Without this the header
+  // pulses forever for computer-use / screenshot tools.
+  const hasResult = result !== undefined || (resultImages?.length ?? 0) > 0
   // #4081: prefer the structured `input` summary when present (server
   // gave us the full final input, e.g. via legacy non-streaming
   // providers or after `tool_result` lands). Otherwise fall back to the
@@ -141,15 +165,18 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result }:
           completed one at a glance; pre-fix the collapsed header looked
           identical in both states. Tested with `result === undefined`
           (not `!result`) so an empty-string result — a tool that
-          finished with no output — does not render as in-flight. */}
-      {result === undefined && (
+          finished with no output — does not render as in-flight.
+          #4317 — also treat images-only resolutions as done so the
+          pulse hides for computer-use / screenshot tools that return
+          base64 PNGs and no text. */}
+      {!hasResult && (
         <span
           className="tool-bubble-pulse"
           data-testid={`tool-bubble-pulse-${toolUseId}`}
           aria-hidden="true"
         />
       )}
-      <span className="tool-name">{formatToolName(toolName)}</span>
+      <span className="tool-name">{formatToolName(toolName, serverName)}</span>
       {summary && (
         <span className="tool-input" data-testid="tool-input-summary" style={{ color: '#666' }}>
           {summary}
