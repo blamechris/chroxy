@@ -219,6 +219,26 @@ describe('ToolGroup', () => {
       rerender(<ToolGroup messages={messages} isActive={false} isTail={false} />)
       expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'false')
     })
+
+    // #4314 — same-commit flip. If a single store update both ends the
+    // stream (isActive: true -> false) AND shifts the tail away from this
+    // group (isTail: true -> false) — e.g. a `response` message arrives in
+    // the same batch as `stream_end` — the on-completion collapse must
+    // still respect the *prior* tail status. Reading isTail via a ref
+    // updated on every render snapshots the post-flip value (false), so
+    // without a guard the group collapses immediately — the same UX bug
+    // #4309 was meant to fix, just on a faster turn.
+    it('does not collapse when isActive and isTail flip false in the same render', () => {
+      const messages = [tool('1', 'Bash'), tool('2', 'Read')]
+      const { rerender } = render(
+        <ToolGroup messages={messages} isActive={true} isTail={true} />,
+      )
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+      // Both flips land in a single render — the response and stream_end
+      // arrived in the same batched store update.
+      rerender(<ToolGroup messages={messages} isActive={false} isTail={false} />)
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
   })
 
   // #4279: per-entry expansion. Clicking an inner entry must reveal the full
