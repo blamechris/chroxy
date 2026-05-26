@@ -975,19 +975,25 @@ export class ClaudeTuiSession extends BaseSession {
    */
   async _writePtyTextThrottled(text, { onAbort } = {}) {
     this._term.write('\x1b[?2004l')
-    for (const ch of text) {
-      if (this._activeTurn?.aborted) {
-        onAbort?.()
-        return false
+    try {
+      for (const ch of text) {
+        if (this._activeTurn?.aborted) {
+          onAbort?.()
+          return false
+        }
+        this._term.write(ch)
+        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+        }
       }
-      this._term.write(ch)
-      if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
-        await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
-      }
+      this._term.write('\r')
+      return true
+    } finally {
+      // Always restore bracketed-paste mode, even on abort/throw. Write may
+      // throw if PTY has exited mid-loop (#4287) — swallow so we don't mask
+      // the original error path.
+      try { this._term.write('\x1b[?2004h') } catch {}
     }
-    this._term.write('\r')
-    this._term.write('\x1b[?2004h')
-    return true
   }
 
   /**
