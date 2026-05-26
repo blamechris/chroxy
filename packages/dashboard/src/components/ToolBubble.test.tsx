@@ -317,6 +317,37 @@ describe('ToolBubble', () => {
       )
       expect(screen.queryByTestId('tool-bubble-pulse-tu-3')).toBeNull()
     })
+
+    // #4317: tools that resolve with images-only (computer-use
+    // screenshots, browser tools returning base64 PNGs) leave
+    // `result === undefined` but populate `resultImages`. Pre-fix the
+    // pulse rendered forever; the predicate now mirrors ToolGroup's
+    // `hasResult` and ActivityIndicator's in-flight check.
+    it('omits the pulse dot when result is images-only (no text result)', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-4"
+          input={{ url: 'https://example.com' }}
+          resultImages={[{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }]}
+        />,
+      )
+      expect(screen.queryByTestId('tool-bubble-pulse-tu-4')).toBeNull()
+    })
+
+    it('still renders the pulse dot when resultImages is an empty array (not resolved)', () => {
+      // Defensive: an empty array should be treated like no images at
+      // all — the tool is still in-flight.
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-5"
+          input={{ url: 'https://example.com' }}
+          resultImages={[]}
+        />,
+      )
+      expect(screen.getByTestId('tool-bubble-pulse-tu-5')).toBeInTheDocument()
+    })
   })
 
   // ---------------------------------------------------------------------------

@@ -1513,6 +1513,7 @@ export function App() {
           result={storeMsg.toolResult}
           serverName={storeMsg.serverName}
           isTail={msg.id === chatTailMessageId}
+          resultImages={storeMsg.toolResultImages}
         />
       )
     }
