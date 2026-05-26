@@ -66,6 +66,17 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
 
   const displayTool = formatToolName(message.tool);
 
+  // #4321 / #4308 — in-flight pulse marker. The collapsed header was
+  // visually identical for running vs. completed tools pre-fix; a small
+  // blue dot in the header (mirroring the dashboard `tool-bubble-pulse`)
+  // distinguishes them at a glance. Checked against `toolResult ===
+  // undefined` (not `!toolResult`) so a tool that finished with no
+  // output (`toolResult === ''`) does NOT render as in-flight. Mirrors
+  // the same predicate used by the ActivityIndicator above.
+  const hasResult =
+    message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
+  const inFlight = !hasResult;
+
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
     if (longPressedRef.current) {
@@ -148,6 +159,14 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     >
       <View style={styles.toolHeader}>
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        {inFlight && (
+          <View
+            style={styles.pulse}
+            testID={`tool-bubble-pulse-${message.toolUseId ?? message.id}`}
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          />
+        )}
         <Text style={styles.senderLabelTool}>
           {message.serverName ? (
             <>
@@ -187,6 +206,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+  },
+  // #4321 / #4308 — in-flight marker, mirrors the dashboard's
+  // `.tool-bubble-pulse` (6px blue dot, slightly transparent).
+  pulse: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentBlue,
+    opacity: 0.8,
   },
   senderLabelTool: {
     color: COLORS.accentPurple,
