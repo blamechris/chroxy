@@ -975,19 +975,25 @@ export class ClaudeTuiSession extends BaseSession {
    */
   async _writePtyTextThrottled(text, { onAbort } = {}) {
     this._term.write('\x1b[?2004l')
-    for (const ch of text) {
-      if (this._activeTurn?.aborted) {
-        onAbort?.()
-        return false
+    try {
+      for (const ch of text) {
+        if (this._activeTurn?.aborted) {
+          onAbort?.()
+          return false
+        }
+        this._term.write(ch)
+        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+        }
       }
-      this._term.write(ch)
-      if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
-        await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
-      }
+      this._term.write('\r')
+      return true
+    } finally {
+      // Always restore bracketed-paste mode, even on abort/throw. Write may
+      // throw if PTY has exited mid-loop (#4287) — swallow so we don't mask
+      // the original error path.
+      try { this._term.write('\x1b[?2004h') } catch {}
     }
-    this._term.write('\r')
-    this._term.write('\x1b[?2004h')
-    return true
   }
 
   /**
@@ -1319,7 +1325,7 @@ export class ClaudeTuiSession extends BaseSession {
     // freeform text), fall through to typing the answer literally —
     // claude TUI's Other-path may still mis-parse that, tracked in
     // #4288 as a separate concern.
-    let payload = text
+    let writeText = text
     if (Array.isArray(options) && options.length > 0) {
       const matchIdx = options.findIndex((o) => o && o.label === text)
       // #4292: single-digit guard (1..9). Multi-digit hotkeys
@@ -1331,13 +1337,13 @@ export class ClaudeTuiSession extends BaseSession {
       // mode-jump way) without silently sending a hotkey we can't
       // trust. Vanishingly rare in practice.
       if (matchIdx >= 0 && matchIdx < 9) {
-        payload = String(matchIdx + 1)
+        writeText = String(matchIdx + 1)
       }
     }
     // Fire-and-forget — the write is async due to the per-char throttle,
     // but the caller (handleUserQuestionResponse) is sync. Errors here
     // are non-fatal; worst case the user re-sends the answer.
-    this._writePtyTextThrottled(payload).catch((err) => {
+    this._writePtyTextThrottled(writeText).catch((err) => {
       log.warn(`respondToQuestion PTY write failed: ${err.message}`)
     })
   }

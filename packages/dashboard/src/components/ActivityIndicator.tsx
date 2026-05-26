@@ -117,10 +117,17 @@ export function ActivityIndicator() {
     // Busy but we haven't seen an activity event yet (race on connect).
     // Render the indicator in its baseline green state without an elapsed
     // value so users still see "Working…" rather than nothing.
+    //
+    // #4320 — if a tool_use already landed (tool_start can arrive before
+    // any event that updates lastClientActivityAt), surface its name so
+    // the user sees "Running Bash" instead of a generic "Working…". No
+    // elapsed value here because we have no clock anchor — startedAt is
+    // a server timestamp and clock-skew makes a "Ns" suffix unreliable.
+    const label = inFlight ? `Running ${formatToolName(inFlight.tool)}` : 'Working…'
     return (
       <div className="activity-indicator activity-indicator--green" aria-label="Agent is working">
         <span className="activity-indicator__dot" aria-hidden="true" />
-        <span className="activity-indicator__label">Working…</span>
+        <span className="activity-indicator__label" data-testid="activity-indicator-label">{label}</span>
       </div>
     )
   }
