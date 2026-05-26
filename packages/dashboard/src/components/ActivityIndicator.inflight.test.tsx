@@ -125,6 +125,54 @@ describe('ActivityIndicator — in-flight tool naming (#4308)', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('names the in-flight tool during the lastActivityAt-null connect race (#4320)', () => {
+    // Busy session with an unresolved tool_use but no activity event has
+    // updated lastClientActivityAt yet (the race observed when tool_start
+    // arrives before any event that bumps the activity timestamp). The
+    // indicator must still name the running tool rather than fall through
+    // to a generic "Working…" label. No elapsed suffix is rendered because
+    // we have no clock anchor in this branch.
+    const now = Date.now()
+    storeState = {
+      activeSessionId: 'sess-1',
+      serverResultTimeoutMs: 30 * 60 * 1000,
+      sessionStates: {
+        'sess-1': {
+          isIdle: false,
+          lastClientActivityAt: null,
+          messages: [
+            { id: 'm1', type: 'tool_use', tool: 'Bash', timestamp: now - 2_000, content: '', toolUseId: 'tu-1' },
+          ],
+          inactivityWarning: null,
+        },
+      },
+    }
+    render(<ActivityIndicator />)
+    const label = screen.getByTestId('activity-indicator-label')
+    expect(label.textContent).toMatch(/Running\s+Bash/)
+    expect(label.textContent).not.toMatch(/Working…/)
+  })
+
+  it('falls back to "Working…" during the connect race when no tool is in flight (#4320)', () => {
+    // Busy with no tool_use in messages and no activity timestamp yet —
+    // the original baseline label is what the user should see.
+    storeState = {
+      activeSessionId: 'sess-1',
+      serverResultTimeoutMs: 30 * 60 * 1000,
+      sessionStates: {
+        'sess-1': {
+          isIdle: false,
+          lastClientActivityAt: null,
+          messages: [],
+          inactivityWarning: null,
+        },
+      },
+    }
+    render(<ActivityIndicator />)
+    const label = screen.getByTestId('activity-indicator-label')
+    expect(label.textContent).toBe('Working…')
+  })
+
   it('formats MCP-style tool names via the shared formatter', () => {
     const now = Date.now()
     setStore([
