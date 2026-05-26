@@ -65,13 +65,16 @@ function ToolGroupEntry({
   // so a misclick on a Thinking row doesn't collapse the parent group, but
   // we never set onToggle — the row has no expanded state.
   if (message.type === 'thinking') {
-    const swallow = (e: React.MouseEvent | React.KeyboardEvent) => e.stopPropagation()
+    // The div is non-interactive (no role/tabIndex), so keyboard focus
+    // never lands here — only the click handler is reachable. We swallow
+    // clicks so a misclick on a Thinking row doesn't collapse the parent
+    // group.
+    const swallow = (e: React.MouseEvent) => e.stopPropagation()
     return (
       <div
         className="tool-group-entry tool-group-entry--thinking"
         data-testid={`tool-group-entry-${message.id}`}
         onClick={swallow}
-        onKeyDown={swallow}
       >
         <span className="tool-group-entry-name">Thinking</span>
       </div>
