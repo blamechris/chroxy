@@ -1075,6 +1075,96 @@ describe('ClaudeTuiSession', () => {
 
       rmSync(sinkDir, { recursive: true, force: true })
     })
+
+    // #4287 follow-up to #4285: when `_activeTurn?.aborted` trips
+    // mid-loop, `_writePtyTextThrottled` previously returned early
+    // WITHOUT writing the `\x1b[?2004h` re-enable, leaving the PTY in
+    // bracketed-paste-disabled mode for subsequent writes. The fix
+    // wraps the for-loop in try/finally so the re-enable always runs.
+    it('_writePtyTextThrottled: aborted mid-loop still writes bracketed-paste re-enable in finally (#4287)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const writes = []
+      session._activeTurn = { messageId: 'm-abort', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      let charsSeen = 0
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          if (data.length === 1 && /^[a-z]$/.test(data)) {
+            charsSeen += 1
+            // Flip aborted after the 3rd char — next loop tick observes it.
+            if (charsSeen === 3) session._activeTurn.aborted = true
+          }
+        },
+        kill: () => {},
+      }
+
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('abcdefgh', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, 'aborted mid-loop returns false')
+      assert.equal(onAbortCalled, true, 'onAbort callback fires')
+      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
+      assert.equal(writes[writes.length - 1], '\x1b[?2004h',
+        'final write is bracketed-paste re-enable even though loop aborted early')
+      assert.equal(writes.includes('\r'), false, 'no submit on abort path')
+    })
+
+    it('_writePtyTextThrottled: throw inside loop still writes bracketed-paste re-enable in finally (#4287)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const writes = []
+      let charsSeen = 0
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          if (data.length === 1 && /^[a-z]$/.test(data)) {
+            charsSeen += 1
+            if (charsSeen === 2) throw new Error('PTY exited mid-write')
+          }
+        },
+        kill: () => {},
+      }
+      session._activeTurn = { messageId: 'm-throw', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+
+      await assert.rejects(
+        () => session._writePtyTextThrottled('abcdef'),
+        /PTY exited mid-write/,
+        'underlying throw propagates to the caller',
+      )
+
+      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
+      // The finally block runs the re-enable. The spy only throws on
+      // single lowercase letters; the re-enable byte sequence (length>1)
+      // pushes cleanly.
+      assert.equal(writes[writes.length - 1], '\x1b[?2004h',
+        'final write is bracketed-paste re-enable even though loop threw')
+    })
+
+    it('_writePtyTextThrottled: finally swallows a re-enable write that itself throws (PTY exited) (#4287)', async () => {
+      // If the PTY exited entirely, term.write may throw on the
+      // re-enable byte sequence too. The finally block must swallow
+      // that so it does not mask the underlying loop error.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const writes = []
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          if (data === 'a') throw new Error('loop-error')
+          if (data === '\x1b[?2004h') throw new Error('reenable-error-should-be-swallowed')
+        },
+        kill: () => {},
+      }
+      session._activeTurn = { messageId: 'm-double', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+
+      await assert.rejects(
+        () => session._writePtyTextThrottled('a'),
+        /loop-error/,
+        'original loop error surfaces, not the swallowed re-enable error',
+      )
+      assert.deepEqual(writes, ['\x1b[?2004l', 'a', '\x1b[?2004h'],
+        'finally always attempts the re-enable even if it will throw')
+    })
   })
 
   describe('attachment-cap warn lines (#4216)', () => {
