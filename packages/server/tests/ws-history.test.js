@@ -585,6 +585,41 @@ describe('sendSessionInfo', () => {
       assert.ok(modelsMsg, 'available_models was not sent on session switch')
       assert.equal(modelsMsg.provider, null)
     })
+
+    // #4315 — follow-up to #4310/#4302. The two tests above verify the
+    // end-state for a single sendSessionInfo call, but the original bug
+    // scenario is a *transition* between providers across two consecutive
+    // switches. Without re-tagging on every switch, the dashboard's
+    // `availableModelsProvider` would stay pinned to whichever provider
+    // the client saw first and `modelsMatchProvider` (App.tsx) would
+    // suppress the model picker for the second session. A future refactor
+    // that suppresses the push when the provider hasn't changed must
+    // still fire one when it has — this test pins that behaviour.
+    it('re-tags available_models when switching between different-provider sessions', () => {
+      const { manager, sessionsMap } = createMockSessionManager([
+        { id: 'sess-tui', name: 'TUI', cwd: '/tui' },
+        { id: 'sess-cli', name: 'CLI', cwd: '/cli' },
+      ])
+      sessionsMap.get('sess-tui').provider = 'claude-tui'
+      sessionsMap.get('sess-cli').provider = 'claude-cli'
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      // First switch: TUI session
+      sendSessionInfo(ctx, ws, 'sess-tui')
+      const firstModels = ctx._sends.find(m => m.type === 'available_models')
+      assert.ok(firstModels, 'available_models was not sent for first session')
+      assert.equal(firstModels.provider, 'claude-tui')
+
+      // Clear sends, then switch to a different-provider session
+      ctx._sends.length = 0
+
+      sendSessionInfo(ctx, ws, 'sess-cli')
+      const secondModels = ctx._sends.find(m => m.type === 'available_models')
+      assert.ok(secondModels, 'available_models was not sent for second session')
+      assert.equal(secondModels.provider, 'claude-cli', 'cross-provider switch must re-tag available_models')
+    })
   })
 
   it('sends model_changed with null when session has no model', () => {
