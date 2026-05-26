@@ -40,11 +40,12 @@ function findInFlightToolUse(
   messages: ReadonlyArray<{
     type: string
     tool?: string
+    serverName?: string
     timestamp: number
     toolResult?: unknown
     toolResultImages?: ReadonlyArray<unknown>
   }> | null | undefined,
-): { tool: string; startedAt: number } | null {
+): { tool: string; serverName?: string; startedAt: number } | null {
   if (!messages) return null
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!
@@ -52,7 +53,7 @@ function findInFlightToolUse(
     const hasResult =
       m.toolResult !== undefined || (m.toolResultImages?.length ?? 0) > 0
     if (!hasResult) {
-      return { tool: m.tool ?? 'tool', startedAt: m.timestamp }
+      return { tool: m.tool ?? 'tool', serverName: m.serverName, startedAt: m.timestamp }
     }
   }
   return null
