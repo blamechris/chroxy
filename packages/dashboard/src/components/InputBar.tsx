@@ -324,12 +324,17 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         return
       }
       if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault()
         if (filteredCommands.length > 0) {
+          e.preventDefault()
           const idx = Math.min(selectedIndex, filteredCommands.length - 1)
           selectCommand(filteredCommands[idx]!.name)
+          return
         }
-        return
+        // #4342 — empty filtered list ("No commands found"). Close the picker
+        // and fall through to the normal Enter handling below (sendOnEnter,
+        // modifier checks, newline). Pre-fix this branch always
+        // preventDefault'd + return'd, trapping the user with no way to send.
+        closePicker()
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault()
