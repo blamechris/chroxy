@@ -20,6 +20,10 @@ const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
 const KEY_ACTIVE_SERVER = `${KEY_PREFIX}active_server_id`;
 const KEY_THEME = `${KEY_PREFIX}theme`;
 const KEY_SHOW_CONSOLE_TAB = `${KEY_PREFIX}show_console_tab`;
+// #4303 — pluggable sidebar panel slot persistence
+const KEY_SIDEBAR_PANEL_HEIGHT = `${KEY_PREFIX}sidebar_panel_height`;
+const KEY_SIDEBAR_PANEL_VIEW = `${KEY_PREFIX}sidebar_panel_view`;
+const KEY_SIDEBAR_PANEL_COLLAPSED = `${KEY_PREFIX}sidebar_panel_collapsed`;
 
 // ---------------------------------------------------------------------------
 // Server-scoped persistence — keys scoped by server ID to prevent data loss
@@ -219,6 +223,71 @@ export function loadPersistedSidebarWidth(): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// #4303 — Pluggable sidebar panel slot persistence
+// ---------------------------------------------------------------------------
+
+/** Persist the sidebar panel height (px). */
+export function persistSidebarPanelHeight(height: number): void {
+  try {
+    localStorage.setItem(KEY_SIDEBAR_PANEL_HEIGHT, String(height));
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted sidebar panel height (px). Returns null when unset or invalid. */
+export function loadPersistedSidebarPanelHeight(): number | null {
+  try {
+    const raw = localStorage.getItem(KEY_SIDEBAR_PANEL_HEIGHT);
+    if (!raw) return null;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the active sidebar-panel view id. */
+export function persistSidebarPanelView(viewId: string | null): void {
+  try {
+    if (viewId) {
+      localStorage.setItem(KEY_SIDEBAR_PANEL_VIEW, viewId);
+    } else {
+      localStorage.removeItem(KEY_SIDEBAR_PANEL_VIEW);
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted sidebar-panel view id. Returns null when unset. */
+export function loadPersistedSidebarPanelView(): string | null {
+  try {
+    return localStorage.getItem(KEY_SIDEBAR_PANEL_VIEW);
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the sidebar-panel collapsed state. */
+export function persistSidebarPanelCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(KEY_SIDEBAR_PANEL_COLLAPSED, collapsed ? '1' : '0');
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted collapsed state. Returns false (default expanded) when unset. */
+export function loadPersistedSidebarPanelCollapsed(): boolean {
+  try {
+    return localStorage.getItem(KEY_SIDEBAR_PANEL_COLLAPSED) === '1';
+  } catch {
+    return false;
   }
 }
 

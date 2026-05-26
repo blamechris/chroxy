@@ -14,6 +14,13 @@ import {
   loadSessionMessages,
   clearPersistedState,
   _resetForTesting,
+  // #4303 — sidebar panel slot persistence
+  persistSidebarPanelHeight,
+  loadPersistedSidebarPanelHeight,
+  persistSidebarPanelView,
+  loadPersistedSidebarPanelView,
+  persistSidebarPanelCollapsed,
+  loadPersistedSidebarPanelCollapsed,
 } from './persistence';
 import {
   createKeyPair,
@@ -149,6 +156,52 @@ describe('persistence', () => {
     expect(state.viewMode).toBeNull();
     expect(state.activeSessionId).toBeNull();
     expect(state.terminalBuffer).toBeNull();
+  });
+
+  // #4303 — pluggable sidebar panel slot
+  describe('sidebar panel slot persistence (#4303)', () => {
+    it('persistSidebarPanelHeight and loadPersistedSidebarPanelHeight round-trip', () => {
+      persistSidebarPanelHeight(240);
+      expect(loadPersistedSidebarPanelHeight()).toBe(240);
+    });
+
+    it('loadPersistedSidebarPanelHeight returns null when unset', () => {
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+    });
+
+    it('loadPersistedSidebarPanelHeight returns null for non-positive values', () => {
+      localStorage.setItem('chroxy_persist_sidebar_panel_height', '0');
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+      localStorage.setItem('chroxy_persist_sidebar_panel_height', '-50');
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+    });
+
+    it('loadPersistedSidebarPanelHeight returns null for non-numeric values', () => {
+      localStorage.setItem('chroxy_persist_sidebar_panel_height', 'banana');
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+    });
+
+    it('persistSidebarPanelView and loadPersistedSidebarPanelView round-trip', () => {
+      persistSidebarPanelView('tokens');
+      expect(loadPersistedSidebarPanelView()).toBe('tokens');
+    });
+
+    it('persistSidebarPanelView(null) removes the key', () => {
+      persistSidebarPanelView('tokens');
+      persistSidebarPanelView(null);
+      expect(loadPersistedSidebarPanelView()).toBeNull();
+    });
+
+    it('persistSidebarPanelCollapsed round-trips true/false', () => {
+      persistSidebarPanelCollapsed(true);
+      expect(loadPersistedSidebarPanelCollapsed()).toBe(true);
+      persistSidebarPanelCollapsed(false);
+      expect(loadPersistedSidebarPanelCollapsed()).toBe(false);
+    });
+
+    it('loadPersistedSidebarPanelCollapsed defaults to false when unset (panel starts expanded)', () => {
+      expect(loadPersistedSidebarPanelCollapsed()).toBe(false);
+    });
   });
 });
 

@@ -4,12 +4,19 @@
  * Shows repos with active/resumable sessions, filter, status footer.
  * Collapsible with Cmd+B toggle.
  */
-import { useState, useCallback, useRef } from 'react'
-import type { CumulativeUsage, SessionVisualStatus } from '@chroxy/store-core'
+import { useState, useCallback, useRef, useMemo } from 'react'
+import type { CumulativeUsage, SessionInfo, SessionVisualStatus } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
+import { SidebarPanelSlot, type SidebarPanelView } from './SidebarPanelSlot'
+import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
 import type { SearchResult } from '../store/types'
+import {
+  persistSidebarPanelHeight,
+  persistSidebarPanelView,
+  persistSidebarPanelCollapsed,
+} from '../store/persistence'
 
 export interface ActiveSessionNode {
   sessionId: string
@@ -71,6 +78,14 @@ export interface SidebarProps {
   searchConversations?: (query: string) => void
   clearSearchResults?: () => void
   onWidthChange?: (width: number) => void
+  // #4303 — full sessions list (used by the bottom slot's token view).
+  // Optional so existing tests + callers don't break; defaults to [].
+  sessions?: SessionInfo[]
+  // #4303 — initial state for the bottom panel slot (loaded from
+  // localStorage in App.tsx; defaults applied here).
+  initialPanelHeight?: number
+  initialPanelView?: string | null
+  initialPanelCollapsed?: boolean
 }
 
 function abbreviateTunnel(url: string): string {
@@ -102,10 +117,47 @@ export function Sidebar({
   searchConversations,
   clearSearchResults,
   onWidthChange,
+  sessions = [],
+  initialPanelHeight = 200,
+  initialPanelView = null,
+  initialPanelCollapsed = false,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [focusedIndex, setFocusedIndex] = useState(0)
   const treeRef = useRef<HTMLDivElement>(null)
+
+  // #4303 — sidebar panel slot state. Initialized from localStorage via
+  // props so SSR / tests stay deterministic. Each setter mirrors to
+  // localStorage so the panel survives reloads.
+  const [panelHeight, setPanelHeightState] = useState(initialPanelHeight)
+  const [panelView, setPanelViewState] = useState<string | null>(initialPanelView ?? 'tokens')
+  const [panelCollapsed, setPanelCollapsedState] = useState(initialPanelCollapsed)
+
+  const handlePanelHeightChange = useCallback((next: number) => {
+    setPanelHeightState(next)
+    persistSidebarPanelHeight(next)
+  }, [])
+
+  const handlePanelViewChange = useCallback((next: string) => {
+    setPanelViewState(next)
+    persistSidebarPanelView(next)
+  }, [])
+
+  const handlePanelCollapsedChange = useCallback((next: boolean) => {
+    setPanelCollapsedState(next)
+    persistSidebarPanelCollapsed(next)
+  }, [])
+
+  // #4303 — view registry. Order here = order in the tab strip. Adding a
+  // future view (MCP, skills, etc.) is a one-entry append.
+  const panelViews = useMemo<SidebarPanelView[]>(() => ([
+    {
+      id: 'tokens',
+      label: 'Tokens',
+      render: () => <SidebarTokenView sessions={sessions} />,
+      collapsedHeaderMetric: () => tokenViewCollapsedMetric(sessions),
+    },
+  ]), [sessions])
 
   const toggleRepo = useCallback((path: string) => {
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))
@@ -433,6 +485,21 @@ export function Sidebar({
               )
             })}
           </div>
+
+          {/* #4303 — pluggable sidebar panel slot. SERVERS section
+              stays BELOW the slot for v1 (rationale: ServerPicker has its
+              own always-visible add button + status; forcing it into the
+              slot's one-view-at-a-time model loses functionality you'd
+              want simultaneously with whatever lives in the slot). */}
+          <SidebarPanelSlot
+            views={panelViews}
+            selectedViewId={panelView}
+            onSelectView={handlePanelViewChange}
+            collapsed={panelCollapsed}
+            onCollapsedChange={handlePanelCollapsedChange}
+            height={panelHeight}
+            onHeightChange={handlePanelHeightChange}
+          />
 
           {/* Server picker (multi-machine) */}
           <ServerPicker />
