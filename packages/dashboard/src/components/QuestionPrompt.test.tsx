@@ -61,10 +61,14 @@ describe('QuestionPrompt', () => {
         onSelect={vi.fn()}
       />
     )
-    expect(screen.getByText('Option A')).toBeInTheDocument()
-    // All buttons should be disabled when answered
-    const buttons = screen.getAllByRole('button')
-    buttons.forEach(btn => expect(btn).toBeDisabled())
+    // Post-#4312: option list is collapsed by default; expand it to assert
+    // that every option button still renders disabled.
+    fireEvent.click(screen.getByTestId('question-answered-summary'))
+    const optionButtons = screen
+      .getAllByRole('button')
+      .filter((btn) => btn.classList.contains('question-option'))
+    expect(optionButtons).toHaveLength(3)
+    optionButtons.forEach((btn) => expect(btn).toBeDisabled())
   })
 
   it('highlights the chosen option', () => {
@@ -76,7 +80,15 @@ describe('QuestionPrompt', () => {
         onSelect={vi.fn()}
       />
     )
-    expect(screen.getByText('Option B').closest('button')).toHaveClass('chosen')
+    // Expand the collapsed summary (#4312) to inspect the chosen-button styling.
+    fireEvent.click(screen.getByTestId('question-answered-summary'))
+    // "Option B" appears both inside the expanded summary's label span and on
+    // the disabled option button — pick the button explicitly via class.
+    const chosenButton = screen
+      .getAllByText('Option B')
+      .map((el) => el.closest('button'))
+      .find((btn) => btn?.classList.contains('question-option'))
+    expect(chosenButton).toHaveClass('chosen')
   })
 
   it('does not call onSelect when already answered', () => {
@@ -89,7 +101,16 @@ describe('QuestionPrompt', () => {
         onSelect={onSelect}
       />
     )
-    fireEvent.click(screen.getByText('Option B'))
+    // Expand first (#4312) so the option button is reachable.
+    fireEvent.click(screen.getByTestId('question-answered-summary'))
+    // Click the disabled option button (filter to the .question-option
+    // matching "Option B"; the summary's label span also contains "Option A"
+    // but it's not the click target here).
+    const optionB = screen
+      .getAllByText('Option B')
+      .map((el) => el.closest('button'))
+      .find((btn) => btn?.classList.contains('question-option'))!
+    fireEvent.click(optionB)
     expect(onSelect).not.toHaveBeenCalled()
   })
 
@@ -184,6 +205,56 @@ describe('QuestionPrompt', () => {
     fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'hello' } })
     const sendBtn = screen.getByRole('button', { name: 'Send' })
     expect(sendBtn).not.toBeDisabled()
+  })
+
+  describe('post-answer collapse (#4312)', () => {
+    it('renders a collapsed ✓ <chosen-label> summary by default once answered', () => {
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={options}
+          answered="b"
+          onSelect={vi.fn()}
+        />
+      )
+      const summary = screen.getByTestId('question-answered-summary')
+      expect(summary).toBeInTheDocument()
+      // Marker + chosen label live inside the summary row.
+      expect(summary.textContent).toContain('✓')
+      expect(summary.textContent).toContain('Option B')
+      // Collapsed: the disabled option list is NOT rendered yet (Option A / C
+      // would only appear once the user clicks the summary to expand).
+      expect(screen.queryByText('Option A')).not.toBeInTheDocument()
+      expect(screen.queryByText('Option C')).not.toBeInTheDocument()
+      // Summary advertises its collapsed state to assistive tech.
+      expect(summary).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('clicking the chevron expands back to the full disabled-button list', () => {
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={options}
+          answered="b"
+          onSelect={vi.fn()}
+        />
+      )
+      // Click the collapsed summary to expand.
+      fireEvent.click(screen.getByTestId('question-answered-summary'))
+      // Every option renders, all disabled, with the chosen one marked.
+      const optionButtons = screen
+        .getAllByRole('button')
+        .filter((btn) => btn.classList.contains('question-option'))
+      expect(optionButtons).toHaveLength(3)
+      const labels = optionButtons.map((b) => b.textContent)
+      expect(labels).toEqual(['Option A', 'Option B', 'Option C'])
+      optionButtons.forEach((btn) => expect(btn).toBeDisabled())
+      const chosenButton = optionButtons.find((btn) => btn.textContent === 'Option B')
+      expect(chosenButton).toHaveClass('chosen')
+      // Summary now reports expanded; clicking again collapses.
+      const summary = screen.getByTestId('question-answered-summary')
+      expect(summary).toHaveAttribute('aria-expanded', 'true')
+    })
   })
 
   describe('Other / free-text escape hatch (#3746)', () => {
