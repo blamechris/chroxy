@@ -106,9 +106,11 @@ describe('Provider Registry', () => {
   // so the dashboard can grey-out unusable providers and show a billing-
   // identity confidence panel without making the user run `chroxy doctor`.
   describe('auth status (#3404 audit)', () => {
-    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG']
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME']
     const saved = {}
     let _tmpClaudeHome = null
+    let _tmpCodexHome = null
+    let _tmpGeminiHome = null
 
     function clearKeys() {
       for (const k of ENV_KEYS) {
@@ -122,6 +124,13 @@ describe('Provider Registry', () => {
       _tmpClaudeHome = mkdtempSync(join(tmpdir(), 'chroxy-claude-home-'))
       process.env.CHROXY_CLAUDE_HOME = _tmpClaudeHome
       process.env.CHROXY_CLAUDE_CONFIG = join(_tmpClaudeHome, '.claude.json')
+      // #4301: same isolation pattern for the new codex/gemini OAuth probes —
+      // point them at empty tmpdirs so neither the developer's real ~/.codex
+      // or ~/.gemini state nor any prior test leftover leaks in.
+      _tmpCodexHome = mkdtempSync(join(tmpdir(), 'chroxy-codex-home-'))
+      process.env.CHROXY_CODEX_HOME = _tmpCodexHome
+      _tmpGeminiHome = mkdtempSync(join(tmpdir(), 'chroxy-gemini-home-'))
+      process.env.CHROXY_GEMINI_HOME = _tmpGeminiHome
       // #3678: drop the cached creds-probe result. The env-var-keyed cache
       // already invalidates on key change, but tests sometimes write/delete
       // files under CHROXY_CLAUDE_HOME after clearKeys() runs — explicitly
@@ -136,6 +145,14 @@ describe('Provider Registry', () => {
       if (_tmpClaudeHome) {
         try { rmSync(_tmpClaudeHome, { recursive: true, force: true }) } catch {}
         _tmpClaudeHome = null
+      }
+      if (_tmpCodexHome) {
+        try { rmSync(_tmpCodexHome, { recursive: true, force: true }) } catch {}
+        _tmpCodexHome = null
+      }
+      if (_tmpGeminiHome) {
+        try { rmSync(_tmpGeminiHome, { recursive: true, force: true }) } catch {}
+        _tmpGeminiHome = null
       }
       // #3678: drop the cache so the next test (or a parallel describe block)
       // doesn't see a value bound to an env-var combo we just unset.
@@ -261,7 +278,7 @@ describe('Provider Registry', () => {
       }
     })
 
-    it('codex reports ready=false and source=none when OPENAI_API_KEY is missing', () => {
+    it('codex reports ready=false and source=none when OPENAI_API_KEY is missing AND no codex login', () => {
       try {
         clearKeys()
         const list = listProviders()
@@ -270,6 +287,109 @@ describe('Provider Registry', () => {
         assert.equal(codex.auth.ready, false)
         assert.equal(codex.auth.source, 'none')
         assert.match(codex.auth.detail, /OPENAI_API_KEY/)
+        // #4301: hint must now mention the `codex login` OAuth path too so the
+        // user knows env var isn't the only way to authenticate.
+        assert.match(codex.auth.hint, /codex login/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    // #4301: Codex CLI's `codex login` writes a JSON auth file under ~/.codex/
+    // with a populated `tokens` block. The CLI works fine even when the file's
+    // OPENAI_API_KEY field is null because the OAuth tokens carry the round-
+    // trip. The preflight must recognise this state as ready, not "credentials
+    // missing".
+    it('codex reports ready=true source=oauth when ~/.codex/auth.json has tokens (#4301)', () => {
+      try {
+        clearKeys()
+        writeFileSync(
+          join(_tmpCodexHome, 'auth.json'),
+          JSON.stringify({
+            OPENAI_API_KEY: null,
+            tokens: {
+              id_token: 'fake.id.token',
+              access_token: 'fake-access-token',
+              refresh_token: 'fake-refresh-token',
+              account_id: 'fake-account',
+            },
+            last_refresh: '2026-05-26T00:00:00.000Z',
+          }),
+        )
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return
+        assert.equal(codex.auth.ready, true)
+        assert.equal(codex.auth.source, 'oauth')
+        assert.equal(codex.auth.envVar, null)
+        assert.match(codex.auth.detail, /OAuth from `codex login`/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('codex reports ready=true source=oauth when auth.json embeds OPENAI_API_KEY string (#4301)', () => {
+      try {
+        clearKeys()
+        writeFileSync(
+          join(_tmpCodexHome, 'auth.json'),
+          JSON.stringify({ OPENAI_API_KEY: 'sk-from-file', tokens: null }),
+        )
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return
+        assert.equal(codex.auth.ready, true)
+        assert.equal(codex.auth.source, 'oauth')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('codex stays ready=false when auth.json exists but tokens block is null/empty (#4301)', () => {
+      try {
+        clearKeys()
+        writeFileSync(
+          join(_tmpCodexHome, 'auth.json'),
+          JSON.stringify({ OPENAI_API_KEY: null, tokens: null }),
+        )
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return
+        assert.equal(codex.auth.ready, false)
+        assert.equal(codex.auth.source, 'none')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('codex stays ready=false when ~/.codex/auth.json is malformed JSON (#4301)', () => {
+      try {
+        clearKeys()
+        writeFileSync(join(_tmpCodexHome, 'auth.json'), 'this is not { valid json')
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return
+        assert.equal(codex.auth.ready, false)
+        assert.equal(codex.auth.source, 'none')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('codex env var still wins over OAuth file (env reported as source=env) (#4301)', () => {
+      try {
+        clearKeys()
+        process.env.OPENAI_API_KEY = 'sk-from-env'
+        writeFileSync(
+          join(_tmpCodexHome, 'auth.json'),
+          JSON.stringify({ tokens: { access_token: 'fake' } }),
+        )
+        const list = listProviders()
+        const codex = list.find(p => p.name === 'codex')
+        if (!codex) return
+        assert.equal(codex.auth.ready, true)
+        assert.equal(codex.auth.source, 'env')
+        assert.equal(codex.auth.envVar, 'OPENAI_API_KEY')
       } finally {
         restoreKeys()
       }
@@ -300,6 +420,71 @@ describe('Provider Registry', () => {
         assert.equal(gemini.auth.ready, true)
         assert.equal(gemini.auth.source, 'env')
         assert.equal(gemini.auth.envVar, 'GOOGLE_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    // #4301: Gemini CLI's `gemini login` caches OAuth state under ~/.gemini/
+    // (filename varies between CLI versions — oauth_creds.json or
+    // google_accounts.json). Preflight must recognise either as authed.
+    it('gemini reports ready=true source=oauth when ~/.gemini/oauth_creds.json exists (#4301)', () => {
+      try {
+        clearKeys()
+        writeFileSync(join(_tmpGeminiHome, 'oauth_creds.json'), '{}')
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'oauth')
+        assert.equal(gemini.auth.envVar, null)
+        assert.match(gemini.auth.detail, /OAuth from `gemini login`/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('gemini reports ready=true source=oauth when ~/.gemini/google_accounts.json exists (#4301)', () => {
+      try {
+        clearKeys()
+        writeFileSync(join(_tmpGeminiHome, 'google_accounts.json'), '{}')
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'oauth')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('gemini reports ready=false with combined hint when no env var AND no login state (#4301)', () => {
+      try {
+        clearKeys()
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, false)
+        assert.equal(gemini.auth.source, 'none')
+        // Hint must now mention both env vars AND `gemini login`.
+        assert.match(gemini.auth.hint, /GEMINI_API_KEY|GOOGLE_API_KEY/)
+        assert.match(gemini.auth.hint, /gemini login/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('gemini env var still wins over OAuth file (source=env) (#4301)', () => {
+      try {
+        clearKeys()
+        process.env.GEMINI_API_KEY = 'gem-from-env'
+        writeFileSync(join(_tmpGeminiHome, 'oauth_creds.json'), '{}')
+        const list = listProviders()
+        const gemini = list.find(p => p.name === 'gemini')
+        if (!gemini) return
+        assert.equal(gemini.auth.ready, true)
+        assert.equal(gemini.auth.source, 'env')
+        assert.equal(gemini.auth.envVar, 'GEMINI_API_KEY')
       } finally {
         restoreKeys()
       }

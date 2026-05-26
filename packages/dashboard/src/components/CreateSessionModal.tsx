@@ -494,9 +494,25 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             {availableProviders.length > 0
               ? availableProviders.map(p => {
                   const unready = p.auth?.ready === false
+                  // #4301: surface the diagnostic (auth.detail / auth.hint)
+                  // for disabled options too — a disabled <option> can't be
+                  // selected so the user wouldn't otherwise see the live
+                  // billing-hint line below. We append the hint inline AND
+                  // mirror it via title= so hover tooltips also work.
+                  const baseLabel = PROVIDER_LABELS[p.name] || p.name
+                  const unreadyHint = unready ? (p.auth?.hint || 'credentials missing') : ''
+                  const optionLabel = unready
+                    ? `${baseLabel} — ${unreadyHint}`
+                    : baseLabel
+                  const tooltip = unready ? (p.auth?.detail || unreadyHint) : undefined
                   return (
-                    <option key={p.name} value={p.name} disabled={unready}>
-                      {(PROVIDER_LABELS[p.name] || p.name) + (unready ? ' — credentials missing' : '')}
+                    <option
+                      key={p.name}
+                      value={p.name}
+                      disabled={unready}
+                      title={tooltip}
+                    >
+                      {optionLabel}
                     </option>
                   )
                 })

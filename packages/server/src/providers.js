@@ -318,6 +318,33 @@ function getProviderAuthInfo(name, ProviderClass) {
     }
   }
 
+  // #4301: Codex and Gemini CLIs authenticate via their own `login` flows
+  // and cache OAuth tokens under `~/.codex/auth.json` / `~/.gemini/...`.
+  // The Codex CLI also runs fine when `OPENAI_API_KEY` is null in that file
+  // because the `tokens` block carries the access/refresh tokens. The
+  // env-var-only preflight misreported these providers as "credentials
+  // missing" whenever users authed via the CLI instead of exporting a key.
+  if (name === 'codex' && _hasCodexOAuthCreds()) {
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `${describeBillingIdentity(name, null)} (OAuth from \`codex login\`)`,
+    }
+  }
+  if (name === 'gemini' && _hasGeminiOAuthCreds()) {
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `${describeBillingIdentity(name, null)} (OAuth from \`gemini login\`)`,
+    }
+  }
+
   // No env var matched — optional creds (host claude-sdk) can fall back to
   // an OAuth subscription cached on disk by `claude login`. Earlier code
   // optimistically reported ready=true here, but #3674 caught that this
@@ -347,14 +374,26 @@ function getProviderAuthInfo(name, ProviderClass) {
   }
 
   // Required creds missing — provider can't run.
+  // #4301: codex/gemini also support an OAuth login flow, so the hint should
+  // mention both paths so the user doesn't think the env var is the only fix.
+  let resolvedHint = hint
+  if (name === 'codex') {
+    resolvedHint = hint
+      ? `${hint} or run \`codex login\``
+      : 'run `codex login` or set OPENAI_API_KEY'
+  } else if (name === 'gemini') {
+    resolvedHint = hint
+      ? `${hint} or run \`gemini login\``
+      : 'run `gemini login` or set GEMINI_API_KEY'
+  }
   return {
     ready: false,
     source: 'none',
     envVar: null,
     envVars,
-    hint,
+    hint: resolvedHint,
     detail: envVars.length
-      ? `Not configured — ${hint}`
+      ? `Not configured — ${resolvedHint}`
       : 'Not configured',
   }
 }
@@ -415,37 +454,131 @@ function _probeClaudeOAuthCreds() {
 }
 
 /**
- * 5s TTL cache around `_probeClaudeOAuthCreds()` (#3678).
+ * Best-effort probe for `codex login` OAuth state on disk (#4301).
  *
- * `listProviders()` is called from `handleListProviders` on every dashboard
- * `list_providers` WS request and once per `auth_ok` from `ws-history.js`.
- * Each call performs three `existsSync` + an optional small `readFileSync` +
- * `JSON.parse`. The cache is keyed on the override env vars so a test (or a
- * runtime tweak) that changes `CHROXY_CLAUDE_HOME` / `CHROXY_CLAUDE_CONFIG`
- * naturally invalidates the previous result.
+ * The Codex CLI caches its login tokens in `~/.codex/auth.json`. The file is
+ * always present after a `codex login` run; what matters for "user is authed"
+ * is the `tokens` block being populated. The Codex CLI itself works fine
+ * even when the file's `OPENAI_API_KEY` field is `null` because the OAuth
+ * tokens carry the credential round-trip.
+ *
+ * Override path for tests / atypical installs:
+ *   - `CHROXY_CODEX_HOME` — overrides the directory used to locate auth.json
+ *
+ * @returns {boolean}
  */
-let _credsCache = { value: null, expiresAt: 0, key: null }
-
-function _hasClaudeOAuthCreds() {
-  const key = `${process.env.CHROXY_CLAUDE_HOME ?? ''}|${process.env.CHROXY_CLAUDE_CONFIG ?? ''}`
-  const now = Date.now()
-  if (_credsCache.key === key && _credsCache.expiresAt > now) {
-    return _credsCache.value
+function _probeCodexOAuthCreds() {
+  try {
+    const codexHome = process.env.CHROXY_CODEX_HOME || join(homedir(), '.codex')
+    const authPath = join(codexHome, 'auth.json')
+    if (!existsSync(authPath)) return false
+    try {
+      const parsed = JSON.parse(readFileSync(authPath, 'utf-8'))
+      if (!parsed || typeof parsed !== 'object') return false
+      // Either: populated `tokens` block (OAuth login), or a real string
+      // OPENAI_API_KEY embedded in the file (CLI also accepts this).
+      if (parsed.tokens && typeof parsed.tokens === 'object') {
+        const t = parsed.tokens
+        if (typeof t.access_token === 'string' && t.access_token.length > 0) return true
+        if (typeof t.refresh_token === 'string' && t.refresh_token.length > 0) return true
+        if (typeof t.id_token === 'string' && t.id_token.length > 0) return true
+      }
+      if (typeof parsed.OPENAI_API_KEY === 'string' && parsed.OPENAI_API_KEY.length > 0) {
+        return true
+      }
+    } catch {
+      // Malformed JSON — treat as absent.
+    }
+  } catch {
+    // Any unexpected fs error → behave as if no creds.
   }
-  const value = _probeClaudeOAuthCreds()
-  _credsCache = { value, expiresAt: now + 5_000, key }
-  return value
+  return false
 }
 
 /**
- * Test-only hook to drop the cached creds-probe result so suites that mutate
- * the override env vars (or write/delete files under `CHROXY_CLAUDE_HOME`
+ * Best-effort probe for `gemini login` OAuth state on disk (#4301).
+ *
+ * The Gemini CLI caches OAuth state under `~/.gemini/`. The exact filename
+ * has shifted between CLI versions; we cover the names observed in the
+ * wild and treat presence of any of them as evidence of a completed login:
+ *
+ *   - `~/.gemini/oauth_creds.json`     — typical for `gemini login`
+ *   - `~/.gemini/google_accounts.json` — older variant
+ *
+ * Override path for tests / atypical installs:
+ *   - `CHROXY_GEMINI_HOME` — overrides the directory used for the lookups
+ *
+ * @returns {boolean}
+ */
+function _probeGeminiOAuthCreds() {
+  try {
+    const geminiHome = process.env.CHROXY_GEMINI_HOME || join(homedir(), '.gemini')
+    if (existsSync(join(geminiHome, 'oauth_creds.json'))) return true
+    if (existsSync(join(geminiHome, 'google_accounts.json'))) return true
+  } catch {
+    // Any unexpected fs error → behave as if no creds.
+  }
+  return false
+}
+
+/**
+ * 5s TTL cache around the on-disk creds probes (#3678).
+ *
+ * `listProviders()` is called from `handleListProviders` on every dashboard
+ * `list_providers` WS request and once per `auth_ok` from `ws-history.js`.
+ * Each call performs several `existsSync` + optional small `readFileSync` +
+ * `JSON.parse`. The cache is keyed on the override env vars so a test (or a
+ * runtime tweak) that changes any of the `CHROXY_*_HOME` variables naturally
+ * invalidates the previous result.
+ *
+ * Per-provider entries so a mutation under one provider's home doesn't blow
+ * away the cached result for another (#4301 added codex + gemini).
+ */
+let _credsCache = {
+  claude: { value: null, expiresAt: 0, key: null },
+  codex: { value: null, expiresAt: 0, key: null },
+  gemini: { value: null, expiresAt: 0, key: null },
+}
+
+function _cachedProbe(slot, key, probe) {
+  const now = Date.now()
+  const entry = _credsCache[slot]
+  if (entry.key === key && entry.expiresAt > now) {
+    return entry.value
+  }
+  const value = probe()
+  _credsCache[slot] = { value, expiresAt: now + 5_000, key }
+  return value
+}
+
+function _hasClaudeOAuthCreds() {
+  const key = `${process.env.CHROXY_CLAUDE_HOME ?? ''}|${process.env.CHROXY_CLAUDE_CONFIG ?? ''}`
+  return _cachedProbe('claude', key, _probeClaudeOAuthCreds)
+}
+
+function _hasCodexOAuthCreds() {
+  const key = `${process.env.CHROXY_CODEX_HOME ?? ''}`
+  return _cachedProbe('codex', key, _probeCodexOAuthCreds)
+}
+
+function _hasGeminiOAuthCreds() {
+  const key = `${process.env.CHROXY_GEMINI_HOME ?? ''}`
+  return _cachedProbe('gemini', key, _probeGeminiOAuthCreds)
+}
+
+/**
+ * Test-only hook to drop the cached creds-probe results so suites that mutate
+ * the override env vars (or write/delete files under any `CHROXY_*_HOME`
  * without changing the env-var values) start from a clean slate. Production
  * code should never call this — the natural env-var-keyed invalidation plus
  * the 5s TTL is what users see.
  */
 export function _resetCredsCacheForTest() {
-  _credsCache = { value: null, expiresAt: 0, key: null }
+  _credsCache = {
+    claude: { value: null, expiresAt: 0, key: null },
+    codex: { value: null, expiresAt: 0, key: null },
+    gemini: { value: null, expiresAt: 0, key: null },
+  }
 }
 
 function describeBillingIdentity(name, envVar) {
