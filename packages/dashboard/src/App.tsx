@@ -64,7 +64,7 @@ import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
@@ -1745,6 +1745,10 @@ export function App() {
           searchQuery={searchQuery}
           searchConversations={searchConversations}
           clearSearchResults={clearSearchResults}
+          sessions={sessions}
+          initialPanelHeight={loadPersistedSidebarPanelHeight() ?? 200}
+          initialPanelView={loadPersistedSidebarPanelView()}
+          initialPanelCollapsed={loadPersistedSidebarPanelCollapsed()}
         />
       )}
 
