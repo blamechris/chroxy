@@ -84,7 +84,7 @@ export function ActivityIndicator() {
   // ToolBubble header uses (#4308 spinner). Returns null when every tool
   // call has resolved — the indicator falls back to the original
   // "Working… last activity" label.
-  const inFlight = useMemo<{ tool: string; startedAt: number } | null>(() => {
+  const inFlight = useMemo<{ tool: string; serverName?: string; startedAt: number } | null>(() => {
     if (!messages) return null
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]!
@@ -92,7 +92,10 @@ export function ActivityIndicator() {
       const hasResult =
         m.toolResult !== undefined || (m.toolResultImages?.length ?? 0) > 0
       if (!hasResult) {
-        return { tool: m.tool ?? 'tool', startedAt: m.timestamp }
+        // #4318: capture `serverName` too so MCP tools render with the
+        // server prefix preserved — keeps the chip's label in sync with
+        // the ToolBubble header and ToolGroup summary.
+        return { tool: m.tool ?? 'tool', serverName: m.serverName, startedAt: m.timestamp }
       }
     }
     return null
@@ -138,7 +141,7 @@ export function ActivityIndicator() {
   // the original "Working… last activity" label when no tool is in
   // flight (e.g. waiting on assistant text between tool calls).
   const label = inFlight
-    ? `Running ${formatToolName(inFlight.tool)} · ${formatDuration(now - inFlight.startedAt)}`
+    ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)} · ${formatDuration(now - inFlight.startedAt)}`
     : `Working… last activity ${formatElapsed(elapsed)}`
 
   return (

@@ -1502,6 +1502,7 @@ export function App() {
           input={storeMsg.toolInput}
           inputPartial={storeMsg.toolInputPartial}
           result={storeMsg.toolResult}
+          serverName={storeMsg.serverName}
         />
       )
     }
