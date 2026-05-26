@@ -67,9 +67,9 @@ describe('SidebarTokenView (#4303 v0)', () => {
       expect(agg.totals.inputTokens).toBe(3000)
       expect(agg.totals.outputTokens).toBe(1300)
       expect(agg.byProvider).toHaveLength(1)
-      expect(agg.byProvider[0].provider).toBe('claude-sdk')
-      expect(agg.byProvider[0].sessionCount).toBe(2)
-      expect(agg.byProvider[0].totals.inputTokens).toBe(3000)
+      expect(agg.byProvider[0]!.provider).toBe('claude-sdk')
+      expect(agg.byProvider[0]!.sessionCount).toBe(2)
+      expect(agg.byProvider[0]!.totals.inputTokens).toBe(3000)
     })
 
     it('keeps per-provider rows separate', () => {
@@ -109,7 +109,7 @@ describe('SidebarTokenView (#4303 v0)', () => {
         makeSession('sdk', 'claude-sdk', makeUsage(100, 50, 0)),
       ]
       const agg = aggregateUsage(sessions)
-      expect(agg.byProvider[agg.byProvider.length - 1].provider).toBe('claude-tui')
+      expect(agg.byProvider[agg.byProvider.length - 1]!.provider).toBe('claude-tui')
     })
 
     it('handles missing cumulativeUsage as all-zero (defensive)', () => {
@@ -119,7 +119,7 @@ describe('SidebarTokenView (#4303 v0)', () => {
       ]
       const agg = aggregateUsage(sessions)
       expect(agg.totals.inputTokens).toBe(100)
-      expect(agg.byProvider[0].sessionCount).toBe(2)
+      expect(agg.byProvider[0]!.sessionCount).toBe(2)
     })
 
     it('groups sessions without a provider field under "unknown"', () => {
@@ -137,7 +137,7 @@ describe('SidebarTokenView (#4303 v0)', () => {
         cumulativeUsage: makeUsage(500, 100),
       }
       const agg = aggregateUsage([s])
-      expect(agg.byProvider[0].provider).toBe('unknown')
+      expect(agg.byProvider[0]!.provider).toBe('unknown')
     })
   })
 
@@ -150,7 +150,13 @@ describe('SidebarTokenView (#4303 v0)', () => {
     it('abbreviates thousands with K', () => {
       expect(formatTokenCount(1000)).toBe('1.0K')
       expect(formatTokenCount(1234)).toBe('1.2K')
-      expect(formatTokenCount(999999)).toBe('1000.0K')
+      expect(formatTokenCount(999_499)).toBe('999.5K')
+    })
+
+    // #4304 review: avoid the "1000.0K" visual nonsense.
+    it('rolls over to M before the K-rounded value crosses 1000', () => {
+      expect(formatTokenCount(999_500)).toBe('1.00M')
+      expect(formatTokenCount(999_999)).toBe('1.00M')
     })
 
     it('abbreviates millions with M', () => {

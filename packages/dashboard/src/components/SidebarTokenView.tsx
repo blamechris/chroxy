@@ -22,22 +22,13 @@
  */
 import { useMemo } from 'react'
 import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
-import { formatCostBadge } from '@chroxy/store-core'
+import { formatCostBadge, getProviderLabel } from '@chroxy/store-core'
 
 // Subscription/PTY providers that never emit token usage today (decision #1).
 // claude-tui is the only one in this set right now; if upstream adds usage
 // exposure we drop it from here. claude-cli DOES emit usage even on
 // subscription via stream-json's `result.usage`, so it is NOT in this set.
 const UNTRACKED_PROVIDERS = new Set(['claude-tui'])
-
-const PROVIDER_LABELS: Record<string, string> = {
-  'claude-cli': 'Claude CLI',
-  'claude-sdk': 'Claude SDK',
-  'claude-tui': 'Claude TUI',
-  'claude-byok': 'Claude BYOK',
-  'codex': 'Codex',
-  'gemini': 'Gemini',
-}
 
 export interface ProviderTotals {
   provider: string
@@ -138,10 +129,21 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
   }
 }
 
-/** Format integer tokens with K/M abbreviation (1234 → "1.2K", 1500000 → "1.5M"). */
+/**
+ * Format integer tokens with K/M abbreviation.
+ *
+ *   formatTokenCount(0)         → "0"
+ *   formatTokenCount(999)       → "999"
+ *   formatTokenCount(1234)      → "1.2K"
+ *   formatTokenCount(999_999)   → "1.0M"   ← #4304 review: cross to M when K would round to 1000
+ *   formatTokenCount(1_500_000) → "1.50M"
+ */
 export function formatTokenCount(n: number): string {
   if (n < 1000) return String(n)
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`
+  // Roll over to "M" when the K-rounded value would be ≥ 1000 (i.e. when
+  // n ≥ 999500 rounds to 1000.0K). Avoid the "1000.0K" visual nonsense
+  // that the simple < 1_000_000 cutoff produced.
+  if (n < 999_500) return `${(n / 1000).toFixed(1)}K`
   return `${(n / 1_000_000).toFixed(2)}M`
 }
 
@@ -191,7 +193,7 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
         ) : (
           <ul className="sidebar-token-view-provider-list">
             {agg.byProvider.map((row) => {
-              const label = PROVIDER_LABELS[row.provider] ?? row.provider
+              const label = getProviderLabel(row.provider)
               const tokens = row.totals.inputTokens + row.totals.outputTokens
               return (
                 <li

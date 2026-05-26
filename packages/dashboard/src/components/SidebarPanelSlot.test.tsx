@@ -98,6 +98,107 @@ describe('SidebarPanelSlot (#4303)', () => {
       expect(selected.getAttribute('tabindex')).toBe('0')
       expect(other.getAttribute('tabindex')).toBe('-1')
     })
+
+    // #4304 review: WAI-ARIA tablist keyboard navigation
+    describe('tablist keyboard navigation (#4304 review)', () => {
+      const views3 = [
+        makeView('a', 'A', 'body-a'),
+        makeView('b', 'B', 'body-b'),
+        makeView('c', 'C', 'body-c'),
+      ]
+
+      it('ArrowRight selects the next tab and wraps at the end', () => {
+        const onSelectView = vi.fn()
+        render(
+          <SidebarPanelSlot
+            {...baseProps}
+            selectedViewId="a"
+            onSelectView={onSelectView}
+            views={views3}
+          />,
+        )
+        const tab = screen.getByTestId('sidebar-panel-slot-tab-a')
+        fireEvent.keyDown(tab, { key: 'ArrowRight' })
+        expect(onSelectView).toHaveBeenLastCalledWith('b')
+      })
+
+      it('ArrowRight wraps from the last tab back to the first', () => {
+        const onSelectView = vi.fn()
+        render(
+          <SidebarPanelSlot
+            {...baseProps}
+            selectedViewId="c"
+            onSelectView={onSelectView}
+            views={views3}
+          />,
+        )
+        const tab = screen.getByTestId('sidebar-panel-slot-tab-c')
+        fireEvent.keyDown(tab, { key: 'ArrowRight' })
+        expect(onSelectView).toHaveBeenLastCalledWith('a')
+      })
+
+      it('ArrowLeft selects the previous tab and wraps at the start', () => {
+        const onSelectView = vi.fn()
+        render(
+          <SidebarPanelSlot
+            {...baseProps}
+            selectedViewId="a"
+            onSelectView={onSelectView}
+            views={views3}
+          />,
+        )
+        const tab = screen.getByTestId('sidebar-panel-slot-tab-a')
+        fireEvent.keyDown(tab, { key: 'ArrowLeft' })
+        expect(onSelectView).toHaveBeenLastCalledWith('c')
+      })
+
+      it('Home selects the first tab', () => {
+        const onSelectView = vi.fn()
+        render(
+          <SidebarPanelSlot
+            {...baseProps}
+            selectedViewId="c"
+            onSelectView={onSelectView}
+            views={views3}
+          />,
+        )
+        const tab = screen.getByTestId('sidebar-panel-slot-tab-c')
+        fireEvent.keyDown(tab, { key: 'Home' })
+        expect(onSelectView).toHaveBeenLastCalledWith('a')
+      })
+
+      it('End selects the last tab', () => {
+        const onSelectView = vi.fn()
+        render(
+          <SidebarPanelSlot
+            {...baseProps}
+            selectedViewId="a"
+            onSelectView={onSelectView}
+            views={views3}
+          />,
+        )
+        const tab = screen.getByTestId('sidebar-panel-slot-tab-a')
+        fireEvent.keyDown(tab, { key: 'End' })
+        expect(onSelectView).toHaveBeenLastCalledWith('c')
+      })
+
+      it('unrelated keys do nothing (no preventDefault on Tab)', () => {
+        const onSelectView = vi.fn()
+        render(
+          <SidebarPanelSlot
+            {...baseProps}
+            selectedViewId="a"
+            onSelectView={onSelectView}
+            views={views3}
+          />,
+        )
+        const tab = screen.getByTestId('sidebar-panel-slot-tab-a')
+        const ev = fireEvent.keyDown(tab, { key: 'Tab' })
+        expect(onSelectView).not.toHaveBeenCalled()
+        // fireEvent.keyDown returns true when the event was NOT cancelled
+        expect(ev).toBe(true)
+      })
+    })
   })
 
   describe('collapse', () => {
@@ -258,6 +359,31 @@ describe('SidebarPanelSlot (#4303)', () => {
       // it's gone instead.
       expect(screen.queryByTestId('sidebar-panel-slot-resize-handle')).toBeNull()
       expect(onHeightChange).not.toHaveBeenCalled()
+    })
+
+    it('removes drag listeners on unmount mid-drag (#4304 review)', () => {
+      const onHeightChange = vi.fn()
+      const removeSpy = vi.spyOn(document, 'removeEventListener')
+      const { unmount } = render(
+        <SidebarPanelSlot
+          {...baseProps}
+          height={200}
+          onHeightChange={onHeightChange}
+          views={[makeView('a', 'A', 'b')]}
+        />,
+      )
+      const handle = screen.getByTestId('sidebar-panel-slot-resize-handle')
+      // Start a drag — listeners attach to document
+      fireEvent.mouseDown(handle, { clientY: 500 })
+      // Unmount before mouseup — the effect cleanup must detach the
+      // listeners or they leak and keep firing onHeightChange on a
+      // dead component.
+      unmount()
+      const removedMove = removeSpy.mock.calls.some(([type]) => type === 'mousemove')
+      const removedUp = removeSpy.mock.calls.some(([type]) => type === 'mouseup')
+      expect(removedMove).toBe(true)
+      expect(removedUp).toBe(true)
+      removeSpy.mockRestore()
     })
 
     it('resize handle has role=separator with proper aria attributes', () => {

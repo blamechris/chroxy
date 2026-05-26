@@ -62,12 +62,21 @@ export function SidebarPanelSlot({
   // a previously-selected view was removed). Falls back to null only when
   // there are zero registered views, which is a degenerate case but
   // shouldn't crash.
+  // Intentional behavior, NOT a bug — when a previously-registered view
+  // is removed in a future build, the user lands on the first registered
+  // view rather than seeing an empty body.
   const activeView =
     views.find((v) => v.id === selectedViewId) ?? views[0] ?? null
 
   const isDragging = useRef(false)
   const startY = useRef(0)
   const startHeight = useRef(height)
+  // #4304 review: hold the live drag listeners on refs so the unmount
+  // effect can detach them. Without this, starting a drag and then
+  // unmounting the slot (e.g. Cmd+B sidebar collapse) leaks document
+  // listeners that keep calling onHeightChange on a dead component.
+  const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null)
+  const dragUpRef = useRef<(() => void) | null>(null)
 
   const handleResizeMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -90,16 +99,20 @@ export function SidebarPanelSlot({
         isDragging.current = false
         document.removeEventListener('mousemove', onMouseMove)
         document.removeEventListener('mouseup', onMouseUp)
+        dragMoveRef.current = null
+        dragUpRef.current = null
       }
 
+      dragMoveRef.current = onMouseMove
+      dragUpRef.current = onMouseUp
       document.addEventListener('mousemove', onMouseMove)
       document.addEventListener('mouseup', onMouseUp)
     },
     [collapsed, height, maxHeight, minHeight, onHeightChange],
   )
 
-  // Keyboard resize support (decision #5 AC): arrow keys when the handle
-  // is focused move the panel boundary in 16px steps.
+  // Keyboard resize support: arrow keys when the handle is focused move
+  // the panel boundary in 16px steps.
   const handleResizeKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (collapsed) return
@@ -115,12 +128,61 @@ export function SidebarPanelSlot({
     [collapsed, height, maxHeight, minHeight, onHeightChange],
   )
 
-  // Cleanup any dangling listeners if the slot unmounts mid-drag.
+  // #4304 review: remove any live drag listeners on unmount. Refs hold
+  // the exact closures registered, so the removeEventListener calls
+  // match what was added.
   useEffect(() => {
     return () => {
       isDragging.current = false
+      if (dragMoveRef.current) {
+        document.removeEventListener('mousemove', dragMoveRef.current)
+        dragMoveRef.current = null
+      }
+      if (dragUpRef.current) {
+        document.removeEventListener('mouseup', dragUpRef.current)
+        dragUpRef.current = null
+      }
     }
   }, [])
+
+  // #4304 review: WAI-ARIA tablist keyboard navigation (ArrowLeft/Right,
+  // Home, End). Wires roving focus to the matching tab button so users
+  // arriving via Tab can move between tabs without a mouse. Trips today
+  // with only one tab registered but is cheap to add now so future view
+  // additions don't ship an a11y regression.
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
+
+  const handleTabKeyDown = useCallback(
+    (e: React.KeyboardEvent, currentIndex: number) => {
+      if (views.length === 0) return
+      let nextIndex: number | null = null
+      switch (e.key) {
+        case 'ArrowLeft':
+          nextIndex = (currentIndex - 1 + views.length) % views.length
+          break
+        case 'ArrowRight':
+          nextIndex = (currentIndex + 1) % views.length
+          break
+        case 'Home':
+          nextIndex = 0
+          break
+        case 'End':
+          nextIndex = views.length - 1
+          break
+        default:
+          return
+      }
+      e.preventDefault()
+      const target = views[nextIndex]
+      if (target) {
+        onSelectView(target.id)
+        // Move focus to the newly-selected tab so the user lands on
+        // tabIndex=0 next render.
+        tabRefs.current[nextIndex]?.focus()
+      }
+    },
+    [onSelectView, views],
+  )
 
   if (views.length === 0) return null
 
@@ -157,11 +219,12 @@ export function SidebarPanelSlot({
           role="tablist"
           aria-label="Sidebar panel views"
         >
-          {views.map((v) => {
+          {views.map((v, i) => {
             const selected = v.id === activeView?.id
             return (
               <button
                 key={v.id}
+                ref={(el) => { tabRefs.current[i] = el }}
                 type="button"
                 role="tab"
                 aria-selected={selected}
@@ -169,6 +232,7 @@ export function SidebarPanelSlot({
                 data-testid={`sidebar-panel-slot-tab-${v.id}`}
                 className={`sidebar-panel-slot-tab${selected ? ' selected' : ''}`}
                 onClick={() => onSelectView(v.id)}
+                onKeyDown={(e) => handleTabKeyDown(e, i)}
                 tabIndex={selected ? 0 : -1}
               >
                 {v.label}
