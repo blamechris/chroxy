@@ -1495,6 +1495,15 @@ export function App() {
 
     // Tool bubble
     if (storeMsg.type === 'tool_use' && storeMsg.toolUseId) {
+      // #4313 — singleton activity runs (a single trailing tool_use)
+      // bypass the ToolGroup path entirely: `chatToolGroupPayloads`
+      // only collapses contiguous runs of 2+ messages (see above,
+      // ~line 897). Pass the same `isTail` signal that ToolGroup uses
+      // (#4309) so the Chat tab's last item matches Output-tab
+      // chronology in the 1-tool case too. Without this, a turn
+      // shaped `summary text -> 1 trailing tool` skipped the #4309
+      // mitigation entirely and the trailing tool rendered collapsed
+      // while Output still showed it inline.
       return (
         <ToolBubble
           toolName={storeMsg.tool || 'Tool'}
@@ -1503,6 +1512,7 @@ export function App() {
           inputPartial={storeMsg.toolInputPartial}
           result={storeMsg.toolResult}
           serverName={storeMsg.serverName}
+          isTail={msg.id === chatTailMessageId}
         />
       )
     }

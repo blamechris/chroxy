@@ -49,6 +49,25 @@ export interface ToolBubbleProps {
    * ActivityIndicator chip and ToolGroup header.
    */
   serverName?: string
+  /**
+   * #4313 — when true, this bubble is the last item in the chat list
+   * (a trailing singleton tool_use, not a multi-tool group). The
+   * #4309 `ToolGroup` mitigation kept tail groups expanded so the
+   * Chat tab matched Output-tab chronology — but singleton activity
+   * runs bypass `ToolGroup` entirely (see `App.tsx:894-902`: groups
+   * only collapse into a `tool_group` row when there are 2+ messages
+   * worth collapsing). So a turn shaped `summary text -> 1 trailing
+   * tool` still showed the tool collapsed in Chat while Output
+   * rendered it inline. Mounting tail bubbles expanded closes that
+   * 1-tool gap.
+   *
+   * Initial-state only: read at mount via `useState`'s initializer so
+   * a later `isTail` flip to false (e.g. a response message lands
+   * after the user has already seen the bubble expanded) does NOT
+   * retroactively collapse it. Matches the `isTailRef` pattern in
+   * ToolGroup — see ToolGroup.tsx:181-187.
+   */
+  isTail?: boolean
 }
 
 // #4243: `getInputSummary` and `getPartialSummary` now live in
@@ -62,8 +81,16 @@ export interface ToolBubbleProps {
 // previously this file had a local copy that ignored `serverName`, so
 // MCP-tool headers could disagree with the ActivityIndicator chip.
 
-export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName }: ToolBubbleProps) {
-  const [expanded, setExpanded] = useState(false)
+export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false }: ToolBubbleProps) {
+  // #4313 — tail bubbles mount expanded so the singleton trailing-tool
+  // case matches the #4309 tail-group behavior. Initial-only via the
+  // lazy `useState` initializer: subsequent `isTail` flips do NOT
+  // retroactively re-open or close the bubble (the user may have
+  // already toggled it). Same shape as ToolGroup's
+  // `useState(isActive || isTail)` + `isTailRef` pattern — we don't
+  // need a ref here because ToolBubble has no `isActive` lifecycle to
+  // react to, so reading `isTail` only at mount is sufficient.
+  const [expanded, setExpanded] = useState(isTail)
   // #4081: prefer the structured `input` summary when present (server
   // gave us the full final input, e.g. via legacy non-streaming
   // providers or after `tool_result` lands). Otherwise fall back to the
