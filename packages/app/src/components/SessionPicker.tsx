@@ -11,7 +11,8 @@ import {
   Animated,
   LayoutChangeEvent,
 } from 'react-native';
-import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
+import type { SessionInfo, SessionHealth } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { getProviderInfo } from '../constants/providers';
