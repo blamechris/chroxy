@@ -15,6 +15,10 @@ let seqCounter = 0
 // on a single fixed id (which would cause React-key duplicates + stuck
 // pending tool_use rows because tool_result only patches the first match).
 let showTodosCounter = 0
+// #4260: per-trigger counter for the partial-summary fixture mirrors
+// the same pattern used by `show-todos` — repeated invocations need
+// unique ids so React keys + tool_result patching stay independent.
+let showBashPartialCounter = 0
 
 function send(ws, msg) {
   seqCounter++
@@ -246,6 +250,64 @@ wss.on('connection', (ws) => {
           })
           send(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
           send(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          break
+        }
+
+        // #4260: trigger phrase 'show-bash-partial' emits a streaming
+        // Bash `tool_use` with a `toolInputPartial` that exercises the
+        // mobile ToolBubble's #4243 field-priority extraction path on
+        // the real RN runtime. The collapsed bubble should surface the
+        // extracted `command` ("ls -la /tmp") rather than the truncated
+        // raw JSON ("{"command":"ls -la /t...").
+        //
+        // Mirrors the production wire path: `tool_start` carries the
+        // placeholder content (tool name) while `input` is empty, and
+        // the in-flight buffer is shipped via `tool_input_delta` chunks
+        // — see store-core/handlers/index.ts handleToolInputDelta which
+        // appends each `partialJson` onto `toolInputPartial`. Once the
+        // accumulated buffer reaches a parseable `}` the bubble's
+        // `getPartialSummary` flips from raw-JSON-slice to the extracted
+        // field. No `tool_result` is emitted — we want the bubble to
+        // stay in the streaming-collapsed state for the assertion.
+        if (text.trim() === 'show-bash-partial') {
+          send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+          showBashPartialCounter += 1
+          const toolUseId = `tu-bash-partial-mock-${showBashPartialCounter}`
+          const toolMessageId = `tool-bash-partial-mock-${showBashPartialCounter}`
+          send(ws, {
+            type: 'tool_start',
+            sessionId: 'mock-sess-1',
+            tool: 'Bash',
+            // Empty input — handleToolStart falls back to `content = tool`,
+            // which is the placeholder state the #4243 partial-priority
+            // path is meant to override.
+            input: {},
+            messageId: toolMessageId,
+            toolUseId,
+          })
+          // Stream the JSON in chunks. The accumulator concatenates each
+          // `partialJson` onto `toolInputPartial`. The final chunk closes
+          // the brace, making the buffer parseable for
+          // `getPartialSummary`. Mid-stream chunks remain unparseable —
+          // that's expected and is handled by `tryParseCompleteJson`'s
+          // parseability gate.
+          const partials = [
+            '{"comm',
+            'and":"',
+            'ls -la /tmp"}',
+          ]
+          for (const partialJson of partials) {
+            send(ws, {
+              type: 'tool_input_delta',
+              sessionId: 'mock-sess-1',
+              messageId: toolMessageId,
+              toolUseId,
+              partialJson,
+            })
+          }
+          // Do NOT emit `tool_result` — the assertion targets the
+          // streaming collapsed-preview render, not the result-arrived
+          // path. Leave the agent busy so the bubble stays in-flight.
           break
         }
 
