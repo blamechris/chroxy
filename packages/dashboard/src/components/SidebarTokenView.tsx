@@ -188,10 +188,16 @@ function InfoDisclosure({
   const [open, setOpen] = useState(false)
   const popoverId = useId()
   const containerRef = useRef<HTMLSpanElement | null>(null)
-  // Track whether the most recent open was via hover so a subsequent tap
-  // on the trigger toggles correctly without flickering on touch screens
-  // that synthesize mouseenter just before click.
-  const hoveredRef = useRef(false)
+  // Track whether the popover was opened via hover (mouse) so a subsequent
+  // mouseleave can close it. Click-opened popovers stay until explicit
+  // dismissal (Escape, click-outside, or second click).
+  const openedByHoverRef = useRef(false)
+  // Touch interactions on mobile browsers synthesize `mouseenter` -> `click`
+  // on a single tap. If we treat the synthesized `mouseenter` as a hover-open
+  // we'd flip-flop on the very tap that's supposed to surface the popover.
+  // Pointer Events expose `pointerType` so we can gate hover-open to genuine
+  // mouse pointers and let the click handler own the toggle on touch.
+  const pointerTypeRef = useRef<string>('mouse')
 
   // Click-outside + Escape handlers. Only attached when the popover is open
   // so we don't leak listeners on every mount of the sidebar.
@@ -202,17 +208,23 @@ function InfoDisclosure({
         setOpen(false)
       }
     }
-    function onMouseDown(e: MouseEvent) {
+    function onPointerDown(e: PointerEvent) {
       const target = e.target as Node | null
       if (!target) return
       if (containerRef.current && containerRef.current.contains(target)) return
       setOpen(false)
     }
     document.addEventListener('keydown', onKeyDown)
-    document.addEventListener('mousedown', onMouseDown)
+    // pointerdown covers both mouse and touch click-outside in one listener.
+    // Tests still use fireEvent.mouseDown which dispatches a MouseEvent that
+    // browsers also fire alongside pointerdown — so we listen to mousedown
+    // as well to stay compatible with the jsdom test harness.
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('mousedown', onPointerDown as EventListener)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
-      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('mousedown', onPointerDown as EventListener)
     }
   }, [open])
 
@@ -225,22 +237,35 @@ function InfoDisclosure({
         aria-label={ariaLabel}
         aria-expanded={open}
         aria-controls={open ? popoverId : undefined}
+        onPointerDown={(e) => {
+          // Record the pointer type so the upcoming click handler can decide
+          // whether to honor a hover-open it just triggered. Touch synthesizes
+          // mouseenter+click on the same tap, which would otherwise flip the
+          // popover closed immediately on touch devices (the bug we're
+          // fixing).
+          pointerTypeRef.current = e.pointerType || 'mouse'
+        }}
         onClick={() => {
-          // If hover already opened it, a click should close (toggle).
-          // Otherwise a tap opens it.
+          // On touch, the synthetic mouseenter may have just opened the
+          // popover. Ignore that and treat the click as the "open" action.
+          if (pointerTypeRef.current === 'touch' && openedByHoverRef.current) {
+            openedByHoverRef.current = false
+            setOpen(true)
+            return
+          }
           setOpen((prev) => !prev)
-          hoveredRef.current = false
+          openedByHoverRef.current = false
         }}
         onMouseEnter={() => {
-          hoveredRef.current = true
+          openedByHoverRef.current = true
           setOpen(true)
         }}
         onMouseLeave={() => {
           // Only auto-close on mouseleave if it was opened via hover —
           // a click-opened popover should stay until explicit dismissal.
-          if (hoveredRef.current) {
+          if (openedByHoverRef.current) {
             setOpen(false)
-            hoveredRef.current = false
+            openedByHoverRef.current = false
           }
         }}
       >

@@ -379,6 +379,39 @@ describe('SidebarTokenView (#4303 v0)', () => {
         // pointer moves away.
         expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
       })
+
+      // #4362 regression guard: touch browsers synthesize mouseenter then click
+      // on a single tap. Treating the synthetic mouseenter as a hover-open
+      // would flip the popover closed on the very tap that's supposed to
+      // surface it — re-introducing the issue this PR fixes. The trigger must
+      // open and stay open on a single tap.
+      it('opens on a single tap on touch devices (no flip-flop)', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        // Simulate a touch tap: pointerdown(touch) -> mouseenter -> click.
+        fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+        fireEvent.mouseEnter(trigger)
+        fireEvent.click(trigger)
+        // Popover should be open after the tap.
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+        expect(trigger.getAttribute('aria-expanded')).toBe('true')
+      })
+
+      // Second tap on touch should close (toggle behavior).
+      it('closes on a second tap on touch devices', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        // First tap to open.
+        fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+        fireEvent.mouseEnter(trigger)
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+
+        // Second tap should close.
+        fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+        fireEvent.click(trigger)
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+      })
     })
   })
 })
