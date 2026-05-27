@@ -230,5 +230,41 @@ describe('SidebarTokenView (#4303 v0)', () => {
       render(<SidebarTokenView sessions={sessions} />)
       expect(screen.queryByText(/Cost \(BYOK\)/i)).toBeNull()
     })
+
+    // #4348: visible-tokens-vs-billed-cost optical illusion.
+    // The sidebar shows user-visible token counts (new content per turn) but
+    // BYOK cost is computed from full per-call billed tokens (which include
+    // the re-sent context). Without an affordance, the apparent $/token rate
+    // looks wildly off Anthropic's published pricing.
+    it('explains the visible-vs-billed-tokens distinction on the cost badge', () => {
+      const sessions = [
+        makeSession('byok', 'claude-byok', makeUsage(12_800, 134_400, 87.48)),
+      ]
+      render(<SidebarTokenView sessions={sessions} />)
+      const costInfo = screen.getByTestId('sidebar-token-view-cost-info')
+      const tooltip = costInfo.getAttribute('title') ?? ''
+      // Mentions "billed" tokens specifically (the key distinction)
+      expect(tooltip.toLowerCase()).toContain('billed')
+      // Mentions Anthropic pricing (so it's clear cost is faithful to invoice)
+      expect(tooltip).toContain('Anthropic')
+      // Mentions the re-sent context (the cause of the gap)
+      expect(tooltip.toLowerCase()).toContain('context')
+    })
+
+    it('renders the info marker next to the cost badge when cost > 0', () => {
+      const sessions = [
+        makeSession('byok', 'claude-byok', makeUsage(1000, 500, 0.10)),
+      ]
+      render(<SidebarTokenView sessions={sessions} />)
+      expect(screen.getByTestId('sidebar-token-view-cost-info')).toBeInTheDocument()
+    })
+
+    it('omits the info marker when no cost row is shown', () => {
+      const sessions = [
+        makeSession('sub', 'claude-sdk', makeUsage(1000, 500, 0)),
+      ]
+      render(<SidebarTokenView sessions={sessions} />)
+      expect(screen.queryByTestId('sidebar-token-view-cost-info')).toBeNull()
+    })
   })
 })

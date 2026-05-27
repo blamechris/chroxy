@@ -5517,11 +5517,12 @@ describe('handleToolInputDelta', () => {
     // Cap defends against adversarial / runaway tool input that would
     // otherwise grow client `messages` state without bound. The cap value
     // (1 MiB) is exported as `MAX_TOOL_INPUT_PARTIAL_LEN`. When the buffer
-    // would exceed the cap, further chunks are truncated and a literal
-    // `...[truncated]` marker is appended so the UI can show the user
-    // input was cut off. The marker is appended exactly once — subsequent
-    // deltas after truncation are dropped silently. See issue #4241.
-    describe('toolInputPartial length cap (#4241)', () => {
+    // would exceed the cap, further chunks are dropped and the bubble's
+    // `toolInputPartialTruncated` boolean is set to `true` exactly once
+    // (#4263) so the UI can show the user input was cut off — subsequent
+    // deltas after truncation are dropped silently. See issues #4241
+    // and #4263.
+    describe('toolInputPartial length cap (#4241, #4263)', () => {
       it('exposes MAX_TOOL_INPUT_PARTIAL_LEN equal to 1 MiB', () => {
         expect(MAX_TOOL_INPUT_PARTIAL_LEN).toBe(1024 * 1024)
       })
@@ -5547,9 +5548,10 @@ describe('handleToolInputDelta', () => {
           MAX_TOOL_INPUT_PARTIAL_LEN - 1024,
         )
         expect(updated[0]!.toolInputPartial!.endsWith('[truncated]')).toBe(false)
+        expect(updated[0]!.toolInputPartialTruncated).toBeUndefined()
       })
 
-      it('truncates and appends the marker when a chunk pushes past the cap', () => {
+      it('caps the buffer and sets toolInputPartialTruncated when a chunk pushes past the cap', () => {
         const existing = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN - 10)
         const seeded: ChatMessage[] = [
           {
@@ -5568,14 +5570,12 @@ describe('handleToolInputDelta', () => {
         )
         const updated = out!.applyTo(seeded)
         const buf = updated[0]!.toolInputPartial!
-        // First MAX_TOOL_INPUT_PARTIAL_LEN chars are the cap-bounded slice
-        // (existing 'a' run + first 10 'b's), followed by exactly one
-        // `...[truncated]` marker.
-        expect(buf.length).toBe(MAX_TOOL_INPUT_PARTIAL_LEN + '...[truncated]'.length)
-        expect(buf.endsWith('...[truncated]')).toBe(true)
-        expect(buf.slice(0, MAX_TOOL_INPUT_PARTIAL_LEN)).toBe(
-          existing + 'b'.repeat(10),
-        )
+        // #4263: buffer is the cap-bounded slice (existing 'a' run + first
+        // 10 'b's) — NO in-band suffix marker, and length equals the cap.
+        expect(buf.length).toBe(MAX_TOOL_INPUT_PARTIAL_LEN)
+        expect(buf.endsWith('...[truncated]')).toBe(false)
+        expect(buf).toBe(existing + 'b'.repeat(10))
+        expect(updated[0]!.toolInputPartialTruncated).toBe(true)
       })
 
       it('truncates exactly at the cap when the boundary is hit precisely', () => {
@@ -5597,19 +5597,16 @@ describe('handleToolInputDelta', () => {
         )
         const updated = out!.applyTo(seeded)
         const buf = updated[0]!.toolInputPartial!
-        expect(buf.endsWith('...[truncated]')).toBe(true)
         // 5 'b's keep buffer at the cap; the 6th would overflow.
-        expect(buf.slice(0, MAX_TOOL_INPUT_PARTIAL_LEN)).toBe(
-          existing + 'b'.repeat(5),
-        )
+        expect(buf).toBe(existing + 'b'.repeat(5))
+        expect(buf.length).toBe(MAX_TOOL_INPUT_PARTIAL_LEN)
+        expect(updated[0]!.toolInputPartialTruncated).toBe(true)
       })
 
-      it('does not append the marker twice across subsequent deltas after truncation', () => {
-        // After truncation, the buffer ends with `...[truncated]`, which
-        // is > cap. A following delta must not append a second marker or
+      it('drops further deltas idempotently once toolInputPartialTruncated is set', () => {
+        // After truncation, the flag is set. A following delta must not
         // accumulate further bytes (idempotent terminal state).
-        const truncatedMarker = '...[truncated]'
-        const cappedBuf = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN) + truncatedMarker
+        const cappedBuf = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN)
         const seeded: ChatMessage[] = [
           {
             id: 'msg-2',
@@ -5617,6 +5614,7 @@ describe('handleToolInputDelta', () => {
             content: 'Bash',
             toolUseId: 'tu-1',
             toolInputPartial: cappedBuf,
+            toolInputPartialTruncated: true,
             timestamp: 2,
           },
         ]
@@ -5625,14 +5623,45 @@ describe('handleToolInputDelta', () => {
           'sess-active',
         )
         const updated = out!.applyTo(seeded)
-        const buf = updated[0]!.toolInputPartial!
-        expect(buf).toBe(cappedBuf)
+        // applyTo returns the same reference (no clone) on no-op.
+        expect(updated).toBe(seeded)
+        expect(updated[0]!.toolInputPartial).toBe(cappedBuf)
+        expect(updated[0]!.toolInputPartialTruncated).toBe(true)
+      })
+
+      // #4263 backwards compatibility: a client may rehydrate state
+      // written by a pre-#4263 client where the legacy in-band
+      // `...[truncated]` suffix is the only terminal-state signal (no
+      // boolean). The handler must still treat that buffer as terminal
+      // and drop further deltas.
+      it('drops further deltas when the legacy suffix marker is present without the boolean (backwards compat)', () => {
+        const legacyMarker = '...[truncated]'
+        const cappedBuf = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN) + legacyMarker
+        const seeded: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            toolInputPartial: cappedBuf,
+            // NB: no toolInputPartialTruncated — this is the pre-#4263 shape.
+            timestamp: 2,
+          },
+        ]
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson: 'more data' },
+          'sess-active',
+        )
+        const updated = out!.applyTo(seeded)
+        expect(updated).toBe(seeded)
+        expect(updated[0]!.toolInputPartial).toBe(cappedBuf)
       })
 
       it('caps cumulative growth across many small chunks (5 MiB of input)', () => {
         // Realistic adversarial pattern: server emits many small chunks
         // that together would push past the cap. Verify the buffer never
-        // grows beyond cap + marker, regardless of arrival pattern.
+        // grows beyond cap, regardless of arrival pattern, and the
+        // truncation boolean is set exactly once.
         const chunk = 'x'.repeat(64 * 1024) // 64 KiB chunks
         const numChunks = 80 // ~5 MiB total
         let messages: ChatMessage[] = [
@@ -5652,10 +5681,9 @@ describe('handleToolInputDelta', () => {
           messages = out!.applyTo(messages)
         }
         const buf = messages[0]!.toolInputPartial!
-        expect(buf.length).toBeLessThanOrEqual(
-          MAX_TOOL_INPUT_PARTIAL_LEN + '...[truncated]'.length,
-        )
-        expect(buf.endsWith('...[truncated]')).toBe(true)
+        expect(buf.length).toBeLessThanOrEqual(MAX_TOOL_INPUT_PARTIAL_LEN)
+        expect(buf.endsWith('...[truncated]')).toBe(false)
+        expect(messages[0]!.toolInputPartialTruncated).toBe(true)
       })
     })
   })

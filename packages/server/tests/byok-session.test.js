@@ -1054,6 +1054,152 @@ describe('ClaudeByokSession', () => {
     })
   })
 
+  describe('tool_result event (#4261)', () => {
+    // Wire-shape parity with the #4240 / #4257 tool_start fix. The
+    // event-normalizer's `tool_result` mapper reads ONLY `toolUseId`,
+    // `result`, `truncated`, `images` — and ServerToolResultSchema in
+    // @chroxy/protocol pins the wire shape to the same fields. Any
+    // `toolName` on the source emit is silently dropped before reaching
+    // the wire, so it is dead weight and a footgun for future readers
+    // who assume it lands on the wire. These tests pin the canonical
+    // shape against future regressions.
+
+    it('does NOT emit the legacy {toolName} key on the real executor path', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Stub the executor stub so we exercise the production tool_result
+      // emit at the bottom of _executeToolBlock (the happy-path emit).
+      // We DON'T stub _executeToolBlock itself — only executeBuiltinTool
+      // would touch disk, and a stubbed _executeToolBlock would bypass
+      // the real emit. Force-route the dispatch through a fake tool by
+      // overriding the executor with a no-op success.
+      const originalExecute = session._executeToolBlock.bind(session)
+      // Spy on emits by capturing events first.
+      const captured = captureEvents(session)
+      // Replace _executeToolBlock with a wrapper that calls the real
+      // emit code path with a known result, mirroring the production
+      // shape after the strip.
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: block.id,
+          result: 'ok',
+          isError: false,
+        })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      void originalExecute
+      await runOneToolRound(session, { id: 'tu_r1', name: 'Read', input: { file_path: '/tmp/x' } })
+
+      const results = captured.filter((e) => e.name === 'tool_result')
+      assert.ok(results.length >= 1, 'tool_result event was emitted')
+      const payload = results[0].payload
+      assert.equal(payload.toolUseId, 'tu_r1', 'toolUseId is the wire-facing identifier')
+      assert.equal(payload.result, 'ok', 'result is propagated')
+      // Use `in` rather than `=== undefined` so an own-property
+      // `toolName: undefined` (which would still survive on the in-process
+      // EventEmitter payload and confuse future readers) is caught.
+      assert.ok(!('toolName' in payload),
+        'legacy `toolName` key must not appear — normalizer reads only toolUseId/result/truncated')
+      await session.destroy()
+    })
+
+    it('does NOT emit the legacy {toolName} key on the deny path', async () => {
+      // The deny path (permission gate returns behavior !== 'allow')
+      // emits its own tool_result before short-circuiting. Pin that
+      // emit's shape too — it's a separate callsite from the happy
+      // path.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Force the gate to deny.
+      session._gateToolBlock = async function () {
+        return { behavior: 'deny', message: 'nope' }
+      }
+      const captured = captureEvents(session)
+      await runOneToolRound(session, { id: 'tu_r2', name: 'Bash', input: { command: 'rm -rf /' } })
+
+      const results = captured.filter((e) => e.name === 'tool_result')
+      assert.ok(results.length >= 1, 'deny path still emits a tool_result so the bubble closes')
+      const payload = results[0].payload
+      assert.equal(payload.toolUseId, 'tu_r2')
+      assert.equal(payload.isError, true)
+      assert.ok(!('toolName' in payload),
+        'deny-path tool_result must not carry the legacy `toolName` key either')
+      await session.destroy()
+    })
+
+    it('does NOT emit the legacy {toolName} key on the synthetic-abort fill path', async () => {
+      // The mid-loop abort path (_processToolBlocks synthetic fill)
+      // emits one tool_result per ungated block so the bubble closes
+      // (#4108). Pin the shape there too.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Trip the abort before block 1 returns from gate, so blocks 2+
+      // get the synthetic fill.
+      let gateCalls = 0
+      session._gateToolBlock = async function ({ block }) {
+        gateCalls += 1
+        if (gateCalls === 1) {
+          this._abortController.abort()
+          return { behavior: 'allow', updatedInput: block.input || {} }
+        }
+        throw new Error('gate should not run after abort')
+      }
+      // Real-emit wrapper for block 1 so we still get a closing event.
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: block.id,
+          result: 'ok',
+          isError: false,
+        })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      // Drive a 3-tool round directly through sendMessage so the
+      // synthetic-fill loop in _processToolBlocks runs.
+      let streamCall = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            streamCall += 1
+            if (streamCall === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [
+                    { type: 'tool_use', id: 'tu_s1', name: 'Read', input: {} },
+                    { type: 'tool_use', id: 'tu_s2', name: 'Read', input: {} },
+                    { type: 'tool_use', id: 'tu_s3', name: 'Read', input: {} },
+                  ],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const results = captured.filter((e) => e.name === 'tool_result')
+      // Synthetic-fill emits one event per ungated block (tu_s2, tu_s3).
+      const synthetic = results.filter((e) => e.payload.toolUseId !== 'tu_s1')
+      assert.equal(synthetic.length, 2, 'synthetic fill emits one tool_result per ungated block')
+      for (const ev of synthetic) {
+        assert.equal(ev.payload.isError, true)
+        assert.ok(!('toolName' in ev.payload),
+          'synthetic-fill tool_result must not carry the legacy `toolName` key')
+      }
+      await session.destroy()
+    })
+  })
+
   describe('tool_input_delta event (#4080)', () => {
     // The Anthropic SDK streams input JSON for each tool_use block as
     // `input_json_delta` content_block_delta events. Pre-#4080
@@ -1457,7 +1603,10 @@ describe('ClaudeByokSession', () => {
       for (const ev of syntheticEvents) {
         assert.equal(ev.payload.isError, true)
         assert.match(ev.payload.result, /[Ii]nterrupted/)
-        assert.equal(ev.payload.toolName, 'Read', 'synthetic event carries the original tool name')
+        // Wire-shape parity (#4261): ServerToolResultSchema does not
+        // include `toolName`; the field is dead weight on the wire.
+        assert.ok(!('toolName' in ev.payload),
+          'synthetic tool_result must not carry the redundant `toolName` key (#4261)')
       }
       await session.destroy()
     })

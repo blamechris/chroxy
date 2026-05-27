@@ -724,7 +724,6 @@ export class ClaudeByokSession extends BaseSession {
         this.emit('tool_result', {
           messageId,
           toolUseId: remaining.id,
-          toolName: remaining.name,
           result: interrupted,
           isError: true,
         })
@@ -832,7 +831,6 @@ export class ClaudeByokSession extends BaseSession {
       this.emit('tool_result', {
         messageId,
         toolUseId,
-        toolName,
         result: msg,
         isError: true,
       })
@@ -859,7 +857,6 @@ export class ClaudeByokSession extends BaseSession {
     this.emit('tool_result', {
       messageId,
       toolUseId,
-      toolName,
       result: content,
       isError,
     })

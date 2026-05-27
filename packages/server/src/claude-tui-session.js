@@ -338,7 +338,33 @@ export class ClaudeTuiSession extends BaseSession {
   // ~1 ms per char makes the bytes look like typed input. A 600-char
   // prompt costs ~600 ms of one-time latency before claude starts —
   // imperceptible during interactive use.
+  //
+  // The loop iterates by code-point (`for (const ch of text)`), not by
+  // UTF-16 code unit, so each non-BMP char (emoji, supplementary CJK)
+  // is one write of a 2-code-unit string and writes its 4 UTF-8 bytes
+  // in a single tick. An emoji-heavy prompt therefore arrives at ~4×
+  // the byte-rate of ASCII, still well under any reasonable bulk-paste
+  // threshold given the 1ms throttle. If paste-detection symptoms ever
+  // surface for emoji-only prompts, decompose to UTF-8 bytes (or
+  // graphemes) before the loop (#4274).
   static get PROMPT_CHAR_DELAY_MS() { return 1 }
+
+  // #4276: per-char throttling is O(N) blocking latency. For huge
+  // prompts (pasted file contents, JSON dumps) the cumulative cost
+  // dominates the turn — at ~1ms per code-point a 100K-char prompt
+  // would block sendMessage for over a minute with no user-visible
+  // progress. Above this threshold the helper falls back to a single
+  // bulk `_term.write(text)`, accepting that very large prompts may
+  // trip claude TUI's paste detector. That symptom (visible "Pasted
+  // text" placeholder) is strictly better than a multi-minute silent
+  // hang, and small/medium prompts — the typical interactive path —
+  // are unaffected.
+  //
+  // 8192 was chosen as a generous interactive ceiling: ~8s worst case
+  // even with a 1ms-floor event loop, and well above any realistic
+  // hand-typed or single-paragraph prompt. Adjust if the dirty-test
+  // stub (#4271) measures the actual paste-detector threshold.
+  static get MAX_THROTTLED_CHARS() { return 8192 }
 
   // Path to the per-PID session file claude TUI maintains. The file
   // surfaces a `status` field (busy/idle/...) updated by claude itself
@@ -960,12 +986,19 @@ export class ClaudeTuiSession extends BaseSession {
    * PROMPT_CHAR_DELAY_MS between each, wrapped in bracketed-paste-disable
    * / re-enable so claude TUI's paste detector accepts it as typed input
    * (#4269). Returns true on completion, false if `_activeTurn.aborted`
-   * tripped mid-write (in which case `onAbort` was called).
+   * or `_ptyExited` (#4275) tripped mid-write — in either case `onAbort`
+   * was called.
    *
    * Used by both sendMessage's prompt write and respondToQuestion's
    * answer write (#4278). The control sequences (\x1b[?2004l/h, \r) are
    * single writes — only the visible text is throttled, since that's
    * what claude's heuristic measures.
+   *
+   * Above MAX_THROTTLED_CHARS the helper switches to a single bulk
+   * `_term.write(text)` (#4276). Per-char throttling is O(N) blocking
+   * latency and unbounded for huge prompts (e.g. pasted file contents)
+   * — the bulk path may trip claude's paste detector but that's
+   * preferable to multi-minute silent hangs.
    *
    * @param {string} text — the text to write (no trailing CR; \r appended)
    * @param {object} [opts]
@@ -976,8 +1009,31 @@ export class ClaudeTuiSession extends BaseSession {
   async _writePtyTextThrottled(text, { onAbort } = {}) {
     this._term.write('\x1b[?2004l')
     try {
+      // #4276: huge prompts bypass the throttle. Counting code-points
+      // (not UTF-16 units) keeps the threshold consistent with how the
+      // loop iterates — an emoji-only 5000-char string [...].length is
+      // 5000, not 10000.
+      const codePointCount = [...text].length
+      if (codePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
+        // Re-check the turn lifecycle exactly once before the bulk
+        // write — same shape as the loop's per-iter guards, so a
+        // caller that aborted between scheduling and execution doesn't
+        // flood a torn-down PTY with a huge payload.
+        if (this._activeTurn?.aborted || this._ptyExited) {
+          onAbort?.()
+          return false
+        }
+        this._term.write(text)
+        this._term.write('\r')
+        return true
+      }
       for (const ch of text) {
-        if (this._activeTurn?.aborted) {
+        // #4275: re-check _ptyExited inside the loop, mirroring the
+        // pre-write guard in sendMessage. A long prompt + a mid-write
+        // PTY crash previously relied on the next _term.write throwing
+        // to bubble up — correct but not the explicit-state-machine
+        // pattern the rest of this file uses.
+        if (this._activeTurn?.aborted || this._ptyExited) {
           onAbort?.()
           return false
         }
