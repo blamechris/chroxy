@@ -19,7 +19,7 @@
  * No third-party library — the menu is a `<ul>` with click handlers and a
  * single `useEffect` that wires the dismiss listeners.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export interface ContextMenuItem {
   /** Stable id used as React key and `data-testid` suffix. */
@@ -56,6 +56,15 @@ export function SessionContextMenu({
   onDismiss,
 }: SessionContextMenuProps) {
   const menuRef = useRef<HTMLUListElement>(null)
+  // #4248: per-item refs so arrow-key handlers can move focus between
+  // <li> nodes without round-tripping through state. A ref array is
+  // cheaper than reading from the DOM by selector and avoids the
+  // testid-as-API coupling that querySelector would introduce.
+  const itemRefs = useRef<(HTMLLIElement | null)[]>([])
+  // #4248: roving tabindex — exactly one item is tab-focusable at a time
+  // so external Tab key presses don't have to walk through every menu
+  // entry, per WAI-ARIA Authoring Practices for the menu role.
+  const [focusedIndex, setFocusedIndex] = useState(0)
   const visibleItems = items.filter(i => typeof i.onClick === 'function')
 
   // Adjust position so the menu stays inside the viewport. We can't know the
@@ -108,7 +117,51 @@ export function SessionContextMenu({
     }
   }, [onDismiss])
 
+  // #4248: focus the first item on mount and restore focus to whatever
+  // element triggered the menu (typically the right-clicked sidebar row)
+  // when the menu unmounts. This is the focus-return half of the WAI-ARIA
+  // menu pattern and keeps keyboard-only users oriented after Esc.
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null
+    const first = itemRefs.current[0]
+    if (first) first.focus()
+    return () => {
+      // Guard against the trigger having been removed from the DOM (the
+      // sidebar row might be unmounted in another effect during the same
+      // render cycle). focus() on a detached node is a no-op but the
+      // `isConnected` check makes the intent explicit.
+      if (previouslyFocused && previouslyFocused.isConnected) {
+        previouslyFocused.focus()
+      }
+    }
+    // Intentionally empty deps — we want this to run once on mount, with
+    // the cleanup running once on unmount. x/y changes don't re-focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // #4248: when the focused index changes (via arrow keys / Home / End),
+  // imperatively focus the matching DOM node. We can't rely on the
+  // tabIndex={0} attribute alone — that only governs Tab traversal, not
+  // programmatic focus.
+  useEffect(() => {
+    const target = itemRefs.current[focusedIndex]
+    if (target && document.activeElement !== target) {
+      target.focus()
+    }
+  }, [focusedIndex])
+
   if (visibleItems.length === 0) return null
+
+  // #4248: activate the current item the same way the click handler does
+  // (try/finally so a throwing handler still dismisses the menu). Shared
+  // by Enter / Space and the mouse click path.
+  const activate = (item: ContextMenuItem) => {
+    try {
+      item.onClick?.()
+    } finally {
+      onDismiss()
+    }
+  }
 
   return (
     <ul
@@ -123,21 +176,63 @@ export function SessionContextMenu({
         zIndex: 1000,
       }}
     >
-      {visibleItems.map(item => (
+      {visibleItems.map((item, index) => (
         <li
           key={item.id}
+          ref={(node) => {
+            itemRefs.current[index] = node
+          }}
           role="menuitem"
+          // #4248: roving tabindex — only the currently-focused item is in
+          // the Tab order. The rest are programmatically focusable via the
+          // arrow-key handler but won't be reached by a stray Tab press
+          // from outside the menu.
+          tabIndex={focusedIndex === index ? 0 : -1}
           data-testid={`session-context-menu-item-${item.id}`}
           className={`session-context-menu-item${item.destructive ? ' destructive' : ''}${item.separatorAbove ? ' separator-above' : ''}`}
-          onClick={() => {
-            // #4045 review: try/finally so a throwing item handler doesn't
-            // leave the menu stuck open. The error still propagates to the
-            // React error boundary / window.onerror — we only guarantee
-            // dismissal here.
-            try {
-              item.onClick?.()
-            } finally {
-              onDismiss()
+          onClick={() => activate(item)}
+          onKeyDown={(e) => {
+            switch (e.key) {
+              case 'ArrowDown': {
+                e.preventDefault()
+                e.stopPropagation()
+                // Wrap-around: last → first.
+                setFocusedIndex((i) => (i + 1) % visibleItems.length)
+                break
+              }
+              case 'ArrowUp': {
+                e.preventDefault()
+                e.stopPropagation()
+                // Wrap-around: first → last.
+                setFocusedIndex((i) => (i - 1 + visibleItems.length) % visibleItems.length)
+                break
+              }
+              case 'Home': {
+                e.preventDefault()
+                e.stopPropagation()
+                setFocusedIndex(0)
+                break
+              }
+              case 'End': {
+                e.preventDefault()
+                e.stopPropagation()
+                setFocusedIndex(visibleItems.length - 1)
+                break
+              }
+              case 'Enter':
+              case ' ': {
+                // Both Enter and Space activate the focused item — matches
+                // the WAI-ARIA menuitem pattern. preventDefault on Space
+                // avoids the default scroll-the-page behaviour.
+                e.preventDefault()
+                e.stopPropagation()
+                activate(item)
+                break
+              }
+              // Escape is handled by the document-level listener so it
+              // still fires when focus has drifted away from the menu.
+              default:
+                break
             }
           }}
         >
