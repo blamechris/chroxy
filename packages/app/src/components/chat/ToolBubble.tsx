@@ -185,7 +185,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
           <Text selectable style={styles.toolContentExpanded}>{content}</Text>
         )
       ) : (
-        <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
+        <Text
+          testID="tool-collapsed-preview"
+          style={styles.toolContentCollapsed}
+          numberOfLines={1}
+        >{preview}</Text>
       )}
     </TouchableOpacity>
   );
