@@ -866,6 +866,13 @@
   cursor: help;
 }
 
+.sidebar-token-view-info {
+  color: var(--text-muted);
+  cursor: help;
+  font-size: 10px;
+  margin-left: 2px;
+}
+
 .sidebar-token-view-provider-cost {
   color: var(--text-muted);
   font-size: 11px;
