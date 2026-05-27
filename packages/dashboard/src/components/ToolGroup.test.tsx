@@ -465,4 +465,54 @@ describe('ToolGroup', () => {
       expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
     })
   })
+
+  // #4259 — input summary derivation must route through the shared
+  // `@chroxy/store-core` helper (single source of truth for the
+  // command → file_path → path → description priority), so a tweak to
+  // the priority order or fallback semantics in store-core propagates
+  // here automatically. These checks pin the observable behaviour of
+  // the shared helper at the dashboard surface — they fail if a future
+  // contributor reintroduces a local copy whose semantics drift.
+  describe('input summary uses shared getInputSummary (#4259)', () => {
+    it('prefers command over file_path/path/description', () => {
+      const messages = [
+        tool('1', 'Bash', {
+          toolInput: {
+            command: 'ls -la',
+            file_path: '/etc/hosts',
+            path: '/tmp',
+            description: 'list',
+          },
+        }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const entry = screen.getByTestId('tool-group-entry-1')
+      expect(entry).toHaveTextContent('ls -la')
+      expect(entry).not.toHaveTextContent('/etc/hosts')
+      expect(entry).not.toHaveTextContent('/tmp')
+      expect(entry).not.toHaveTextContent('list')
+    })
+
+    it('falls through to file_path, then path, then description', () => {
+      const messages = [
+        tool('1', 'Read', { toolInput: { file_path: '/etc/hosts' } }),
+        tool('2', 'Glob', { toolInput: { path: '/tmp' } }),
+        tool('3', 'Task', { toolInput: { description: 'investigate' } }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('/etc/hosts')
+      expect(screen.getByTestId('tool-group-entry-2')).toHaveTextContent('/tmp')
+      expect(screen.getByTestId('tool-group-entry-3')).toHaveTextContent('investigate')
+    })
+
+    it('truncates a long string-shaped command to 100 chars', () => {
+      const long = 'x'.repeat(200)
+      const messages = [tool('1', 'Bash', { toolInput: { command: long } })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const input = screen
+        .getByTestId('tool-group-entry-1')
+        .querySelector('.tool-group-entry-input')
+      expect(input?.textContent).toHaveLength(100)
+    })
+  })
 })
