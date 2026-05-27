@@ -176,7 +176,26 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
         </div>
         {agg.totals.costUsd > 0 && (
           <div className="sidebar-token-view-aggregate-row">
-            <span className="sidebar-token-view-label">Cost (BYOK)</span>
+            <span className="sidebar-token-view-label">
+              Cost (BYOK){' '}
+              <span
+                className="sidebar-token-view-info"
+                data-testid="sidebar-token-view-cost-info"
+                aria-label="Why doesn't this cost match the visible token count?"
+                title={
+                  // #4348: the optical illusion is that visible tokens ÷ cost
+                  // yields a rate nowhere near Anthropic's published pricing.
+                  // Spell out the gap between visible and billed tokens here.
+                  'Token counts above are user-visible (new content per turn). ' +
+                  'BYOK cost is computed from billed tokens, which include the ' +
+                  'full conversation context re-sent on every API call — so ' +
+                  'long agentic sessions bill far more input than the visible ' +
+                  'count suggests. Pricing follows Anthropic’s published rates.'
+                }
+              >
+                {'ⓘ'}
+              </span>
+            </span>
             <span className="sidebar-token-view-value-secondary">
               {formatCostBadge(agg.totals.costUsd)}
             </span>
