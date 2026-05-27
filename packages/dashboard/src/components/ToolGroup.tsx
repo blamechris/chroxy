@@ -15,6 +15,7 @@ import {
   formatToolBreakdown,
   formatToolName,
   tryParseCompleteJson,
+  getInputSummary,
 } from '@chroxy/store-core'
 
 export interface ToolGroupProps {
@@ -25,19 +26,6 @@ export interface ToolGroupProps {
   // auto-collapse so trailing tool runs stay visible (matching the Output
   // tab's chronology) until the user explicitly collapses them.
   isTail?: boolean
-}
-
-function getInputSummary(input: ChatMessage['toolInput']): string {
-  if (!input) return ''
-  if (typeof input === 'string') return String(input).slice(0, 100)
-  const summary =
-    (input.command as string) ||
-    (input.file_path as string) ||
-    (input.path as string) ||
-    (input.description as string) ||
-    ''
-  if (typeof summary !== 'string') return JSON.stringify(summary).slice(0, 100)
-  return summary.slice(0, 100)
 }
 
 function formatInputForDetail(input: ChatMessage['toolInput']): string {
