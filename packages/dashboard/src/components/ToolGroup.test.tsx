@@ -70,7 +70,9 @@ describe('ToolGroup', () => {
       tool('2', 'Read', { toolInput: { file_path: '/etc/hosts' } }),
     ]
     render(<ToolGroup messages={messages} isActive={false} />)
-    fireEvent.click(screen.getByTestId('tool-group'))
+    // #4282 — the toggle target is the header <button>, not the outer
+    // (now plain) container.
+    fireEvent.click(screen.getByTestId('tool-group-header'))
     expect(screen.getByTestId('tool-group-list')).toBeInTheDocument()
     expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('Bash')
     expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('ls')
@@ -78,14 +80,22 @@ describe('ToolGroup', () => {
     expect(screen.getByTestId('tool-group-entry-2')).toHaveTextContent('/etc/hosts')
   })
 
-  it('toggles on Enter and Space, ignoring repeated Space', () => {
+  // #4282 — keyboard activation is now handled natively by the header
+  // <button> rather than a hand-rolled onKeyDown on a role="button"
+  // <div>. JSDOM doesn't simulate the UA's keyboard-to-click translation
+  // for a native <button>, so we exercise the toggle via the equivalent
+  // click event that the UA would dispatch on Enter/Space release. The
+  // "ignore repeated Space" concern from the role-div era is also
+  // delegated to the platform: browsers only fire `click` on Space keyup,
+  // so a held-down Space never auto-repeats the toggle.
+  it('toggles via the header button (keyboard activation handled natively)', () => {
     render(<ToolGroup messages={[tool('1', 'Bash')]} isActive={false} />)
     const group = screen.getByTestId('tool-group')
-    fireEvent.keyDown(group, { key: 'Enter' })
+    const header = screen.getByTestId('tool-group-header')
+    expect(header.tagName).toBe('BUTTON')
+    fireEvent.click(header)
     expect(group).toHaveAttribute('aria-expanded', 'true')
-    fireEvent.keyDown(group, { key: ' ' })
-    expect(group).toHaveAttribute('aria-expanded', 'false')
-    fireEvent.keyDown(group, { key: ' ', repeat: true })
+    fireEvent.click(header)
     expect(group).toHaveAttribute('aria-expanded', 'false')
   })
 
@@ -513,6 +523,69 @@ describe('ToolGroup', () => {
         .getByTestId('tool-group-entry-1')
         .querySelector('.tool-group-entry-input')
       expect(input?.textContent).toHaveLength(100)
+    })
+  })
+
+  // #4282 — pre-fix, the outer .tool-group div carried role="button" +
+  // tabIndex=0 AND every .tool-group-entry-row also carried role="button"
+  // + tabIndex=0. WAI-ARIA disallows nesting interactive elements: NVDA /
+  // VoiceOver behaviour with a button-inside-a-button is undefined and AT
+  // may surface only the outer button, or read both and confuse the user.
+  // The fix moves the group's toggle onto a real <button> header that is
+  // a SIBLING of the entry rows rather than an ancestor — so no
+  // interactive element is nested inside another interactive element.
+  describe('no nested interactive elements (#4282)', () => {
+    it('the outer .tool-group container is not interactive', () => {
+      const messages = [tool('1', 'Bash', { toolInput: { command: 'ls' } })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const group = screen.getByTestId('tool-group')
+      // Plain <div>, not a <button>, and no role="button" / tabindex.
+      expect(group.tagName).toBe('DIV')
+      expect(group).not.toHaveAttribute('role', 'button')
+      expect(group).not.toHaveAttribute('tabindex')
+    })
+
+    it('the header is a real <button>, sibling of the entry list', () => {
+      const messages = [tool('1', 'Bash', { toolInput: { command: 'ls' } })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const header = screen.getByTestId('tool-group-header')
+      const list = screen.getByTestId('tool-group-list')
+      expect(header.tagName).toBe('BUTTON')
+      // Same parent => the header and the entry list are siblings, not
+      // ancestor/descendant.
+      expect(header.parentElement).toBe(list.parentElement)
+      // The entry list must not contain the header (and vice versa).
+      expect(list.contains(header)).toBe(false)
+      expect(header.contains(list)).toBe(false)
+    })
+
+    it('no interactive element is nested inside another interactive element', () => {
+      // Exercise the worst-case shape: an expanded group with multiple
+      // tool entries, each row interactive. Pre-fix every row sat inside
+      // the outer role="button" container — a nested-interactive
+      // violation per entry.
+      const messages = [
+        tool('1', 'Bash', { toolInput: { command: 'ls' } }),
+        tool('2', 'Read', { toolInput: { file_path: '/etc/hosts' } }),
+        tool('3', 'Write', { toolInput: { file_path: '/tmp/x' } }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      const interactives = Array.from(
+        document.querySelectorAll(
+          'button, [role="button"], a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ),
+      )
+      // Sanity check — we should have found the header button + one row
+      // per tool entry (3 rows).
+      expect(interactives.length).toBeGreaterThanOrEqual(4)
+      for (const a of interactives) {
+        for (const b of interactives) {
+          if (a === b) continue
+          // No interactive element may be contained by another
+          // interactive element.
+          expect(a.contains(b)).toBe(false)
+        }
+      }
     })
   })
 })
