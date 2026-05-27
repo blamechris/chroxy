@@ -848,20 +848,28 @@ describe('ClaudeTuiSession', () => {
       await session.sendMessage(prompt)
 
       // The fix issues N+3 writes: one for the bracketed-paste-disable
-      // prefix, one per prompt character, one for the \r submit, and
+      // prefix, one per prompt code-point, one for the \r submit, and
       // one for the bracketed-paste re-enable suffix. The throttle
       // between char writes is what actually defeats claude's paste
       // detector (which fires on byte-arrival rate, not mode 2004).
-      assert.equal(writes.length, prompt.length + 3,
-        `expected ${prompt.length + 3} writes (disable + N chars + \\r + enable), got ${writes.length}`)
+      //
+      // #4274: use `[...prompt]` for code-point counting. String#length
+      // counts UTF-16 code units, so non-BMP chars (emoji, some CJK)
+      // would yield a stale count under bare ASCII assumptions. ASCII
+      // is unaffected (1 code unit == 1 code point), but writing the
+      // code-point form keeps these assertions valid for any prompt
+      // the multi-byte fixture below exercises.
+      const codePoints = [...prompt]
+      assert.equal(writes.length, codePoints.length + 3,
+        `expected ${codePoints.length + 3} writes (disable + N chars + \\r + enable), got ${writes.length}`)
       assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
-      assert.equal(writes.slice(1, 1 + prompt.length).join(''), prompt,
+      assert.equal(writes.slice(1, 1 + codePoints.length).join(''), prompt,
         'chars 1..N concatenate back to the original prompt')
-      for (let i = 0; i < prompt.length; i++) {
-        assert.equal(writes[1 + i].length, 1, `write index ${1 + i} is a single character`)
+      for (let i = 0; i < codePoints.length; i++) {
+        assert.equal(writes[1 + i], codePoints[i], `write index ${1 + i} is the i-th code-point of the prompt`)
       }
-      assert.equal(writes[1 + prompt.length], '\r', 'penultimate write is the submit')
-      assert.equal(writes[2 + prompt.length], '\x1b[?2004h', 'final write is bracketed-paste re-enable')
+      assert.equal(writes[1 + codePoints.length], '\r', 'penultimate write is the submit')
+      assert.equal(writes[2 + codePoints.length], '\x1b[?2004h', 'final write is bracketed-paste re-enable')
     })
 
     it('throttles multi-line prompts too — embedded \\n passes through as a single-char write', async () => {
@@ -892,13 +900,67 @@ describe('ClaudeTuiSession', () => {
       const multiline = 'line one\nline two\nline three'
       await session.sendMessage(multiline)
 
-      assert.equal(writes.length, multiline.length + 3)
+      // #4274: count code-points, not UTF-16 units (no difference for
+      // pure ASCII like this fixture — the emoji/CJK fixture below
+      // covers the divergence).
+      const codePoints = [...multiline]
+      assert.equal(writes.length, codePoints.length + 3)
       // Char writes must reproduce the multi-line content verbatim,
       // including the embedded \n bytes as their own single-char writes.
-      const charWrites = writes.slice(1, 1 + multiline.length)
+      const charWrites = writes.slice(1, 1 + codePoints.length)
       assert.equal(charWrites.join(''), multiline, 'multi-line prompt body reproduced verbatim')
       const newlineWrites = charWrites.filter((c) => c === '\n')
       assert.equal(newlineWrites.length, 2, 'each embedded \\n is its own single-char write')
+    })
+
+    // #4274: bare String#length counts UTF-16 code units, so a single
+    // non-BMP code-point (emoji, some CJK supplementary chars) reports
+    // as length 2. `for (const ch of text)` iterates by code-point, so
+    // each emoji is ONE write of a 2-UTF-16-unit string. Pre-fix the
+    // tests assumed 1 write == 1 code-unit and would over-count + fail
+    // the per-write `length === 1` assertion. This test pins the
+    // production behavior under multi-byte input.
+    it('reproduces emoji + CJK prompts verbatim (one write per code-point, not per UTF-16 unit) (#4274)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._processReady = true
+      session._sessionId = 'test'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-sink-mb-'))
+      writeIdleSessionFile(fakePid)
+      const writes = []
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          writeFileSync(join(session._sinkDir, 'stop-mb.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+        },
+        kill: () => {},
+        pid: fakePid,
+      }
+      session._hardTimeoutMs = 2000
+      session._resultTimeoutMs = 2000
+      session.on('error', () => {})
+
+      // Mix of: BMP ASCII, BMP CJK (length 1 in UTF-16), and non-BMP
+      // emoji (length 2 in UTF-16, length 1 in code-points). If the
+      // throttle loop walks UTF-16 units it splits the emoji surrogate
+      // pair and corrupts the prompt. Iterating by code-point keeps
+      // every grapheme intact.
+      const prompt = 'hi 😀 こんにちは 👋'
+      await session.sendMessage(prompt)
+
+      const codePoints = [...prompt]
+      assert.ok(prompt.length > codePoints.length,
+        'fixture exercises non-BMP — UTF-16 length must exceed code-point length')
+      assert.equal(writes.length, codePoints.length + 3,
+        `expected ${codePoints.length + 3} writes (disable + N code-points + \\r + enable), got ${writes.length}`)
+      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
+      assert.equal(writes.slice(1, 1 + codePoints.length).join(''), prompt,
+        'code-point writes concatenate back to the original prompt verbatim')
+      for (let i = 0; i < codePoints.length; i++) {
+        assert.equal(writes[1 + i], codePoints[i],
+          `write index ${1 + i} is the i-th code-point (UTF-16 length ${codePoints[i].length})`)
+      }
+      assert.equal(writes[1 + codePoints.length], '\r', 'penultimate write is the submit')
+      assert.equal(writes[2 + codePoints.length], '\x1b[?2004h', 'final write is bracketed-paste re-enable')
     })
   })
 
@@ -1164,6 +1226,119 @@ describe('ClaudeTuiSession', () => {
       )
       assert.deepEqual(writes, ['\x1b[?2004l', 'a', '\x1b[?2004h'],
         'finally always attempts the re-enable even if it will throw')
+    })
+
+    // #4275: the throttle loop checks `_activeTurn?.aborted` between
+    // each char but did NOT re-check `_ptyExited`. If the PTY exits
+    // mid-write (e.g. claude crashed during a long prompt), remaining
+    // chars get pushed at a dead PTY and only surface via the
+    // _term.write throw catch path. Cleaner to mirror the pre-write
+    // guard (line ~768) inside the loop body so the bail is explicit.
+    it('_writePtyTextThrottled: bails out cleanly when _ptyExited flips mid-loop (#4275)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const writes = []
+      let charsSeen = 0
+      session._term = {
+        write: (data) => {
+          writes.push(data)
+          if (data.length === 1 && /^[a-z]$/.test(data)) {
+            charsSeen += 1
+            // Flip _ptyExited after the 3rd char — next loop tick must
+            // observe it BEFORE attempting another _term.write.
+            if (charsSeen === 3) session._ptyExited = true
+          }
+        },
+        kill: () => {},
+      }
+      session._activeTurn = { messageId: 'm-ptyexit', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('abcdefgh', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, '_ptyExited mid-loop returns false (same shape as abort)')
+      assert.equal(onAbortCalled, true, 'onAbort fires so caller can surface a PTY-exit error')
+      // Loop wrote a,b,c then noticed _ptyExited and bailed before d.
+      // Char writes (single lowercase letter) should be exactly 3.
+      const charWrites = writes.filter((d) => /^[a-z]$/.test(d))
+      assert.equal(charWrites.length, 3, 'loop bails after the char that tripped _ptyExited, not after d')
+      assert.equal(writes[0], '\x1b[?2004l', 'first write is bracketed-paste-disable')
+      assert.equal(writes[writes.length - 1], '\x1b[?2004h',
+        'final write is bracketed-paste re-enable (finally still runs on _ptyExited bail)')
+      assert.equal(writes.includes('\r'), false, 'no submit when PTY exited mid-write')
+    })
+
+    // #4276: per-char throttling for huge prompts (e.g. pasted file
+    // contents) is unbounded — 100K chars × ~1-4ms each = minutes of
+    // blocked turn. Above MAX_THROTTLED_CHARS the helper falls back
+    // to a single bulk _term.write, accepting that very large prompts
+    // may trip claude TUI's paste detector (the user-visible symptom
+    // is far better than a multi-minute silent block).
+    it('exposes MAX_THROTTLED_CHARS for callers / regression tests (#4276)', () => {
+      assert.equal(typeof ClaudeTuiSession.MAX_THROTTLED_CHARS, 'number',
+        'MAX_THROTTLED_CHARS is a numeric static for tunability + assertions')
+      assert.ok(ClaudeTuiSession.MAX_THROTTLED_CHARS > 0, 'must be positive')
+    })
+
+    it('_writePtyTextThrottled: bulk-writes the body in one call when text exceeds MAX_THROTTLED_CHARS (#4276)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-bulk', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // One code-point beyond the threshold — must take the bulk path.
+      const huge = 'x'.repeat(ClaudeTuiSession.MAX_THROTTLED_CHARS + 1)
+      const completed = await session._writePtyTextThrottled(huge)
+
+      assert.equal(completed, true, 'bulk path returns true on success')
+      // Bulk path: disable + ONE write of the whole body + \r + enable.
+      assert.deepEqual(writes, ['\x1b[?2004l', huge, '\r', '\x1b[?2004h'],
+        'large prompts bypass the per-char throttle entirely')
+    })
+
+    it('_writePtyTextThrottled: stays on the per-char throttle path at exactly MAX_THROTTLED_CHARS (#4276)', async () => {
+      // Boundary check — the threshold is "above MAX", so EQUAL to MAX
+      // still gets the paste-detector-friendly per-char throttle. This
+      // pins the comparison so a future refactor doesn't accidentally
+      // make `> MAX` into `>= MAX` and silently downgrade the typical
+      // medium-sized prompt UX.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-edge', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const atCap = 'x'.repeat(ClaudeTuiSession.MAX_THROTTLED_CHARS)
+      const completed = await session._writePtyTextThrottled(atCap)
+
+      assert.equal(completed, true)
+      // disable + N chars + \r + enable.
+      assert.equal(writes.length, atCap.length + 3,
+        'exactly-at-cap still gets per-char writes')
+    })
+
+    it('_writePtyTextThrottled: bulk path still honors _ptyExited / abort pre-write guards (#4276)', async () => {
+      // The bulk path skips the loop, but still has to respect the
+      // outer turn lifecycle. If the turn was already aborted (or PTY
+      // dead) before we hit the bulk write, we must NOT send bytes —
+      // same contract the per-char path provides via its loop guards.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-bulk-abort', startedAt: Date.now(), aborted: true, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      let onAbortCalled = false
+      const huge = 'x'.repeat(ClaudeTuiSession.MAX_THROTTLED_CHARS + 100)
+      const completed = await session._writePtyTextThrottled(huge, {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, 'bulk path returns false when aborted before write')
+      assert.equal(onAbortCalled, true, 'onAbort still fires on the bulk path')
+      // The bulk body must NOT appear in writes. The disable + finally
+      // re-enable are bookkeeping — what matters is no big payload was
+      // sent at a stale PTY.
+      assert.equal(writes.includes(huge), false, 'large body never reaches a torn-down PTY')
     })
   })
 
