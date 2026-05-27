@@ -70,6 +70,20 @@ export interface ChatMessage {
    * (preserved for history/replay).
    */
   toolInputPartial?: string;
+  /**
+   * #4263 — set to `true` exactly once when `tool_input_delta`
+   * accumulation hits {@link MAX_TOOL_INPUT_PARTIAL_LEN} and subsequent
+   * chunks are dropped. The boolean is the canonical "truncated"
+   * indicator on a `tool_use` bubble; pre-#4263 code relied on the
+   * literal `...[truncated]` suffix appended to `toolInputPartial`,
+   * which mis-fired on the rare case where a legitimate input ended
+   * with that 14-char string at a chunk boundary. Renderers MAY surface
+   * a "truncated" affordance from this flag; consumers checking for
+   * the terminal state (e.g. handleToolInputDelta's idempotent drop)
+   * MUST prefer this boolean and fall back to the legacy suffix check
+   * only for backwards compatibility with rehydrated state.
+   */
+  toolInputPartialTruncated?: boolean;
   answered?: string;
   /** Timestamp when the user answered a permission prompt */
   answeredAt?: number;

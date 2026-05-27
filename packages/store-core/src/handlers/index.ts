@@ -3376,17 +3376,22 @@ export function handleToolResult(
  * input (typically tens of KB at most) while small enough to bound
  * per-bubble memory.
  *
- * Note: the stored string can exceed this cap by exactly
- * `'...[truncated]'.length` (14 code units) — the cap bounds the
- * payload portion, and the marker is appended once on truncation. See
- * issue #4241.
+ * On truncation the stored buffer is capped at exactly this many code
+ * units; the terminal state is signalled by the
+ * `toolInputPartialTruncated` boolean on the `ChatMessage` (#4263, see
+ * issue #4241 for the original cap). No suffix marker is appended to
+ * the buffer itself.
  */
 export const MAX_TOOL_INPUT_PARTIAL_LEN = 1024 * 1024
 
 /**
- * Literal appended to `toolInputPartial` exactly once when the cap is
- * hit. Renderers may detect the suffix to show a "truncated" indicator;
- * the marker is also a UX breadcrumb when reading the buffer raw.
+ * Legacy in-band marker historically appended to `toolInputPartial`
+ * exactly once when the cap was hit. Retained ONLY for backwards-
+ * compatible terminal-state detection on rehydrated state (#4263) — if
+ * an older client wrote a persisted `toolInputPartial` ending with this
+ * literal, treat the bubble as already-truncated and drop further
+ * deltas idempotently. New truncations no longer append this marker;
+ * the canonical signal is `toolInputPartialTruncated: true`.
  */
 const TOOL_INPUT_PARTIAL_TRUNCATED_MARKER = '...[truncated]'
 
@@ -3432,14 +3437,14 @@ export interface ToolInputDeltaPayload {
  * the standard result view; `toolInputPartial` is kept for
  * history/replay but no longer drives the active display.
  *
- * The payload portion of the concatenated buffer is capped at
- * {@link MAX_TOOL_INPUT_PARTIAL_LEN} code units (defence-in-depth —
- * see #4241). When a chunk would push past the cap, the payload is
- * sliced to the cap and `...[truncated]` is appended exactly once —
- * the final stored string is therefore at most
- * `MAX_TOOL_INPUT_PARTIAL_LEN + '...[truncated]'.length` code units.
- * Subsequent deltas land on an already-truncated buffer and are
- * dropped silently, leaving the marker as the terminal state.
+ * The concatenated buffer is capped at {@link MAX_TOOL_INPUT_PARTIAL_LEN}
+ * code units (defence-in-depth — see #4241). When a chunk would push
+ * past the cap, the buffer is sliced to the cap and the bubble's
+ * `toolInputPartialTruncated` boolean is set to `true` (#4263);
+ * subsequent deltas land on a bubble already flagged as truncated and
+ * are dropped silently. The legacy in-band `...[truncated]` suffix is
+ * still recognised on the existing buffer for backwards compatibility
+ * with state rehydrated from older clients.
  */
 export function handleToolInputDelta(
   msg: Record<string, unknown>,
@@ -3468,12 +3473,21 @@ export function handleToolInputDelta(
       // already used by the malformed-payload guards above). Checked
       // before cloning so post-truncation deltas stay O(1) and allocation
       // free — no spread of `messages`, no message-object copy.
-      if (prev.endsWith(TOOL_INPUT_PARTIAL_TRUNCATED_MARKER)) {
+      //
+      // Prefer the canonical boolean (#4263). The
+      // `prev.endsWith(...[truncated])` check is a backwards-compat
+      // fallback for state rehydrated from a pre-#4263 client that wrote
+      // the legacy in-band marker into the buffer without the flag.
+      if (
+        existing.toolInputPartialTruncated ||
+        prev.endsWith(TOOL_INPUT_PARTIAL_TRUNCATED_MARKER)
+      ) {
         return messages
       }
       // Length-first check avoids briefly allocating a giant string for
       // the worst-case adversarial input (e.g. a single 100 MB chunk).
       let next: string
+      let truncated = false
       if (prev.length + partialJson.length > MAX_TOOL_INPUT_PARTIAL_LEN) {
         // `Math.max(0, headroom)` defends against a `prev` that is
         // already at or above the cap (e.g. rehydrated from persisted
@@ -3481,10 +3495,8 @@ export function handleToolInputDelta(
         // negative slice index would otherwise take from the end of
         // `partialJson` and silently corrupt the buffer.
         const headroom = MAX_TOOL_INPUT_PARTIAL_LEN - prev.length
-        next =
-          prev +
-          partialJson.slice(0, Math.max(0, headroom)) +
-          TOOL_INPUT_PARTIAL_TRUNCATED_MARKER
+        next = prev + partialJson.slice(0, Math.max(0, headroom))
+        truncated = true
       } else {
         next = prev + partialJson
       }
@@ -3492,6 +3504,7 @@ export function handleToolInputDelta(
       updated[idx] = {
         ...existing,
         toolInputPartial: next,
+        ...(truncated ? { toolInputPartialTruncated: true } : null),
       }
       return updated
     },
