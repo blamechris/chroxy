@@ -2,7 +2,7 @@
  * SidebarTokenView v0 tests (#4303).
  */
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, cleanup, screen } from '@testing-library/react'
+import { render, cleanup, screen, fireEvent } from '@testing-library/react'
 import type { SessionInfo, CumulativeUsage } from '@chroxy/store-core'
 import {
   SidebarTokenView,
@@ -205,12 +205,23 @@ describe('SidebarTokenView (#4303 v0)', () => {
       expect(screen.getByTestId('sidebar-token-view-provider-claude-byok')).toBeInTheDocument()
     })
 
-    it('renders "—" for TUI rows with tooltip', () => {
+    it('renders "—" for TUI rows with tap-to-disclose explanation', () => {
       const sessions = [makeSession('tui', 'claude-tui', makeUsage(0, 0, 0))]
       render(<SidebarTokenView sessions={sessions} />)
       const untracked = screen.getByTestId('sidebar-token-view-provider-claude-tui-untracked')
       expect(untracked).toHaveTextContent('—')
-      expect(untracked.getAttribute('title')).toContain('claude TUI')
+      // #4362: native title= doesn't fire on tap, so the trigger must be a
+      // button + popover so touch users can surface the explanation.
+      expect(untracked.tagName).toBe('BUTTON')
+      // Closed by default
+      expect(
+        screen.queryByTestId('sidebar-token-view-provider-claude-tui-untracked-popover'),
+      ).toBeNull()
+      fireEvent.click(untracked)
+      const popover = screen.getByTestId(
+        'sidebar-token-view-provider-claude-tui-untracked-popover',
+      )
+      expect(popover.textContent ?? '').toContain('claude TUI')
     })
 
     it('renders aggregate total and cost when present', () => {
@@ -231,24 +242,29 @@ describe('SidebarTokenView (#4303 v0)', () => {
       expect(screen.queryByText(/Cost \(BYOK\)/i)).toBeNull()
     })
 
-    // #4348: visible-tokens-vs-billed-cost optical illusion.
-    // The sidebar shows user-visible token counts (new content per turn) but
-    // BYOK cost is computed from full per-call billed tokens (which include
-    // the re-sent context). Without an affordance, the apparent $/token rate
-    // looks wildly off Anthropic's published pricing.
-    it('explains the visible-vs-billed-tokens distinction on the cost badge', () => {
+    // #4348 / #4362: visible-tokens-vs-billed-cost optical illusion. The
+    // sidebar shows user-visible token counts (new content per turn) but BYOK
+    // cost is computed from full per-call billed tokens (which include the
+    // re-sent context). The disclosure surfaces the explanation on tap (not
+    // just hover) so it works on touch devices.
+    it('explains the visible-vs-billed-tokens distinction in the cost popover', () => {
       const sessions = [
         makeSession('byok', 'claude-byok', makeUsage(12_800, 134_400, 87.48)),
       ]
       render(<SidebarTokenView sessions={sessions} />)
-      const costInfo = screen.getByTestId('sidebar-token-view-cost-info')
-      const tooltip = costInfo.getAttribute('title') ?? ''
+      const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+      // Popover closed by default
+      expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+
+      fireEvent.click(trigger)
+      const popover = screen.getByTestId('sidebar-token-view-cost-info-popover')
+      const text = popover.textContent ?? ''
       // Mentions "billed" tokens specifically (the key distinction)
-      expect(tooltip.toLowerCase()).toContain('billed')
+      expect(text.toLowerCase()).toContain('billed')
       // Mentions Anthropic pricing (so it's clear cost is faithful to invoice)
-      expect(tooltip).toContain('Anthropic')
+      expect(text).toContain('Anthropic')
       // Mentions the re-sent context (the cause of the gap)
-      expect(tooltip.toLowerCase()).toContain('context')
+      expect(text.toLowerCase()).toContain('context')
     })
 
     it('renders the info marker next to the cost badge when cost > 0', () => {
@@ -265,6 +281,104 @@ describe('SidebarTokenView (#4303 v0)', () => {
       ]
       render(<SidebarTokenView sessions={sessions} />)
       expect(screen.queryByTestId('sidebar-token-view-cost-info')).toBeNull()
+    })
+
+    // #4362: touch-friendly disclosure replaces the hover-only `title=`
+    // attribute. The trigger must be a button so touch users get tap-to-
+    // disclose, with click-outside and Escape both dismissing the popover.
+    // Hover behavior is preserved for pointer users.
+    describe('cost-info disclosure (#4362)', () => {
+      const sessions = [
+        makeSession('byok', 'claude-byok', makeUsage(1000, 500, 0.10)),
+      ]
+
+      it('renders the trigger as a button with accessible name', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        expect(trigger.tagName).toBe('BUTTON')
+        // The original aria-label intent is preserved (issue acceptance criteria).
+        expect(trigger.getAttribute('aria-label')).toMatch(/cost|match|token/i)
+        // aria-expanded should reflect closed state initially.
+        expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      })
+
+      it('toggles the popover on click (tap)', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+
+        // Initially closed
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+        expect(trigger.getAttribute('aria-expanded')).toBe('false')
+
+        // First click opens
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+        expect(trigger.getAttribute('aria-expanded')).toBe('true')
+
+        // Second click closes
+        fireEvent.click(trigger)
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+        expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      })
+
+      it('exposes the popover with an appropriate ARIA role', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        fireEvent.click(screen.getByTestId('sidebar-token-view-cost-info'))
+        const popover = screen.getByTestId('sidebar-token-view-cost-info-popover')
+        // Either role="dialog" or role="tooltip" is acceptable for a small
+        // explanatory popover; both surface the content to AT users.
+        const role = popover.getAttribute('role')
+        expect(role === 'dialog' || role === 'tooltip').toBe(true)
+      })
+
+      it('dismisses the popover when Escape is pressed', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+
+        fireEvent.keyDown(document, { key: 'Escape' })
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+        expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      })
+
+      it('dismisses the popover when clicking outside', () => {
+        render(
+          <div>
+            <SidebarTokenView sessions={sessions} />
+            <button type="button" data-testid="outside-button">outside</button>
+          </div>,
+        )
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+
+        // mousedown is the typical click-outside trigger (fires before focus).
+        fireEvent.mouseDown(screen.getByTestId('outside-button'))
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+      })
+
+      it('does not dismiss when clicking inside the popover', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        fireEvent.click(screen.getByTestId('sidebar-token-view-cost-info'))
+        const popover = screen.getByTestId('sidebar-token-view-cost-info-popover')
+        fireEvent.mouseDown(popover)
+        // Still open after clicking inside.
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+      })
+
+      it('opens on mouseenter so hover users keep the same affordance', () => {
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        // Hover should reveal the popover (matches the pre-#4362 hover-only UX
+        // for desktop pointer users).
+        fireEvent.mouseEnter(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+        fireEvent.mouseLeave(trigger)
+        // And hide on mouseleave so the popover doesn't linger after the
+        // pointer moves away.
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+      })
     })
   })
 })

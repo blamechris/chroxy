@@ -861,16 +861,57 @@
   font-size: 12px;
 }
 
+/* #4362: untracked-provider trigger is now a button (tap-to-disclose). */
 .sidebar-token-view-provider-untracked {
   color: var(--text-muted);
   cursor: help;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
 }
 
+/* #4362: cost-info trigger is a button (tap-to-disclose). Style it to look
+ * like the prior inline marker so the affordance isn't visually noisy. */
 .sidebar-token-view-info {
   color: var(--text-muted);
   cursor: help;
   font-size: 10px;
   margin-left: 2px;
+  background: none;
+  border: 0;
+  padding: 0;
+  line-height: inherit;
+}
+
+.sidebar-token-view-info:focus-visible,
+.sidebar-token-view-provider-untracked:focus-visible {
+  outline: 1px dotted var(--text-muted);
+  outline-offset: 2px;
+}
+
+/* #4362: inline popover container — anchors the popover near the trigger
+ * without a portal. The popover itself wraps onto its own line so it
+ * doesn't disrupt the row layout. */
+.sidebar-token-view-disclosure {
+  position: relative;
+  display: inline;
+}
+
+.sidebar-token-view-popover {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-panel, var(--bg-secondary, #1f2128));
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: normal;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  max-width: 240px;
+  white-space: normal;
 }
 
 .sidebar-token-view-provider-cost {
