@@ -38,3 +38,8 @@ name: All E2E flows
 # Flow 9: Chat TodoList renderer (#4195) — end-to-end exercise of the
 # #4180 mobile TodoList via mock-server tool_start + tool_result.
 - runFlow: chat-todolist.yaml
+
+# Flow 10: ToolBubble collapsed-preview field-priority (#4260) —
+# exercises the #4243 partial-summary extraction via mock-server
+# 'show-bash-partial' trigger (tool_start + streaming tool_input_delta).
+- runFlow: chat-tool-partial-summary.yaml

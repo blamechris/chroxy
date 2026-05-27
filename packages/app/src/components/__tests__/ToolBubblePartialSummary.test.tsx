@@ -13,7 +13,6 @@
  */
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { Text } from 'react-native';
 import { ToolBubble } from '../chat/ToolBubble';
 import type { ChatMessage } from '../../store/connection';
 
@@ -46,21 +45,36 @@ function renderBubble(message: ChatMessage): renderer.ReactTestRenderer {
 }
 
 /**
- * Mobile renders the collapsed preview as `<Text numberOfLines={1}>` —
- * its first child string is the preview text. Walk all Text nodes and
- * pick the one that matches the numberOfLines=1 invariant.
+ * Mobile renders the collapsed preview as a `<Text>` tagged with
+ * `testID="tool-collapsed-preview"` (#4260). Select explicitly by
+ * testID rather than walking by `numberOfLines={1}` — the latter
+ * silently binds to the wrong node if a future one-line Text is
+ * added above the preview, causing field-priority assertions to
+ * pass/fail against unrelated text.
  */
 function getCollapsedPreview(root: renderer.ReactTestRenderer): string {
-  const texts = root.root.findAllByType(Text);
-  const collapsed = texts.find((t) => t.props.numberOfLines === 1);
+  const collapsed = root.root.findByProps({ testID: 'tool-collapsed-preview' });
   expect(collapsed).toBeTruthy();
-  const children = Array.isArray(collapsed!.props.children)
-    ? collapsed!.props.children
-    : [collapsed!.props.children];
-  return children.filter((c): c is string => typeof c === 'string').join('');
+  const children = Array.isArray(collapsed.props.children)
+    ? collapsed.props.children
+    : [collapsed.props.children];
+  return children.filter((c: unknown): c is string => typeof c === 'string').join('');
 }
 
 describe('ToolBubble collapsed preview — partial-input field priority (#4243)', () => {
+  // #4260: collapsed-preview Text is tagged so Maestro + jest can
+  // select it explicitly. Without this testID, render-tree walkers
+  // bind to the first `numberOfLines={1}` Text and silently mis-target
+  // future siblings.
+  it('renders the collapsed preview with testID="tool-collapsed-preview" (#4260)', () => {
+    const root = renderBubble(makeToolMessage({
+      toolInputPartial: '{"command":"ls"}',
+    }));
+    const node = root.root.findByProps({ testID: 'tool-collapsed-preview' });
+    expect(node).toBeTruthy();
+    expect(node.props.numberOfLines).toBe(1);
+  });
+
   describe('streaming toolInputPartial', () => {
     it('prefers `command` over the raw 60-char JSON slice when partial is parseable', () => {
       const root = renderBubble(makeToolMessage({
