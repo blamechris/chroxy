@@ -370,7 +370,7 @@ export class ClaudeByokSession extends BaseSession {
             case 'stream_delta':
               this.emit('stream_delta', { messageId, delta: t.text })
               break
-            case 'tool_start':
+            case 'tool_start': {
               // Surface the tool_use opening to the dashboard so it can
               // render a tool-call bubble. Matches sdk-session.js /
               // cli-session.js shape — event-normalizer reads `tool`
@@ -381,8 +381,18 @@ export class ClaudeByokSession extends BaseSession {
               // `input` is null here because the model streams the
               // tool's JSON input via subsequent input_json_delta
               // events; tool_input_delta carries the partials.
+              //
+              // #4262: Use the tool's content_block.id as the tool_start
+              // messageId so each tool in a multi-tool turn has a distinct
+              // id. Sharing the turn-level messageId across tools collides
+              // with itself (store-core/handlers/handleToolStart uses
+              // messageId as ChatMessage.id, so later tools overwrite
+              // earlier ones in replay-dedupe) AND with the post-tool
+              // stream_start id (#stream_id_collision class). Mirrors
+              // sdk-session.js:635-641 / cli-session.js:708-714.
+              const toolId = t.toolUseId || `${messageId}-tool`
               this.emit('tool_start', {
-                messageId,
+                messageId: toolId,
                 toolUseId: t.toolUseId,
                 tool: t.toolName,
                 input: null,
@@ -394,6 +404,7 @@ export class ClaudeByokSession extends BaseSession {
                 this._streamingIndexToToolUseId.set(t.index, t.toolUseId)
               }
               break
+            }
             case 'tool_input_delta': {
               // #4080: stream the partial JSON to the dashboard so the
               // tool-call bubble can live-preview the model's evolving
