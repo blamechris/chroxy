@@ -70,16 +70,15 @@ function ToolGroupEntry({
   // so a misclick on a Thinking row doesn't collapse the parent group, but
   // we never set onToggle — the row has no expanded state.
   if (message.type === 'thinking') {
-    // The div is non-interactive (no role/tabIndex), so keyboard focus
-    // never lands here — only the click handler is reachable. We swallow
-    // clicks so a misclick on a Thinking row doesn't collapse the parent
-    // group.
-    const swallow = (e: React.MouseEvent) => e.stopPropagation()
+    // #4282: the outer .tool-group container is no longer interactive
+    // (the header button is the only toggle target), so a click on the
+    // Thinking row has nothing to bubble into and the previous
+    // stopPropagation swallow is redundant. Render the row as a plain
+    // non-interactive label.
     return (
       <div
         className="tool-group-entry tool-group-entry--thinking"
         data-testid={`tool-group-entry-${message.id}`}
-        onClick={swallow}
       >
         <span className="tool-group-entry-name">Thinking</span>
       </div>
@@ -96,10 +95,12 @@ function ToolGroupEntry({
     (message.toolResultImages?.length ?? 0) > 0
   const markerClass = `tool-group-entry-marker tool-group-entry-marker--${hasResult ? 'complete' : 'pending'}`
 
-  // #4279: clicks must not bubble to the parent group's onClick={toggle}
-  // (otherwise expanding an entry collapses the whole list). Same goes for
-  // keyboard activation — Enter/Space have to stop propagation before the
-  // group's handler swallows them.
+  // #4279 / #4282: the parent group's toggle now lives on a dedicated
+  // header <button> that is a SIBLING of the entry list — not an ancestor
+  // — so DOM bubbling from a row click can never reach it. We keep
+  // stopPropagation as defensive insulation against any future ancestor
+  // adding a click/keydown handler that would otherwise see entry events,
+  // but it is no longer load-bearing for the per-entry expand flow.
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     onToggle(message.id)
@@ -247,28 +248,37 @@ export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps
   const summary = breakdown ? `${baseSummary} — ${breakdown}` : baseSummary
 
   const toggle = () => setExpanded((prev) => !prev)
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || (e.key === ' ' && !e.repeat)) {
-      e.preventDefault()
-      toggle()
-    }
-  }
 
+  // #4282: the outer container is a plain non-interactive <div>. The
+  // group's expand/collapse toggle lives on a real <button> header, and
+  // the entry rows are interactive siblings of that button — no more
+  // nested interactive roles, no more <button>-inside-<button> ARIA
+  // violation, and no more click bubbling from a row into a parent
+  // toggle (so the stopPropagation calls in ToolGroupEntry become
+  // defensive insulation rather than load-bearing). data-testid +
+  // aria-expanded remain on the root so existing tests / a11y tooling
+  // that inspect the group as a whole still see the state, and
+  // aria-expanded is mirrored on the header button so AT also hears the
+  // state when focus lands on the toggle itself. Keyboard activation
+  // (Enter/Space) is handled natively by the <button> — no custom
+  // onKeyDown is required.
   return (
     <div
       className={`tool-group${expanded ? ' expanded' : ''}${isActive ? ' active' : ''}`}
       data-testid="tool-group"
-      role="button"
-      tabIndex={0}
       aria-expanded={expanded}
-      onClick={toggle}
-      onKeyDown={handleKeyDown}
     >
-      <div className="tool-group-header">
+      <button
+        type="button"
+        className="tool-group-header"
+        data-testid="tool-group-header"
+        aria-expanded={expanded}
+        onClick={toggle}
+      >
         {isActive && <span className="tool-group-pulse" aria-hidden="true" />}
         <span className="tool-group-summary">{summary}</span>
         <span className="tool-group-chevron" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-      </div>
+      </button>
       {expanded && (
         <div className="tool-group-list" data-testid="tool-group-list">
           {messages.map((m) => (
