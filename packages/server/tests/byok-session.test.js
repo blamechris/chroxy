@@ -925,6 +925,133 @@ describe('ClaudeByokSession', () => {
         'legacy `toolName` key must not appear — normalizer reads `tool`, not `toolName`')
       await session.destroy()
     })
+
+    // #4262: tool_start.messageId must be the per-tool content_block.id, NOT
+    // the turn-level messageId. store-core/handlers/handleToolStart uses
+    // `messageId` as the `ChatMessage.id` — sharing the turn-level id across
+    // every tool in a multi-tool turn collides with itself (later tools
+    // overwrite earlier ones in the replay-dedupe path) AND with the
+    // post-tool stream_start id (stream_id_collision class). Mirrors
+    // sdk-session.js:635-641 / cli-session.js:708-714.
+
+    it('#4262: tool_start.messageId is the per-tool content_block.id, distinct across tools in a multi-tool turn', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      // Permission mode auto so the test doesn't hang waiting for the
+      // 5-min PermissionManager timeout — this test cares about the
+      // tool_start payload, not the permission UI.
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block, messageId }) {
+        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      let round = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            round += 1
+            if (round === 1) {
+              return fakeStream([
+                { type: 'message_start', message: { id: 'msg_turn_1', model: 'claude-opus-4-7' } },
+                { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_01aaa', name: 'Read', input: {} } },
+                { type: 'content_block_stop', index: 0 },
+                { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_02bbb', name: 'Bash', input: {} } },
+                { type: 'content_block_stop', index: 1 },
+                { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { input_tokens: 1, output_tokens: 1 } },
+                { type: 'message_stop' },
+              ], {
+                stop_reason: 'tool_use',
+                content: [
+                  { type: 'tool_use', id: 'toolu_01aaa', name: 'Read', input: { file_path: '/a' } },
+                  { type: 'tool_use', id: 'toolu_02bbb', name: 'Bash', input: { command: 'ls' } },
+                ],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              })
+            }
+            return fakeStream([
+              { type: 'message_start', message: { id: 'msg_turn_2', model: 'claude-opus-4-7' } },
+              { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'done' }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            })
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const starts = captured.filter((e) => e.name === 'tool_start')
+      assert.equal(starts.length, 2, 'two tool_use blocks -> two tool_start events')
+      // Each tool_start MUST carry its OWN content_block.id as messageId,
+      // not the turn-level messageId. handleToolStart uses messageId as
+      // the ChatMessage.id; sharing it would dedupe-collapse the second
+      // tool onto the first in the replay path.
+      assert.equal(starts[0].payload.messageId, 'toolu_01aaa', 'first tool_start.messageId == content_block.id #1')
+      assert.equal(starts[1].payload.messageId, 'toolu_02bbb', 'second tool_start.messageId == content_block.id #2')
+      assert.notEqual(starts[0].payload.messageId, starts[1].payload.messageId,
+        'distinct messageId per tool — no replay-dedupe collision')
+      // toolUseId continues to carry the same content_block.id (existing
+      // contract — handleToolResult matches via toolUseId).
+      assert.equal(starts[0].payload.toolUseId, 'toolu_01aaa')
+      assert.equal(starts[1].payload.toolUseId, 'toolu_02bbb')
+
+      // And the follow-up stream_start (post-tool turn) must use the
+      // turn-level messageId, which must differ from every tool's
+      // messageId — pins the stream_id_collision regression.
+      const streamStarts = captured.filter((e) => e.name === 'stream_start')
+      const postToolStreamStart = streamStarts[streamStarts.length - 1]
+      assert.ok(postToolStreamStart, 'a stream_start event followed the tool round')
+      assert.notEqual(postToolStreamStart.payload.messageId, 'toolu_01aaa',
+        'post-tool stream_start.messageId differs from first tool_start.messageId')
+      assert.notEqual(postToolStreamStart.payload.messageId, 'toolu_02bbb',
+        'post-tool stream_start.messageId differs from second tool_start.messageId')
+      await session.destroy()
+    })
+
+    it('#4262: falls back to `${turnMessageId}-tool` when content_block.id is absent', async () => {
+      // Defensive parity with sdk-session.js / cli-session.js: if the SDK
+      // ever omits content_block.id we still emit a string messageId
+      // (ServerToolStartSchema.messageId is required) rather than letting
+      // an undefined leak through.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              // No `id` on the content_block — translator emits toolUseId: undefined.
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'Read', input: {} } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [{ type: 'text', text: 'ok' }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('go')
+
+      const starts = captured.filter((e) => e.name === 'tool_start')
+      assert.equal(starts.length, 1)
+      // The turn-level messageId is a string; the fallback shape is
+      // `${turnMessageId}-tool`. Pin only that the emitted messageId is
+      // a non-empty string ending with `-tool` so future renames of the
+      // turn id format don't pointlessly break this test.
+      const { messageId } = starts[0].payload
+      assert.equal(typeof messageId, 'string', 'messageId is a string even on fallback')
+      assert.ok(messageId.endsWith('-tool'), `fallback messageId ends with -tool (got: ${messageId})`)
+      await session.destroy()
+    })
   })
 
   describe('tool_input_delta event (#4080)', () => {
