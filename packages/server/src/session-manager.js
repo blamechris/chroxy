@@ -857,6 +857,22 @@ export class SessionManager extends EventEmitter {
         // this stays zero — the UI uses `turnsBilled === 0` or
         // `costUsd === 0` to suppress the cost badge.
         cumulativeUsage: { ...makeZeroCumulativeUsage(), ...(entry.cumulativeUsage || {}) },
+        // #4307: hydrate pending background-shell entries so a client
+        // joining mid-flight (fresh tab, server reconnect, app
+        // resume) sees the waiting-on-shell state without needing to
+        // wait for the next `background_work_changed` event. Always
+        // an array — sessions with no pending work serialize as `[]`
+        // (no defensive `undefined` on the wire, mirrors how
+        // `cumulativeUsage` always carries a zero block). Empty array
+        // is the common path; the dashboard's renderer treats it as
+        // "no waiting indicator." Defensive guard: providers that
+        // skip BaseSession's field initialiser (older custom
+        // providers, hypothetical) round-trip an empty array rather
+        // than crashing `getPendingBackgroundShells()` on undefined.
+        pendingBackgroundShells:
+          typeof entry.session.getPendingBackgroundShells === 'function'
+            ? entry.session.getPendingBackgroundShells()
+            : [],
       })
     }
     return list
@@ -1561,7 +1577,7 @@ export class SessionManager extends EventEmitter {
     // without the event being replayed on every reconnect (the loader re-checks
     // the hash every time skills are scanned, so the latest state is always
     // canonical).
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning']
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {

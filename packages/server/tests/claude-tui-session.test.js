@@ -2059,6 +2059,94 @@ describe('ClaudeTuiSession', () => {
       // Must not throw.
       session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash' }, 'msg-1')
     })
+
+    // #4307: parity with SdkSession — PreToolUse with Bash +
+    // run_in_background stashes the command; PostToolUse with the
+    // canonical "Command running in background with ID:" text
+    // promotes it to a pending shell.
+    describe('#4307 — background-shell tracking', () => {
+      it('records a pending shell when PreToolUse + PostToolUse pair carries a backgrounded Bash', () => {
+        const events = []
+        session.on('background_work_changed', (e) => events.push(e))
+
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_bg_1',
+          tool_name: 'Bash',
+          tool_input: { command: 'sleep 600', run_in_background: true },
+        }, 'msg-bg-1')
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_bg_1',
+          tool_name: 'Bash',
+          tool_response: 'Command running in background with ID: tui-shell-1. Output…',
+        }, 'msg-bg-1')
+
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        const entry = session._pendingBackgroundShells.get('tui-shell-1')
+        assert.equal(entry.command, 'sleep 600')
+        assert.equal(events.length, 1)
+        assert.equal(events[0].pending[0].shellId, 'tui-shell-1')
+        // isRunning reports waiting even with _isBusy=false (default).
+        assert.equal(session._isBusy, false)
+        assert.equal(session.isRunning, true)
+      })
+
+      it('PostToolUse without the canonical text is a no-op for the pending map', () => {
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_bg_2',
+          tool_name: 'Bash',
+          tool_input: { command: 'ls', run_in_background: true },
+        }, 'msg-bg-2')
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_bg_2',
+          tool_name: 'Bash',
+          tool_response: 'random output, no shell id',
+        }, 'msg-bg-2')
+        assert.equal(session._pendingBackgroundShells.size, 0)
+      })
+
+      it('BashOutput PreToolUse clears the matching pending shell', () => {
+        const events = []
+        // Seed a pending shell.
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_bg_3',
+          tool_name: 'Bash',
+          tool_input: { command: 'sleep 600', run_in_background: true },
+        }, 'msg-bg-3')
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_bg_3',
+          tool_name: 'Bash',
+          tool_response: 'Command running in background with ID: tui-shell-3. Output…',
+        }, 'msg-bg-3')
+        session.on('background_work_changed', (e) => events.push(e))
+
+        // Agent polls — clears.
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_bo_1',
+          tool_name: 'BashOutput',
+          tool_input: { bash_id: 'tui-shell-3' },
+        }, 'msg-bg-3')
+        assert.equal(session._pendingBackgroundShells.size, 0)
+        assert.equal(events.length, 1)
+        assert.equal(events[0].pending.length, 0)
+        assert.equal(session.isRunning, false)
+      })
+
+      it('destroy() clears the pending map', async () => {
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_bg_4',
+          tool_name: 'Bash',
+          tool_input: { command: 'sleep 600', run_in_background: true },
+        }, 'msg-bg-4')
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_bg_4',
+          tool_name: 'Bash',
+          tool_response: 'Command running in background with ID: tui-shell-4. Output…',
+        }, 'msg-bg-4')
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        await session.destroy()
+        assert.equal(session._pendingBackgroundShells.size, 0)
+      })
+    })
   })
 
   // #4278: TUI sessions previously had ZERO handling for AskUserQuestion.

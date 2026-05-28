@@ -9,6 +9,11 @@ import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
+import {
+  parseBackgroundShellId,
+  isRunInBackgroundInput,
+  parseBashOutputShellId,
+} from './background-shells.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -1090,6 +1095,23 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     if (kind === 'PreToolUse') {
+      // #4307: stash the command text so the matching PostToolUse can
+      // record the resulting shellId with the original command. Same
+      // behaviour as sdk-session.js _handleToolUseBlock — keeps TUI
+      // parity for the dashboard "waiting on …" chip.
+      if (isRunInBackgroundInput(toolName, payload.tool_input)) {
+        const cmd = typeof payload.tool_input?.command === 'string'
+          ? payload.tool_input.command : ''
+        this._pendingBackgroundCommands.set(toolUseId, cmd)
+      }
+      // #4307: a BashOutput call means the agent has acknowledged the
+      // backgrounded shell. Clear the pending entry so the session is
+      // no longer reported as waiting (the agent saw the output or is
+      // about to act on it — either way our pending model is stale).
+      const bashOutputShellId = parseBashOutputShellId(toolName, payload.tool_input)
+      if (bashOutputShellId) {
+        this.clearBackgroundShell(bashOutputShellId)
+      }
       this.emit('tool_start', {
         messageId: toolUseId,
         toolUseId,
@@ -1161,6 +1183,25 @@ export class ClaudeTuiSession extends BaseSession {
       result,
       truncated,
     })
+
+    // #4307: scan PostToolUse output for the canonical "Command running
+    // in background with ID: <id>" pattern. The PostToolUse hook
+    // payload runs through stringify above, so the same regex SDK uses
+    // matches against the resulting JSON (the shellId pattern is
+    // unique enough that a false positive on stringified-quoted text
+    // is improbable). Pull the command stashed at PreToolUse so the
+    // pending-shell entry carries it. Note we parse from the
+    // post-truncation text intentionally: the canonical message is
+    // ~60 chars and lands at the FRONT of the response, so truncation
+    // never strips it (and if it ever did we'd accept that — the
+    // result event already carries truncated=true, the dashboard chip
+    // would just lack the command).
+    const shellId = parseBackgroundShellId(result)
+    if (shellId) {
+      const command = this._pendingBackgroundCommands.get(toolUseId) || ''
+      this._pendingBackgroundCommands.delete(toolUseId)
+      this.trackBackgroundShell({ shellId, command })
+    }
   }
 
   _finishTurnError(message, callerMessageId) {
@@ -1431,5 +1472,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._permissionModeFile = null
     this._consumedFiles.clear()
     this._clearMessageState()
+    // #4307: drop any pending background-shell entries so the session-
+    // list snapshot doesn't carry phantom entries past destroy. Done
+    // after _clearMessageState (which preserves the pending shells —
+    // the #4307 core invariant); the explicit destroy hook is the only
+    // path that removes them.
+    this._destroyPendingBackgroundShells()
   }
 }

@@ -25,6 +25,7 @@ import type {
   GitBranch,
   GitFileStatus,
   ModelInfo,
+  PendingBackgroundShell,
   SearchResult,
   ServerError,
   SessionInfo,
@@ -2265,6 +2266,98 @@ export function handleAgentCompleted(
       const filtered = current.filter((a) => a.toolUseId !== toolUseId)
       if (filtered.length === current.length) return current
       return filtered
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// #4307 — background_work_changed
+//
+// Snapshot-replacement: each event carries the full pending list for the
+// targeted session. The handler returns a builder mirroring the
+// agent_spawned/completed shape so the caller can gate on
+// `sessionStates[sessionId]` (a known session) before applying, matching
+// the surrounding handler conventions. Defensive against missing /
+// non-array `pending` field (returns []), missing session id (caller
+// treats as no-op), and malformed entries (skips fail-soft).
+// ---------------------------------------------------------------------------
+
+/**
+ * Builder returned by {@link handleBackgroundWorkChanged}. Mirrors
+ * {@link AgentInfoBuilder} / {@link ActiveToolBuilder}: callers gate
+ * on `sessionStates[sessionId]` and call `applyTo` with the current
+ * value to produce the next array (same reference when no change).
+ */
+export interface PendingBackgroundShellsBuilder {
+  sessionId: string | null
+  applyTo: (current: PendingBackgroundShell[]) => PendingBackgroundShell[]
+}
+
+/**
+ * Parse a `background_work_changed` message into a builder that
+ * replaces the session's `pendingBackgroundShells` slot with the
+ * server's authoritative snapshot.
+ *
+ * Why snapshot-replace (rather than per-id diff): the wire event always
+ * carries the full pending list (full-snapshot protocol — see
+ * `ServerBackgroundWorkChangedSchema` doc-comment), so the handler can
+ * be a flat replace. Late joiners catch up via `session_list`'s
+ * `pendingBackgroundShells` field; live updates come through this
+ * handler.
+ *
+ * Malformed entries (missing/non-string shellId, missing/non-number
+ * startedAt, missing/non-string command) are filtered out fail-soft so
+ * one bad row from a hypothetical future server can't make the whole
+ * list disappear.
+ */
+export function handleBackgroundWorkChanged(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): PendingBackgroundShellsBuilder {
+  const rawPending = Array.isArray(msg.pending) ? msg.pending : []
+  const next: PendingBackgroundShell[] = []
+  for (const raw of rawPending) {
+    if (!raw || typeof raw !== 'object') continue
+    const entry = raw as Record<string, unknown>
+    const shellId = typeof entry.shellId === 'string' ? entry.shellId : null
+    if (!shellId) continue
+    const command = typeof entry.command === 'string' ? entry.command : ''
+    const startedAt = typeof entry.startedAt === 'number' && entry.startedAt >= 0
+      ? entry.startedAt
+      : Date.now()
+    next.push({ shellId, command, startedAt })
+  }
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    applyTo: (current) => {
+      // Reference-equality short-circuit: same length AND same
+      // (shellId, startedAt, command) per index means no observable
+      // change. The dashboard's `updateSession` skips re-renders when
+      // the patch yields the same reference, so this matters for
+      // duplicate emissions (idempotent server pushes from
+      // pre-existing flows or reconnect-replay races).
+      if (next.length === current.length) {
+        let same = true
+        for (let i = 0; i < next.length; i++) {
+          const a = next[i]
+          const b = current[i]
+          // Index-in-bounds guard satisfies TS strict-null: `next` /
+          // `current` are equal length but `noUncheckedIndexedAccess`
+          // still types the element as `T | undefined`. The `!a || !b`
+          // path is unreachable given the bounds; treat as mismatch
+          // defensively.
+          if (!a || !b) {
+            same = false
+            break
+          }
+          if (a.shellId !== b.shellId || a.startedAt !== b.startedAt || a.command !== b.command) {
+            same = false
+            break
+          }
+        }
+        if (same) return current
+      }
+      return next
     },
   }
 }

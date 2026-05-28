@@ -74,6 +74,7 @@ import {
   handleGitStatusResult as sharedGitStatusResult,
   handleAgentSpawned as sharedAgentSpawned,
   handleAgentCompleted as sharedAgentCompleted,
+  handleBackgroundWorkChanged as sharedBackgroundWorkChanged,
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
   handleAvailableModels as sharedAvailableModels,
@@ -2182,6 +2183,28 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             });
           }
         }
+        // #4307: seed pendingBackgroundShells from the snapshot so a
+        // fresh tab / reconnect catches up to any sessions already
+        // waiting on background work without needing the next
+        // background_work_changed event to arrive. The
+        // `handleBackgroundWorkChanged` builder does the
+        // same-reference short-circuit so duplicate seeds don't
+        // re-render. The field is optional on `SessionInfo` because
+        // older servers omit it; treat `undefined` as "no waiting
+        // work" (empty array passthrough).
+        for (const s of sessionList) {
+          if (!get().sessionStates[s.sessionId]) continue;
+          const builder = sharedBackgroundWorkChanged(
+            { sessionId: s.sessionId, pending: s.pendingBackgroundShells ?? [] },
+            get().activeSessionId,
+          );
+          updateSession(s.sessionId, (ss) => {
+            const next = builder.applyTo(ss.pendingBackgroundShells);
+            return next === ss.pendingBackgroundShells
+              ? {}
+              : { pendingBackgroundShells: next };
+          });
+        }
       }
       break;
     }
@@ -2462,6 +2485,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(builder.sessionId, (ss) => {
           const next = builder.applyTo(ss.activeAgents);
           return next === ss.activeAgents ? {} : { activeAgents: next };
+        });
+      }
+      break;
+    }
+
+    case 'background_work_changed': {
+      // #4307 — pending-background-shells snapshot updated for a
+      // session. Full-snapshot protocol, so the builder replaces the
+      // slot wholesale; the shared handler returns the same reference
+      // when next == current to suppress no-op renders.
+      const builder = sharedBackgroundWorkChanged(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.pendingBackgroundShells);
+          return next === ss.pendingBackgroundShells
+            ? {}
+            : { pendingBackgroundShells: next };
         });
       }
       break;

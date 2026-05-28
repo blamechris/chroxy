@@ -81,6 +81,10 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     health: 'healthy',
     activeAgents: [],
     activeTools: [],
+    // #4307: empty until the first background_work_changed event or
+    // session_list snapshot arrives; null would force every renderer to
+    // .length-check against null, so an empty array is the safer default.
+    pendingBackgroundShells: [],
     isPlanPending: false,
     planAllowedPrompts: [],
     primaryClientId: null,

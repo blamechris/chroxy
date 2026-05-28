@@ -6,6 +6,11 @@ import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
+import {
+  parseBackgroundShellId,
+  isRunInBackgroundInput,
+  parseBashOutputShellId,
+} from './background-shells.js'
 import { parseMcpToolName } from './mcp-tools.js'
 import { createLogger } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
@@ -717,6 +722,15 @@ export class SdkSession extends BaseSession {
           case 'user': {
             // Tool result content blocks appear in user-role messages during the tool loop
             emitToolResults(msg.message?.content, this)
+            // #4307: scan tool_result blocks for the canonical
+            // "Command running in background with ID: <id>" pattern so
+            // we can record the shell as pending background work. Done
+            // alongside emitToolResults rather than inside it so the
+            // tracker stays out of the existing image-extraction /
+            // truncation surface (tool-result.js is also used by
+            // CliSession + GeminiSession, which don't share this
+            // BaseSession path).
+            this._recordBackgroundShellsFromToolResults(msg.message?.content)
             break
           }
 
@@ -1006,6 +1020,25 @@ export class SdkSession extends BaseSession {
       return
     }
 
+    // #4307: stash the command text against the tool_use_id so the
+    // matching tool_result (carrying the shellId Claude prints) can
+    // recover it. Strict-boolean run_in_background check; non-Bash
+    // tools and missing inputs are no-ops. The map is the ephemeral
+    // turn-local one — entries that never see a tool_result clear at
+    // turn-end.
+    if (isRunInBackgroundInput(block.name, block.input)) {
+      const cmd = typeof block.input?.command === 'string' ? block.input.command : ''
+      this._pendingBackgroundCommands.set(block.id, cmd)
+    }
+    // #4307: when the agent calls BashOutput on a previously-tracked
+    // shell, drop the pending entry. Whether output was complete or
+    // not, the agent has acknowledged the shell — our local model of
+    // "session is waiting on background work" is stale either way.
+    const bashOutputId = parseBashOutputShellId(block.name, block.input)
+    if (bashOutputId) {
+      this.clearBackgroundShell(bashOutputId)
+    }
+
     if (block.name === 'Task') {
       const input = block.input || {}
       const description = (typeof input.description === 'string'
@@ -1017,6 +1050,42 @@ export class SdkSession extends BaseSession {
       }
       this._activeAgents.set(block.id, agentInfo)
       this.emit('agent_spawned', agentInfo)
+    }
+  }
+
+  /**
+   * #4307: scan a user-role message's tool_result content blocks for
+   * the canonical `Command running in background with ID: <id>` text
+   * and register each pending background shell against the matching
+   * command stashed earlier by `_handleToolUseBlock`.
+   *
+   * Defensive against non-array content (the SDK sometimes ships a
+   * single string for content) and content blocks without `tool_use_id`
+   * (no-op) — the standard tool-loop flow always populates both.
+   *
+   * @param {unknown} content
+   * @private
+   */
+  _recordBackgroundShellsFromToolResults(content) {
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (block?.type !== 'tool_result' || !block.tool_use_id) continue
+      // Flatten the result text the same way `emitToolResults` does so
+      // a shellId in a multi-block content array still matches.
+      let text = ''
+      if (typeof block.content === 'string') {
+        text = block.content
+      } else if (Array.isArray(block.content)) {
+        text = block.content
+          .filter((b) => b?.type === 'text')
+          .map((b) => b.text)
+          .join('\n')
+      }
+      const shellId = parseBackgroundShellId(text)
+      if (!shellId) continue
+      const command = this._pendingBackgroundCommands.get(block.tool_use_id) || ''
+      this._pendingBackgroundCommands.delete(block.tool_use_id)
+      this.trackBackgroundShell({ shellId, command })
     }
   }
 
@@ -1321,6 +1390,14 @@ export class SdkSession extends BaseSession {
 
     // Emit completions for any tracked agents and clear busy state
     this._clearMessageState()
+
+    // #4307: drop any pending background-shell entries so the session-
+    // list snapshot doesn't carry phantom entries for a destroyed
+    // session and the map can't leak. Done after _clearMessageState so
+    // the canonical "turn-end keeps pending shells" invariant from
+    // _clearMessageState is preserved — the explicit destroy hook is
+    // the only path that removes them.
+    this._destroyPendingBackgroundShells()
 
     // Clean up permission manager
     this._permissions.destroy()

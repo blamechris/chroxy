@@ -26,6 +26,9 @@ describe('createEmptyBaseSessionState', () => {
       health: 'healthy',
       activeAgents: [],
       activeTools: [],
+      // #4307: empty array on init — populated by background_work_changed
+      // events and/or session_list snapshot seed.
+      pendingBackgroundShells: [],
       isPlanPending: false,
       planAllowedPrompts: [],
       primaryClientId: null,
@@ -45,6 +48,7 @@ describe('createEmptyBaseSessionState', () => {
     expect(a.messages).not.toBe(b.messages)
     expect(a.activeAgents).not.toBe(b.activeAgents)
     expect(a.activeTools).not.toBe(b.activeTools)
+    expect(a.pendingBackgroundShells).not.toBe(b.pendingBackgroundShells)
     expect(a.planAllowedPrompts).not.toBe(b.planAllowedPrompts)
     expect(a.mcpServers).not.toBe(b.mcpServers)
     expect(a.devPreviews).not.toBe(b.devPreviews)
