@@ -23,10 +23,9 @@ fi
 git status
 git log main..HEAD --oneline
 git diff main --stat
-git diff main
 ```
 
-Review the commits and full diff. Understand the full scope of work before drafting the PR.
+Review the commits and changed files. Understand the full scope of work before drafting the PR.
 
 ### 2. Detect Closable Issues
 
@@ -43,10 +42,9 @@ echo "$BRANCH" | grep -oE '[0-9]+' | while read num; do
 done
 
 # Source 3: Open from-review issues whose title/body matches changed files
-gh issue list --label "from-review" --label "enhancement" --state open --json number,title,body --limit 50
+CHANGED_FILES=$(git diff main --name-only | head -20)
+gh issue list --label "from-review" --state open --json number,title,body --limit 50
 ```
-
-Cross-reference the from-review issues against the files changed in this branch (`git diff main --name-only`) to find matches. Only include issues whose description relates to files actually modified in this PR.
 
 **For each candidate issue:** Verify it's open and the PR's changes actually address it. Don't claim to close an issue the commits don't fix.
 
@@ -62,14 +60,7 @@ If branch has commit messages referencing issues (`#NNN`) but NONE of those issu
 
 Based on the commits, changed files, and detected issues, draft the PR.
 
-**Choose a template:**
-
-```
-IF $ARGUMENTS contains "batch" OR closes 3+ issues:
-  → Use BATCH FIX template (table format)
-ELSE:
-  → Use DEFAULT template (bullet list)
-```
+**If `$ARGUMENTS` contains "batch" OR the PR closes 3+ issues, use Batch Fix template. Otherwise use Default template.**
 
 #### Default Template
 
@@ -110,6 +101,7 @@ ${CLOSES_LINES}
 
 - [ ] Server tests pass
 - [ ] App type-checks clean
+- [ ] Dashboard tests pass
 - [ ] Manual smoke test
 ```
 
@@ -180,4 +172,4 @@ Then below the table:
 5. **Verify after creation** — Check that `closingIssuesReferences` matches expected issues.
 6. **Target main** — Always create PRs against `main` unless the user specifies otherwise.
 7. **Don't fabricate** — Only add `Closes #N` for issues the PR's changes actually address. If unsure, ask.
-<!-- skill-templates: create-pr 0000000 2026-05-15 -->
+<!-- skill-templates: create-pr 57ceacc 2026-05-27 -->

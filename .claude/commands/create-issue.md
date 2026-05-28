@@ -7,22 +7,13 @@ Create a standardized GitHub issue with labels and traceability.
 - `$ARGUMENTS` - Issue title (required). Optionally followed by flags:
   - `--from-pr N` — Link to source PR
   - `--comment-url URL` — Link to specific review comment
-  - `--complexity low|medium|high` — Set complexity label
   - `--label NAME` — Additional label (repeatable)
 
 ## Instructions
 
 ### 1. Parse Arguments and Gather Context
 
-Extract the title and any flags from `$ARGUMENTS`:
-
-- **Title:** Everything that isn't a flag becomes the issue title
-- **`--from-pr N`** → `SOURCE_PR=N`
-- **`--comment-url URL`** → `COMMENT_URL=URL` (extract `FILE_PATH` and `LINE_NUMBER` from the URL if possible)
-- **`--complexity low|medium|high`** → `COMPLEXITY=value` (used for labeling in Step 4)
-- **`--label NAME`** → Append to `EXTRA_LABELS` array (repeatable)
-
-Then determine context:
+Extract the title and any flags from `$ARGUMENTS`. Determine context:
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
@@ -53,7 +44,7 @@ Construct the issue body based on available context.
 ```markdown
 ## Context
 
-Found during review of PR #${SOURCE_PR}.
+Identified during review of PR #${SOURCE_PR}.
 
 {{If comment URL provided:}}
 **Review comment:** ${COMMENT_URL}
@@ -96,12 +87,7 @@ if [ -n "$SOURCE_PR" ] || [ -n "$COMMENT_URL" ]; then
   LABELS="$LABELS,from-review"
 fi
 
-# Add complexity label if --complexity was provided in Step 1
-if [ -n "$COMPLEXITY" ]; then
-  LABELS="$LABELS,complexity: $COMPLEXITY"
-fi
-
-# Add any extra labels from --label flags parsed in Step 1
+# Add any extra --label flags
 for extra in "${EXTRA_LABELS[@]}"; do
   LABELS="$LABELS,$extra"
 done
@@ -139,7 +125,7 @@ Output a **summary table** — this is the PRIMARY output:
 ```markdown
 | Issue | Title | Labels | Source |
 |-------|-------|--------|--------|
-| #${ISSUE_NUM} | ${ISSUE_TITLE} | from-review, complexity:low | PR #${SOURCE_PR} |
+| #${ISSUE_NUM} | ${ISSUE_TITLE} | from-review | PR #${SOURCE_PR} |
 ```
 
 Then below the table:
@@ -156,4 +142,4 @@ Then below the table:
 4. **Be specific** — The issue description must be self-contained. Another developer should understand it without reading the review thread.
 5. **Always include acceptance criteria** — Even if just one checkbox. Issues without criteria are hard to close confidently.
 6. **Link to source** — If from a review, always include the PR number and comment URL in the body.
-<!-- skill-templates: create-issue 0000000 2026-05-15 -->
+<!-- skill-templates: create-issue 57ceacc 2026-05-27 -->

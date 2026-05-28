@@ -62,7 +62,7 @@ For each issue in work queue:
 
 ### Phase 0.5: Auto-Decompose High-Complexity Issues
 
-When the queue contains issues that are too large to implement directly (e.g., labeled `complexity:high` or equivalent), decompose them into smaller, independently implementable sub-issues BEFORE entering the core loop.
+When the queue contains issues that are too large to implement directly (e.g., issues spanning multiple systems or touching 3+ files), decompose them into smaller, independently implementable sub-issues BEFORE entering the core loop.
 
 For each high-complexity issue:
 
@@ -193,11 +193,12 @@ git checkout -b "${BRANCH}"
 Based on the issue's acceptance criteria, write tests that describe the desired behavior. Tests MUST fail before any implementation.
 
 ```bash
-# Server: npm test, App: npx jest
-# Server: __tests__/*.test.js, App: __tests__/*.test.ts
+# Server: cd packages/server && npm test
+# App: cd packages/app && npx jest
+# Dashboard: cd packages/server && npm run dashboard:test
 
 # Run tests to confirm they fail
-npm test
+${TEST_COMMAND}
 ```
 
 If tests pass immediately, the behavior already exists — investigate before proceeding. Either the issue is already resolved or the tests don't capture the right behavior.
@@ -208,7 +209,7 @@ Write the minimum implementation to make all new tests pass. Don't over-engineer
 
 ```bash
 # Run tests to confirm they pass
-npm test
+${TEST_COMMAND}
 ```
 
 If tests still fail, iterate on the implementation until they pass. Do NOT move to REFACTOR until all tests are green.
@@ -223,10 +224,11 @@ With green tests as a safety net:
 
 ```bash
 # Run tests again to confirm refactoring didn't break anything
-npm test
+${TEST_COMMAND}
 
-# App: npx tsc --noEmit
-npx tsc --noEmit
+# App: cd packages/app && npx tsc --noEmit
+# Dashboard: cd packages/server && npm run dashboard:typecheck
+${LINT_COMMAND}
 ```
 
 ### Phase 4: Commit and PR Creation
@@ -247,7 +249,7 @@ Refs #${ISSUE_NUM}
 EOF
 )"
 
-# server, app, core, ui
+# Commit scopes: server, app, desktop, tunnel, ws, cli, ci, docs, dashboard
 
 git push -u origin ${BRANCH}
 ```
@@ -278,10 +280,9 @@ Refs #${ISSUE_NUM}
 
 ## Test Plan
 
-- [ ] All new tests pass
-- [ ] Existing tests unbroken
 - [ ] Server tests pass
 - [ ] App type-checks clean
+- [ ] Dashboard tests pass
 - [ ] Manual smoke test
 EOF
 )")
@@ -291,10 +292,10 @@ PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 
 ### Phase 4.5: Smoke Test (if applicable)
 
-If the PR modified **UI or frontend files**, run the smoke test to catch visual regressions before review. This prevents wasting review cycles on PRs that break the UI.
+If the PR modified **dashboard or UI files**, run the project's smoke test to catch visual regressions before review. This prevents wasting review cycles on PRs that break the UI.
 
 ```bash
-NEEDS_SMOKE_TEST=false
+# Check if PR touches dashboard source files, React components, CSS, or theme files
 CHANGED_FILES=$(git diff --name-only main...HEAD)
 if echo "$CHANGED_FILES" | grep -qE 'dashboard-next|\.tsx$|\.css$|\.html$|components\.css|theme'; then
   NEEDS_SMOKE_TEST=true
@@ -303,16 +304,16 @@ fi
 
 If `NEEDS_SMOKE_TEST` is true:
 
-1. **Rebuild dashboard** — source changes are NOT visible without rebuild:
-   ```bash
-   cd packages/server
-   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
-   ```
-2. **Run `/smoke-test`** — launches headless browser, verifies key UI elements, takes screenshots
+1. **Rebuild dashboard** if needed:
+```bash
+cd packages/server
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
+```
+2. **Run `/smoke-test`** — this launches the app, opens a headless browser, and verifies key UI elements
 3. **Check results:**
    - **All pass:** Continue to Phase 5 (review)
    - **Failures:** Read the screenshots, diagnose whether it's an app bug or a test selector issue
-     - **App bug:** Fix the code, rebuild, re-run smoke test
+     - **App bug:** Fix the code, re-run tests, amend commit, re-run smoke test
      - **Test issue:** Note it in the PR description, continue (don't block on flaky test selectors)
 4. **Max 2 smoke test fix attempts** — if still failing after 2 fixes, flag the PR as "Needs attention (smoke test failure)" and move on
 
@@ -439,4 +440,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why. The user sees the reason.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running /full-review to prevent context drift.
 15. **Sync before branching** — Always `git checkout main && git pull` before starting each issue. Check for merged PRs first.
-<!-- skill-templates: autonomous-dev-flow e60105e 2026-02-28 -->
+<!-- skill-templates: autonomous-dev-flow 57ceacc 2026-05-27 -->
