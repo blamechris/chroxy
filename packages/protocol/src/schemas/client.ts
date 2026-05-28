@@ -149,6 +149,18 @@ export const SetPromptEvaluatorSkipPatternSchema = z.object({
   sessionId: z.string().max(256).optional(),
 })
 
+// #3805: per-session opt-in Chroxy context hint. When true, the server
+// prepends a short paragraph to the system prompt telling the model it's
+// running inside Chroxy so it can adjust output for mobile clients.
+// Default OFF — only forwarded when an explicit boolean is sent.
+// `sessionId` is optional; the handler falls back to the client's bound
+// active session.
+export const SetChroxyContextHintSchema = z.object({
+  type: z.literal('set_chroxy_context_hint'),
+  value: z.boolean(),
+  sessionId: z.string().max(256).optional(),
+})
+
 // #3209: runtime activate/deactivate of a manual skill. The skill name
 // is the loader-resolved name (the file's basename without extension);
 // the server validates it matches a real skill before mutating state.
@@ -551,6 +563,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetPermissionRulesSchema,
   SetPromptEvaluatorSchema,
   SetPromptEvaluatorSkipPatternSchema,
+  SetChroxyContextHintSchema,
   SkillActivateSchema,
   SkillDeactivateSchema,
   SkillTrustAcceptSchema,

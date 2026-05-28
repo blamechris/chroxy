@@ -85,6 +85,7 @@ const PLATFORM_SPECIFIC = {
   'environment_error': 'dashboard',   // environment panel is dashboard-only
   'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
   'prompt_evaluator_changed': 'dashboard', // per-session promptEvaluator toggle (#3185) is dashboard-only — same epic as evaluate_draft_result, mobile app exposure tracked in #3068
+  'chroxy_context_hint_changed': 'dashboard', // per-session Chroxy context hint toggle (#3805) is dashboard-only for v1; mobile mirror tracked in the issue's non-goals
   'evaluator_rewrite': 'dashboard',   // auto-evaluator rewrite broadcast (#3208 schema, #3186 emit, #3188 handler) — dashboard renders rewrite-explanation banner; mobile app exposure tracked under parent epic #3068
   'evaluator_clarify': 'dashboard',   // auto-evaluator clarify broadcast (#3208 schema, #3186 emit, #3188 handler) — dashboard renders inline clarify question with iteration counter; mobile app exposure tracked under parent epic #3068
   'skills_list': 'dashboard',       // skills list response (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
