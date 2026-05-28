@@ -59,6 +59,8 @@ import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
+import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
+import { formatBindingForDisplay } from './shortcuts/registry'
 import { readClipboardImage } from './utils/clipboard-image'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
@@ -242,6 +244,10 @@ function ViewSwitcher({
 }
 
 export function App() {
+  // #3852: customizable keyboard-shortcut registry. The same instance
+  // drives both the keydown matcher below and the cheat-sheet display
+  // — when a user rebinds Cmd+K in Settings, both surfaces update.
+  const shortcutRegistry = useShortcutRegistry()
   // Store selectors — subscribe to specific slices to avoid re-renders
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
   const serverVersion = useConnectionStore(s => s.serverVersion)
@@ -687,9 +693,22 @@ export function App() {
         })()
         return
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      // #3852: customizable shortcuts win first. The registry holds the
+      // user-rebindable subset (palette, sidebar, settings, new
+      // session). Each shortcut's id maps to a stable action below; if
+      // the user has rewired Cmd+K to Cmd+J the registry's matchEvent
+      // returns 'palette.toggle' for the new combo. Hardcoded fallbacks
+      // for shortcuts NOT yet in the registry (Cmd+1-9, Cmd+\, etc.)
+      // remain below. Note: we deliberately do NOT gate on text-input
+      // focus — that matches the legacy ladder's behavior (Cmd+K in a
+      // textarea still toggles the palette).
+      const matchedId = shortcutRegistry.matchEvent(e, 'global')
+      if (matchedId) {
         e.preventDefault()
-        setPaletteOpen(prev => !prev)
+        if (matchedId === 'palette.toggle') setPaletteOpen(prev => !prev)
+        else if (matchedId === 'sidebar.toggle') setSidebarOpen(prev => !prev)
+        else if (matchedId === 'settings.open') setSettingsOpen(prev => !prev)
+        else if (matchedId === 'session.new') setShowCreateSession(true)
         return
       }
       // Cmd+Shift+P: toggle command palette (VSCode-style alias)
@@ -702,12 +721,6 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
         e.preventDefault()
         setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
-        return
-      }
-      // Cmd+N / Ctrl+N: open new session modal
-      if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !e.shiftKey) {
-        e.preventDefault()
-        setShowCreateSession(true)
         return
       }
       // Cmd+1-9: switch to tab by index
@@ -736,11 +749,7 @@ export function App() {
           handleCloseSession(activeSessionId)
         }
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
-        e.preventDefault()
-        setSidebarOpen(prev => !prev)
-        return
-      }
+      // Cmd+B (sidebar) handled by the registry above (#3852).
       // Cmd+Shift+P: command palette (VSCode alias)
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
         e.preventDefault()
@@ -763,12 +772,7 @@ export function App() {
         })
         return
       }
-      // Cmd+,: open settings
-      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
-        e.preventDefault()
-        setSettingsOpen(prev => !prev)
-        return
-      }
+      // Cmd+, (settings) handled by the registry above (#3852).
       // Cmd+Shift+T: copy chat transcript (#3073)
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 't') {
         e.preventDefault()
@@ -812,7 +816,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript])
+  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript, shortcutRegistry])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -1532,13 +1536,20 @@ export function App() {
     // #2883: author entries with canonical `Cmd+...` labels and rewrite to
     // `Ctrl+...` at render time on non-Mac platforms so the cheat-sheet
     // matches the modifier the user can actually press.
+    // #3852: customizable IDs read their effective binding from the
+    // registry so user overrides show up in the cheat sheet too.
+    const isMac = isMacPlatform()
+    const customBinding = (id: string, fallback: string) => {
+      const entry = shortcutRegistry.get(id)
+      return entry ? formatBindingForDisplay(entry.binding, isMac) : fallback
+    }
     const rawEntries: ShortcutEntry[] = [
       { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
-      { keys: 'Cmd+K', description: 'Command palette', section: 'Global' },
+      { keys: customBinding('palette.toggle', 'Cmd+K'), description: 'Command palette', section: 'Global' },
       { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
-      { keys: 'Cmd+N', description: 'New session', section: 'Global' },
-      { keys: 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
-      { keys: 'Cmd+,', description: 'Settings', section: 'Global' },
+      { keys: customBinding('session.new', 'Cmd+N'), description: 'New session', section: 'Global' },
+      { keys: customBinding('sidebar.toggle', 'Cmd+B'), description: 'Toggle sidebar', section: 'Global' },
+      { keys: customBinding('settings.open', 'Cmd+,'), description: 'Settings', section: 'Global' },
       { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
       { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
       { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
@@ -1563,7 +1574,7 @@ export function App() {
       })
     }
     return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
-  }, [])
+  }, [shortcutRegistry])
 
   // Compute context window usage percentage from active model metadata
   const contextPercent = useMemo(() => {
