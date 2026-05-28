@@ -8,6 +8,7 @@ Composes `/autonomous-dev-flow` logic internally but adds multi-wave retry with 
 
 - `$ARGUMENTS` - Issue source and options. Same as `/autonomous-dev-flow` plus marathon-specific options:
   - `label:from-review` (all open issues with this label)
+  - `label:enhancement` (all open issues with this label)
   - `milestone:"v1.2"` (all open issues in milestone)
   - `#12 #15 #18` or `12 15 18` (specific issues by number)
   - `label:from-review max:10 sort:created-asc` (with options)
@@ -41,7 +42,7 @@ REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 REPO_NAME=$(basename "$REPO")
 SESSION_START=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-# Session branches use feat/, fix/, refactor/, test/ prefixes matching existing conventions
+# Branch prefix for session branches — uses feat/, fix/, refactor/, test/ prefixes matching existing conventions
 BRANCH_PREFIX="feat/"
 ```
 
@@ -385,4 +386,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 15. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running `/full-review` in every wave.
 16. **Sync before every branch** — Always `git checkout main && git pull` before starting each issue in each wave.
 17. **Morning summary is mandatory** — Even if interrupted, output the best summary possible with data collected so far.
-<!-- skill-templates: tackle-issues 57ceacc 2026-05-27 -->
+<!-- skill-templates: tackle-issues 9652481 2026-05-27 -->

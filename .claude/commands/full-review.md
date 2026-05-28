@@ -72,4 +72,4 @@ Then below the table:
 - **Deduplication.** If agent-review creates a follow-up issue and check-pr's fixes resolve it, close the issue in Phase 2 with a PR cross-reference.
 - **Threads resolved before declaring done.** Check-pr's step 6b runs the GraphQL `resolveReviewThread` mutation for every thread. Without it, branch protection blocks merge silently — the user has to click "Resolve conversation" once per thread. If you skip this, full-review is not done; you've handed the user manual cleanup.
 - **Attribution.** Follow Zero Attribution Policy throughout — no AI mentions in commits, replies, or issues.
-<!-- skill-templates: full-review 57ceacc 2026-05-27 -->
+<!-- skill-templates: full-review 9652481 2026-05-27 -->

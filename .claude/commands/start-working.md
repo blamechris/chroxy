@@ -136,8 +136,16 @@ Scan for TODO/FIXME/HACK markers in source code:
 
 ```bash
 # Search for actionable markers in server and app source files
-find server -name "*.js" -type f \( ! -path "*/node_modules/*" ! -path "*/.godot/*" ! -path "*/build/*" ! -path "*/dist/*" \) -exec grep -Hn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" {} \;
-find app -name "*.tsx" -o -name "*.ts" -type f \( ! -path "*/node_modules/*" ! -path "*/.godot/*" ! -path "*/build/*" ! -path "*/dist/*" \) -exec grep -Hn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" {} \;
+grep -r "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" \
+  server/**/*.js \
+  app/**/*.tsx \
+  app/**/*.ts \
+  --exclude-dir=node_modules \
+  --exclude-dir=.godot \
+  --exclude-dir=build \
+  --exclude-dir=dist \
+  --exclude="*.lock" \
+  2>/dev/null
 ```
 
 Use Grep to find `TODO`, `FIXME`, `HACK`, `XXX`, and `WORKAROUND` markers in source files. Exclude:
@@ -277,6 +285,8 @@ When the queue is truly empty, perform a lightweight codebase scan to surface po
 # Check which source directories have corresponding test files
 # Server: npm test
 # App: npx jest
+cd packages/server && npm test 2>&1 | head -20
+cd packages/app && npx jest --listTests 2>&1 | head -20
 ```
 
 - Check which source directories have corresponding test files
@@ -292,7 +302,7 @@ npm audit
 ```
 
 - Count outdated dependencies
-- Check for known vulnerabilities if tooling is available
+- Check for known vulnerabilities if tooling is available (`npm audit`, `pip-audit`, etc.)
 
 #### 4c. Code Quality Signals
 
@@ -343,4 +353,4 @@ Run `/project-audit` for a comprehensive multi-agent analysis with detailed reco
 6. **Respect blocked/assigned** — Show blocked and assigned items for context but clearly separate them from the actionable queue. Never recommend working on a blocked or assigned item.
 7. **Composable output** — The "Recommended Next Action" section should include copy-pasteable commands (e.g., `/autonomous-dev-flow #12 #18 #25`) so the user can immediately act on the findings.
 8. **No file writes** — The fallback audit in Phase 4 outputs to the conversation only. Unlike `/project-audit`, it does NOT write report files or create a `docs/` directory.
-<!-- skill-templates: start-working 57ceacc 2026-05-27 -->
+<!-- skill-templates: start-working 9652481 2026-05-27 -->

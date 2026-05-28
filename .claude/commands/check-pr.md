@@ -430,4 +430,4 @@ Then below the table, list:
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
-<!-- skill-templates: check-pr 57ceacc 2026-05-27 -->
+<!-- skill-templates: check-pr 9652481 2026-05-27 -->

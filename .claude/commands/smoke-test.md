@@ -50,9 +50,17 @@ npx chroxy start
 
 ### 2. Run the Smoke Test
 
+First, rebuild the dashboard to ensure UI changes are visible:
+
 ```bash
 cd packages/server
 npm run dashboard:build
+```
+
+Then run the smoke test:
+
+```bash
+cd packages/server
 node tests/smoke-test.mjs $ARGUMENTS
 ```
 
@@ -86,12 +94,14 @@ Output a summary table:
 
 | # | Check | Status | Notes |
 |---|-------|--------|-------|
-| 1 | Dashboard loads | PASS | HTTP 200, WS connected |
-| 2 | Session creation | PASS | Modal opens, form works |
-| 3 | Keyboard shortcuts | PASS | Ctrl+N, Ctrl+K, ? all work |
+| 1 | Dashboard loads | PASS | HTTP 200, WS connects |
+| 2 | Session creation | PASS | Ctrl+N modal opens |
+| 3 | Keyboard shortcuts | PASS | ? and Ctrl+K work |
 
 **Screenshots reviewed:** N
 **Visual issues found:** M (describe any issues)
+
+If the test failed, check that the server is running and the dashboard was rebuilt. If WS connection fails, verify the API token is loaded from `~/.chroxy/config.json`.
 ```
 
 ### 5. Cleanup
@@ -123,17 +133,18 @@ import { chromium } from 'playwright'
 // ... setup
 
 async function run() {
-  // 1. Find running application
-  // 2. Launch browser
-  // 3. Navigate to app URL (with auth if needed)
-  // 4. Wait for app to be ready (WebSocket, data loading, etc.)
-  // 5. Run checks — each one:
+  // 1. Find running application (probe ports 8765, 3131, 8080, 3000)
+  // 2. Load API token from ~/.chroxy/config.json
+  // 3. Launch browser
+  // 4. Navigate to http://localhost:{port}/dashboard/?token={token}
+  // 5. Wait for WS connection (page should NOT contain "Disconnected" or "Connecting...")
+  // 6. Run checks — each one:
   //    a. Interact with UI (click, type, navigate)
   //    b. Take screenshot
   //    c. Assert element exists / is visible / has correct content
   //    d. Log PASS or FAIL
-  // 6. Output summary
-  // 7. Exit with appropriate code
+  // 7. Output summary
+  // 8. Exit with appropriate code
 }
 ```
 
@@ -169,10 +180,10 @@ Prefer stable selectors in this order:
 
 ### Connection Handling
 
-Many apps need a backend connection before the full UI renders. Always wait for the "ready" state:
+The dashboard connects via WebSocket automatically on load. Always wait for the "ready" state:
 
 ```javascript
-// Wait for app to be fully loaded and connected
+// Wait for WS connection to establish
 await page.waitForFunction(() => {
   const body = document.body.innerText
   return !body.includes('Disconnected') && !body.includes('Connecting...')
@@ -198,6 +209,6 @@ Organize checks into logical groups:
 4. **Stable selectors** — Use aria labels and roles, not brittle CSS class names that change with refactors.
 5. **Visual verification is the point** — The automated checks catch DOM presence. Reading screenshots catches visual regressions (z-index, color, spacing).
 6. **Idempotent** — Safe to run repeatedly. Don't create persistent state (sessions, data, etc.) that would affect the next run.
-7. **Dashboard rebuild required** — Always run `npm run dashboard:build` before testing. Provider picker CSS and other assets are not visible without rebuild.
-8. **Keyboard shortcut quirk** — `?` shortcut fails if textarea has focus (key goes to input, not shortcut handler). Click body first before testing the shortcut.
-<!-- skill-templates: smoke-test 57ceacc 2026-05-27 -->
+7. **Dashboard rebuild required** — Always run `npm run dashboard:build` before testing. Provider picker CSS and other UI elements are invisible without the rebuild.
+8. **Keyboard shortcut quirk** — The `?` shortcut fails if the textarea has focus (keystroke goes to input, not shortcut handler). Click the page body first before testing keyboard shortcuts.
+<!-- skill-templates: smoke-test 9652481 2026-05-27 -->

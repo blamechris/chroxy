@@ -16,7 +16,7 @@ Examples:
 ```
 /recon
 /recon server
-/recon "the WebSocket protocol" scouts=4
+/recon "the websocket protocol" scouts=4
 /recon scouts=2 depth=quick output=-
 /recon packages/app scouts=5 depth=deep
 ```
@@ -268,9 +268,9 @@ Output a concise summary:
 ```
 /recon                                  # whole repo, 3 scouts, standard depth
 /recon server                           # focus on server module
-/recon "the WebSocket protocol" scouts=4 depth=deep
+/recon "the websocket protocol" scouts=4 depth=deep
 /recon scouts=2 depth=quick output=-    # print-only quick sweep
 /recon . scouts=5                       # full panel including Native + Scribe
 /recon packages/app scouts=4            # monorepo subpackage with extra scout for size
 ```
-<!-- skill-templates: recon 57ceacc 2026-05-27 -->
+<!-- skill-templates: recon 9652481 2026-05-27 -->

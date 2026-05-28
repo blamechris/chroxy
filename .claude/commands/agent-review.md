@@ -197,4 +197,4 @@ Mindset: "Will this code work reliably over a cellular connection through a tunn
 3. **Pragmatic over perfect** - Working code first, polish later
 4. **Reliability first** - Always consider error recovery and edge cases
 5. **Keep it simple** - No over-engineering, no premature abstractions
-<!-- skill-templates: agent-review 57ceacc 2026-05-27 -->
+<!-- skill-templates: agent-review 9652481 2026-05-27 -->

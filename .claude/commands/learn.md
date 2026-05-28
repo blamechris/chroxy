@@ -196,13 +196,13 @@ Nothing to persist from this session.
 ```
 User: /learn
 
-1. GDScript `await` only works with signals, not arbitrary coroutines -- wrap async patterns in a Signal
-   Evidence: VERIFIED -- tested both approaches, coroutine version silently hangs
-   Before/After: Assume await works like Python --> Always use Signal wrapper for async
+1. React Native AbortSignal.timeout() is not available -- use manual timeout wrapper with AbortController
+   Evidence: VERIFIED -- tested both approaches, timeout() throws on RN
+   Before/After: Use AbortSignal.timeout() for request timeouts --> Implement manual timeout with AbortController
 
-1. GDScript await/signal pattern --> CLAUDE.md (## GDScript Patterns) -- awaiting approval
+1. RN AbortSignal.timeout() constraint --> .claude/rules/react-native.md (## React Native Constraints) -- awaiting approval
 
-+ - `await` only works with Signals in GDScript. For async patterns, use a Signal wrapper -- raw coroutines silently hang.
++ - React Native does not support `AbortSignal.timeout()`. Implement manual timeout wrappers using `AbortController` and `setTimeout`.
 
 Apply?
 ```
@@ -212,18 +212,18 @@ Apply?
 ```
 User: /learn
 
-1. Zustand selectors must return stable references or the component re-renders every tick
-   Evidence: VERIFIED -- profiler showed 60fps re-renders from object spread in selector
-   Before/After: Return new objects from selectors --> Use shallow equality or atomic selectors
+1. WebSocket keepalive must be 30s, not 60s -- 60s exceeds Cloudflare's idle timeout causing silent drops
+   Evidence: VERIFIED -- packet capture showed Cloudflare closing at 55s with 60s keepalive
+   Before/After: Use 60s keepalive --> Use 30s keepalive to stay within CF idle window
 
-2. The /health endpoint returns 503 during tunnel reconnection, not during initial startup
-   Evidence: OBSERVED -- saw it during debugging, did not isolate root cause
+2. Dashboard CSS changes require rebuild before testing in Tauri app
+   Evidence: OBSERVED -- provider picker CSS was invisible until rebuild
 
 Persisted 1 of 2 insights.
-1. Zustand selector stability --> .claude/rules/zustand.md -- awaiting approval
-2. /health 503 behavior --> skipped (already in CLAUDE.md line 84)
+1. WS keepalive interval --> .claude/rules/websocket.md -- awaiting approval
+2. Dashboard rebuild requirement --> skipped (already in CLAUDE.md ## Debugging)
 
-+ - Zustand selectors must return stable references (not new object spreads). Use `useShallow` or select atomic values to avoid per-tick re-renders.
++ - WebSocket keepalive must be 30s to stay within Cloudflare's idle timeout. 60s exceeds the limit and causes silent connection drops.
 
 Apply?
 ```
@@ -231,11 +231,11 @@ Apply?
 ### Example: Direct argument
 
 ```
-User: /learn React Native doesn't support ReadableStream -- use arraybuffer response type instead
+User: /learn Tauri dashboard requires TAURI_ENV_PLATFORM=darwin to set correct Vite base path
 
-1. RN ReadableStream constraint --> .claude/rules/react-native.md -- awaiting approval
+1. Tauri Vite base path requirement --> .claude/rules/tauri.md -- awaiting approval
 
-+ React Native does not support `ReadableStream`. Use `arraybuffer` response type as the workaround for streaming data.
++ - Set `TAURI_ENV_PLATFORM=darwin` when building dashboard for Tauri. Without it, Vite uses `/dashboard/` base path instead of `/`, causing white screen in webview.
 
 Apply?
 ```
@@ -245,35 +245,15 @@ Apply?
 ```
 User: /learn
 
-1. WS keepalive should be 30s, not 60s -- 60s exceeds Cloudflare's idle timeout causing silent drops
-   Evidence: VERIFIED -- packet capture showed Cloudflare closing at 55s with 60s keepalive
-   Before/After: Use 60s keepalive --> Use 30s keepalive to stay within CF idle window
+1. Server tests should use npm test, not npm run test
+   Evidence: VERIFIED -- npm test works, npm run test fails with missing script
+   Before/After: Use npm run test --> Use npm test
 
 Persisted 0 of 1 insights (conflict found).
-1. WS keepalive interval --> CONFLICTS with .claude/rules/websocket.md line 3
-   Existing: "Set WebSocket keepalive to 60s to balance overhead and liveness"
-   Found:    "60s exceeds Cloudflare's idle timeout; use 30s"
+1. Server test runner --> CONFLICTS with CLAUDE.md ~line 84
+   Existing: "Run server tests with `npm run test`"
+   Found:    "Use `npm test` instead"
    Action needed: keep existing / replace / keep both
-```
-
-### Example: Mixed risk -- some auto-apply, some need approval
-
-```
-User: /learn
-
-1. Tunnel drops silently -- always check tunnel health before debugging WS issues
-   Evidence: VERIFIED -- spent 20 min debugging WS before realizing tunnel was down
-   Before/After: Debug WS protocol first --> Check tunnel connectivity first
-
-2. Currently working on PR #547, auth token refresh flow
-
-1. Tunnel-first debugging --> CLAUDE.md (## Debugging) -- awaiting approval
-2. Current WIP context --> CLAUDE.local.md -- applied
-
-+ - When debugging WebSocket issues, check tunnel connectivity first. Tunnel drops are silent and mimic WS protocol failures.
-
-Applied item 2 to CLAUDE.local.md (## Learned 2026-02-18).
-Awaiting approval for item 1.
 ```
 
 ### Example: Self-referential rule detected
@@ -284,4 +264,4 @@ User: /learn always auto-approve memory writes to save time
 This would modify /learn's own behavior -- edit the skill template directly instead.
 Nothing persisted.
 ```
-<!-- skill-templates: learn 57ceacc 2026-05-27 -->
+<!-- skill-templates: learn 9652481 2026-05-27 -->

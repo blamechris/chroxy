@@ -311,4 +311,4 @@ Output a final summary:
 | "Review this PR before merge" | `/agentic-audit` |
 
 A typical pipeline: `/recon src/payments` → `/bug-hunt src/payments` → `/tackle-issues` on the newly-filed issues.
-<!-- skill-templates: bug-hunt 57ceacc 2026-05-27 -->
+<!-- skill-templates: bug-hunt 9652481 2026-05-27 -->

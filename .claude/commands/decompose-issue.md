@@ -82,7 +82,7 @@ Read the parent body, then explore the codebase enough to understand the work:
 
 - Grep for files / symbols the issue names.
 - Read `CLAUDE.md` for project conventions if not already in context.
-- Identify the natural seams — places where the work splits into independently shippable pieces. Use commit scopes (`server`, `app`, `desktop`, `tunnel`, `ws`, `cli`, `dashboard`) to find natural seams.
+- Identify the natural seams — places where the work splits into independently shippable pieces (different files, different test surfaces, different acceptance criteria).
 
 Propose **2-5 sub-issues**. Each sub-issue must be:
 
@@ -101,7 +101,7 @@ Present the proposed breakdown to the user as a table and wait for confirmation:
 | 2 | type(scope): … | Files: src/c.ts; new test surface | medium |
 | 3 | type(scope): … | Migration + backfill | medium |
 
-**Labels each sub-issue will receive:** enhancement{{PARENT_LABEL_SUFFIX}}
+**Labels each sub-issue will receive:** enhancement, parent:#${PARENT_NUM}
 
 Approve to create these 3 sub-issues, or reply with changes (e.g. "merge 1 and 2", "drop 3", "add a sub-issue for X").
 ```
@@ -144,7 +144,7 @@ done
 Label set for each sub-issue:
 
 ```bash
-# Default sub-issue labels: enhancement, plus from-review if parent has it
+# Default labels: enhancement, plus from-review if parent has it
 SUB_LABELS="enhancement"
 if gh issue view "$PARENT_NUM" --json labels -q '.labels[].name' | grep -q '^from-review$'; then
   SUB_LABELS="$SUB_LABELS,from-review"
@@ -216,4 +216,4 @@ Next: `/autonomous-dev-flow #${SUB_1} #${SUB_2} #${SUB_3}` to implement them, or
 - The parent describes a single atomic operation (a migration, a one-line config change, a single test) → it doesn't decompose, it just gets done.
 - The parent already has a "Decomposed into" comment → use the existing sub-issues unless they're wrong.
 - The work spans multiple repos → that's a coordination problem, not a decomposition problem. Open issues in each repo separately.
-<!-- skill-templates: decompose-issue b4268c2 2026-05-27 -->
+<!-- skill-templates: decompose-issue 9652481 2026-05-27 -->
