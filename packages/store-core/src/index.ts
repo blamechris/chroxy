@@ -24,6 +24,9 @@ export type {
   ModelInfo,
   SessionInfo,
   AgentInfo,
+  // #4308: ActiveTool — one entry per in-flight tool call, kept on
+  // BaseSessionState.activeTools and driven by tool_start / tool_result.
+  ActiveTool,
   ConnectedClient,
   SessionHealth,
   SessionContext,

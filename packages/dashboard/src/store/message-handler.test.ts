@@ -1546,6 +1546,153 @@ describe('dashboard message-handler dispatch', () => {
   // The 5s safety timer in sendInput used to recover this case but was bypassed
   // by #3170. agent_idle is now the recovery hook: it must clear streamingMessageId
   // so the stop button hides.
+  describe('activeTools wiring (#4308)', () => {
+    it('pushes an ActiveTool entry on tool_start', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { command: 'ls' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].toolUseId).toBe('tu-1')
+      expect(ss.activeTools[0].tool).toBe('Bash')
+      expect(ss.activeTools[0].input).toEqual({ command: 'ls' })
+      expect(typeof ss.activeTools[0].startedAt).toBe('number')
+    })
+
+    it('removes the matching entry on tool_result', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { command: 'ls' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'tool_result', toolUseId: 'tu-1', result: 'out', sessionId: 's1' },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+    })
+
+    it('supports parallel in-flight tools (multiple tool_start before any tool_result)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-2',
+          tool: 'Read',
+          toolUseId: 'tu-2',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools.map((t: any) => t.toolUseId)).toEqual(['tu-1', 'tu-2'])
+      // Resolving tu-1 leaves tu-2 still in flight.
+      handleMessage(
+        { type: 'tool_result', toolUseId: 'tu-1', result: 'ok', sessionId: 's1' },
+        ctx() as any,
+      )
+      const ss2 = (store.getState() as any).sessionStates.s1
+      expect(ss2.activeTools.map((t: any) => t.toolUseId)).toEqual(['tu-2'])
+    })
+
+    it('clears activeTools on agent_idle as a safety net', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      // tool_result never arrives; agent_idle fires (e.g. abnormal SDK shutdown).
+      handleMessage({ type: 'agent_idle', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+    })
+
+    it('clears activeTools on result as a safety net', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      handleMessage({ type: 'result', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+    })
+  })
+
   describe('agent_idle clears streamingMessageId (#3171)', () => {
     it('clears streamingMessageId when agent_idle fires mid-stream', () => {
       store = createMockStore(
