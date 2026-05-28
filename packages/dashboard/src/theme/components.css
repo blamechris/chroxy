@@ -6803,3 +6803,131 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* ── #3852 Customizable keyboard-shortcut Settings section ───── */
+
+.settings-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-link-button {
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  padding: 0;
+}
+
+.settings-link-button:hover {
+  text-decoration: underline;
+}
+
+.settings-secondary-button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.settings-secondary-button:hover:not(:disabled) {
+  background: var(--bg-secondary);
+}
+
+.settings-secondary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-error {
+  background: rgba(220, 40, 40, 0.12);
+  border: 1px solid rgba(220, 40, 40, 0.6);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  margin-bottom: 10px;
+}
+
+.shortcuts-group {
+  margin-top: 12px;
+}
+
+.shortcuts-group-title {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.shortcuts-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.shortcuts-section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.shortcuts-section-row:last-child {
+  border-bottom: none;
+}
+
+.shortcuts-section-row-description {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.shortcuts-section-row-default {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.shortcuts-section-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shortcuts-section-row-binding {
+  display: inline-block;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  min-width: 60px;
+  text-align: center;
+}
+
+.keybind-capture {
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--accent-blue);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  min-width: 200px;
+  text-align: center;
+}
+

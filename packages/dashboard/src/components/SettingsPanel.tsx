@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -321,6 +322,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               </select>
             </div>
           </section>
+
+          {/* #3852: customizable keyboard-shortcut bindings. Lives next
+              to the existing Send shortcut select so all keyboard
+              preferences are grouped together. */}
+          <ShortcutsSection />
 
           {/* Active session — per-session toggles. Only renders when the
               active session reports a capability (e.g. boolean

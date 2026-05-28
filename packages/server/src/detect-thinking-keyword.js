@@ -33,14 +33,17 @@ export function detectThinkingKeyword(text) {
 
   // Longest first so `think harder` wins over `think hard` wins over `think`.
   // Each entry is `[canonicalKeyword, regex, budget]`. The regex uses
-  // word-boundary anchors on both sides; the multi-word entries collapse
-  // any run of whitespace between words so `think  harder` (double space)
-  // and `think\nharder` still match.
+  // word-boundary anchors on both sides; the multi-word entries allow a
+  // run of horizontal whitespace (space/tab only — NOT `\s`) between
+  // words so `think  harder` (double space) still matches but
+  // `think\n\nharder` (paragraph boundary) does not. See #4402: `\s+`
+  // matched arbitrary newline runs and false-positived on unrelated
+  // thoughts the user happened to type on consecutive lines.
   const PATTERNS = [
     ['ultrathink', /\bultrathink\b/i, 128_000],
     ['megathink', /\bmegathink\b/i, 32_000],
-    ['think harder', /\bthink\s+harder\b/i, 32_000],
-    ['think hard', /\bthink\s+hard\b/i, 10_000],
+    ['think harder', /\bthink[ \t]+harder\b/i, 32_000],
+    ['think hard', /\bthink[ \t]+hard\b/i, 10_000],
     ['think', /\bthink\b/i, 4_000],
   ]
 
