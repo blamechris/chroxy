@@ -1083,16 +1083,53 @@ describe('App', () => {
       const row = screen.getByTestId('session-item-s1')
       fireEvent.contextMenu(row)
       // Sanity: the menu is open and its first item should be focused.
-      expect(screen.getByRole('menu')).toBeInTheDocument()
+      const menu = screen.getByRole('menu')
+      expect(menu).toBeInTheDocument()
 
       // Esc dismisses the menu. SessionContextMenu listens at document scope
-      // for keydown — fire on the menu element so the event bubbles.
-      fireEvent.keyDown(document, { key: 'Escape' })
+      // for keydown today; firing on the menu element (rather than directly
+      // on `document`) lets the event bubble through the standard user-facing
+      // path, so this test stays green if the listener is later scoped to
+      // the menu itself.
+      fireEvent.keyDown(menu, { key: 'Escape' })
 
       // The menu should be gone, and focus restored to the row (NOT the
       // textarea, which would indicate the pre-#4372 bug).
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()
       expect(document.activeElement).toBe(row)
+    })
+
+    // Parallel to the session-row case above, but for repo headers — the
+    // case the first pass of #4372 missed because the onContextMenu listener
+    // used to be on the inner `.sidebar-repo-header` (no tabIndex, no role)
+    // instead of the outer `.sidebar-repo` treeitem. Without the Sidebar
+    // structural fix, this test would fail: focus would stay on the textarea
+    // (because focus() on the unfocusable header is a no-op) and Esc would
+    // land focus on document.body or the textarea, not the treeitem.
+    it('returns focus to the repo treeitem when the menu is dismissed (Esc)', () => {
+      stateOverrides = connectedState
+      render(<App />)
+      const textarea = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      // App derives repos from sessions; our s1 session cwd is /tmp/repo,
+      // which produces a `repo-header-/tmp/repo` testid on the header.
+      const header = screen.getByTestId('repo-header-/tmp/repo')
+      const treeitem = header.closest('[role="treeitem"]') as HTMLElement | null
+      expect(treeitem).not.toBeNull()
+
+      // Right-click on the inner header. The listener now lives on the
+      // outer treeitem, so the contextmenu event bubbles up and the
+      // handler's event.currentTarget is the focusable treeitem.
+      fireEvent.contextMenu(header)
+      const menu = screen.getByRole('menu')
+      expect(menu).toBeInTheDocument()
+
+      fireEvent.keyDown(menu, { key: 'Escape' })
+
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(document.activeElement).toBe(treeitem)
     })
   })
 })

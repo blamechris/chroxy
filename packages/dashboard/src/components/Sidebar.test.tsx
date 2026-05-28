@@ -379,6 +379,39 @@ describe('Sidebar', () => {
       fireEvent.contextMenu(row)
       expect(document.activeElement).toBe(row)
     })
+
+    // Repo headers are the case the original PR missed: the onContextMenu
+    // listener used to be bound to the inner `.sidebar-repo-header` div
+    // (no tabIndex, no role) — so event.currentTarget.focus() was a no-op
+    // and document.activeElement stayed on <body>. The fix moves the
+    // listener up to the outer `.sidebar-repo` treeitem wrapper, which
+    // owns the roving tabIndex. This test asserts:
+    //   (a) onContextMenu receives the outer treeitem as currentTarget
+    //       even when the right-click originates on the inner header,
+    //   (b) the App-style `currentTarget.focus()` actually lands focus
+    //       on the outer treeitem.
+    it('focuses the outer treeitem when the user right-clicks a repo header', () => {
+      const observed: { currentTarget: EventTarget | null } = { currentTarget: null }
+      const onContextMenu = vi.fn((_target, event: React.MouseEvent) => {
+        observed.currentTarget = event.currentTarget
+        if (event.currentTarget instanceof HTMLElement) {
+          event.currentTarget.focus()
+        }
+      })
+      renderSidebar({ onContextMenu })
+      const header = screen.getByTestId('repo-header-/home/user/projects/api')
+      const treeitem = header.closest('[role="treeitem"]') as HTMLElement | null
+      expect(treeitem).not.toBeNull()
+      // Sanity: nothing focused yet.
+      expect(document.activeElement).not.toBe(treeitem)
+      // Right-click on the inner header — bubbles to the outer treeitem,
+      // which is where the listener now lives. currentTarget should be the
+      // outer treeitem (not the header), and focus() should land there.
+      fireEvent.contextMenu(header)
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(observed.currentTarget).toBe(treeitem)
+      expect(document.activeElement).toBe(treeitem)
+    })
   })
 
   describe('stdin forwarding disabled badge (#3567)', () => {
