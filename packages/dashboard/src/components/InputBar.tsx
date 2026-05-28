@@ -14,6 +14,7 @@ import type { SlashCommand, EvaluatorResultPayload } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
 import { shouldCollapsePaste, findActiveMarkerIds } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
+import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
 
 /**
  * Convert a clipboard HTML payload to plain text. Used as a fallback when
@@ -131,6 +132,19 @@ export interface InputBarProps {
    * entirely — Up/Down then revert to plain cursor movement.
    */
   userMessageHistory?: string[]
+  /**
+   * #4306 — when true, render the inline "thinking keyword" highlight
+   * overlay (matches `ultrathink`, `megathink`, `think harder`, `think hard`,
+   * `think` case-insensitively at word boundaries). Caller MUST gate this
+   * on whether the active session's provider actually supports the
+   * server-side escalation — currently the SDK provider only. Highlighting
+   * on a provider that ignores the keyword would imply an escalation the
+   * server does not perform; see #4306's "do not lie to the user" gate.
+   *
+   * When omitted / false, the overlay renders nothing and the textarea
+   * behaves exactly as before (plain visible text, no transparency hack).
+   */
+  highlightThinkingKeywords?: boolean
 }
 
 type EvaluatorState =
@@ -139,7 +153,7 @@ type EvaluatorState =
   | { kind: 'result', result: EvaluatorResultPayload }
   | { kind: 'error', message: string }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -150,6 +164,21 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   const [selectedIndex, setSelectedIndex] = useState(0)
   const shortcutsId = useId()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // #4306 — thinking-keyword highlight overlay. Mirror div behind a
+  // transparent-text textarea; identical box metrics in CSS (font, padding,
+  // line-height, white-space) so the overlay's <span>-wrapped keywords line
+  // up pixel-perfect with the user's literal text.
+  //
+  // We hold an overlayRef and `useLayoutEffect`-sync `scrollTop` from the
+  // textarea so multi-line drafts scroll the highlight along with the cursor.
+  // (No `useState` for scrollTop — we'd re-render on every keystroke for a
+  // value the DOM owns.)
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const tokens = useMemo(
+    () => highlightThinkingKeywords ? tokenizeThinkingKeywords(value) : null,
+    [value, highlightThinkingKeywords]
+  )
 
   // #3068 — manual prompt evaluator state machine. Lives in InputBar because
   // applying a rewrite has to swap the textarea value and re-focus it.
@@ -830,18 +859,54 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           onDismiss={dismissEvaluator}
         />
       )}
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        disabled={disabled}
-        placeholder={isBusy ? 'Type to send follow-up...' : placeholder}
-        aria-label="Message input"
-        aria-describedby={shortcutsId}
-        rows={1}
-      />
+      <div className={`input-bar-textarea-wrap${tokens ? ' has-overlay' : ''}`}>
+        {tokens && (
+          // Mirror div behind the textarea (#4306). Identical box metrics
+          // (font, padding, line-height, white-space) are enforced in CSS
+          // via the .input-bar-textarea-wrap.has-overlay selector pair so
+          // the overlay characters land in the same x/y as the textarea's
+          // own characters. aria-hidden because the textarea is the
+          // authoritative input — the overlay is purely visual.
+          <div
+            ref={overlayRef}
+            className="input-bar-textarea-overlay"
+            aria-hidden="true"
+            data-testid="thinking-keyword-overlay"
+          >
+            {tokens.map((tok, i) => (
+              tok.kind === 'keyword'
+                ? <span key={i} className="thinking-keyword" data-testid="thinking-keyword">{tok.text}</span>
+                : <span key={i}>{tok.text}</span>
+            ))}
+            {/* Trailing whitespace handling: a trailing newline at the end
+                of the textarea content doesn't create a new line in a
+                contenteditable-style div without an explicit terminator.
+                Append a zero-width space inside a span so the overlay's
+                height matches the textarea's when the user ends with `\n`. */}
+            {value.endsWith('\n') && <span>{'​'}</span>}
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          onScroll={tokens ? (e) => {
+            // Scroll-sync the overlay to the textarea so multi-line drafts
+            // keep keyword highlights aligned as the user scrolls within
+            // the textarea. Direct DOM write (not state) — same reason as
+            // the auto-resize logic in handleChange.
+            const ov = overlayRef.current
+            if (ov) ov.scrollTop = e.currentTarget.scrollTop
+          } : undefined}
+          disabled={disabled}
+          placeholder={isBusy ? 'Type to send follow-up...' : placeholder}
+          aria-label="Message input"
+          aria-describedby={shortcutsId}
+          rows={1}
+        />
+      </div>
       <div className="input-bar-actions">
         {voiceInput?.isAvailable && (
           <button

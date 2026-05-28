@@ -1068,6 +1068,121 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- thinking keyword escalation (#4306) --
+
+  describe('thinking keyword escalation (#4306)', () => {
+    // The native CLI's REPL scans user prompts for magic thinking keywords
+    // ("think", "think hard", "think harder", "megathink", "ultrathink") and
+    // escalates maxThinkingTokens for that turn. SdkSession's query() path
+    // does NOT do this — the scanner lives in the REPL, not the SDK. These
+    // tests assert that Chroxy detects the keyword server-side and bumps
+    // maxThinkingTokens on the per-turn options object before the query
+    // generator is invoked.
+    function setupCapturingSession(opts = {}) {
+      const s = createSession(opts)
+      s._processReady = true
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+      return { s, captured }
+    }
+
+    it('does NOT set maxThinkingTokens when no keyword present', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('please refactor this function')
+      s.destroy()
+      assert.equal(captured.length, 1)
+      assert.equal(captured[0].options.maxThinkingTokens, undefined,
+        'plain prompts must not bump the SDK thinking budget')
+    })
+
+    it('escalates to 4_000 for bare "think"', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('please think about this')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 4_000)
+    })
+
+    it('escalates to 10_000 for "think hard"', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('think hard about edge cases')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 10_000)
+    })
+
+    it('escalates to 32_000 for "think harder" (prefers over "think hard")', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('think harder please')
+      s.destroy()
+      // Without longest-match-first, this would fall through to `think hard`
+      // (which is also a substring) and shortchange the user's intent.
+      assert.equal(captured[0].options.maxThinkingTokens, 32_000)
+    })
+
+    it('escalates to 128_000 for "ultrathink"', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('ultrathink the architecture trade-offs')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000)
+    })
+
+    it('case-insensitive: ULTRATHINK still escalates', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('ULTRATHINK now')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000)
+    })
+
+    it('does NOT match `think` inside `unthinkingly` (word boundary)', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('I unthinkingly committed this')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, undefined,
+        'substring matches must not trigger escalation — the user did not type a keyword')
+    })
+
+    // The dropdown-driven thinking level (#2263) and the per-turn keyword
+    // escalation are layered: the keyword must never DOWNgrade an explicit
+    // max-level session. Mirrors the native CLI's "more thinking, never less"
+    // semantic — typing `think` on a session you already cranked to `max`
+    // should leave it at max for that turn, not drop it to 4_000.
+    it('keyword does NOT lower an already-elevated dropdown level', async () => {
+      const { s, captured } = setupCapturingSession()
+      s._thinkingLevel = 'max' // dropdown set to 128_000
+      await s.sendMessage('please think about this')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000,
+        'dropdown-level budget must win when it is higher than the keyword budget')
+    })
+
+    it('keyword DOES raise above the dropdown level when bigger', async () => {
+      const { s, captured } = setupCapturingSession()
+      s._thinkingLevel = 'high' // dropdown set to 32_000
+      await s.sendMessage('ultrathink this one')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000,
+        'a stronger keyword must override a weaker dropdown level for the turn')
+    })
+
+    it('keyword escalation is per-turn and does NOT mutate the session-wide level', async () => {
+      const { s, captured } = setupCapturingSession()
+      // First turn: keyword present.
+      await s.sendMessage('ultrathink this design')
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000)
+      assert.equal(s._thinkingLevel, null, 'session-wide level must remain unchanged')
+
+      // Second turn: no keyword — must drop back to no escalation.
+      await s.sendMessage('now write the code')
+      s.destroy()
+      assert.equal(captured[1].options.maxThinkingTokens, undefined,
+        'per-turn escalation must NOT bleed into subsequent turns without the keyword')
+    })
+  })
+
   // -- destroy --
 
   describe('destroy', () => {

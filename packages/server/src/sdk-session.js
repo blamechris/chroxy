@@ -11,6 +11,7 @@ import { createLogger } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { detectThinkingKeyword } from './detect-thinking-keyword.js'
 
 const log = createLogger('sdk')
 
@@ -491,6 +492,34 @@ export class SdkSession extends BaseSession {
     if (this._thinkingLevel) {
       const budget = SdkSession.THINKING_BUDGETS[this._thinkingLevel]
       if (budget != null) options.maxThinkingTokens = budget
+    }
+
+    // #4306 — magic thinking-keyword escalation. The native Claude Code CLI's
+    // interactive REPL scans the user's prompt for keywords (`think`,
+    // `think hard`, `think harder`, `megathink`, `ultrathink`) and escalates
+    // the thinking budget for that turn. The Agent SDK's `query()` path does
+    // NOT do this — the scanner lives in the REPL only. Re-implement it here
+    // so the keyword behaviour is consistent between Chroxy and the native CLI.
+    //
+    // Important: the keyword detection runs against the ORIGINAL prompt
+    // (`prompt`), not the transformed one. Voice / typo / etc. transforms
+    // (#3203, MessageTransformPipeline) may legitimately rewrite the user's
+    // input, but the keyword is a user-intent signal that must come from
+    // their literal typed text.
+    //
+    // The detected budget takes precedence over the dropdown-driven level
+    // ONLY when the keyword's budget is larger — otherwise a `think` keyword
+    // could *lower* a session that the user already set to `max`. Matches
+    // the native CLI's "more thinking, never less" semantic.
+    const detectedKeyword = typeof prompt === 'string' ? detectThinkingKeyword(prompt) : null
+    if (detectedKeyword) {
+      const existing = options.maxThinkingTokens ?? 0
+      if (detectedKeyword.budget > existing) {
+        options.maxThinkingTokens = detectedKeyword.budget
+        log.info(`Thinking keyword "${detectedKeyword.keyword}" detected — escalating maxThinkingTokens to ${detectedKeyword.budget} for this turn`)
+      } else {
+        log.debug(`Thinking keyword "${detectedKeyword.keyword}" detected but session already at higher budget (${existing}) — leaving unchanged`)
+      }
     }
 
     // Sandbox settings (lightweight isolation without Docker)
