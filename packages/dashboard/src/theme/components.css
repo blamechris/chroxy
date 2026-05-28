@@ -586,6 +586,24 @@
   color: var(--text-primary);
 }
 
+/* #4372 — visible focus ring on sidebar treeitem rows. The App's
+ * `handleSidebarContextMenu` focuses the right-clicked row before opening
+ * the SessionContextMenu so unmount focus-restoration lands back on it;
+ * the user needs a visible indicator that the row is the focused element
+ * once the menu dismisses (matches the dashboard's standard 2px outline
+ * pattern used by buttons, tabs, and CheckpointTimeline rows).
+ *
+ * `.sidebar-repo` is the outer treeitem wrapper (also the onContextMenu
+ * binding target); `.sidebar-session-item` / `.sidebar-resumable-item` are
+ * the leaf treeitems. The bare wrapper has no border-radius normally, so
+ * we keep the outline rectangular for consistency. */
+.sidebar-repo:focus-visible,
+.sidebar-session-item:focus-visible,
+.sidebar-resumable-item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
 /* SessionContextMenu (#4045) — right-click context menu overlay for sidebar
  * items. Positioned fixed at the click coordinates; the component itself
  * handles outside-click / Escape / blur dismissal. */

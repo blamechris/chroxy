@@ -356,15 +356,27 @@ export function Sidebar({
             {filteredRepos.map(repo => {
               const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
               return (
-                <div key={repo.path} className="sidebar-repo" role="treeitem" aria-expanded={!isCollapsed} tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}>
+                <div
+                  key={repo.path}
+                  className="sidebar-repo"
+                  role="treeitem"
+                  aria-expanded={!isCollapsed}
+                  tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}
+                  // #4372: bind onContextMenu on the outer treeitem (not the
+                  // inner .sidebar-repo-header) so that App's handler can
+                  // call `event.currentTarget.focus()` on a focusable element.
+                  // The header is a bare <div> without tabIndex/role, so a
+                  // focus() call on it would be a no-op and leave
+                  // document.activeElement on <body>.
+                  onContextMenu={e => {
+                    e.preventDefault()
+                    onContextMenu({ type: 'repo', path: repo.path }, e)
+                  }}
+                >
                   <div
                     className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
                     data-testid={`repo-header-${repo.path}`}
                     onClick={() => toggleRepo(repo.path)}
-                    onContextMenu={e => {
-                      e.preventDefault()
-                      onContextMenu({ type: 'repo', path: repo.path }, e)
-                    }}
                   >
                     <span className="sidebar-chevron">{isCollapsed ? '\u25B6' : '\u25BC'}</span>
                     <span className="sidebar-repo-name">{repo.name}</span>
@@ -405,7 +417,15 @@ export function Sidebar({
                             data-testid={`session-item-${session.sessionId}`}
                             onClick={() => onSessionClick(session.sessionId)}
                             onContextMenu={e => {
+                              // #4372: stopPropagation so the right-click
+                              // does not bubble to the outer .sidebar-repo
+                              // treeitem (which also listens since the fix).
+                              // Without this the App handler fires twice and
+                              // the *outer* listener wins for focus(),
+                              // landing focus on the repo wrapper instead of
+                              // the session row.
                               e.preventDefault()
+                              e.stopPropagation()
                               onContextMenu({ type: 'session', sessionId: session.sessionId }, e)
                             }}
                           >
@@ -468,7 +488,12 @@ export function Sidebar({
                           data-testid={`resumable-item-${conv.conversationId}`}
                           onClick={() => onResumeSession(conv.conversationId)}
                           onContextMenu={e => {
+                            // #4372: stopPropagation so the right-click does
+                            // not bubble to the outer .sidebar-repo
+                            // treeitem (see matching comment on session
+                            // rows above).
                             e.preventDefault()
+                            e.stopPropagation()
                             onContextMenu({ type: 'resumable', conversationId: conv.conversationId }, e)
                           }}
                         >
