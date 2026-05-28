@@ -137,6 +137,8 @@ export function ActivityIndicator() {
     serverName: inFlightServerName,
     agentDescription,
     agentStartedAt,
+    pendingShellCommand,
+    pendingShellId,
   } = useConnectionStore(
     useShallow((s) => {
       const id = s.activeSessionId
@@ -158,12 +160,26 @@ export function ActivityIndicator() {
       const mostRecentAgent = activeAgents && activeAgents.length > 0
         ? activeAgents[activeAgents.length - 1]!
         : null
+      // #4418 — surface the most-recently-started pending background shell so
+      // the chip can say "Waiting on background work" when the turn ends but
+      // the session is still parked on a backgrounded Bash command. We project
+      // only the visible primitives (command + shellId) so `useShallow` bails
+      // out on no-op `pendingBackgroundShells[]` reference swaps (e.g. when
+      // another session's `background_work_changed` re-seeds the slot).
+      const pendingShells = ss?.pendingBackgroundShells
+      const mostRecentShell = pendingShells && pendingShells.length > 0
+        ? pendingShells.reduce((latest, s) =>
+            s.startedAt > latest.startedAt ? s : latest,
+          )
+        : null
       return {
         tool: inFlight?.tool ?? null,
         startedAt: inFlight?.startedAt ?? null,
         serverName: inFlight?.serverName ?? null,
         agentDescription: mostRecentAgent?.description ?? null,
         agentStartedAt: mostRecentAgent?.startedAt ?? null,
+        pendingShellCommand: mostRecentShell?.command ?? null,
+        pendingShellId: mostRecentShell?.shellId ?? null,
       }
     }),
   )
@@ -182,7 +198,37 @@ export function ActivityIndicator() {
     return () => window.clearInterval(id)
   }, [isIdle])
 
-  if (isIdle) return null
+  if (isIdle) {
+    // #4418 — when the turn ends but the agent backgrounded a Bash shell, the
+    // session is still effectively waiting on work. Surface that as a chip so
+    // the user can tell "idle and done" from "idle but parked on a long-
+    // running shell". We project the most-recently-started shell's command
+    // (falling back to its shellId when the command string is empty) — the
+    // full list is a deferred stretch goal per #4418's body. The chip uses
+    // the same neutral green styling as the connect-race fallback rather
+    // than the elapsed-driven color escalation; pending shells aren't a
+    // timeout candidate the way an agent turn is.
+    if (pendingShellCommand != null || pendingShellId != null) {
+      const detail = (pendingShellCommand && pendingShellCommand.length > 0)
+        ? pendingShellCommand
+        : pendingShellId!
+      return (
+        <div
+          className="activity-indicator activity-indicator--green"
+          aria-label="Waiting on background work"
+        >
+          <span className="activity-indicator__dot" aria-hidden="true" />
+          <span
+            className="activity-indicator__label"
+            data-testid="activity-indicator-label"
+          >
+            Waiting on background work · {detail}
+          </span>
+        </div>
+      )
+    }
+    return null
+  }
   if (lastActivityAt == null) {
     // Busy but we haven't seen an activity event yet (race on connect).
     // Render the indicator in its baseline green state without an elapsed
@@ -217,17 +263,17 @@ export function ActivityIndicator() {
   const approaching = remaining > 0 && remaining <= 60_000
   const klass = statusClass(elapsed, referenceTimeoutMs)
 
-  // #4308 — preference order:
+  // #4308 — preference order during an active turn (`_isBusy === true`):
   //   1. Active sub-agent (description + elapsed since its startedAt) — more
   //      specific than the parent's `Task` tool wrapper.
   //   2. In-flight tool (name + elapsed since its startedAt) — both
   //      activeTools (live) and the derive-from-messages fallback.
   //   3. Generic "Working… last activity Ns ago" — no current named work.
   //
-  // TODO(#4307): when the server lands background-shell task tracking, slot
-  // pending background work between #2 and #3 here ("1 background task
-  // running"). Schema lives in #4307; the activeTools[]-style array should
-  // be sufficient.
+  // #4418 — pending background shells are surfaced ONLY when the session is
+  // idle (handled above). During an active turn the live tool/agent label
+  // dominates; pending shells are SECONDARY per the issue's acceptance
+  // criteria and intentionally do not enter the preference order here.
   let label: string
   if (agentDescription != null && agentStartedAt != null) {
     label = `Running ${agentDescription} · ${formatDuration(now - agentStartedAt)}`
