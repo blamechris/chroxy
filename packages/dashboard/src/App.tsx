@@ -565,7 +565,15 @@ export function App() {
   // #4045: sidebar right-click context menu open + dismiss handlers. The
   // open path stashes the click target + viewport coordinates so the
   // SessionContextMenu can render at the cursor. Dismiss clears state.
+  // #4372: move focus to the row before opening the menu. A right-click
+  // does not move focus by default, so without this the SessionContextMenu's
+  // `previouslyFocused` capture (PR #4369) lands on whatever the user last
+  // clicked (often the composer textarea) and Esc returns focus there
+  // instead of to the row.
   const handleSidebarContextMenu = useCallback((target: ContextMenuTarget, event: React.MouseEvent) => {
+    if (event.currentTarget instanceof HTMLElement) {
+      event.currentTarget.focus()
+    }
     setSidebarContextMenu({ target, x: event.clientX, y: event.clientY })
   }, [])
   const dismissSidebarContextMenu = useCallback(() => {

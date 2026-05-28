@@ -1037,4 +1037,62 @@ describe('App', () => {
       expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
     })
   })
+
+  // #4372 — a11y: handleSidebarContextMenu must move focus to the row before
+  // opening the SessionContextMenu. PR #4369 added focus restoration on
+  // menu unmount that returns focus to whatever was document.activeElement
+  // at open time; a right-click does not move focus by default, so without
+  // this the captured "trigger" is whatever was last clicked (often the
+  // composer textarea) and Esc lands focus there, not on the row.
+  describe('right-click focuses the sidebar row before opening the menu (#4372)', () => {
+    const connectedState = {
+      connectionPhase: 'connected' as const,
+      sessions: [
+        { sessionId: 's1', name: 'Alpha', cwd: '/tmp/repo', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+    }
+
+    it('calls focus() on the right-clicked row before opening the menu', () => {
+      // We can't assert `document.activeElement === row` after the contextMenu
+      // event finishes — SessionContextMenu's mount effect focuses its first
+      // item, so by the time the assertion runs the menu has stolen focus.
+      // What we *can* pin down is that the handler invokes `focus()` on the
+      // row element itself (so SessionContextMenu's mount-effect capture of
+      // `document.activeElement` lands on the row). Spy on the row's focus.
+      stateOverrides = connectedState
+      render(<App />)
+      const row = screen.getByTestId('session-item-s1')
+      const focusSpy = vi.spyOn(row, 'focus')
+      fireEvent.contextMenu(row)
+      expect(focusSpy).toHaveBeenCalled()
+    })
+
+    it('returns focus to the row when the menu is dismissed (Esc)', () => {
+      // End-to-end: the user right-clicks the row from the composer textarea,
+      // navigates the menu, then dismisses with Esc. PR #4369 added the
+      // focus-restoration cleanup; #4372 ensures the *captured* trigger is
+      // the row (not the composer) by focusing it first in the handler. We
+      // assert both halves: the menu opens, then Esc lands focus on the row.
+      stateOverrides = connectedState
+      render(<App />)
+      const textarea = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      // Sanity: the menu is open and its first item should be focused.
+      expect(screen.getByRole('menu')).toBeInTheDocument()
+
+      // Esc dismisses the menu. SessionContextMenu listens at document scope
+      // for keydown — fire on the menu element so the event bubbles.
+      fireEvent.keyDown(document, { key: 'Escape' })
+
+      // The menu should be gone, and focus restored to the row (NOT the
+      // textarea, which would indicate the pre-#4372 bug).
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(document.activeElement).toBe(row)
+    })
+  })
 })

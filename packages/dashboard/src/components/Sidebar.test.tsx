@@ -1,6 +1,7 @@
 /**
  * Sidebar component tests (#1102)
  */
+import type React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { Sidebar, type SidebarProps, type RepoNode } from './Sidebar'
@@ -310,6 +311,74 @@ describe('Sidebar', () => {
   it('shows Running label when server is connected', () => {
     renderSidebar({ serverStatus: 'connected' })
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('Running')
+  })
+
+  // #4372: a11y — focus the right-clicked sidebar row before opening the
+  // SessionContextMenu so unmount focus-restoration lands back on the row
+  // (a right-click does not move focus by default).
+  describe('right-click focus on sidebar rows (#4372)', () => {
+    it('renders session rows with tabIndex (focusable)', () => {
+      renderSidebar()
+      // The active session row owns tabIndex=0; others sit at -1 (roving
+      // tabindex). What matters for #4372 is that the row is *focusable*
+      // (tabIndex is set, not absent), so the App handler's .focus() call
+      // can actually move focus to it.
+      const row = screen.getByTestId('session-item-s1')
+      expect(row).toHaveAttribute('tabindex')
+      expect(Number(row.getAttribute('tabindex'))).toBeGreaterThanOrEqual(-1)
+    })
+
+    it('renders repo header rows with tabIndex (focusable)', () => {
+      renderSidebar()
+      const repoTreeitem = screen
+        .getByTestId('repo-header-/home/user/projects/api')
+        .closest('[role="treeitem"]')
+      expect(repoTreeitem).not.toBeNull()
+      expect(repoTreeitem).toHaveAttribute('tabindex')
+    })
+
+    it('renders resumable rows with tabIndex (focusable)', () => {
+      renderSidebar()
+      const row = screen.getByTestId('resumable-item-c1')
+      expect(row).toHaveAttribute('tabindex')
+    })
+
+    it('passes the right-clicked row as event.currentTarget to onContextMenu', () => {
+      // The App-level handler will call event.currentTarget.focus() before
+      // opening the menu. We assert that the event handed to onContextMenu
+      // has the *row* (the element bound to the listener) as currentTarget,
+      // not some descendant — otherwise focusing currentTarget would target
+      // an unfocusable child. NB: React pools the event after the handler
+      // returns, so we must read currentTarget synchronously inside the
+      // listener.
+      let observed: EventTarget | null = null
+      const onContextMenu = vi.fn((_target, event: React.MouseEvent) => {
+        observed = event.currentTarget
+      })
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(observed).toBe(row)
+    })
+
+    it('focuses the row when the App-style handler runs on right-click', () => {
+      // Simulates the App-side handler (`event.currentTarget.focus()`) and
+      // verifies it actually moves document.activeElement to the row. This
+      // is the regression guard for #4372: if the row drops tabIndex, this
+      // .focus() call becomes a no-op.
+      const onContextMenu = vi.fn((_target, event: React.MouseEvent) => {
+        if (event.currentTarget instanceof HTMLElement) {
+          event.currentTarget.focus()
+        }
+      })
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      // Sanity: row is not focused before the right-click.
+      expect(document.activeElement).not.toBe(row)
+      fireEvent.contextMenu(row)
+      expect(document.activeElement).toBe(row)
+    })
   })
 
   describe('stdin forwarding disabled badge (#3567)', () => {
