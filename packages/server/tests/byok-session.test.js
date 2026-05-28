@@ -462,7 +462,6 @@ describe('ClaudeByokSession', () => {
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
-          toolName: block.name,
           result: 'ok',
           isError: false,
         })
@@ -512,7 +511,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCallCount = 0
@@ -568,7 +567,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCallCount = 0
@@ -620,7 +619,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCallCount = 0
@@ -674,7 +673,7 @@ describe('ClaudeByokSession', () => {
       session._executeToolBlock = async function ({ block, messageId }) {
         executeCount += 1
         if (executeCount === 1) {
-          this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+          this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
           return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
         }
         throw new Error('tool execution exploded')
@@ -941,7 +940,7 @@ describe('ClaudeByokSession', () => {
       // tool_start payload, not the permission UI.
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let round = 0
@@ -1546,7 +1545,6 @@ describe('ClaudeByokSession', () => {
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
-          toolName: block.name,
           result: 'ok',
           isError: false,
         })
@@ -1631,7 +1629,6 @@ describe('ClaudeByokSession', () => {
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
-          toolName: block.name,
           result: 'ok',
           isError: false,
         })
@@ -1713,12 +1710,12 @@ describe('ClaudeByokSession', () => {
           // blocks — important because the orchestrator passes the
           // decision through.
           const msg = decision.message || 'Permission denied by user.'
-          this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: msg, isError: true })
+          this.emit('tool_result', { messageId, toolUseId: block.id, result: msg, isError: true })
           return { type: 'tool_result', tool_use_id: block.id, content: msg, is_error: true }
         }
         const sleep = delays[block.id] || 0
         if (sleep) await new Promise((r) => setTimeout(r, sleep))
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCall = 0
@@ -1786,7 +1783,7 @@ describe('ClaudeByokSession', () => {
         return { behavior: 'allow', updatedInput: block.input || {} }
       }
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCall = 0
