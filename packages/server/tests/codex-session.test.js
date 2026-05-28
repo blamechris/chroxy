@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX, CODEX_CONTEXT_WINDOW_HEADROOM, _maybeRatchetContextWindow } from '../src/codex-session.js'
+import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX, CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP, _maybeRatchetContextWindow } from '../src/codex-session.js'
 import { SkillsTrustStore } from '../src/skills-trust.js'
 import { getRegistryForProvider } from '../src/models.js'
 import { waitFor } from './test-helpers.js'
@@ -1678,5 +1678,34 @@ describe('CodexSession', () => {
       assert.equal(changed, false, 'unknown models should be a silent no-op, not a throw')
       assert.equal(emitted.length, 0)
     })
+
+    // The cap exists to make a single corrupt turn unable to balloon the
+    // registry to an absurd number — a JSONL parse glitch or future Codex
+    // CLI bug must not blow up the meter math downstream. 2M is well above
+    // today's largest published windows, so anything above suggests bad data.
+    it('caps the ratchet target at CODEX_CONTEXT_WINDOW_RATCHET_CAP', () => {
+      const fakeSession = { model: 'gpt-5-codex', emit: () => {} }
+      // A wildly high observed value — e.g. CLI bug or overflow
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 10_000_000)
+      const r = getRegistryForProvider('codex')
+      const m = r.getModels().find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m)
+      assert.ok(m.contextWindow <= CODEX_CONTEXT_WINDOW_RATCHET_CAP,
+        `expected ratchet capped at ${CODEX_CONTEXT_WINDOW_RATCHET_CAP}, got ${m.contextWindow}`)
+    })
+
+    // Defensive guards: a corrupt usage payload (NaN, Infinity, negative)
+    // must not feed the ratchet math. NaN * 1.1 = NaN; Infinity * 1.1 =
+    // Infinity → unbounded growth (or NaN propagation through the
+    // registry → meter showing NaN%). Silent no-op is the right failure.
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0]) {
+      it(`no-op when input_tokens is invalid (${bad})`, () => {
+        const emitted = []
+        const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+        const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', bad)
+        assert.equal(changed, false)
+        assert.equal(emitted.length, 0)
+      })
+    }
   })
 })

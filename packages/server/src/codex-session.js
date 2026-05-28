@@ -255,6 +255,17 @@ const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
 export const CODEX_CONTEXT_WINDOW_HEADROOM = 1.1
 
 /**
+ * Sanity cap on the learn-loop ratchet target — a single `turn.completed`
+ * event with a corrupt or malicious `input_tokens` value (overflow, JSONL
+ * parse glitch, future Codex CLI bug) must not be able to balloon the
+ * registered window to an absurd number. 2,000,000 tokens is well above
+ * today's largest published Codex window (1M for gpt-4.1 / certain 1M
+ * GPT-5 variants on plan tiers) — any legit future model that exceeds
+ * this should bump this constant, not silently leak through.
+ */
+export const CODEX_CONTEXT_WINDOW_RATCHET_CAP = 2_000_000
+
+/**
  * #3857 learn-loop helper. When Codex's reported `input_tokens` for the
  * most-recent turn exceeds the registered context window for the active
  * model, bump the registry entry to `inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM`
@@ -265,6 +276,7 @@ export const CODEX_CONTEXT_WINDOW_HEADROOM = 1.1
  *   - the model isn't in the registry (unknown / custom deploy — caller
  *     handles via the registry's deriveId/resolveContextWindow fallback)
  *   - `input_tokens` is at or below the registered window (no drift signal)
+ *   - `input_tokens` is not a finite positive number (corrupt JSONL)
  *   - the model lacks a fullId we can resolve
  *
  * Extracted from `_processJsonlLine` so the logic is testable in isolation
@@ -277,6 +289,13 @@ export const CODEX_CONTEXT_WINDOW_HEADROOM = 1.1
  * @returns {boolean}  true when the registry was updated, false when no-op
  */
 export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
+  // Defensive guard against corrupt/malicious JSONL — a non-finite or
+  // negative `input_tokens` must not feed the ratchet math (NaN * 1.1 = NaN,
+  // Infinity * 1.1 = Infinity → unbounded growth). The caller in
+  // `_processJsonlLine` already gates on `>0`, but we re-check here so the
+  // helper is safe to call from any future caller too.
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return false
+
   const registry = getRegistryForProvider('codex')
   if (!registry) return false
 
@@ -291,8 +310,10 @@ export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
 
   // Round the bumped value up to the nearest 1k so the meter shows a clean
   // number ("440k" not "440231") and we don't write a fresh cache entry on
-  // every single turn for sub-1k variation.
-  const raw = inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM
+  // every single turn for sub-1k variation. Capped at
+  // CODEX_CONTEXT_WINDOW_RATCHET_CAP so a single corrupt turn can't balloon
+  // the registry to an absurd value.
+  const raw = Math.min(inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP)
   const bumped = Math.ceil(raw / 1000) * 1000
 
   const changed = registry.updateContextWindow(modelId, bumped)

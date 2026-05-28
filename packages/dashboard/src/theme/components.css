@@ -3502,6 +3502,19 @@
   animation: none;
 }
 
+/*
+ * Respect prefers-reduced-motion (#3857) — the pulse is a redundant cue
+ * (the .over-budget class also recolors and the label still shows the
+ * over-budget percent), so disabling it doesn't lose information for users
+ * who opt out of motion.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .footer-context-bar.over-budget .footer-context-fill,
+  .footer-compact-suggest.over-budget {
+    animation: none;
+  }
+}
+
 .footer-agents {
   color: var(--text-secondary);
 }
