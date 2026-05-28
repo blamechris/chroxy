@@ -495,6 +495,160 @@ describe('SdkSession', () => {
       assert.equal(errors.length, 1)
       s.destroy()
     })
+
+    // #4307: background-shell tracking wired through SdkSession's
+    // tool_use → tool_result loop. Asserts: command stashing at
+    // tool_use time, BashOutput-triggered clearing, ignoring non-Bash
+    // run_in_background:false calls.
+    describe('#4307 — background-shell tracking', () => {
+      it('stashes the command on a run_in_background Bash tool_use', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-1',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        assert.equal(session._pendingBackgroundCommands.get('tu-bg-1'), 'sleep 600')
+        // No shell registered yet — that happens on the matching tool_result.
+        assert.equal(session._pendingBackgroundShells.size, 0)
+      })
+
+      it('does not stash on a regular Bash call (no run_in_background flag)', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-2',
+          input: { command: 'ls' },
+        })
+        assert.equal(session._pendingBackgroundCommands.size, 0)
+      })
+
+      it('does not stash on a non-Bash tool with run_in_background:true (defensive)', () => {
+        // The flag is Bash-specific in Claude's tool surface — a non-Bash
+        // call with the field is a malformed payload; reject without
+        // poisoning the pending-commands map.
+        session._handleToolUseBlock('msg-1', {
+          name: 'Edit',
+          id: 'tu-bg-3',
+          input: { file_path: '/foo', run_in_background: true },
+        })
+        assert.equal(session._pendingBackgroundCommands.size, 0)
+      })
+
+      it('records a pending shell when the matching tool_result carries the canonical id', () => {
+        const events = []
+        session.on('background_work_changed', (e) => events.push(e))
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-4',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-4',
+            content: 'Command running in background with ID: brk57kt6pm. Output…',
+          },
+        ])
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        const entry = session._pendingBackgroundShells.get('brk57kt6pm')
+        assert.equal(entry.command, 'sleep 600')
+        assert.equal(entry.shellId, 'brk57kt6pm')
+        assert.ok(entry.startedAt > 0)
+        // The ephemeral command stash drops once promoted to a pending shell.
+        assert.equal(session._pendingBackgroundCommands.has('tu-bg-4'), false)
+        // background_work_changed fired with the new snapshot.
+        assert.equal(events.length, 1)
+        assert.equal(events[0].pending[0].shellId, 'brk57kt6pm')
+      })
+
+      it('extracts the id from an array-form content block (text-only blocks)', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-5',
+          input: { command: 'long-running', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-5',
+            content: [
+              { type: 'text', text: 'Command running in background with ID: bg-abc-1.' },
+            ],
+          },
+        ])
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        assert.ok(session._pendingBackgroundShells.has('bg-abc-1'))
+      })
+
+      it('isRunning reports waiting (true) once _isBusy clears but the shell is pending', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-6',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-6',
+            content: 'Command running in background with ID: bg-6-id. Output…',
+          },
+        ])
+        // Simulate turn-end: _clearMessageState happens after `result`.
+        session._isBusy = true
+        session._clearMessageState()
+        assert.equal(session._isBusy, false)
+        // The waiting-on-background-work signal: isRunning stays true.
+        assert.equal(session.isRunning, true)
+        assert.equal(session._pendingBackgroundShells.size, 1)
+      })
+
+      it('clears the pending entry when the agent calls BashOutput with the matching bash_id', () => {
+        const events = []
+        // Set up a pending shell.
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-7',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-7',
+            content: 'Command running in background with ID: shell-77. Output…',
+          },
+        ])
+        session.on('background_work_changed', (e) => events.push(e))
+        // Now the agent calls BashOutput on shell-77.
+        session._handleToolUseBlock('msg-2', {
+          name: 'BashOutput',
+          id: 'tu-bo-1',
+          input: { bash_id: 'shell-77' },
+        })
+        assert.equal(session._pendingBackgroundShells.size, 0)
+        assert.equal(session.isRunning, false)
+        assert.equal(events.length, 1)
+        assert.equal(events[0].pending.length, 0)
+      })
+
+      it('destroy() clears the pending map (no leak)', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-8',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-8',
+            content: 'Command running in background with ID: shell-88. Output…',
+          },
+        ])
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        session.destroy()
+        assert.equal(session._pendingBackgroundShells.size, 0)
+        // Re-create one for the afterEach destroy to not double-destroy.
+        session = createSession()
+      })
+    })
   })
 
   // -- _clearMessageState --

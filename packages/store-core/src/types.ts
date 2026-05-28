@@ -199,6 +199,15 @@ export interface SessionInfo {
   // because older servers don't include the field; renderers should
   // treat `undefined` as "no data, hide the badge."
   cumulativeUsage?: CumulativeUsage;
+  /**
+   * #4307: snapshot of backgrounded shells the session is still waiting
+   * on. Optional because pre-#4307 servers omit the field; consumers
+   * should treat `undefined` as `[]`. Always an array when present
+   * (#4307-aware servers send `[]` when no work is pending). The
+   * SessionInfo entry's value is the late-joiner seed; the live update
+   * channel is the `background_work_changed` event.
+   */
+  pendingBackgroundShells?: PendingBackgroundShell[];
 }
 
 export interface AgentInfo {
@@ -236,6 +245,30 @@ export interface ActiveTool {
   tool: string;
   serverName?: string;
   input?: unknown;
+  startedAt: number;
+}
+
+/**
+ * #4307 — one entry per backgrounded `Bash` shell the session is still
+ * waiting on. Mirrors the server-side `ServerPendingBackgroundShellSchema`.
+ *
+ * Driven by the `background_work_changed` event and seeded from the
+ * `session_list` snapshot's `pendingBackgroundShells` field for late
+ * joiners. The entry persists across turn-end (the whole point: the
+ * agent's turn finished but the shell is still running); it clears when
+ * the agent calls `BashOutput` on the matching id, or when the session
+ * is destroyed.
+ *
+ * `shellId` is the short alphanumeric token Claude prints in its
+ * "Command running in background with ID: <id>" tool_result (e.g.
+ * `brk57kt6pm`). `command` is the original Bash command text so the
+ * activity indicator can show "waiting on `<command>`" without a
+ * round-trip. `startedAt` is the server-side wall-clock at register
+ * time so elapsed-time display doesn't depend on client clock skew.
+ */
+export interface PendingBackgroundShell {
+  shellId: string;
+  command: string;
   startedAt: number;
 }
 
@@ -521,6 +554,21 @@ export interface BaseSessionState {
    * server-side schema landed by #4307.
    */
   activeTools: ActiveTool[];
+  /**
+   * #4307 — backgrounded shells the session is still waiting on. See
+   * {@link PendingBackgroundShell}. Driven by the
+   * `background_work_changed` event and seeded from the `session_list`
+   * snapshot for late joiners. Empty array when no work is pending —
+   * never `null` so the renderer's `.length` check is safe.
+   *
+   * Distinct from `activeTools`: those are in-flight tool calls in the
+   * CURRENT turn; pending background shells persist ACROSS turns until
+   * the agent acknowledges them (via `BashOutput`) or the session is
+   * destroyed. A session with no `activeTools` but a non-empty
+   * `pendingBackgroundShells` is the "waiting on background work"
+   * state the activity indicator surfaces.
+   */
+  pendingBackgroundShells: PendingBackgroundShell[];
   isPlanPending: boolean;
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;

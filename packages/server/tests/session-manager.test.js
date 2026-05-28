@@ -1273,6 +1273,48 @@ describe('SessionManager.listSessions includes stdinDroppedTotals (#3573)', () =
   })
 })
 
+// #4307: pending-background-shells snapshot in session_list. A client
+// joining mid-flight (fresh tab, server reconnect, app resume) must
+// see the waiting state through the session-list snapshot without
+// waiting for the next `background_work_changed` event.
+describe('SessionManager.listSessions includes pendingBackgroundShells (#4307)', () => {
+  it('reads getPendingBackgroundShells() and surfaces the entries', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const pending = [
+      { shellId: 'a', command: 'sleep 600', startedAt: 100 },
+      { shellId: 'b', command: 'tail -f log', startedAt: 200 },
+    ]
+    const session = new EventEmitter()
+    session.isRunning = true
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.getPendingBackgroundShells = () => pending
+    session.destroy = () => {}
+    mgr._sessions.set('s-bg', { session, name: 'Waiting', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.ok(Array.isArray(entry.pendingBackgroundShells))
+    assert.equal(entry.pendingBackgroundShells.length, 2)
+    assert.equal(entry.pendingBackgroundShells[0].shellId, 'a')
+    assert.equal(entry.pendingBackgroundShells[1].shellId, 'b')
+  })
+
+  it('defaults to an empty array for providers without the getter', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s-old', { session, name: 'NoGetter', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.deepEqual(entry.pendingBackgroundShells, [])
+  })
+})
+
 describe('SessionManager provider support', () => {
   it('defaults to claude-sdk provider', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })

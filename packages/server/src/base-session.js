@@ -187,6 +187,33 @@ export class BaseSession extends EventEmitter {
 
     this._isBusy = false
     this._processReady = false
+    // #4307: per-session map of backgrounded Bash shells the agent is
+    // still waiting on. Keyed by the shellId Claude prints in the
+    // `Command running in background with ID: <id>` tool_result. Lives
+    // beyond `_clearMessageState` (turn-end) on purpose — the whole
+    // point of #4307 is that a session waiting on background work is
+    // distinct from an idle session and must NOT be reaped by
+    // `SessionTimeoutManager`. Entries clear in two paths:
+    //   1. Matching `BashOutput` tool call (the agent acknowledged the
+    //      shell — either it polled and saw output, or it asked to be
+    //      killed; either way our model of pending work is stale).
+    //   2. `destroy()` (no leak — see `_destroyPendingBackgroundShells`).
+    // SDK provider: if the agent never calls `BashOutput`, the entry
+    // persists until destroy. Documented behaviour — we deliberately do
+    // not try to tail the output file ourselves (that's a separate
+    // sidecar lifecycle problem, out of scope).
+    // TUI provider: same parity — the agent's next turn surfaces the
+    // BashOutput call and clears the entry naturally.
+    this._pendingBackgroundShells = new Map()
+    // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
+    // `run_in_background: true`, keyed by toolUseId. Used to recover the
+    // command string when the matching tool_result lands carrying the
+    // shellId — the command string is informational (surfaced in the
+    // dashboard "waiting on …" chip). Cleared on `_clearMessageState`
+    // because once a turn ends, any tool_use blocks that did not see a
+    // result this turn are stranded; the agent's next turn re-emits a
+    // fresh `tool_use` if it cares to wait again.
+    this._pendingBackgroundCommands = new Map()
     this._messageCounter = 0
     // Boot-unique prefix mixed into every emitted messageId (#3700).
     // The dashboard caches up to 100 messages per session in localStorage
@@ -477,8 +504,106 @@ export class BaseSession extends EventEmitter {
     return true
   }
 
+  /**
+   * #4307: a session is "running" — i.e. NOT idle, NOT subject to
+   * `SessionTimeoutManager` reaping — when EITHER:
+   *   - `_isBusy` is true (the model is mid-turn), OR
+   *   - the pending-background-shells map is non-empty (the agent
+   *     dispatched a `run_in_background` Bash and is waiting on it).
+   *
+   * The second clause is the #4307 fix: previously a session that
+   * kicked off a long-running background shell and returned looked
+   * indistinguishable from a finished session — `_isBusy` had cleared
+   * at turn-end. Now it stays "running" until the agent acknowledges
+   * the shell (via a `BashOutput` call) or the session is destroyed.
+   */
   get isRunning() {
-    return this._isBusy
+    if (this._isBusy) return true
+    return this._pendingBackgroundShells.size > 0
+  }
+
+  /**
+   * #4307: read-only snapshot of pending background shells, ordered by
+   * insertion (so the dashboard surfaces the most-recently-started shell
+   * last). Returns a plain array of `{ shellId, startedAt, command }`
+   * objects so the caller can stringify directly onto a wire payload.
+   */
+  getPendingBackgroundShells() {
+    return Array.from(this._pendingBackgroundShells.values())
+  }
+
+  /**
+   * #4307: record a new pending background shell. Idempotent on
+   * shellId — re-registering an existing id is a no-op (preserves the
+   * original startedAt + command so a duplicate tool_result, which
+   * does happen on certain claude paths, can't bump the timestamp or
+   * overwrite the original command text).
+   *
+   * Emits `background_work_changed` with the full pending snapshot
+   * after a change. `SessionManager` proxies this transient event onto
+   * the WS wire (see `customEvents`-style integration).
+   *
+   * @param {{ shellId: string, command?: string }} opts
+   * @returns {boolean} true if a new entry was added
+   */
+  trackBackgroundShell({ shellId, command } = {}) {
+    if (typeof shellId !== 'string' || shellId.length === 0) return false
+    if (this._pendingBackgroundShells.has(shellId)) return false
+    this._pendingBackgroundShells.set(shellId, {
+      shellId,
+      startedAt: Date.now(),
+      command: typeof command === 'string' ? command : '',
+    })
+    this._emitBackgroundWorkChanged()
+    return true
+  }
+
+  /**
+   * #4307: clear a pending background shell by id. Returns true when
+   * an entry actually existed, false when the id was not tracked —
+   * matches the idempotent contract of other BaseSession setters so
+   * the caller can decide whether to log / emit.
+   *
+   * Emits `background_work_changed` with the post-clear snapshot when
+   * the change is observable (entry actually existed).
+   *
+   * @param {string} shellId
+   * @returns {boolean}
+   */
+  clearBackgroundShell(shellId) {
+    if (typeof shellId !== 'string' || shellId.length === 0) return false
+    if (!this._pendingBackgroundShells.delete(shellId)) return false
+    this._emitBackgroundWorkChanged()
+    return true
+  }
+
+  /**
+   * #4307: emit the current pending-shells snapshot on the
+   * `background_work_changed` event. Pulled into a helper so both
+   * `trackBackgroundShell` and `clearBackgroundShell` use one shape.
+   * The full snapshot is sent on each change (not just the delta) so a
+   * late-joining client subscribed to the event sees the canonical
+   * state without needing to replay a delta stream.
+   *
+   * @private
+   */
+  _emitBackgroundWorkChanged() {
+    this.emit('background_work_changed', {
+      pending: this.getPendingBackgroundShells(),
+    })
+  }
+
+  /**
+   * #4307: clear the pending map on session destroy. Pulled into a
+   * helper so subclasses can call it from their own `destroy()` after
+   * the existing teardown — keeping the map alive past destroy would
+   * leak memory and confuse late session-list snapshots.
+   *
+   * @private
+   */
+  _destroyPendingBackgroundShells() {
+    this._pendingBackgroundShells.clear()
+    this._pendingBackgroundCommands.clear()
   }
 
   /** Current thinking level. Override in subclasses that support it. */
@@ -790,6 +915,15 @@ export class BaseSession extends EventEmitter {
   _clearMessageState() {
     this._isBusy = false
     this._currentMessageId = null
+
+    // #4307: clear the ephemeral tool_use→command lookup. NOT the
+    // pending-shells map — those entries survive turn-end intentionally
+    // (the whole point of #4307: a session waiting on background work
+    // is distinct from an idle session). The commands map is only used
+    // to recover the command text for the next tool_result of the SAME
+    // turn — once the turn ends, any unmatched entries are stranded
+    // and a fresh tool_use would re-populate.
+    this._pendingBackgroundCommands.clear()
 
     // Emit completions for any tracked agents so the app clears badges
     if (this._activeAgents.size > 0) {

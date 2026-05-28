@@ -145,6 +145,27 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #4307: pending-background-shells snapshot changed for a session.
+  // BaseSession emits this on both push (run_in_background tool_result
+  // observed) and clear (BashOutput tool_use observed). Full snapshot
+  // is on the wire so a client subscribed to this event but missing
+  // earlier broadcasts (e.g. just-reconnected, late-listener) sees the
+  // canonical state without needing a delta protocol. The
+  // session_list snapshot carries the same field for the late-joining
+  // path. Also pushes a session_list side effect so the SessionInfo
+  // entry's `pendingBackgroundShells` slot refreshes for clients that
+  // render off the list rather than subscribing to the event directly.
+  background_work_changed: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'background_work_changed',
+        sessionId: ctx.sessionId,
+        pending: Array.isArray(data?.pending) ? data.pending : [],
+      },
+    }],
+    sideEffects: [{ type: 'session_list' }],
+  }),
+
   mcp_servers: (data) => ({
     messages: [{
       msg: { type: 'mcp_servers', servers: data.servers },

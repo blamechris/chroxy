@@ -65,6 +65,7 @@ import {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,
   handleAvailableModels,
@@ -100,6 +101,7 @@ import type {
   ConversationSummary,
   DevPreview,
   ModelInfo,
+  PendingBackgroundShell,
   SessionInfo,
 } from '../types'
 
@@ -3213,6 +3215,110 @@ describe('handleAgentCompleted', () => {
       'tu-1',
       'tu-3',
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #4307 — handleBackgroundWorkChanged
+// ---------------------------------------------------------------------------
+describe('handleBackgroundWorkChanged (#4307)', () => {
+  it('replaces the pending list with the server snapshot', () => {
+    const existing: PendingBackgroundShell[] = [
+      { shellId: 'old', command: 'sleep 1', startedAt: 100 },
+    ]
+    const builder = handleBackgroundWorkChanged(
+      {
+        sessionId: 'sess-1',
+        pending: [
+          { shellId: 'new', command: 'sleep 60', startedAt: 200 },
+        ],
+      },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    expect(builder.applyTo(existing)).toEqual([
+      { shellId: 'new', command: 'sleep 60', startedAt: 200 },
+    ])
+  })
+
+  it('returns the same array reference when the snapshot matches the current list', () => {
+    const existing: PendingBackgroundShell[] = [
+      { shellId: 'a', command: 'cmd-a', startedAt: 100 },
+      { shellId: 'b', command: 'cmd-b', startedAt: 200 },
+    ]
+    const builder = handleBackgroundWorkChanged(
+      {
+        pending: [
+          { shellId: 'a', command: 'cmd-a', startedAt: 100 },
+          { shellId: 'b', command: 'cmd-b', startedAt: 200 },
+        ],
+      },
+      'active-1',
+    )
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('returns an empty list when pending is empty (the "clear" path)', () => {
+    const existing: PendingBackgroundShell[] = [
+      { shellId: 'a', command: 'cmd-a', startedAt: 100 },
+    ]
+    const builder = handleBackgroundWorkChanged(
+      { pending: [] },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toEqual([])
+  })
+
+  it('treats missing pending field as empty list (defensive fail-soft)', () => {
+    const builder = handleBackgroundWorkChanged({}, 'active-1')
+    expect(builder.applyTo([])).toEqual([])
+  })
+
+  it('drops entries missing shellId without rejecting the whole snapshot', () => {
+    const builder = handleBackgroundWorkChanged(
+      {
+        pending: [
+          { shellId: 'good', command: 'cmd', startedAt: 100 },
+          { command: 'no id', startedAt: 100 },
+          { shellId: '', command: 'empty', startedAt: 100 },
+        ],
+      },
+      'active-1',
+    )
+    const out = builder.applyTo([])
+    expect(out).toHaveLength(1)
+    expect(out[0]?.shellId).toBe('good')
+  })
+
+  it('defaults missing command to empty string', () => {
+    const builder = handleBackgroundWorkChanged(
+      { pending: [{ shellId: 'a', startedAt: 100 }] },
+      'active-1',
+    )
+    expect(builder.applyTo([])[0]?.command).toBe('')
+  })
+
+  it('defaults missing startedAt to current time', () => {
+    const before = Date.now()
+    const builder = handleBackgroundWorkChanged(
+      { pending: [{ shellId: 'a', command: 'cmd' }] },
+      'active-1',
+    )
+    const out = builder.applyTo([])
+    const after = Date.now()
+    expect(out[0]?.startedAt).toBeGreaterThanOrEqual(before)
+    expect(out[0]?.startedAt).toBeLessThanOrEqual(after)
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleBackgroundWorkChanged({ pending: [] }, 'active-1')
+    expect(builder.sessionId).toBe('active-1')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const builder = handleBackgroundWorkChanged({ pending: [] }, null)
+    expect(builder.sessionId).toBeNull()
   })
 })
 

@@ -27,6 +27,11 @@ export type {
   // #4308: ActiveTool — one entry per in-flight tool call, kept on
   // BaseSessionState.activeTools and driven by tool_start / tool_result.
   ActiveTool,
+  // #4307: PendingBackgroundShell — one entry per backgrounded Bash
+  // shell the session is still waiting on. Survives turn-end (the
+  // whole point of #4307); clears when the agent calls BashOutput or
+  // the session is destroyed.
+  PendingBackgroundShell,
   ConnectedClient,
   SessionHealth,
   SessionContext,
@@ -224,6 +229,7 @@ export type {
   ThinkingLevel,
   DevPreviewBuilder,
   AgentInfoBuilder,
+  PendingBackgroundShellsBuilder,
   ServerMode,
   AuthOkPayload,
   CheckpointRestoredPayload,
@@ -338,6 +344,7 @@ export {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,
   handleAvailableModels,

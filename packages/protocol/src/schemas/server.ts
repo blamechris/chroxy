@@ -269,6 +269,51 @@ export const ServerAgentCompletedSchema = z.object({
   toolUseId: z.string(),
 })
 
+/**
+ * #4307 — one entry per backgrounded `Bash` shell the session is still
+ * waiting on. Pushed when the agent dispatches a `Bash` tool call with
+ * `run_in_background: true` (the matching tool_result carries the
+ * canonical `Command running in background with ID: <id>` text); cleared
+ * when the agent calls `BashOutput` (acknowledged) or the session is
+ * destroyed.
+ *
+ * `shellId` is the short alphanumeric token Claude prints (e.g.
+ * `brk57kt6pm`). `command` is the original Bash command text the agent
+ * dispatched, stashed at tool_use time so the dashboard can render
+ * "waiting on `<command>`" without a separate roundtrip. `startedAt` is
+ * the server-side wall-clock at the moment the tool_result was parsed —
+ * lets the dashboard surface elapsed wait time without trusting the
+ * client clock.
+ */
+export const ServerPendingBackgroundShellSchema = z.object({
+  shellId: z.string(),
+  command: z.string(),
+  startedAt: z.number().int().nonnegative(),
+})
+
+/**
+ * #4307 — transient event: the pending-background-shells snapshot for a
+ * session changed. Emitted both on push (a new `run_in_background` shell
+ * was registered) and on clear (`BashOutput` acknowledged or the session
+ * was destroyed). The full snapshot is on the wire (not a delta) so a
+ * late-joining client sees canonical state.
+ *
+ * Why a full snapshot instead of an event per delta: pending work is a
+ * tiny set (typically 0 or 1 entries) and the event fires rarely, so
+ * the wire cost is negligible. A delta protocol would force every
+ * client to also reconcile against `pendingBackgroundShells` on the
+ * `session_list` snapshot — the full-snapshot shape avoids that.
+ *
+ * Late joiners: `session_list` carries the same `pendingBackgroundShells`
+ * field on each entry, so a client that connects between
+ * `background_work_changed` events catches up via the next snapshot.
+ */
+export const ServerBackgroundWorkChangedSchema = z.object({
+  type: z.literal('background_work_changed'),
+  sessionId: z.string(),
+  pending: z.array(ServerPendingBackgroundShellSchema),
+})
+
 export const ServerClientFocusChangedSchema = z.object({
   type: z.literal('client_focus_changed'),
   clientId: z.string(),
@@ -410,6 +455,12 @@ export const ServerSessionListEntrySchema = z.object({
   // running total, and a session that received only refunds could
   // legitimately end up with a negative cumulative.
   cumulativeUsage: CumulativeUsageSchema.optional(),
+  // #4307: pending backgrounded shells. Empty array when no work is
+  // pending — never `undefined` from a #4307-aware server (mirrors the
+  // `cumulativeUsage` shape, which always carries a zero block once
+  // present). Optional in the schema so pre-#4307 servers that omit
+  // the field still parse; consumers should treat `undefined` as `[]`.
+  pendingBackgroundShells: z.array(ServerPendingBackgroundShellSchema).optional(),
 }).passthrough()
 
 export const ServerSessionListSchema = z.object({
