@@ -16,7 +16,8 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi, nextMessageId } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, stripAnsi, nextMessageId } from '../store/connection';
+import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';

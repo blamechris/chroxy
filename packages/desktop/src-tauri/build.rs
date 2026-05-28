@@ -58,6 +58,10 @@ fn main() {
         // consistent even if speech-helper.swift is temporarily absent.
         println!("cargo:rerun-if-changed={}", swift_src);
         println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
+        // APPLE_KEYCHAIN_PATH is passed to `codesign --keychain` below; toggling
+        // it between cargo invocations must invalidate the speech-helper cache
+        // marker so the binary is re-signed against the new keychain (#4252).
+        println!("cargo:rerun-if-env-changed=APPLE_KEYCHAIN_PATH");
 
         // Helper: run a command, panic with captured stderr on failure.
         fn run(label: &str, cmd: &mut std::process::Command) {
@@ -85,6 +89,9 @@ fn main() {
             //     but cargo's tracker is per-target_dir; the universal build
             //     uses two target dirs so we re-check explicitly here)
             //   - APPLE_SIGNING_IDENTITY (signature changes when identity does)
+            //   - APPLE_KEYCHAIN_PATH (#4252: passed to codesign --keychain;
+            //     swapping the keychain must re-sign the binary against the
+            //     new identity-resolution scope)
             //   - swiftc toolchain version (#3950: Xcode/Swift updates produce
             //     binaries with different runtime requirements; without this,
             //     a stale cache would silently ship a binary compiled against
@@ -103,11 +110,18 @@ fn main() {
             let swift_cache = format!("{}.cache", swift_out);
             // Track the cache marker so `rm <swift_cache>` reliably forces a
             // rebuild: without this, cargo only re-runs the build script when
-            // a tracked input changes (currently `swift_src` and
-            // `APPLE_SIGNING_IDENTITY`), so deleting the cache marker alone
-            // would be silently ignored on the next `cargo build`.
+            // a tracked input changes (currently `swift_src`,
+            // `APPLE_SIGNING_IDENTITY`, and `APPLE_KEYCHAIN_PATH`), so
+            // deleting the cache marker alone would be silently ignored on
+            // the next `cargo build`.
             println!("cargo:rerun-if-changed={}", swift_cache);
             let identity_for_cache = std::env::var("APPLE_SIGNING_IDENTITY").unwrap_or_default();
+            // Include the (possibly empty) keychain path in the cache key so a
+            // swap of APPLE_KEYCHAIN_PATH between two cargo invocations forces
+            // a re-sign even on a warm cache (#4252). On CI this is moot
+            // (fresh runner), but it matters for local experiments with
+            // alternate keychains.
+            let keychain_for_cache = std::env::var("APPLE_KEYCHAIN_PATH").unwrap_or_default();
             let src_mtime_secs = std::fs::metadata(&swift_src)
                 .ok()
                 .and_then(|m| m.modified().ok())
@@ -130,8 +144,8 @@ fn main() {
                 })
                 .unwrap_or_else(|| "unknown".to_string());
             let cache_key = format!(
-                "v2\nsrc_mtime={}\nidentity={}\nswiftc={}\n",
-                src_mtime_secs, identity_for_cache, swiftc_version,
+                "v3\nsrc_mtime={}\nidentity={}\nkeychain={}\nswiftc={}\n",
+                src_mtime_secs, identity_for_cache, keychain_for_cache, swiftc_version,
             );
 
             let cached = std::path::Path::new(&swift_out).exists()
