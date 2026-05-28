@@ -21,7 +21,7 @@ jobs:
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     steps:
-      - uses: blamechris/repo-relay@7d09c257e5456511ab26d08b7ad21d8657d4594b # v1
+      - uses: blamechris/repo-relay@b238b3f06628720308cf993ffed3990b82350eda # v1.0.1
         with:
           discord_bot_token: ${{ secrets.DISCORD_BOT_TOKEN }}
           channel_prs: ${{ secrets.DISCORD_CHANNEL_PRS }}

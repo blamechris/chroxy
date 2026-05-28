@@ -160,11 +160,17 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permissionMode, setPermissionMode] = useState('')
   const [worktree, setWorktree] = useState(false)
-  // #4208: TUI-only opt-in to spawn claude with
-  // --dangerously-skip-permissions. Reset to false whenever the modal
-  // re-opens (alongside permissionMode / worktree below) so a previous
-  // session's choice doesn't leak into the next create.
-  const [skipPermissions, setSkipPermissions] = useState(false)
+  // #4208/#4244: TUI-only opt-in to spawn claude with
+  // --dangerously-skip-permissions. Tri-state (#4244) so the modal can
+  // submit an explicit `false` and override a server-wide
+  // `defaultSkipPermissions: true` (#4209) on a per-session basis:
+  //   - 'inherit' → emits undefined; server applies defaultSkipPermissions
+  //   - 'on'      → emits true; always skip prompts
+  //   - 'off'     → emits false; never skip prompts, even if server default is true
+  // Reset to 'inherit' whenever the modal re-opens (alongside permissionMode
+  // / worktree below) so a previous session's choice doesn't leak into the
+  // next create.
+  const [skipPermissions, setSkipPermissions] = useState<'inherit' | 'on' | 'off'>('inherit')
   const [environmentId, setEnvironmentId] = useState('')
   const environments = useConnectionStore(s => s.environments)
   const [showSuggestions, setShowSuggestions] = useState(false)
@@ -221,7 +227,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setShowAdvanced(false)
     setPermissionMode('')
     setWorktree(false)
-    setSkipPermissions(false)
+    setSkipPermissions('inherit')
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
     setBrowsing(false)
@@ -247,6 +253,18 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [open, availableProviders, provider])
 
+  // #4245: reset skipPermissions whenever the provider changes. The
+  // checkbox is hidden for non-TUI providers, but the underlying state
+  // survives a provider switch — so a user who ticks the box for
+  // claude-tui, tabs to claude-sdk, then tabs back to claude-tui would
+  // see the checkbox pre-checked with no fresh warning. Force a
+  // re-confirmation by clearing the state on every provider change. The
+  // submit-time guard (`provider === 'claude-tui' && skipPermissions`)
+  // still acts as belt + braces in case this reset races a submit.
+  useEffect(() => {
+    setSkipPermissions('inherit')
+  }, [provider])
+
   // #4340: gate the Create button on the selected provider being ready.
   // Pre-#4340 the dropdown disabled unready options so they couldn't be
   // selected; now we let the user navigate to any provider to read its
@@ -268,13 +286,18 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // depth (e.g. keyboard activation racing a store update).
     if (selectedProviderUnready) return
     const model = resolveCreateSessionModel(provider, defaultModel, availableModels, availableModelsProvider)
-    // #4208: gate on the TUI provider at submit time as well as in the UI.
-    // The checkbox is hidden for non-TUI providers, but a user who flips
-    // provider AFTER ticking the box would otherwise carry the stale flag
-    // forward — and the server-side handler doesn't gate by provider
+    // #4208/#4244: gate on the TUI provider at submit time as well as in the
+    // UI. The radio group is hidden for non-TUI providers, but a user who
+    // flips provider AFTER changing state would otherwise carry the stale
+    // value forward — and the server-side handler doesn't gate by provider
     // (forwards via providerOpts; non-TUI providers ignore it). Belt +
     // braces: undefined unless the active provider is `claude-tui`.
-    const skipPermissionsOut = provider === 'claude-tui' && skipPermissions ? true : undefined
+    // Tri-state mapping: 'inherit' → undefined (server default wins), 'on'
+    // → true (force skip), 'off' → false (force require, overrides a server
+    // launched with --dangerously-skip-permissions).
+    const skipPermissionsOut: boolean | undefined = provider === 'claude-tui'
+      ? (skipPermissions === 'on' ? true : skipPermissions === 'off' ? false : undefined)
+      : undefined
     onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut })
   }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId, skipPermissions, selectedProviderUnready])
 
@@ -728,30 +751,57 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 : 'Runs in an isolated git worktree — requires a git repo CWD'}
             </span>
           </div>
-          {/* #4208: TUI-only opt-in to spawn `claude --dangerously-skip-permissions`.
+          {/* #4208/#4244: TUI-only opt-in to spawn `claude --dangerously-skip-permissions`.
               Hidden for non-TUI providers because:
                 - claude-sdk / claude-byok don't accept the flag (different bin)
                 - claude-cli already has its own `--dangerously-skip-permissions`
                   wiring on `chroxy resume`, not on create_session
                 - docker-* and codex/gemini don't have a comparable concept
-              The checkbox only renders when the active provider is `claude-tui`,
-              and the submit handler double-checks the provider before
-              forwarding the flag. */}
+              Tri-state radio group (#4244) so the user can submit an explicit
+              `false` to override a server launched with
+              `chroxy start --dangerously-skip-permissions` (server-wide
+              defaultSkipPermissions: true). The submit handler double-checks
+              the provider before forwarding the flag. */}
           {provider === 'claude-tui' && (
-            <div className="form-field form-field--checkbox" data-testid="skip-permissions-field">
-              <label className="checkbox-label">
+            <div className="form-field" data-testid="skip-permissions-field" role="radiogroup" aria-labelledby="skip-permissions-legend" aria-describedby="skip-permissions-hint">
+              <span id="skip-permissions-legend" className="form-field-label">
+                Permission prompts
+              </span>
+              <label className="radio-label">
                 <input
-                  type="checkbox"
-                  id="skip-permissions-checkbox"
-                  data-testid="skip-permissions-checkbox"
-                  checked={skipPermissions}
-                  onChange={e => setSkipPermissions(e.target.checked)}
-                  aria-describedby="skip-permissions-hint"
+                  type="radio"
+                  name="skip-permissions"
+                  data-testid="skip-permissions-radio-inherit"
+                  value="inherit"
+                  checked={skipPermissions === 'inherit'}
+                  onChange={() => setSkipPermissions('inherit')}
+                />
+                Use server default
+              </label>
+              <label className="radio-label">
+                <input
+                  type="radio"
+                  name="skip-permissions"
+                  data-testid="skip-permissions-radio-off"
+                  value="off"
+                  checked={skipPermissions === 'off'}
+                  onChange={() => setSkipPermissions('off')}
+                />
+                Require permission prompts (override server default)
+              </label>
+              <label className="radio-label">
+                <input
+                  type="radio"
+                  name="skip-permissions"
+                  data-testid="skip-permissions-radio-on"
+                  value="on"
+                  checked={skipPermissions === 'on'}
+                  onChange={() => setSkipPermissions('on')}
                 />
                 Skip permission prompts (dangerous)
               </label>
               <span id="skip-permissions-hint" className="form-hint form-hint--warning">
-                Spawns the claude TUI with <code>--dangerously-skip-permissions</code> and
+                &ldquo;Skip&rdquo; spawns the claude TUI with <code>--dangerously-skip-permissions</code> and
                 disables chroxy&rsquo;s tool-call gate entirely. Every tool runs with no
                 prompt and no audit trail. Use only in trusted contexts (e.g. isolated
                 workspace, throwaway worktree, or container).
