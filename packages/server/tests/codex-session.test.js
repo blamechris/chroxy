@@ -6,9 +6,16 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX } from '../src/codex-session.js'
+import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX, CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP, _maybeRatchetContextWindow } from '../src/codex-session.js'
 import { SkillsTrustStore } from '../src/skills-trust.js'
+import { getRegistryForProvider } from '../src/models.js'
 import { waitFor } from './test-helpers.js'
+// Importing providers.js triggers built-in provider registration so
+// getRegistryForProvider('codex') can wire to CodexSession's static hooks
+// when this suite runs in isolation. Without this the registry falls back
+// to the default Claude registry and the learn-loop ratchet tests below
+// would silently no-op.
+import '../src/providers.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1569,5 +1576,136 @@ describe('CodexSession', () => {
       assert.equal(toolResults[0].toolUseId, 'tc-99')
       assert.equal(toolResults[0].result, 'file.txt')
     })
+  })
+
+  // -------------------------------------------------------------------
+  // #3857 — Codex context-window registry + learn-loop
+  // -------------------------------------------------------------------
+  //
+  // The static MODEL_INFO table was last bumped pre-launch and shipped 272k
+  // for both gpt-5 and gpt-5-codex even though OpenAI publishes 400k for
+  // Codex on every paid plan. The first fix is the static bump; the second
+  // is a runtime learn-loop that catches future drift the same way
+  // sdk-session.js corrects Claude windows from `SDKResultSuccess.modelUsage`.
+  describe('#3857 context-window source-of-truth', () => {
+    it('gpt-5-codex ships the current OpenAI-documented 400k window', () => {
+      const meta = CodexSession.getModelMetadata('gpt-5-codex')
+      assert.ok(meta)
+      assert.equal(meta.contextWindow, 400_000,
+        'gpt-5-codex should ship the 400k Codex window OpenAI publishes for all paid plans')
+    })
+
+    it('gpt-5 ships the current OpenAI-documented 400k window', () => {
+      const meta = CodexSession.getModelMetadata('gpt-5')
+      assert.ok(meta)
+      assert.equal(meta.contextWindow, 400_000,
+        'gpt-5 should ship the 400k window — was 272k pre-launch (#3857)')
+    })
+
+    it('every shipped fallback model carries a positive contextWindow', () => {
+      for (const m of CodexSession.getFallbackModels()) {
+        assert.ok(typeof m.contextWindow === 'number' && m.contextWindow > 0,
+          `${m.fullId} should have a numeric contextWindow > 0`)
+      }
+    })
+  })
+
+  describe('#3857 learn-loop — _maybeRatchetContextWindow()', () => {
+    // The codex provider registry is module-cached; reset before each test
+    // so the pollution from a previous ratchet doesn't bleed in.
+    beforeEach(() => {
+      const r = getRegistryForProvider('codex')
+      r.resetModels()
+    })
+
+    it('no-op when input_tokens is at or below the registered window', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+      // 400k window — a 100k turn should not trigger.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 100_000)
+      assert.equal(changed, false)
+      assert.equal(emitted.length, 0)
+    })
+
+    it('ratchets up when input_tokens exceeds the registered window', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+      // 500k input on a 400k registered window → bump to >= 500k * 1.1 = 550k.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 500_000)
+      assert.equal(changed, true)
+
+      const r = getRegistryForProvider('codex')
+      const m = r.getModels().find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m)
+      assert.ok(m.contextWindow >= 500_000 * CODEX_CONTEXT_WINDOW_HEADROOM,
+        `expected ratcheted window >= ${500_000 * CODEX_CONTEXT_WINDOW_HEADROOM}, got ${m.contextWindow}`)
+      // Round-to-1k cleanliness check — meter should not display "550127".
+      assert.equal(m.contextWindow % 1000, 0,
+        `expected ratcheted window rounded up to nearest 1k, got ${m.contextWindow}`)
+    })
+
+    it('emits models_updated with the updated registry when ratcheted', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 500_000)
+      const evt = emitted.find(x => x.e === 'models_updated')
+      assert.ok(evt, 'should emit models_updated so dashboards refresh')
+      assert.ok(Array.isArray(evt.d.models))
+      const m = evt.d.models.find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m && m.contextWindow >= 500_000 * CODEX_CONTEXT_WINDOW_HEADROOM)
+    })
+
+    it('only ratchets up — never shrinks the registered window', () => {
+      const r = getRegistryForProvider('codex')
+      // Ratchet up first.
+      const fakeSession = { model: 'gpt-5-codex', emit: () => {} }
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 800_000)
+      const after = r.getModels().find(x => x.fullId === 'gpt-5-codex').contextWindow
+      assert.ok(after > 400_000, 'sanity: ratchet should have raised the window')
+
+      // Now a small turn comes in. Must NOT ratchet down.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 50_000)
+      assert.equal(changed, false)
+      const stable = r.getModels().find(x => x.fullId === 'gpt-5-codex').contextWindow
+      assert.equal(stable, after,
+        'a small follow-up turn must not shrink the ratcheted window')
+    })
+
+    it('no-op for an unknown model id', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-99-future', emit: (e, d) => emitted.push({ e, d }) }
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-99-future', 999_999_999)
+      assert.equal(changed, false, 'unknown models should be a silent no-op, not a throw')
+      assert.equal(emitted.length, 0)
+    })
+
+    // The cap exists to make a single corrupt turn unable to balloon the
+    // registry to an absurd number — a JSONL parse glitch or future Codex
+    // CLI bug must not blow up the meter math downstream. 2M is well above
+    // today's largest published windows, so anything above suggests bad data.
+    it('caps the ratchet target at CODEX_CONTEXT_WINDOW_RATCHET_CAP', () => {
+      const fakeSession = { model: 'gpt-5-codex', emit: () => {} }
+      // A wildly high observed value — e.g. CLI bug or overflow
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 10_000_000)
+      const r = getRegistryForProvider('codex')
+      const m = r.getModels().find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m)
+      assert.ok(m.contextWindow <= CODEX_CONTEXT_WINDOW_RATCHET_CAP,
+        `expected ratchet capped at ${CODEX_CONTEXT_WINDOW_RATCHET_CAP}, got ${m.contextWindow}`)
+    })
+
+    // Defensive guards: a corrupt usage payload (NaN, Infinity, negative)
+    // must not feed the ratchet math. NaN * 1.1 = NaN; Infinity * 1.1 =
+    // Infinity → unbounded growth (or NaN propagation through the
+    // registry → meter showing NaN%). Silent no-op is the right failure.
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0]) {
+      it(`no-op when input_tokens is invalid (${bad})`, () => {
+        const emitted = []
+        const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+        const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', bad)
+        assert.equal(changed, false)
+        assert.equal(emitted.length, 0)
+      })
+    }
   })
 })

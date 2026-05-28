@@ -39,6 +39,15 @@ export interface FooterBarProps {
   provider?: string
   /** #3858: model context window in tokens for the model tooltip. */
   contextWindow?: number
+  /**
+   * #3857: invoked when the user clicks the high-utilization "/compact"
+   * suggestion chip. Receives the literal text the chip would send (always
+   * `/compact`) so the consumer can route it through whatever input pipe
+   * is current (sendInput in App.tsx). Undefined hides the chip entirely
+   * — read-only dashboards (e.g. archived-session previews) should not
+   * surface a CTA that won't fire.
+   */
+  onCompact?: () => void
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -54,6 +63,16 @@ const STATUS_LABELS: Record<string, string> = {
   server_restarting: 'Restarting',
   disconnected: 'Disconnected',
 }
+
+/**
+ * #3857: high-water threshold for surfacing the `/compact` suggestion chip.
+ * Mirrors the Claude Code CLI's own "near limit" cue (~80%). Exported so
+ * tests don't re-hardcode the magic number.
+ */
+export const FOOTER_COMPACT_SUGGEST_THRESHOLD = 80
+
+/** #3857: hard threshold past which the meter is in "over-budget" mode. */
+export const FOOTER_OVER_BUDGET_THRESHOLD = 100
 
 export function FooterBar({
   connectionPhase,
@@ -74,6 +93,7 @@ export function FooterBar({
   onShareSession,
   provider,
   contextWindow,
+  onCompact,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -173,7 +193,15 @@ export function FooterBar({
             {contextPercent != null ? (
               <>
                 <span
-                  className={`footer-context-bar${contextPercent >= 80 ? ' high' : contextPercent >= 50 ? ' medium' : ''}`}
+                  className={`footer-context-bar${
+                    contextPercent >= FOOTER_OVER_BUDGET_THRESHOLD
+                      ? ' high over-budget'
+                      : contextPercent >= FOOTER_COMPACT_SUGGEST_THRESHOLD
+                        ? ' high'
+                        : contextPercent >= 50
+                          ? ' medium'
+                          : ''
+                  }`}
                   role="progressbar"
                   aria-label="Context window usage"
                   aria-valuenow={Math.min(Math.round(contextPercent), 100)}
@@ -182,10 +210,47 @@ export function FooterBar({
                 >
                   <span className="footer-context-fill" style={{ width: `${Math.min(contextPercent, 100)}%` }} />
                 </span>
-                <span className="footer-context-label">{Math.min(Math.round(contextPercent), 100)}%</span>
+                {/*
+                 * #3857: show the *true* percent in the label (not the clamped
+                 * value) once we cross 100% so the user gets a real over-budget
+                 * signal. The bar fill stays clamped at 100% width — a bar
+                 * wider than its container is just visual noise — but the
+                 * numeric label is what tells the user "you're 18% over".
+                 * Sub-100% renders unchanged (Math.min returns the original).
+                 */}
+                <span className="footer-context-label">
+                  {Math.round(contextPercent)}%
+                </span>
               </>
             ) : context}
           </span>
+        )}
+        {/*
+         * #3857: clickable "/compact" suggestion chip surfaces at >=80% so
+         * users get a remedy hint before the meter pegs at red. Hidden when
+         * onCompact is undefined (read-only embeds) so a CTA that won't fire
+         * never renders. Rendered AFTER the context chip so the spatial
+         * relationship reads as "you're at 90% → here's what to do".
+         */}
+        {contextPercent != null
+          && contextPercent >= FOOTER_COMPACT_SUGGEST_THRESHOLD
+          && onCompact && (
+          <button
+            type="button"
+            className={`footer-compact-suggest${
+              contextPercent >= FOOTER_OVER_BUDGET_THRESHOLD ? ' over-budget' : ''
+            }`}
+            onClick={onCompact}
+            data-testid="btn-compact-session"
+            title={
+              contextPercent >= FOOTER_OVER_BUDGET_THRESHOLD
+                ? 'Context window full — send /compact to free space (the model may already be silently truncating older context).'
+                : 'Context is filling up — send /compact to summarise older turns and free space.'
+            }
+            aria-label="Compact session — send /compact to free context space"
+          >
+            /compact
+          </button>
         )}
       </div>
     </footer>

@@ -3444,8 +3444,75 @@
   background: var(--accent-red, #e53e3e);
 }
 
+/*
+ * #3857: distinct "over-budget" visual so the user can tell "exactly at 100%"
+ * apart from "30% over the registered window". Adds a subtle pulse on the
+ * fill so the bar reads as "this is actively wrong" rather than "this is the
+ * limit". Pulsing only triggers past 100% to avoid alarm fatigue at the
+ * common 95%+ case where the meter is correct.
+ */
+.footer-context-bar.over-budget .footer-context-fill {
+  background: var(--accent-red-dark, #c53030);
+  animation: footerContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+@keyframes footerContextOverBudgetPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
 .footer-context-label {
   font-size: 11px;
+}
+
+/*
+ * #3857: "/compact" suggestion chip — surfaces at >=80% context usage to give
+ * the user a one-click remedy instead of just a red bar with no signal. Styled
+ * to match the .footer-qr-btn aesthetic so it reads as a footer-bar control
+ * rather than a notification.
+ */
+.footer-compact-suggest {
+  appearance: none;
+  background: var(--bg-tertiary, #1a1a2e);
+  color: var(--accent-yellow, #ecc94b);
+  border: 1px solid var(--accent-yellow, #ecc94b);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.footer-compact-suggest:hover {
+  background: var(--accent-yellow, #ecc94b);
+  color: var(--bg-tertiary, #1a1a2e);
+}
+
+.footer-compact-suggest.over-budget {
+  color: var(--accent-red, #e53e3e);
+  border-color: var(--accent-red, #e53e3e);
+  animation: footerContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+.footer-compact-suggest.over-budget:hover {
+  background: var(--accent-red, #e53e3e);
+  color: #fff;
+  animation: none;
+}
+
+/*
+ * Respect prefers-reduced-motion (#3857) — the pulse is a redundant cue
+ * (the .over-budget class also recolors and the label still shows the
+ * over-budget percent), so disabling it doesn't lose information for users
+ * who opt out of motion.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .footer-context-bar.over-budget .footer-context-fill,
+  .footer-compact-suggest.over-budget {
+    animation: none;
+  }
 }
 
 .footer-agents {

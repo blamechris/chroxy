@@ -91,12 +91,14 @@ describe('provider static metadata hooks', () => {
 
 describe('createModelsRegistry(providerHooks)', () => {
   it('honors provider-supplied fallback models for a non-Claude provider', () => {
+    // #3857: 400k is the OpenAI-documented Codex window for gpt-5 / gpt-5-codex
+    // across paid plans; was 272k pre-launch and never bumped.
     const fallback = Object.freeze([
-      Object.freeze({ id: 'gpt-5-codex', label: 'GPT-5 Codex', fullId: 'gpt-5-codex', contextWindow: 272_000 }),
+      Object.freeze({ id: 'gpt-5-codex', label: 'GPT-5 Codex', fullId: 'gpt-5-codex', contextWindow: 400_000 }),
     ])
     const r = createModelsRegistry({
       fallbackModels: fallback,
-      getModelMetadata: (id) => ({ id, label: id, fullId: id, contextWindow: 272_000 }),
+      getModelMetadata: (id) => ({ id, label: id, fullId: id, contextWindow: 400_000 }),
     })
     const models = r.getModels()
     assert.equal(models.length, 1)

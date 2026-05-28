@@ -3,6 +3,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { getRegistryForProvider } from './models.js'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -211,9 +212,20 @@ export function buildCodexArgs(text, model, threadId = null) {
 // Context-window values come from the OpenAI model docs; `contextWindow` is
 // used both in the token-usage HUD and as the Codex-side override for the
 // generic 200k default shipped by `models.js`.
+//
+// #3857: gpt-5 / gpt-5-codex bumped from 272k → 400k. The 272k value was an
+// internal pre-launch limit that was never updated when OpenAI shipped the
+// public 400k Codex window — surfaced as a permanent 100% footer meter at
+// ~321k tokens even though Codex kept responding coherently (issue #3857,
+// also captured upstream in openai/codex#19319 + community.openai.com:
+// "Input tokens exceed the configured limit of 272,000 tokens"). The runtime
+// learn-loop in `_processJsonlLine` ratchets these upward when the SDK
+// reports an `input_tokens` value larger than the static entry, so a future
+// upstream bump (1M variants on certain plans) self-corrects without
+// requiring another source-code change.
 const CODEX_MODEL_METADATA = Object.freeze({
-  'gpt-5-codex': { label: 'GPT-5 Codex', contextWindow: 272_000 },
-  'gpt-5':       { label: 'GPT-5',        contextWindow: 272_000 },
+  'gpt-5-codex': { label: 'GPT-5 Codex', contextWindow: 400_000 },
+  'gpt-5':       { label: 'GPT-5',        contextWindow: 400_000 },
   'gpt-4.1':     { label: 'GPT-4.1',      contextWindow: 1_000_000 },
   'gpt-4o':      { label: 'GPT-4o',       contextWindow: 128_000 },
   'o1':          { label: 'o1',           contextWindow: 200_000 },
@@ -231,6 +243,88 @@ const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
     contextWindow: meta.contextWindow,
   })
 }))
+
+/**
+ * Headroom multiplier for the learn-loop. When `input_tokens` exceeds the
+ * registered window for a model, we ratchet to `inputTokens * HEADROOM`
+ * so the next turn has slack before it pegs the meter again.
+ *
+ * Exported so the test suite can verify the exact ratchet target instead
+ * of recomputing the magic number.
+ */
+export const CODEX_CONTEXT_WINDOW_HEADROOM = 1.1
+
+/**
+ * Sanity cap on the learn-loop ratchet target — a single `turn.completed`
+ * event with a corrupt or malicious `input_tokens` value (overflow, JSONL
+ * parse glitch, future Codex CLI bug) must not be able to balloon the
+ * registered window to an absurd number. 2,000,000 tokens is well above
+ * today's largest published Codex window (1M for gpt-4.1 / certain 1M
+ * GPT-5 variants on plan tiers) — any legit future model that exceeds
+ * this should bump this constant, not silently leak through.
+ */
+export const CODEX_CONTEXT_WINDOW_RATCHET_CAP = 2_000_000
+
+/**
+ * #3857 learn-loop helper. When Codex's reported `input_tokens` for the
+ * most-recent turn exceeds the registered context window for the active
+ * model, bump the registry entry to `inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM`
+ * (rounded up to the nearest 1k for a clean number) and emit
+ * `models_updated` so connected dashboards refresh the meter.
+ *
+ * No-op when:
+ *   - the model isn't in the registry (unknown / custom deploy — caller
+ *     handles via the registry's deriveId/resolveContextWindow fallback)
+ *   - `input_tokens` is at or below the registered window (no drift signal)
+ *   - `input_tokens` is not a finite positive number (corrupt JSONL)
+ *   - the model lacks a fullId we can resolve
+ *
+ * Extracted from `_processJsonlLine` so the logic is testable in isolation
+ * — the real method runs as part of the readline pipeline, which is messy
+ * to stub directly from a unit test.
+ *
+ * @param {import('events').EventEmitter} session  The CodexSession instance
+ * @param {string} modelId  Short id or fullId of the active Codex model
+ * @param {number} inputTokens  `usage.input_tokens` from `turn.completed`
+ * @returns {boolean}  true when the registry was updated, false when no-op
+ */
+export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
+  // Defensive guard against corrupt/malicious JSONL — a non-finite or
+  // negative `input_tokens` must not feed the ratchet math (NaN * 1.1 = NaN,
+  // Infinity * 1.1 = Infinity → unbounded growth). The caller in
+  // `_processJsonlLine` already gates on `>0`, but we re-check here so the
+  // helper is safe to call from any future caller too.
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return false
+
+  const registry = getRegistryForProvider('codex')
+  if (!registry) return false
+
+  // Look up the active model in the registry to read its current window.
+  // Match on either short id or fullId — the registry stores both.
+  const models = registry.getModels()
+  const entry = models.find(m => m.id === modelId || m.fullId === modelId)
+  if (!entry) return false
+  if (typeof entry.contextWindow !== 'number' || entry.contextWindow <= 0) return false
+
+  if (inputTokens <= entry.contextWindow) return false
+
+  // Round the bumped value up to the nearest 1k so the meter shows a clean
+  // number ("440k" not "440231") and we don't write a fresh cache entry on
+  // every single turn for sub-1k variation. Capped at
+  // CODEX_CONTEXT_WINDOW_RATCHET_CAP so a single corrupt turn can't balloon
+  // the registry to an absurd value.
+  const raw = Math.min(inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP)
+  const bumped = Math.ceil(raw / 1000) * 1000
+
+  const changed = registry.updateContextWindow(modelId, bumped)
+  if (!changed) return false
+
+  // Mirror sdk-session.js:763 — broadcast the corrected registry so the
+  // dashboard's `availableModels` (and therefore the footer meter) picks
+  // up the new window without waiting for the next refresh.
+  session.emit('models_updated', { models: registry.getModels() })
+  return true
+}
 
 export class CodexSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
@@ -427,12 +521,31 @@ export class CodexSession extends JsonlSubprocessSession {
           ctx.didStreamStart = false
         }
         const usage = event.usage || {}
+        const inputTokens = usage.input_tokens || 0
+        const outputTokens = usage.output_tokens || 0
+        // #3857 learn-loop: when Codex reports an `input_tokens` value that
+        // exceeds the registered context window for the active model, the
+        // static window is stale (this is exactly how we found the original
+        // 272k drift — 321k turns kept succeeding past 100%). Ratchet the
+        // registry upward to at least `input_tokens * 1.1` so the next turn's
+        // meter reflects reality, and emit `models_updated` so connected
+        // dashboards pick up the corrected value without waiting for a
+        // refresh. Mirrors the Claude path in sdk-session.js:741 — except
+        // the SDK there has an explicit `contextWindow` field; here we infer
+        // it from the observed token count.
+        //
+        // Only ratchets *up* — a single small turn must never shrink the
+        // registered window (the model didn't change, only the prompt size
+        // for this one turn did).
+        if (this.model && inputTokens > 0) {
+          _maybeRatchetContextWindow(this, this.model, inputTokens)
+        }
         this.emit('result', {
           cost: null,
           duration: null,
           usage: {
-            input_tokens: usage.input_tokens || 0,
-            output_tokens: usage.output_tokens || 0,
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
           },
           sessionId: this.resumeSessionId,
         })
