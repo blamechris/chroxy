@@ -198,8 +198,8 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 **Reason:** Clear explanation of why this is correct
 
 **Evidence:**
-- Reference to docs/pattern used (e.g., 'per CLAUDE.md: no semicolons, single quotes')
-- Link to similar code in codebase"
+- per CLAUDE.md: no semicolons, single quotes
+- Reference to similar code in codebase"
 ```
 
 ---
@@ -305,21 +305,28 @@ If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 
 GraphQL is required here — REST doesn't expose thread state. Threads are GraphQL-only objects (`PRRT_*` IDs); the `resolveReviewThread` mutation needs the GraphQL node ID, not the REST `databaseId`.
 
 ```bash
-# Fetch all review threads (GraphQL — REST API doesn't expose thread state)
-THREADS=$(gh api graphql -f query="
-  query {
+# Fetch all unresolved review thread IDs (GraphQL — REST doesn't expose thread
+# state). --paginate auto-loops on pageInfo.hasNextPage so PRs with >100 threads
+# are fully covered; without it, threads on later pages stayed unresolved AND
+# unreported, so the resolve step silently appeared to succeed while the merge
+# gate stayed red. --jq runs per-page and outputs are concatenated, so we emit
+# one ID per line rather than building one mega-array across pages.
+THREAD_IDS=$(gh api graphql --paginate -f query="
+  query(\$endCursor: String) {
     repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
       pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: \$endCursor) {
           nodes { id isResolved }
+          pageInfo { hasNextPage endCursor }
         }
       }
     }
-  }" --jq '.data.repository.pullRequest.reviewThreads.nodes')
+  }" --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .id')
 
 # Resolve each unresolved thread; surface any single-thread failure
 # instead of swallowing it (a 401/403 on one thread shouldn't be silent).
-echo "$THREADS" | jq -r '.[] | select(.isResolved == false) | .id' | while read -r tid; do
+echo "$THREAD_IDS" | while read -r tid; do
+  [ -z "$tid" ] && continue
   gh api graphql -f query="
     mutation {
       resolveReviewThread(input: {threadId: \"$tid\"}) {
@@ -329,21 +336,35 @@ echo "$THREADS" | jq -r '.[] | select(.isResolved == false) | .id' | while read 
     || echo "  FAILED to resolve: $tid"
 done
 
-# Verify zero unresolved threads remain
-UNRESOLVED=$(gh api graphql -f query="
-  query {
+# Verify zero unresolved threads remain. --paginate emits one length per page,
+# which we sum with awk so the count is correct on PRs with >100 threads. If
+# this stays nonzero, either the resolve loop failed on specific threads or new
+# threads landed mid-flight — re-run step 6b.
+UNRESOLVED=$(gh api graphql --paginate -f query="
+  query(\$endCursor: String) {
     repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
       pullRequest(number: ${PR_NUM}) {
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: \$endCursor) {
           nodes { isResolved }
+          pageInfo { hasNextPage endCursor }
         }
       }
     }
-  }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+  }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' \
+  | awk '{s+=$1} END {print s+0}')
 
 echo "Unresolved threads: ${UNRESOLVED}"
 [ "$UNRESOLVED" -eq 0 ] || { echo "FAIL: ${UNRESOLVED} threads still unresolved"; exit 1; }
 ```
+
+**Pagination cap:** `gh api graphql --paginate` follows `pageInfo.hasNextPage` until exhausted — no implicit cap. On the rare PR with thousands of threads, GitHub's GraphQL rate limit (5000 points/hr) is the practical ceiling. If you see HTTP 403 with "API rate limit exceeded" from gh on step 6b, the resolve loop will short-circuit on the failing call and the verify will report nonzero — re-run after the rate limit window resets.
+
+**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**.
+
+**Edge cases:**
+- A thread you marked FALSE POSITIVE: still resolve it. The reply records the rationale; if a reviewer disagrees, they can re-open the thread.
+- A FOLLOW-UP ISSUE thread: still resolve it. The issue link in the reply is the paper trail; the conversation in the PR has served its purpose.
+- A FIX thread: resolve it after the fix commit lands and the reply with the commit SHA is posted.
 
 ### 7. Post Summary Comment
 
@@ -430,4 +451,4 @@ Then below the table, list:
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
-<!-- skill-templates: check-pr 57ceacc 2026-05-27 -->
+<!-- skill-templates: check-pr 97dfcd4 2026-05-28 -->
