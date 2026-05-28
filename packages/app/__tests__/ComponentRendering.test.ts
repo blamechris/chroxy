@@ -113,7 +113,7 @@ describe('ChatView component', () => {
   })
 
   test('imports ChatMessage type from store', () => {
-    expect(chatViewSrc).toMatch(/import\s*\{.*ChatMessage.*\}\s*from\s+['"]\.\.\/store\/connection['"]/)
+    expect(chatViewSrc).toMatch(/import\s+(?:type\s+)?\{.*ChatMessage.*\}\s*from\s+['"]\.\.\/store\/connection['"]/)
   })
 
   test('imports child components (MessageBubble, ActivityGroup, ToolDetailModal)', () => {

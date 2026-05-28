@@ -10,7 +10,7 @@ import {
   NativeScrollEvent,
   AccessibilityInfo,
 } from 'react-native';
-import { ChatMessage, ToolResultImage } from '../store/connection';
+import type { ChatMessage, ToolResultImage } from '../store/connection';
 import { ImageViewer } from './ImageViewer';
 import { AnimatedMessage } from './AnimatedMessage';
 import { ICON_CHEVRON_RIGHT } from '../constants/icons';

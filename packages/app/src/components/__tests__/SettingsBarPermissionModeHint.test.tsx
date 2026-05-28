@@ -114,7 +114,12 @@ describe('SettingsBar permission-mode hint (#4213)', () => {
     expect(() => root.findByProps({ testID: 'permission-mode-hint' })).toThrow();
   });
 
-  it('hides the hint when the selected mode has neither server nor fallback copy', () => {
+  // #4251: parity with dashboard #4019 — when the selected mode has neither
+  // a server-supplied description nor a hardcoded fallback (e.g. a future
+  // provider added a new mode the mobile build doesn't recognise), the
+  // hint must render the same catch-all string CreateSessionModal.tsx
+  // emits at the end of its fallback chain.
+  it('renders catch-all hint when the selected mode has neither server nor fallback copy', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
       tree = renderer.create(
@@ -129,6 +134,9 @@ describe('SettingsBar permission-mode hint (#4213)', () => {
       );
     });
     const root = tree!.root;
-    expect(() => root.findByProps({ testID: 'permission-mode-hint' })).toThrow();
+    const hint = root.findByProps({ testID: 'permission-mode-hint' });
+    expect(collectVisibleText(hint)).toContain(
+      'Uses whatever the server’s --default-permission-mode was set to (usually Approve).',
+    );
   });
 });
