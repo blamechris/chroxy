@@ -390,10 +390,18 @@ export class ClaudeByokSession extends BaseSession {
               // earlier ones in replay-dedupe) AND with the post-tool
               // stream_start id (#stream_id_collision class). Mirrors
               // sdk-session.js:635-641 / cli-session.js:708-714.
+              // #4364: Mirror sdk-session.js:635-641 — reuse the
+              // derived toolId for both fields so the wire schema
+              // (`ServerToolStartSchema.toolUseId: z.string()`) holds
+              // even on the defensive fallback path. Pre-#4364 this
+              // emitted `toolUseId: undefined` when content_block.id
+              // was absent; no observable runtime impact today (no
+              // broadcast-side validator) but the schema is the
+              // contract.
               const toolId = t.toolUseId || `${messageId}-tool`
               this.emit('tool_start', {
                 messageId: toolId,
-                toolUseId: t.toolUseId,
+                toolUseId: toolId,
                 tool: t.toolName,
                 input: null,
               })
