@@ -104,10 +104,31 @@ describe('tokenizeThinkingKeywords', () => {
       ])
     })
 
-    it('matches "think\\nharder" across a newline', () => {
+    it('matches "think\\tharder" with a tab', () => {
+      expect(tokenizeThinkingKeywords('please think\tharder')).toEqual([
+        { kind: 'text', text: 'please ' },
+        { kind: 'keyword', text: 'think\tharder' },
+      ])
+    })
+
+    // #4402: `\s+` used to swallow newlines, so the user pressing Enter
+    // between unrelated thoughts ("think.\n\nNow go harder.") false-
+    // positived. Horizontal whitespace only now — overlay still highlights
+    // the bare `think` (the budget mirrored server-side), but the multi-
+    // word keyword does NOT span a newline.
+    it('does NOT match "think\\nharder" across a newline — falls back to bare "think" (#4402)', () => {
       expect(tokenizeThinkingKeywords('please think\nharder')).toEqual([
         { kind: 'text', text: 'please ' },
-        { kind: 'keyword', text: 'think\nharder' },
+        { kind: 'keyword', text: 'think' },
+        { kind: 'text', text: '\nharder' },
+      ])
+    })
+
+    it('does NOT match "think\\n\\nharder" across a paragraph boundary (#4402)', () => {
+      expect(tokenizeThinkingKeywords('please think\n\nharder')).toEqual([
+        { kind: 'text', text: 'please ' },
+        { kind: 'keyword', text: 'think' },
+        { kind: 'text', text: '\n\nharder' },
       ])
     })
   })
@@ -119,6 +140,40 @@ describe('tokenizeThinkingKeywords', () => {
         { kind: 'keyword', text: 'ultrathink' },
         { kind: 'text', text: ' then ' },
         { kind: 'keyword', text: 'think hard' },
+      ])
+    })
+  })
+
+  describe('reuses module-level regex across calls (#4404)', () => {
+    // The module-level `THINKING_KEYWORD_RE` carries the `g` flag, which
+    // stores `lastIndex` iteration state on the regex object itself. If
+    // the function forgot to reset `lastIndex` between calls — or if it
+    // resumed using a stale state — the second call would skip the start
+    // of its input and miss matches that appear before the previous
+    // call's last match position.
+    it('produces the same tokens when called repeatedly with the same input', () => {
+      const input = 'please ultrathink then think hard'
+      const first = tokenizeThinkingKeywords(input)
+      const second = tokenizeThinkingKeywords(input)
+      const third = tokenizeThinkingKeywords(input)
+      expect(second).toEqual(first)
+      expect(third).toEqual(first)
+    })
+
+    it('does not leak state when a long input is followed by a short one', () => {
+      // The long input drives the regex's `lastIndex` deep into the
+      // string. If state leaked, the short input's `think` (at index 0)
+      // would be missed.
+      tokenizeThinkingKeywords('a b c d e f g h ultrathink i j k l m n o think hard')
+      expect(tokenizeThinkingKeywords('think')).toEqual([
+        { kind: 'keyword', text: 'think' },
+      ])
+    })
+
+    it('still finds a match in a short string after a previous no-match call', () => {
+      tokenizeThinkingKeywords('no keywords here at all')
+      expect(tokenizeThinkingKeywords('ultrathink')).toEqual([
+        { kind: 'keyword', text: 'ultrathink' },
       ])
     })
   })

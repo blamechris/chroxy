@@ -31,11 +31,18 @@ export type ThinkingKeywordToken =
  *   - `g`  — global (advance lastIndex on each match)
  *   - `i`  — case-insensitive
  *
- * The `\s+` between the multi-word entries collapses any run of whitespace
- * (spaces, tabs, newlines) so `think  harder` and `think\nharder` still
- * match the same way they do server-side.
+ * The `[ \t]+` between the multi-word entries allows a run of horizontal
+ * whitespace (spaces / tabs only — NOT newlines) so `think  harder` still
+ * matches but `think\n\nharder` (paragraph boundary) does not. Mirrors the
+ * server-side regex tightening in #4402 — if either side drifts the overlay
+ * lies about what got escalated.
+ *
+ * The regex is reused directly by `tokenizeThinkingKeywords` below (#4404),
+ * which resets `lastIndex` at the top of the function — the `g` flag stores
+ * iteration state on the regex object itself, so a re-entrant call would
+ * otherwise resume from wherever the previous call left off.
  */
-const THINKING_KEYWORD_RE = /\b(?:ultrathink|megathink|think\s+harder|think\s+hard|think)\b/gi
+const THINKING_KEYWORD_RE = /\b(?:ultrathink|megathink|think[ \t]+harder|think[ \t]+hard|think)\b/gi
 
 /**
  * Split `text` into an ordered list of tokens. Adjacent text runs are not
@@ -58,10 +65,14 @@ export function tokenizeThinkingKeywords(text: string): ThinkingKeywordToken[] {
   // the gap-text (the run between consecutive matches) — `matchAll` would
   // give us match arrays but not the inter-match slices without bookkeeping
   // we'd need either way.
-  const re = new RegExp(THINKING_KEYWORD_RE.source, THINKING_KEYWORD_RE.flags)
+  //
+  // Reuse the module-level regex directly (#4404) instead of cloning per
+  // call — but reset `lastIndex` first because the `g` flag stores
+  // iteration state on the regex object across calls.
+  THINKING_KEYWORD_RE.lastIndex = 0
   let lastIndex = 0
   let match: RegExpExecArray | null
-  while ((match = re.exec(text)) !== null) {
+  while ((match = THINKING_KEYWORD_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
       tokens.push({ kind: 'text', text: text.slice(lastIndex, match.index) })
     }
@@ -71,7 +82,7 @@ export function tokenizeThinkingKeywords(text: string): ThinkingKeywordToken[] {
     // current regex (no `*` or `?` quantifiers on the alternation as a
     // whole) but a future edit could regress this and produce an infinite
     // loop. Cheap belt-and-braces.
-    if (match[0].length === 0) re.lastIndex++
+    if (match[0].length === 0) THINKING_KEYWORD_RE.lastIndex++
   }
   if (lastIndex < text.length) {
     tokens.push({ kind: 'text', text: text.slice(lastIndex) })
