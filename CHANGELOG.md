@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] - 2026-05-28
+
+Dashboard UX bug-bundle release. Focus areas: making the working session look alive (in-flight tool naming, spinners, thinking-keyword escalation) and fixing two long-standing chat/output rendering bugs that made dogfooded TUI sessions feel broken. Also adds the keyboard-only third leg of the sidebar context menu story (Shift+F10 / ContextMenu key) and several skill-template / process improvements for handling external contributors.
+
+### Added
+
+- **Thinking-keyword escalation + inline highlight (#4306 / #4401):** typing `think`, `think hard`, `think harder`, `megathink`, or `ultrathink` in the input now actually escalates the SDK session's `maxThinkingTokens` budget for that turn — mirroring the native Claude Code CLI behaviour. Each keyword is highlighted (uppercase / coloured) via an overlay/mirror technique in `InputBar.tsx`. Provider-gated: the legacy CLI provider (`thinkingLevel: false`) treats keywords as no-ops and skips highlighting, so the UI never lies about what's about to happen. New `detect-thinking-keyword.js` + `thinking-keyword-tokens.ts` modules with longest-match-first regex.
+- **Per-session activity indicator names the in-flight tool (#4308 / #4399):** the `ActivityIndicator` now shows "Running Bash · 12s" / "Waiting on WebFetch" / the active sub-agent's description instead of a generic "Working…". Added `activeTools: ActiveTool[]` to `BaseSessionState` (store-core) — pushed on `tool_start`, popped by `toolUseId` on `tool_result`, cleared on `agent_idle` / `result`. `ToolBubble.tsx` now shows a running spinner in the collapsed header when there's no result yet.
+- **Sidebar context menu opens via keyboard (#4392 / #4400):** the missing third leg of the keyboard a11y story for the sidebar context menu (PR #4369 was nav-within, PR #4390 was focus-restore). Pressing `ContextMenu` or `Shift+F10` on a focused session row, repo group header, or resumable row now opens `SessionContextMenu` positioned at the row's right edge. The handler `stopPropagation()`s so the tree-level key handler doesn't double-process.
+
+### Fixed
+
+- **Chat and Output panes stay mounted across tab switches (#4305 / #4396):** switching tabs used to unmount the inactive pane, which reset every `ToolGroup`/`ToolBubble`'s hook-local `expanded` state — producing a visible re-fold "jump" on switch and silently hiding trailing tool calls in the Chat tab that were visible in Output. Now both panes render with `display: none` toggling instead of conditional rendering, preserving expand state + scroll position across switches. Trailing tool groups stay expanded.
+
+### Changed
+
+- **Skill templates: external-contributor awareness (#4387, #4393, #4394):** Session Start Protocol now splits the open-PR review into yours (`gh pr list --author @me`) vs. external (`gh pr list --search "-author:@me"`) so contributor PRs can't get buried. `/tackle-issues` Phase 0 now pre-scans for open PRs referencing each queued issue and defers them instead of duplicating work in a parallel worktree. Placeholder issue #4394 tracks the stale-PR auto-close policy for when external contributions accumulate (currently 1 in flight — #4082).
+
 ## [0.9.8] - 2026-05-27
 
 Same-day sweep release of the 16-PR follow-up marathon to v0.9.7. Focus areas: cross-client UX (chat composer history, sidebar Copy path, tri-state skipPermissions on CreateSessionModal, touch-friendly cost-gap tooltip), server-side correctness (byok abort-race + tool_start fallback parity, config-key rename with backwards-compat alias, opt-in Chroxy system-prompt context), mobile parity (unknown-permission-mode catch-all), a11y (SessionContextMenu keyboard nav, populated context menus for resumable rows), and several supporting refactors (import-type re-exports, build.rs cache key, supply-chain SHA pinning).
