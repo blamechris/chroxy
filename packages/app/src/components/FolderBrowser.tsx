@@ -7,7 +7,8 @@ import {
   ActivityIndicator,
   StyleSheet,
 } from 'react-native';
-import { useConnectionStore, DirectoryListing } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
+import type { DirectoryListing } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 

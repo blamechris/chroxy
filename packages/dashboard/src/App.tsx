@@ -22,6 +22,7 @@ import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { SessionContextMenu, type ContextMenuItem } from './components/SessionContextMenu'
+import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
 import { CommandPalette } from './components/CommandPalette'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
@@ -571,96 +572,50 @@ export function App() {
     setSidebarContextMenu(null)
   }, [])
 
-  // #4045: build the menu item list for the currently-targeted sidebar row.
-  // Items are capability-gated:
-  //   - "Open in Finder" only appears under Tauri (we shell out to `open`
-  //     / `explorer` / `xdg-open` via the reveal_in_finder Rust command —
-  //     no server-side endpoint exists for the browser dashboard).
-  //   - "Archive" is intentionally omitted; the server has no archive
-  //     store yet (#4045 splits this into a follow-up).
+  // #4045/#4249: build the menu item list for the currently-targeted sidebar
+  // row. Branching by target.type and capability-gating ("Open in Finder"
+  // only under Tauri; resumable "Open in Finder" only when the conversation
+  // record carries a cwd) lives in buildSidebarContextMenuItems so the
+  // per-branch logic is unit-testable without rendering App.
   const sidebarContextMenuItems = useMemo<ContextMenuItem[]>(() => {
     if (!sidebarContextMenu) return []
-    const { target } = sidebarContextMenu
-    const tauriRuntime = isTauri()
-
-    if (target.type === 'session' && target.sessionId) {
-      const session = sessions.find(s => s.sessionId === target.sessionId)
-      if (!session) return []
-      return [
-        {
-          id: 'duplicate',
-          label: 'Duplicate Session',
-          onClick: () => {
-            createSession({
-              name: session.name,
-              cwd: session.cwd || undefined,
-              provider: session.provider,
-              model: session.model || undefined,
-              permissionMode: session.permissionMode || undefined,
-              worktree: session.worktree,
-            })
-          },
-        },
-        {
-          id: 'reveal',
-          label: 'Open in Finder',
-          onClick: tauriRuntime && session.cwd
-            ? () => {
-                // #4045: surface Rust-side errors (missing path, spawn
-                // failure, restricted-window rejection) as a toast so the
-                // user knows the action failed instead of getting an
-                // unhandled promise rejection in the console.
-                const cwd = session.cwd
-                revealInFinder(cwd).catch((err: unknown) => {
-                  useConnectionStore.getState().addServerError(
-                    `Failed to reveal in Finder: ${err instanceof Error ? err.message : String(err)}`,
-                  )
-                })
-              }
-            : undefined,
-        },
-        {
-          id: 'close',
-          label: 'Close Session',
-          destructive: true,
-          separatorAbove: true,
-          onClick: () => handleCloseSession(session.sessionId),
-        },
-      ]
-    }
-
-    if (target.type === 'repo' && target.path) {
-      const repoPath = target.path
-      return [
-        {
-          id: 'new-session',
-          label: 'New Session Here',
-          onClick: () => {
-            setPendingCwd(repoPath)
-            setShowCreateSession(true)
-          },
-        },
-        {
-          id: 'reveal',
-          label: 'Open in Finder',
-          onClick: tauriRuntime
-            ? () => {
-                // #4045: see session-row reveal — same pattern, surface
-                // Rust-side errors as a toast instead of an unhandled
-                // promise rejection.
-                revealInFinder(repoPath).catch((err: unknown) => {
-                  useConnectionStore.getState().addServerError(
-                    `Failed to reveal in Finder: ${err instanceof Error ? err.message : String(err)}`,
-                  )
-                })
-              }
-            : undefined,
-        },
-      ]
-    }
-
-    return []
-  }, [sidebarContextMenu, sessions, createSession, handleCloseSession])
+    return buildSidebarContextMenuItems({
+      target: sidebarContextMenu.target,
+      sessions,
+      conversationHistory,
+      isTauri: isTauri(),
+      createSession,
+      resumeConversation,
+      revealInFinder,
+      onRevealError: (message) => {
+        useConnectionStore.getState().addServerError(message)
+      },
+      copyToClipboard: (text) => {
+        // navigator.clipboard is undefined in non-secure contexts and some
+        // embedded webviews; mirror the same guard handleCopyTranscript
+        // uses (see the comment block on that callback) so this menu item
+        // doesn't throw out of the synchronous click handler.
+        if (!navigator.clipboard) return
+        void navigator.clipboard.writeText(text).catch(() => {
+          // Clipboard rejected (user denied permission) — fail quietly.
+          // The user can still see the conversation id by hovering or
+          // re-running the search.
+        })
+      },
+      openCreateSessionAt: (cwd) => {
+        setPendingCwd(cwd)
+        setShowCreateSession(true)
+      },
+      confirmCloseSession: handleCloseSession,
+    })
+  }, [
+    sidebarContextMenu,
+    sessions,
+    conversationHistory,
+    createSession,
+    resumeConversation,
+    handleCloseSession,
+  ])
 
   /**
    * Append processed image attachments to the composer's pending-image
