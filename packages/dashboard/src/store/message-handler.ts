@@ -1490,6 +1490,13 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
       if (ss.streamingMessageId === 'pending') {
         patch.streamingMessageId = toolMsg.id;
       }
+      // #4308 — track the in-flight tool in activeTools[]. Same-reference
+      // no-op (dedup by toolUseId) is honoured so a duplicate broadcast
+      // doesn't churn state.
+      const nextActiveTools = result.applyToActiveTools(ss.activeTools);
+      if (nextActiveTools !== ss.activeTools) {
+        patch.activeTools = nextActiveTools;
+      }
       return patch;
     });
   } else {
@@ -1541,8 +1548,13 @@ function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, (ss: SessionState) => {
       const updated = result.applyTo(ss.messages);
-      if (updated === ss.messages) return {};
-      return { messages: updated };
+      // #4308 — drop the resolved entry from activeTools[]. Same-reference
+      // no-op (tool not currently tracked) is honoured to skip the write.
+      const nextActiveTools = result.applyToActiveTools(ss.activeTools);
+      const patch: Partial<SessionState> = {};
+      if (updated !== ss.messages) patch.messages = updated;
+      if (nextActiveTools !== ss.activeTools) patch.activeTools = nextActiveTools;
+      return patch;
     });
   } else {
     const updated = result.applyTo(get().messages);
@@ -2259,6 +2271,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       updateActiveSession((ss) => {
         const patch: Partial<SessionState> = {};
         if (ss.activeAgents.length > 0) patch.activeAgents = [];
+        // #4308 — same rationale: in-flight tools never survive a replay
+        // boundary; the live tool_start broadcasts that follow rebuild
+        // activeTools as needed.
+        if (ss.activeTools.length > 0) patch.activeTools = [];
         if (ss.isPlanPending) {
           patch.isPlanPending = false;
           patch.planAllowedPrompts = [];
@@ -2394,10 +2410,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (targetId && get().sessionStates[targetId]) {
         // Force a new messages array reference so selectors detect the change,
         // even when flushPendingDeltas() was a no-op (timer already flushed).
-        updateSession(targetId, (ss) => ({
-          ...resultPatch,
-          messages: [...ss.messages],
-        }));
+        updateSession(targetId, (ss) => {
+          // #4308 — `result` is a guaranteed turn boundary; any still-tracked
+          // activeTools are a missed tool_result (server crash, dropped
+          // broadcast) and must be dropped so the activity indicator can't
+          // get stuck on a phantom "Running X". Mirror in agent_idle.
+          const patch: Partial<SessionState> = {
+            ...resultPatch,
+            messages: [...ss.messages],
+          };
+          if (ss.activeTools.length > 0) patch.activeTools = [];
+          return patch;
+        });
       } else {
         set((s) => ({ ...resultPatch, messages: [...s.messages] }));
       }

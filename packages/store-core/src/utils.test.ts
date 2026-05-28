@@ -25,6 +25,7 @@ describe('createEmptyBaseSessionState', () => {
       lastClientActivityAt: null,
       health: 'healthy',
       activeAgents: [],
+      activeTools: [],
       isPlanPending: false,
       planAllowedPrompts: [],
       primaryClientId: null,
@@ -43,6 +44,7 @@ describe('createEmptyBaseSessionState', () => {
     expect(a).not.toBe(b)
     expect(a.messages).not.toBe(b.messages)
     expect(a.activeAgents).not.toBe(b.activeAgents)
+    expect(a.activeTools).not.toBe(b.activeTools)
     expect(a.planAllowedPrompts).not.toBe(b.planAllowedPrompts)
     expect(a.mcpServers).not.toBe(b.mcpServers)
     expect(a.devPreviews).not.toBe(b.devPreviews)

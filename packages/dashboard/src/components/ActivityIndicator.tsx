@@ -124,18 +124,49 @@ export function ActivityIndicator() {
   // `useShallow` selector runs the walk ONCE and lets zustand do a shallow
   // compare on the returned object — same re-render guarantee, one walk per
   // update, and a cleaner consumer shape.
-  const { tool: inFlightTool, startedAt: inFlightStartedAt, serverName: inFlightServerName } =
-    useConnectionStore(
-      useShallow((s) => {
-        const id = s.activeSessionId
-        const inFlight = id ? findInFlightToolUse(s.sessionStates[id]?.messages) : null
-        return {
-          tool: inFlight?.tool ?? null,
-          startedAt: inFlight?.startedAt ?? null,
-          serverName: inFlight?.serverName ?? null,
-        }
-      }),
-    )
+  //
+  // #4308 (this PR) — prefer `activeTools` (state slot driven by tool_start /
+  // tool_result) over the derive-from-messages walk when present. The walk
+  // is kept as a fallback so history-replay / pre-state-bootstrap paths that
+  // never fired tool_start still surface a tool name. Also subscribe to the
+  // active sub-agent (most-recent activeAgents entry) so the chip can name
+  // sub-agent work via its description rather than just a count.
+  const {
+    tool: inFlightTool,
+    startedAt: inFlightStartedAt,
+    serverName: inFlightServerName,
+    agentDescription,
+    agentStartedAt,
+  } = useConnectionStore(
+    useShallow((s) => {
+      const id = s.activeSessionId
+      const ss = id ? s.sessionStates[id] : null
+      // Prefer the structured activeTools slot — most-recent entry is the
+      // visible in-flight tool when the renderer has room for one label.
+      const activeTools = ss?.activeTools
+      const fromState = activeTools && activeTools.length > 0
+        ? activeTools[activeTools.length - 1]!
+        : null
+      // Fall back to the messages walk when activeTools is empty (replay,
+      // pre-bootstrap, or a tool_use rendered from history without a live
+      // tool_start). #4337 — exported helper, exercised by inflight tests.
+      const fromMessages = fromState
+        ? null
+        : findInFlightToolUse(ss?.messages)
+      const inFlight = fromState ?? fromMessages
+      const activeAgents = ss?.activeAgents
+      const mostRecentAgent = activeAgents && activeAgents.length > 0
+        ? activeAgents[activeAgents.length - 1]!
+        : null
+      return {
+        tool: inFlight?.tool ?? null,
+        startedAt: inFlight?.startedAt ?? null,
+        serverName: inFlight?.serverName ?? null,
+        agentDescription: mostRecentAgent?.description ?? null,
+        agentStartedAt: mostRecentAgent?.startedAt ?? null,
+      }
+    }),
+  )
   const referenceTimeoutMs = useConnectionStore(
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   )
@@ -162,8 +193,15 @@ export function ActivityIndicator() {
     // the user sees "Running Bash" instead of a generic "Working…". No
     // elapsed value here because we have no clock anchor — startedAt is
     // a server timestamp and clock-skew makes a "Ns" suffix unreliable.
+    //
+    // #4308 (this PR) — when an active sub-agent is present, surface its
+    // description first ("Running my-sub-agent" / "Waiting on …"). Sub-agent
+    // work is the more specific named activity; the parent's in-flight tool
+    // is usually `Task` while a sub-agent runs.
     const label =
-      inFlightTool != null
+      agentDescription != null
+        ? `Running ${agentDescription}`
+        : inFlightTool != null
         ? `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)}`
         : 'Working…'
     return (
@@ -179,13 +217,25 @@ export function ActivityIndicator() {
   const approaching = remaining > 0 && remaining <= 60_000
   const klass = statusClass(elapsed, referenceTimeoutMs)
 
-  // #4308 — name the in-flight tool when one is running. Falls back to
-  // the original "Working… last activity" label when no tool is in
-  // flight (e.g. waiting on assistant text between tool calls).
-  const label =
-    inFlightTool != null && inFlightStartedAt != null
-      ? `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)} · ${formatDuration(now - inFlightStartedAt)}`
-      : `Working… last activity ${formatElapsed(elapsed)}`
+  // #4308 — preference order:
+  //   1. Active sub-agent (description + elapsed since its startedAt) — more
+  //      specific than the parent's `Task` tool wrapper.
+  //   2. In-flight tool (name + elapsed since its startedAt) — both
+  //      activeTools (live) and the derive-from-messages fallback.
+  //   3. Generic "Working… last activity Ns ago" — no current named work.
+  //
+  // TODO(#4307): when the server lands background-shell task tracking, slot
+  // pending background work between #2 and #3 here ("1 background task
+  // running"). Schema lives in #4307; the activeTools[]-style array should
+  // be sufficient.
+  let label: string
+  if (agentDescription != null && agentStartedAt != null) {
+    label = `Running ${agentDescription} · ${formatDuration(now - agentStartedAt)}`
+  } else if (inFlightTool != null && inFlightStartedAt != null) {
+    label = `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)} · ${formatDuration(now - inFlightStartedAt)}`
+  } else {
+    label = `Working… last activity ${formatElapsed(elapsed)}`
+  }
 
   return (
     <div className={`activity-indicator ${klass}`} aria-label="Agent is working">

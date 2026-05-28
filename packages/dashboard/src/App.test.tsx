@@ -19,6 +19,21 @@ vi.mock('./hooks/usePathAutocomplete', () => ({
 // exercise the handler-level `if (!session) return` guard).
 let capturedOnRestart: ((sessionId: string) => void) | null = null
 
+// #4305 — Chat and Output are now ALWAYS mounted (display:none toggle
+// instead of conditional render) so user-set expand state on tool
+// groups + chat scroll position survive a tab switch. That means
+// `MultiTerminalView` mounts even in tests where `viewMode === 'chat'`,
+// which previously hid it behind a conditional. xterm.js's real
+// `Terminal.open()` (via `TerminalView`) calls `matchMedia` and other
+// JSDOM-incompatible browser APIs and would throw on every test. A
+// shallow stub keeps the App tests focused on App behaviour while
+// MultiTerminalView's own tests cover its production wiring.
+vi.mock('./components/MultiTerminalView', () => ({
+  MultiTerminalView: (props: { className?: string }) => (
+    <div data-testid="multi-terminal-view-mock" className={props.className} />
+  ),
+}))
+
 vi.mock('./components/StdinDisabledBanner', () => ({
   StdinDisabledBanner: (props: {
     visible: boolean
@@ -469,6 +484,91 @@ describe('App', () => {
       render(<App />)
       const systemTab = screen.getByRole('button', { name: /system/i })
       expect(systemTab.querySelector('.system-badge')).toBeInTheDocument()
+    })
+  })
+
+  // #4305 — switching between Chat and Output (terminal) tabs must not
+  // unmount the ChatView. Pre-fix, the panes were rendered with
+  // `{viewMode === 'chat' && <ChatView .../>}` / `{viewMode === 'terminal'
+  // && <MultiTerminalView .../>}`, so a tab switch unmounted the inactive
+  // pane and reset every ToolGroup/ToolBubble's local `expanded` state
+  // (and the scroll position). The fix keeps both panes mounted at all
+  // times and toggles visibility with display:none on a wrapper div, so
+  // React's reconciler keeps the same component instances and their
+  // hooks-local state survives the switch.
+  describe('chat/output tab switch preserves mount (#4305)', () => {
+    const connectedState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('keeps both chat-pane and terminal-pane mounted regardless of viewMode', () => {
+      stateOverrides = { ...connectedState, viewMode: 'chat' }
+      const { rerender } = render(<App />)
+      expect(screen.getByTestId('chat-pane')).toBeInTheDocument()
+      expect(screen.getByTestId('terminal-pane')).toBeInTheDocument()
+
+      // Switch to terminal — both panes still mounted, just hidden/shown.
+      stateOverrides = { ...connectedState, viewMode: 'terminal' }
+      rerender(<App />)
+      expect(screen.getByTestId('chat-pane')).toBeInTheDocument()
+      expect(screen.getByTestId('terminal-pane')).toBeInTheDocument()
+    })
+
+    it('hides the inactive pane with display:none and shows the active one', () => {
+      stateOverrides = { ...connectedState, viewMode: 'chat' }
+      const { rerender } = render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      const terminalPane = screen.getByTestId('terminal-pane')
+      // Active pane uses `display: contents` so its child participates
+      // in the parent flex/grid layout exactly as the original
+      // conditional render did; inactive pane is `display: none`.
+      expect(chatPane.style.display).toBe('contents')
+      expect(terminalPane.style.display).toBe('none')
+
+      stateOverrides = { ...connectedState, viewMode: 'terminal' }
+      rerender(<App />)
+      // Same node references — proves React did NOT unmount/remount.
+      expect(screen.getByTestId('chat-pane')).toBe(chatPane)
+      expect(screen.getByTestId('terminal-pane')).toBe(terminalPane)
+      expect(chatPane.style.display).toBe('none')
+      expect(terminalPane.style.display).toBe('contents')
+    })
+
+    it('ChatView DOM persists across tab switch (no unmount/remount jump)', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [
+            { id: 'msg-1', type: 'response', content: 'Hello from Claude', timestamp: 1 },
+          ],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        viewMode: 'chat',
+      }
+      const { rerender } = render(<App />)
+      const chatViewBefore = screen.getByTestId('chat-view')
+
+      // Flip to terminal then back to chat.
+      stateOverrides = { ...stateOverrides, viewMode: 'terminal' }
+      rerender(<App />)
+      // chat-view is still in the DOM (just hidden via the wrapper) —
+      // pre-fix it was unmounted and so would be missing.
+      expect(screen.getByTestId('chat-view')).toBe(chatViewBefore)
+
+      stateOverrides = { ...stateOverrides, viewMode: 'chat' }
+      rerender(<App />)
+      // And still the same node reference after coming back — no
+      // remount happened across the round-trip.
+      expect(screen.getByTestId('chat-view')).toBe(chatViewBefore)
     })
   })
 
