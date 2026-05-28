@@ -100,6 +100,11 @@ export class JsonlSubprocessSession extends BaseSession {
     trustMismatchMode,
     promptEvaluator,
     promptEvaluatorSkipPattern,
+    // #3805: Chroxy context hint flows through this middle layer to
+    // BaseSession so Codex / Gemini sessions also pick up the toggle.
+    // Same pattern as the other per-session opts — drop it here and
+    // the flag silently fails to take effect on subprocess providers.
+    chroxyContextHint,
     resultTimeoutMs,
     // #3899: hard-cap timeout (per-session backstop) flows through this
     // middle layer to BaseSession exactly like resultTimeoutMs. Memory
@@ -124,6 +129,7 @@ export class JsonlSubprocessSession extends BaseSession {
       trustMismatchMode,
       promptEvaluator,
       promptEvaluatorSkipPattern,
+      chroxyContextHint,
       resultTimeoutMs,
       hardTimeoutMs,
     })

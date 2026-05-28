@@ -842,6 +842,20 @@ function handlePromptEvaluatorChanged(msg: Record<string, unknown>, get: MsgGet,
   _set({ sessions });
 }
 
+// #3805: per-session Chroxy context hint toggle changed. Mirrors
+// handlePromptEvaluatorChanged — update the `sessions` array entry so
+// every client bound to the session sees the new state immediately.
+function handleChroxyContextHintChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const value = typeof msg.value === 'boolean' ? msg.value : null;
+  if (value === null) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId) return;
+  const sessions = get().sessions.map(s =>
+    s.sessionId === targetId ? { ...s, chroxyContextHint: value } : s,
+  );
+  _set({ sessions });
+}
+
 // #3209: full skills list response. Replaces the cached list on the
 // active (or message-targeted) session. Each entry carries `name`,
 // `description`, `source`, `activation`, `active`. The dashboard
@@ -1775,6 +1789,7 @@ const HANDLERS: Record<string, Handler> = {
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
+  chroxy_context_hint_changed: handleChroxyContextHintChanged,
   // #3188: auto-evaluator broadcast events (#3186 emit, #3208 schema)
   evaluator_rewrite: handleEvaluatorRewrite,
   evaluator_clarify: handleEvaluatorClarify,

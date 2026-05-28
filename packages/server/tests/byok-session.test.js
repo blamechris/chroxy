@@ -462,7 +462,6 @@ describe('ClaudeByokSession', () => {
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
-          toolName: block.name,
           result: 'ok',
           isError: false,
         })
@@ -512,7 +511,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCallCount = 0
@@ -568,7 +567,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCallCount = 0
@@ -620,7 +619,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCallCount = 0
@@ -674,7 +673,7 @@ describe('ClaudeByokSession', () => {
       session._executeToolBlock = async function ({ block, messageId }) {
         executeCount += 1
         if (executeCount === 1) {
-          this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+          this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
           return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
         }
         throw new Error('tool execution exploded')
@@ -941,7 +940,7 @@ describe('ClaudeByokSession', () => {
       // tool_start payload, not the permission UI.
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let round = 0
@@ -1047,9 +1046,16 @@ describe('ClaudeByokSession', () => {
       // `${turnMessageId}-tool`. Pin only that the emitted messageId is
       // a non-empty string ending with `-tool` so future renames of the
       // turn id format don't pointlessly break this test.
-      const { messageId } = starts[0].payload
+      const { messageId, toolUseId } = starts[0].payload
       assert.equal(typeof messageId, 'string', 'messageId is a string even on fallback')
       assert.ok(messageId.endsWith('-tool'), `fallback messageId ends with -tool (got: ${messageId})`)
+      // #4364: toolUseId mirrors the fallback messageId (parity with
+      // sdk-session.js:635-641). Pre-#4364 this was `undefined`, which
+      // violates ServerToolStartSchema.toolUseId: z.string() — the
+      // schema isn't enforced on the broadcast path today, but the
+      // wire-shape contract should be honored on every path.
+      assert.equal(typeof toolUseId, 'string', 'toolUseId is a string even on fallback')
+      assert.equal(toolUseId, messageId, 'toolUseId mirrors messageId on the fallback path')
       await session.destroy()
     })
   })
@@ -1546,7 +1552,6 @@ describe('ClaudeByokSession', () => {
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
-          toolName: block.name,
           result: 'ok',
           isError: false,
         })
@@ -1611,6 +1616,229 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('does NOT schedule phase-2 executions when abort fires between phase 1 and phase 2 (#4247)', async () => {
+      // The race the issue describes: every gate auto-resolves
+      // synchronously (e.g. permissionMode=auto), then the user hits
+      // Stop in the microtask window AFTER phase 1 completes but
+      // BEFORE phase 2 fans out into Promise.all. Pre-fix, the
+      // already-gated decisions still flow into _executeToolBlock for
+      // every block — and tools like Write/Edit/Read/TodoWrite ignore
+      // the signal, so they run to completion AFTER the user said stop.
+      //
+      // We model the race deterministically by aborting at the END of
+      // the last gate call. The gate already returned 'allow' for every
+      // block, so phase 1 considers the round fully gated (no mid-gate
+      // synthetic fill). The new guard must re-check signal.aborted
+      // before scheduling phase 2 and short-circuit every block into a
+      // synthetic 'Interrupted' tool_result.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let gateCalls = 0
+      session._gateToolBlock = async function ({ block }) {
+        gateCalls += 1
+        // Approve every block. Abort AFTER the last gate resolves so
+        // phase 1 completes cleanly (firstUngatedIndex = N), but the
+        // signal trips before phase 2 schedules executions.
+        if (gateCalls === 3) {
+          this._abortController.abort()
+        }
+        return { behavior: 'allow', updatedInput: block.input || {} }
+      }
+      let executeCalls = 0
+      session._executeToolBlock = async function () {
+        executeCalls += 1
+        throw new Error('phase 2 must not schedule any executions after abort between phases')
+      }
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+              {
+                stop_reason: 'tool_use',
+                content: [
+                  { type: 'tool_use', id: 'tu_w1', name: 'Write', input: { file_path: '/a', content: 'x' } },
+                  { type: 'tool_use', id: 'tu_w2', name: 'Write', input: { file_path: '/b', content: 'y' } },
+                  { type: 'tool_use', id: 'tu_w3', name: 'Write', input: { file_path: '/c', content: 'z' } },
+                ],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            ),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('parallel writes')
+      // The whole point: zero real executions after the inter-phase abort.
+      assert.equal(executeCalls, 0,
+        'phase-2 schedule must observe the abort that fired between phase 1 and phase 2')
+      // History invariant (#4061) still holds: N tool_use → N tool_result.
+      const userTurns = session._history.filter((m) => m.role === 'user' && Array.isArray(m.content))
+      const toolResultTurn = userTurns[userTurns.length - 1]
+      assert.ok(toolResultTurn, 'tool_result user-turn must be pushed even on inter-phase abort')
+      const ids = toolResultTurn.content.map((b) => b.tool_use_id).sort()
+      assert.deepEqual(ids, ['tu_w1', 'tu_w2', 'tu_w3'],
+        'every tool_use id must have a matching tool_result block (history invariant)')
+      for (const b of toolResultTurn.content) {
+        assert.equal(b.type, 'tool_result')
+        assert.equal(b.is_error, true, 'synthetic tool_result must mark is_error')
+        assert.match(b.content, /[Ii]nterrupted/, 'synthetic content references the abort')
+      }
+      // The dashboard / mobile tool-call bubble closes on `tool_result`
+      // events — without one per synthetic, all three Write bubbles
+      // would stay in 'running…' forever (#4108).
+      const toolResultEvents = captured.filter((e) => e.name === 'tool_result')
+      const eventIds = toolResultEvents.map((e) => e.payload.toolUseId).sort()
+      assert.deepEqual(eventIds, ['tu_w1', 'tu_w2', 'tu_w3'],
+        'one closing tool_result event per ungated block')
+      for (const ev of toolResultEvents) {
+        assert.equal(ev.payload.isError, true)
+        assert.match(ev.payload.result, /[Ii]nterrupted/)
+        assert.ok(!('toolName' in ev.payload),
+          'inter-phase synthetic tool_result must not carry the legacy `toolName` key (#4261)')
+      }
+      await session.destroy()
+    })
+
+    it('still short-circuits when abort fires DURING phase 1 (regression guard for #4247 fix)', async () => {
+      // Regression: the existing mid-gate synthetic-fill path
+      // (firstUngatedIndex < N) must keep working unchanged after we
+      // add the between-phase guard. The two paths share the
+      // synthetic-fill helper but diverge on `firstUngatedIndex` — pin
+      // it so a future refactor that collapses them can't silently
+      // drop the mid-gate semantics.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let gateCalls = 0
+      session._gateToolBlock = async function ({ block }) {
+        gateCalls += 1
+        if (gateCalls === 1) {
+          // Trip abort INSIDE the gate so the next iteration's top-of-loop
+          // check sees signal.aborted and bails — block 1 still ran the
+          // gate (firstUngatedIndex = 1, blocks 2/3 synthetic-filled).
+          this._abortController.abort()
+          return { behavior: 'allow', updatedInput: block.input || {} }
+        }
+        throw new Error('gate must not run after mid-gate abort')
+      }
+      let executeCalls = 0
+      session._executeToolBlock = async function ({ block, messageId }) {
+        executeCalls += 1
+        // Mirror the real emit so the dashboard bubble closes for the
+        // one block that actually ran (block 1).
+        this.emit('tool_result', {
+          messageId,
+          toolUseId: block.id,
+          result: 'ok',
+          isError: false,
+        })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+              {
+                stop_reason: 'tool_use',
+                content: [
+                  { type: 'tool_use', id: 'tu_m1', name: 'Read', input: { file_path: '/a' } },
+                  { type: 'tool_use', id: 'tu_m2', name: 'Read', input: { file_path: '/b' } },
+                  { type: 'tool_use', id: 'tu_m3', name: 'Read', input: { file_path: '/c' } },
+                ],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            ),
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      // Mid-gate semantics preserved: block 1 ran exactly once; blocks
+      // 2/3 were synthetic-filled. The new inter-phase guard must NOT
+      // double-fill block 1 or skip its execution.
+      assert.equal(executeCalls, 1, 'only block 1 executes after mid-gate abort')
+      const userTurns = session._history.filter((m) => m.role === 'user' && Array.isArray(m.content))
+      const toolResultTurn = userTurns[userTurns.length - 1]
+      const ids = toolResultTurn.content.map((b) => b.tool_use_id)
+      assert.deepEqual(ids, ['tu_m1', 'tu_m2', 'tu_m3'], 'history order preserved')
+      assert.equal(toolResultTurn.content[0].is_error, false, 'block 1 is a real success')
+      assert.equal(toolResultTurn.content[1].is_error, true)
+      assert.equal(toolResultTurn.content[2].is_error, true)
+      assert.match(toolResultTurn.content[1].content, /[Ii]nterrupted/)
+      assert.match(toolResultTurn.content[2].content, /[Ii]nterrupted/)
+      await session.destroy()
+    })
+
+    it('still honours in-flight abort during phase 2 execution (regression guard for #4247 fix)', async () => {
+      // The third path: abort fires AFTER phase 2 has scheduled. The
+      // existing behavior is that executions that accepted the signal
+      // (Bash/Glob/Grep/WebFetch) can short-circuit; others run to
+      // completion. We don't change that — but we must prove the new
+      // inter-phase guard doesn't accidentally swallow this case
+      // either (e.g. by re-checking too aggressively and converting
+      // already-scheduled executions to synthetics).
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._gateToolBlock = async function ({ block }) {
+        return { behavior: 'allow', updatedInput: block.input || {} }
+      }
+      // Phase 2 executor that aborts FROM INSIDE itself (after
+      // scheduling), so the abort fires strictly during execution —
+      // not between phases. All three executor calls still happen
+      // because Promise.all already scheduled them when the first
+      // one began running.
+      let executeCalls = 0
+      let firstStarted
+      session._executeToolBlock = async function ({ block, messageId }) {
+        executeCalls += 1
+        if (executeCalls === 1) {
+          firstStarted = true
+          // Trip the abort once the parallel batch has begun. By this
+          // point all three executions are already in-flight (their
+          // promises were pushed in the for-loop before Promise.all
+          // awaited). The new inter-phase guard must NOT retroactively
+          // cancel them — they've passed the gate AND been scheduled.
+          this._abortController.abort()
+        }
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
+        return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+              {
+                stop_reason: 'tool_use',
+                content: [
+                  { type: 'tool_use', id: 'tu_p1', name: 'Read', input: {} },
+                  { type: 'tool_use', id: 'tu_p2', name: 'Read', input: {} },
+                  { type: 'tool_use', id: 'tu_p3', name: 'Read', input: {} },
+                ],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            ),
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      assert.equal(firstStarted, true, 'phase 2 must have started — abort tested in-flight, not between phases')
+      assert.equal(executeCalls, 3,
+        'in-flight abort does not retroactively cancel already-scheduled phase-2 executions')
+      const userTurns = session._history.filter((m) => m.role === 'user' && Array.isArray(m.content))
+      const toolResultTurn = userTurns[userTurns.length - 1]
+      const ids = toolResultTurn.content.map((b) => b.tool_use_id)
+      assert.deepEqual(ids, ['tu_p1', 'tu_p2', 'tu_p3'])
+      // All three are real successes because the stub executor doesn't
+      // honour the signal (just like Read/Write/Edit/TodoWrite in
+      // production). The point is: no synthetic-fill kicked in for
+      // already-scheduled work.
+      for (const b of toolResultTurn.content) {
+        assert.equal(b.is_error, false, 'in-flight executions complete normally — no synthetic overwrite')
+      }
+      await session.destroy()
+    })
+
     it('executes parallel tool_use blocks concurrently — wall clock < sequential (#4062)', async () => {
       // Three Read tool_use blocks in one assistant turn. Each executor
       // sleeps 100ms. Sequential would take ~300ms; Promise.all should
@@ -1631,7 +1859,6 @@ describe('ClaudeByokSession', () => {
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
-          toolName: block.name,
           result: 'ok',
           isError: false,
         })
@@ -1713,12 +1940,12 @@ describe('ClaudeByokSession', () => {
           // blocks — important because the orchestrator passes the
           // decision through.
           const msg = decision.message || 'Permission denied by user.'
-          this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: msg, isError: true })
+          this.emit('tool_result', { messageId, toolUseId: block.id, result: msg, isError: true })
           return { type: 'tool_result', tool_use_id: block.id, content: msg, is_error: true }
         }
         const sleep = delays[block.id] || 0
         if (sleep) await new Promise((r) => setTimeout(r, sleep))
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCall = 0
@@ -1786,7 +2013,7 @@ describe('ClaudeByokSession', () => {
         return { behavior: 'allow', updatedInput: block.input || {} }
       }
       session._executeToolBlock = async function ({ block, messageId }) {
-        this.emit('tool_result', { messageId, toolUseId: block.id, toolName: block.name, result: 'ok', isError: false })
+        this.emit('tool_result', { messageId, toolUseId: block.id, result: 'ok', isError: false })
         return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
       }
       let streamCall = 0

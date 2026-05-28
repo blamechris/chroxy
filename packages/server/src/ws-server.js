@@ -258,6 +258,7 @@ function _isSecureRequest(req) {
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'set_prompt_evaluator_skip_pattern', value: string|null, sessionId? } — set the per-session evaluator skip-pattern source (#3639)
+ *   { type: 'set_chroxy_context_hint', value: boolean, sessionId? } — toggle the per-session Chroxy context hint (#3805)
  *   { type: 'skill_activate', skillName, sessionId? }   — activate a manual skill at runtime (#3209)
  *   { type: 'skill_deactivate', skillName, sessionId? } — deactivate a manual skill at runtime (#3209)
  *   { type: 'skill_trust_accept', skillName, sessionId?, requestId? } — re-trust a skill after a content-hash mismatch (#3235)
@@ -383,6 +384,7 @@ function _isSecureRequest(req) {
  *   { type: 'evaluate_draft_result', requestId, verdict?, rewritten?, clarification?, reasoning?, error? } — prompt evaluator response (#3068)
  *   { type: 'prompt_evaluator_changed', sessionId, value: boolean } — per-session promptEvaluator toggle changed (#3185)
  *   { type: 'prompt_evaluator_skip_pattern_changed', sessionId, value: string|null } — per-session evaluator skip pattern changed (#3639)
+ *   { type: 'chroxy_context_hint_changed', sessionId, value: boolean } — per-session Chroxy context hint toggle changed (#3805)
  *   { type: 'evaluator_rewrite', sessionId, originalDraft, rewritten, reasoning, evaluatorIterationId } — auto-evaluator rewrite verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'evaluator_clarify', sessionId, originalDraft, clarification, reasoning, evaluatorIterationId, evaluatorIteration } — auto-evaluator clarify verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'stdin_dropped_totals', sessionId, bytes, count, reason, escalated } — cumulative SidecarProcess pre-dial-cap drop totals (#3544, transient)

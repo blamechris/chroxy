@@ -1818,3 +1818,418 @@ describe('InputBar large-text paste (#3797)', () => {
     expect(screen.getByTestId('pasted-text-chip-2')).toBeInTheDocument()
   })
 })
+
+// #3698 — terminal-style Up/Down history. Empty/edge-of-textarea Up recalls
+// the previous user message; Down walks forward; Down past the newest restores
+// the stashed in-progress draft. Up/Down elsewhere in a multi-line draft is
+// normal cursor movement (untouched).
+describe('InputBar history navigation (#3698)', () => {
+  // Helper — RTL/jsdom's fireEvent.keyDown forwards currentTarget.selectionStart/End,
+  // so positioning the caret via setSelectionRange before dispatching the event
+  // is the only setup needed.
+  function setCaret(textarea: HTMLTextAreaElement, start: number, end = start) {
+    textarea.setSelectionRange(start, end)
+  }
+
+  it('Up in empty input fills with the most-recent user message', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        userMessageHistory={['oldest', 'middle', 'newest']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+  })
+
+  it('Up twice walks back two entries', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    // Stable history array reference — the component resets cycling when the
+    // array identity changes (mirrors per-session reset in App.tsx), so the
+    // sequence test must reuse the same array across rerenders.
+    const history = ['oldest', 'middle', 'newest']
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={value}
+        onValueChange={onValueChange}
+        userMessageHistory={history}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={value}
+        onValueChange={onValueChange}
+        userMessageHistory={history}
+      />,
+    )
+    // Caret lands at end of recalled text — second Up still triggers history.
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('middle')
+  })
+
+  it('Down moves forward toward newer entries', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['oldest', 'middle', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // newest
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // middle
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' }) // back to newest
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+  })
+
+  it('Down past the newest restores the in-progress draft', () => {
+    let value = 'draft-in-progress'
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['older', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Start cycling from the end of the draft (Down trigger position).
+    // First press Up from end of draft — empty/edge gating treats `value.length`
+    // as a valid Up-from-end position too (mirrors the symmetric Down rule).
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    // Down past newest restores the original draft text.
+    expect(onValueChange).toHaveBeenLastCalledWith('draft-in-progress')
+  })
+
+  it('Escape while cycling restores the draft and does not call onInterrupt', () => {
+    let value = 'my-draft'
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const onInterrupt = vi.fn()
+    const history = ['oldest', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt,
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(onValueChange).toHaveBeenLastCalledWith('my-draft')
+    expect(onInterrupt).not.toHaveBeenCalled()
+  })
+
+  it('Escape when not cycling still calls onInterrupt (no regression)', () => {
+    const onInterrupt = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+        userMessageHistory={['something']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(onInterrupt).toHaveBeenCalled()
+  })
+
+  it('sending a message resets the cycling state', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    let history = ['oldest', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // newest
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // oldest
+    expect(onValueChange).toHaveBeenLastCalledWith('oldest')
+    // Simulate send: history grows + draft clears (mimics App's send round-trip).
+    value = ''
+    history = ['oldest', 'newest', 'just-sent']
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // After reset, Up should land on the most-recent entry — `just-sent` —
+    // not continue from where we left off in the previous cycle.
+    expect(onValueChange).toHaveBeenLastCalledWith('just-sent')
+  })
+
+  it('Up on line 2+ of a multi-line draft does not recall history (cursor moves)', () => {
+    const onValueChange = vi.fn()
+    const onInterrupt = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+        controlledValue={'line1\nline2'}
+        onValueChange={onValueChange}
+        userMessageHistory={['should-not-fire']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Caret on line 2, middle — position is "line1\n" length (6) + some chars.
+    setCaret(textarea, 8)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // History recall would emit 'should-not-fire'; with caret mid-text we
+    // must NOT touch the value.
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Up on line 1 (caret at position 0) recalls history even with multi-line draft text', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={'line1\nline2'}
+        onValueChange={onValueChange}
+        userMessageHistory={['recalled']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Cursor at absolute position 0 (line 1, col 0) — Up should recall.
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('recalled')
+  })
+
+  it('Up with a selection (not collapsed) does not recall history', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={'hello'}
+        onValueChange={onValueChange}
+        userMessageHistory={['recalled']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0, 3)   // selection: chars 0..3
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Up does nothing when history is empty', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        userMessageHistory={[]}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Up at the oldest entry stays on the oldest (does not wrap or crash)', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['only-entry']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('only-entry')
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // Already at oldest — nothing changes.
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Down when not cycling is a no-op (does not touch value)', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="draft"
+        onValueChange={onValueChange}
+        userMessageHistory={['something']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 5)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('typing while cycling resets the cycling state (so the next Up starts at newest)', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['oldest', 'middle', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // newest
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // middle
+    expect(onValueChange).toHaveBeenLastCalledWith('middle')
+    rerender(<InputBar {...props()} />)
+    // User edits the recalled text — fire change with a value different from
+    // the currently-rendered controlledValue ('middle') so React's controlled-
+    // input wrapper actually dispatches onChange.
+    fireEvent.change(textarea, { target: { value: 'middle-edited' } })
+    expect(value).toBe('middle-edited')
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    // Up again should NOT continue cycling from 'oldest' — it should start
+    // fresh from the most-recent entry.
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+  })
+
+  it('does not interfere with the slash command picker (Up navigates the picker)', () => {
+    // Uncontrolled mode (no controlledValue/onValueChange) — matches how the
+    // existing slash-picker tests open the palette. The history feature only
+    // needs to NOT fire while the picker handles Up, which is independent of
+    // controlled-vs-uncontrolled mode (history navigation passes through
+    // `setValue` either way).
+    const onSend = vi.fn()
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        userMessageHistory={['should-not-fire']}
+        slashCommands={[
+          { name: 'commit', description: 'commit', source: 'project' },
+          { name: 'review', description: 'review', source: 'project' },
+        ]}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Open the picker by typing "/" at the start of the input.
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    setCaret(textarea, 1)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // Picker consumed the Up — textarea text remains "/" (history would have
+    // overwritten it with 'should-not-fire').
+    expect(textarea.value).toBe('/')
+  })
+
+  it('does not interfere with the file picker (Up navigates the picker)', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        userMessageHistory={['should-not-fire']}
+        filePickerFiles={[
+          { path: 'src/index.ts', type: 'file', size: 1 },
+          { path: 'src/App.tsx', type: 'file', size: 1 },
+        ]}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '@' } })
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+    setCaret(textarea, 1)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // File picker consumed the Up — textarea text remains "@" (history
+    // would have overwritten it with 'should-not-fire').
+    expect(textarea.value).toBe('@')
+  })
+
+  it('switching userMessageHistory reference (e.g. session switch) resets cycling', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const sessionA = ['a-old', 'a-new']
+    const sessionB = ['b-old', 'b-new']
+    let history = sessionA
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // 'a-new'
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // 'a-old'
+    // Switch session — different history array, draft also blanks.
+    history = sessionB
+    value = ''
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // After reset, Up should land on most-recent of the new history.
+    expect(onValueChange).toHaveBeenLastCalledWith('b-new')
+  })
+})

@@ -21,6 +21,16 @@ import { SkillsTrustStore } from './skills-trust.js'
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
+// #3805: opt-in Chroxy context paragraph. Prepended to `_buildSystemPrompt()`
+// output when `chroxyContextHint` is true so the model knows it's running
+// inside Chroxy's remote-terminal front-end and can adjust its output for
+// mobile clients (narrower code blocks, no wide ASCII diagrams). Kept short
+// (~50 words) to minimise token overhead on every turn.
+export const CHROXY_CONTEXT_HINT_TEXT =
+  'You are running inside Chroxy, a remote-control front-end that bridges this session to a mobile phone over a Cloudflare tunnel. ' +
+  'The user may be on a small screen. Prefer concise, copyable answers; keep code blocks narrow (<80 cols); ' +
+  'avoid ASCII diagrams and wide tables; chunk long output so it scrolls smoothly on mobile.'
+
 // #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
 // — every provider event (SDK iterator message, CLI stdout JSONL line)
 // resets the timer; the window only bounds *silent stretches*, not wall-
@@ -115,6 +125,12 @@ export class BaseSession extends EventEmitter {
     trustMismatchMode,
     promptEvaluator,
     promptEvaluatorSkipPattern,
+    // #3805: opt-in flag — when true, _buildSystemPrompt prepends a
+    // short paragraph telling the model it's running inside Chroxy so
+    // it can adjust output for mobile clients (narrower code blocks,
+    // no wide ASCII diagrams). Default false — existing users see no
+    // observable change.
+    chroxyContextHint,
     // #3749 / #3884 / #3899: configurable SOFT-warning timeout (the
     // inactivity safety net). Subclasses arm this timer; when it fires
     // they emit an `inactivity_warning` event so the client can render
@@ -163,6 +179,11 @@ export class BaseSession extends EventEmitter {
     // does the same validation but reports the rejection so the operator
     // sees a session_error in the dashboard instead of a silent default.
     this.promptEvaluatorSkipPattern = _coerceSkipPatternOpt(promptEvaluatorSkipPattern)
+    // #3805: per-session Chroxy context hint flag. Coerced to a strict
+    // boolean so `undefined` (omitted by clients on older protocol
+    // versions) yields the safe `false` default and JSON.stringify
+    // produces `true`/`false` (not `1`/`null`) on the wire.
+    this.chroxyContextHint = !!chroxyContextHint
 
     this._isBusy = false
     this._processReady = false
@@ -535,6 +556,33 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * Toggle the per-session Chroxy context hint (#3805). Mirrors the
+   * `setPromptEvaluator` contract: strict-boolean validation, idempotent
+   * (returns `false` on a no-op set), and safe to flip mid-turn because
+   * the flag is only consulted at the start of the next prompt assembly
+   * via `_buildSystemPrompt()`.
+   *
+   * Default is OFF — when enabled, the Chroxy context paragraph is
+   * prepended to the system prompt so the model can adjust output for
+   * the mobile-screen client (narrower code blocks, no wide ASCII
+   * diagrams). Off by default because some users explicitly want the
+   * full desktop response style.
+   *
+   * @param {boolean} value
+   * @returns {boolean}
+   */
+  setChroxyContextHint(value) {
+    if (typeof value !== 'boolean') {
+      return false
+    }
+    if (value === this.chroxyContextHint) {
+      return false
+    }
+    this.chroxyContextHint = value
+    return true
+  }
+
+  /**
    * Set the per-session promptEvaluatorSkipPattern (#3639). Accepts a
    * regex source string (validated by attempting to compile it), null,
    * or empty string (both clear the override). Returns `true` when the
@@ -670,7 +718,15 @@ export class BaseSession extends EventEmitter {
    * @returns {string}
    */
   _buildSystemPrompt() {
-    return typeof this._skillsText === 'string' ? this._skillsText : ''
+    const skillsText = typeof this._skillsText === 'string' ? this._skillsText : ''
+    // #3805: opt-in Chroxy context hint. When OFF (default) the return value
+    // is byte-identical to pre-#3805 so existing users see no observable
+    // behaviour change. When ON, the short hint paragraph rides at the FRONT
+    // so the model reads it first and the existing skills text (if any)
+    // follows untouched.
+    if (!this.chroxyContextHint) return skillsText
+    if (skillsText) return `${CHROXY_CONTEXT_HINT_TEXT}\n\n${skillsText}`
+    return CHROXY_CONTEXT_HINT_TEXT
   }
 
   /**

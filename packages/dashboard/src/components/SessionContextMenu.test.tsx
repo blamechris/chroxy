@@ -159,6 +159,270 @@ describe('SessionContextMenu', () => {
     expect(onDismiss).toHaveBeenCalled()
   })
 
+  // #4248: keyboard navigation (WAI-ARIA menu pattern). Items must be
+  // focusable, arrow keys cycle focus (with wrap-around), Enter/Space
+  // activate the focused item, and focus returns to the originating
+  // trigger element when the menu closes.
+  describe('keyboard navigation (#4248)', () => {
+    it('exposes role="menu" on the container and role="menuitem" on items', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const menu = screen.getByTestId('session-context-menu')
+      expect(menu).toHaveAttribute('role', 'menu')
+      const dup = screen.getByTestId('session-context-menu-item-duplicate')
+      const close = screen.getByTestId('session-context-menu-item-close')
+      expect(dup).toHaveAttribute('role', 'menuitem')
+      expect(close).toHaveAttribute('role', 'menuitem')
+    })
+
+    it('focuses the first item on mount', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      expect(document.activeElement).toBe(first)
+    })
+
+    it('makes items focusable (tabIndex)', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      const second = screen.getByTestId('session-context-menu-item-close')
+      // At least one of them must be tab-focusable so screen-reader / keyboard
+      // users can reach the menu. The component uses a roving-tabindex pattern
+      // where exactly one item is focusable at a time.
+      const tabIndices = [first.tabIndex, second.tabIndex]
+      expect(tabIndices).toContain(0)
+    })
+
+    it('ArrowDown moves focus to the next item', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      const second = screen.getByTestId('session-context-menu-item-close')
+      fireEvent.keyDown(first, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(second)
+    })
+
+    it('ArrowUp moves focus to the previous item', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      const second = screen.getByTestId('session-context-menu-item-close')
+      // Move down then back up.
+      fireEvent.keyDown(first, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(second)
+      fireEvent.keyDown(second, { key: 'ArrowUp' })
+      expect(document.activeElement).toBe(first)
+    })
+
+    it('ArrowDown wraps from last to first', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      const second = screen.getByTestId('session-context-menu-item-close')
+      fireEvent.keyDown(first, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(second)
+      fireEvent.keyDown(second, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(first)
+    })
+
+    it('ArrowUp wraps from first to last', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      const second = screen.getByTestId('session-context-menu-item-close')
+      fireEvent.keyDown(first, { key: 'ArrowUp' })
+      expect(document.activeElement).toBe(second)
+    })
+
+    it('Home jumps to the first item', () => {
+      const items: ContextMenuItem[] = [
+        { id: 'a', label: 'A', onClick: vi.fn() },
+        { id: 'b', label: 'B', onClick: vi.fn() },
+        { id: 'c', label: 'C', onClick: vi.fn() },
+      ]
+      render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+      const a = screen.getByTestId('session-context-menu-item-a')
+      const c = screen.getByTestId('session-context-menu-item-c')
+      fireEvent.keyDown(a, { key: 'End' })
+      expect(document.activeElement).toBe(c)
+      fireEvent.keyDown(c, { key: 'Home' })
+      expect(document.activeElement).toBe(a)
+    })
+
+    it('End jumps to the last item', () => {
+      const items: ContextMenuItem[] = [
+        { id: 'a', label: 'A', onClick: vi.fn() },
+        { id: 'b', label: 'B', onClick: vi.fn() },
+        { id: 'c', label: 'C', onClick: vi.fn() },
+      ]
+      render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+      const a = screen.getByTestId('session-context-menu-item-a')
+      const c = screen.getByTestId('session-context-menu-item-c')
+      fireEvent.keyDown(a, { key: 'End' })
+      expect(document.activeElement).toBe(c)
+    })
+
+    it('Enter activates the focused item and dismisses', () => {
+      const dup = vi.fn()
+      const onDismiss = vi.fn()
+      render(
+        <SessionContextMenu
+          x={0}
+          y={0}
+          items={[{ id: 'duplicate', label: 'Duplicate', onClick: dup }]}
+          onDismiss={onDismiss}
+        />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      fireEvent.keyDown(first, { key: 'Enter' })
+      expect(dup).toHaveBeenCalledTimes(1)
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it('Space activates the focused item and dismisses', () => {
+      const dup = vi.fn()
+      const onDismiss = vi.fn()
+      render(
+        <SessionContextMenu
+          x={0}
+          y={0}
+          items={[{ id: 'duplicate', label: 'Duplicate', onClick: dup }]}
+          onDismiss={onDismiss}
+        />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      fireEvent.keyDown(first, { key: ' ' })
+      expect(dup).toHaveBeenCalledTimes(1)
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it('Enter activates the second item after ArrowDown', () => {
+      const dup = vi.fn()
+      const close = vi.fn()
+      const onDismiss = vi.fn()
+      render(
+        <SessionContextMenu
+          x={0}
+          y={0}
+          items={[
+            { id: 'duplicate', label: 'Duplicate', onClick: dup },
+            { id: 'close', label: 'Close', onClick: close, destructive: true },
+          ]}
+          onDismiss={onDismiss}
+        />,
+      )
+      const first = screen.getByTestId('session-context-menu-item-duplicate')
+      fireEvent.keyDown(first, { key: 'ArrowDown' })
+      const second = screen.getByTestId('session-context-menu-item-close')
+      expect(document.activeElement).toBe(second)
+      fireEvent.keyDown(second, { key: 'Enter' })
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(dup).not.toHaveBeenCalled()
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it('returns focus to the trigger element on unmount', () => {
+      // Simulate the real consumer pattern: a button is the right-click
+      // origin, so when the menu closes focus should land back on it.
+      const trigger = document.createElement('button')
+      trigger.setAttribute('data-testid', 'trigger')
+      document.body.appendChild(trigger)
+      trigger.focus()
+      expect(document.activeElement).toBe(trigger)
+
+      const { unmount } = render(
+        <SessionContextMenu
+          x={0}
+          y={0}
+          items={makeItems()}
+          onDismiss={vi.fn()}
+        />,
+      )
+      // Menu mounts and steals focus to the first item.
+      expect(document.activeElement).not.toBe(trigger)
+      unmount()
+      // After dismissal, focus is restored.
+      expect(document.activeElement).toBe(trigger)
+
+      document.body.removeChild(trigger)
+    })
+  })
+
+  // #4268: "Copy path" item — sidebar callers wire an onClick that writes
+  // the session/repo cwd to the clipboard via navigator.clipboard.writeText.
+  // The menu itself is agnostic to what the handler does; these tests pin
+  // the contract used in App.tsx so the wiring (and the disabled-when-no-cwd
+  // capability gate) doesn't silently regress.
+  describe('Copy path item (#4268)', () => {
+    it('renders the Copy path menuitem when an onClick is provided', () => {
+      const onCopy = vi.fn()
+      const items: ContextMenuItem[] = [
+        { id: 'duplicate', label: 'Duplicate', onClick: vi.fn() },
+        { id: 'copy-path', label: 'Copy path', onClick: onCopy },
+      ]
+      render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+      expect(screen.getByTestId('session-context-menu-item-copy-path')).toHaveTextContent('Copy path')
+    })
+
+    it('hides the Copy path item when its onClick is omitted (no cwd)', () => {
+      // Mirrors how App.tsx capability-gates the action when the row has
+      // no `cwd`: the item is passed with `onClick: undefined`, which the
+      // visible-items filter strips before render.
+      const items: ContextMenuItem[] = [
+        { id: 'duplicate', label: 'Duplicate', onClick: vi.fn() },
+        { id: 'copy-path', label: 'Copy path' /* no onClick */ },
+      ]
+      render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+      expect(screen.queryByTestId('session-context-menu-item-copy-path')).not.toBeInTheDocument()
+    })
+
+    it('invokes navigator.clipboard.writeText with the path when clicked', () => {
+      // The Copy path handler in App.tsx calls navigator.clipboard.writeText
+      // with the session/repo cwd. The menu itself just fires the onClick;
+      // we stub clipboard.writeText here and assert the wire-up.
+      const writeText = vi.fn(() => Promise.resolve())
+      const originalClipboard = (navigator as { clipboard?: Clipboard }).clipboard
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      try {
+        const path = '/Users/blamechris/Projects/archery-apprentice'
+        const items: ContextMenuItem[] = [
+          {
+            id: 'copy-path',
+            label: 'Copy path',
+            onClick: () => {
+              if (!navigator.clipboard) return
+              void navigator.clipboard.writeText(path)
+            },
+          },
+        ]
+        render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('session-context-menu-item-copy-path'))
+        expect(writeText).toHaveBeenCalledTimes(1)
+        expect(writeText).toHaveBeenCalledWith(path)
+      } finally {
+        if (originalClipboard) {
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: originalClipboard,
+          })
+        } else {
+          delete (navigator as { clipboard?: Clipboard }).clipboard
+        }
+      }
+    })
+  })
+
   it('clamps menu position to viewport on first render', () => {
     // Set a viewport so we can predict the clamp.
     const originalInnerWidth = window.innerWidth
