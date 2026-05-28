@@ -31,6 +31,7 @@ Configuration values are resolved in the following order (highest priority first
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
 | `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
 | `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
+| `dangerouslySkipPermissions` | boolean | `--dangerously-skip-permissions` | `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` | Server-wide default for the per-session skip-permissions flag (#4246, #4384). Honoured only by the `claude-tui` provider — spawns claude with `--dangerously-skip-permissions` and elides chroxy's permission hook. Off by default. Legacy alias `skipPermissions` (config key) and `CHROXY_SKIP_PERMISSIONS` (env var) are still honoured for one deprecation window and emit a warning at boot — rename to the canonical key. See [Skip permissions (TUI provider)](#skip-permissions-tui-provider) below. |
 | `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session **soft-warning** inactivity window in milliseconds. When no SDK / CLI event arrives within this window, the server emits an `inactivity_warning` event (#3899) so clients can render a check-in chip and surface a push notification — the session stays alive. The kill path is `hardTimeoutMs` (below). See [Inactivity safety net](#inactivity-safety-net). Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
 | `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server emits `permission_expired` for every outstanding permission prompt, force-clears busy state, and emits a generic `error` event with `"Response timed out after <duration> of inactivity"` (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
 | _(env-only)_ | number | - | `CHROXY_DIAGNOSTICS_RATE_LIMIT` | Per-source-IP request cap on `GET /diagnostics` over a 60 s sliding window (#3737). The endpoint reads the on-disk log tail and iterates every session per call, so it is rate-limited to protect against a stolen-token tight loop. Default `12` requests/min with a 4-request burst. Set the env var to an **integer ≥ 1** to override `maxMessages`; the burst auto-derives as `max(1, floor(N/3))`. Invalid values (non-integer, < 1, NaN) silently fall through to the default — including sub-integer values like `0.5`, which are rejected outright (truncating to `0` would otherwise raise the limit via RateLimiter's `||` fallback). No `config.json` key is exposed; this setting is intentionally env-only. Overshoot returns `429` with a `Retry-After` header and a JSON body `{ "error": "rate limited", "retryAfterMs": <ms> }`. |
@@ -138,6 +139,82 @@ directly. Format:
 
 A corrupted or missing trust file is treated as empty (fail-open) so a single
 bad write can't lock every skill out of every session.
+
+### Skip permissions (TUI provider)
+
+`dangerouslySkipPermissions` is a **TUI-only** opt-out from chroxy's permission
+gate. When enabled, sessions on the `claude-tui` provider (the legacy CLI
+session backend that drives the real `claude` TUI through a PTY) are spawned
+with the `--dangerously-skip-permissions` flag and the chroxy permission hook
+is elided entirely. Other providers (`claude-sdk`, `claude-cli`,
+`docker-sdk`/`docker-cli`, `codex`, `gemini`) ignore the flag harmlessly —
+they have their own permission paths and chroxy does not pass this through.
+
+**What enabling it actually does:**
+
+- Spawns the TUI `claude` binary with `--dangerously-skip-permissions`, so
+  Claude itself stops prompting for tool approvals.
+- Skips wiring chroxy's permission hook into the TUI session, so chroxy's own
+  permission rule engine never sees a request to gate.
+- Logs a loud `[security]` warning at startup identifying which config key
+  surfaced the setting (see below).
+
+**Sources, in precedence order** (highest priority first):
+
+1. CLI flag: `chroxy start --dangerously-skip-permissions`
+2. Config key: `dangerouslySkipPermissions` (canonical, mirrors the CLI flag name)
+3. Config key: `skipPermissions` (legacy alias — see "Deprecation" below)
+4. Default: `false`
+
+Operators running headless deploys can pin the setting in `config.json`:
+
+```jsonc
+{
+  "dangerouslySkipPermissions": true
+}
+```
+
+At boot, when the resolved value is `true`, the server emits:
+
+```
+[security] dangerouslySkipPermissions=true (source: config.dangerouslySkipPermissions) — claude-tui sessions will spawn with --dangerously-skip-permissions and chroxy's permission gate is BYPASSED for those sessions
+```
+
+**Deprecation: the legacy `skipPermissions` key.**
+
+Prior to #4246 the config-file key was `skipPermissions`. That spelling is
+still honoured for one deprecation window so existing config files keep
+working, but the server logs a warning at startup nudging operators to rename
+the key:
+
+```
+[security] config key 'skipPermissions' is deprecated — rename it to 'dangerouslySkipPermissions' to match the CLI flag name. Both keys are honoured for now; the legacy key will be removed in a future release.
+```
+
+If both keys are present the canonical `dangerouslySkipPermissions` wins as
+the value source, but the deprecation warning is still emitted to nudge
+cleanup of the stale duplicate.
+
+**Config-key vs wire-field distinction.**
+
+This config key is the **server-wide default** applied to every new session
+that does not specify the setting explicitly. It is distinct from the
+per-session `skipPermissions` field on the WebSocket `create_session`
+message (see `packages/protocol/src/schemas/client.ts`), which lets a single
+session opt in at creation time — for example via the dashboard's TUI-only
+checkbox. The per-session wire field is also `skipPermissions` (matching the
+session-creation API surface) rather than `dangerouslySkipPermissions`; that
+naming is intentional and does not carry the config-file deprecation.
+
+When the per-session wire field is omitted, the session inherits the
+server-wide default resolved from this config key. As with the config-file
+flag, the wire field is honoured only by the `claude-tui` provider.
+
+**Env var.** The matching environment variable is
+`CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` (canonical) with the deprecated alias
+`CHROXY_SKIP_PERMISSIONS` honoured for the same deprecation window as the
+config-file alias (#4384). Both follow the same precedence as their config-key
+counterparts.
 
 ### Inactivity safety net
 
