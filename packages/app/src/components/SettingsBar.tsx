@@ -4,7 +4,7 @@ import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
-import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
+import type { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
@@ -377,7 +377,14 @@ export function SettingsBar({
                     hint = 'Default. Each tool call gates on your approval in the dashboard or mobile app.';
                   }
                 }
-                if (!hint) return null;
+                // #4251: parity with dashboard CreateSessionModal.tsx #4019
+                // catch-all. When a future provider adds a permission mode the
+                // mobile build doesn't recognise AND the server didn't send a
+                // description, surface the same explanatory copy the dashboard
+                // shows instead of hiding the hint entirely.
+                if (!hint) {
+                  hint = 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).';
+                }
                 return (
                   <Text
                     style={styles.permissionModeHint}

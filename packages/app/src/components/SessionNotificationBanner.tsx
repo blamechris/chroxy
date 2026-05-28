@@ -6,7 +6,8 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { useConnectionStore, SessionNotification } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
+import type { SessionNotification } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
