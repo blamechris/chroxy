@@ -3543,6 +3543,30 @@
   cursor: pointer;
 }
 
+/* #4244: tri-state radio group for skip-permissions. Stacks vertically with
+   the existing form-field rhythm; label color/font match checkbox-label so
+   the modal looks consistent. */
+.advanced-section .radio-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: unset;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.advanced-section .radio-label input[type='radio'] {
+  cursor: pointer;
+}
+
+.advanced-section .form-field-label {
+  display: block;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  margin-bottom: 2px;
+}
+
 .form-hint {
   font-size: 11px;
   color: var(--text-muted);
