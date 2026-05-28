@@ -55,11 +55,23 @@ Build the initial queue using the same logic as `/autonomous-dev-flow` Phase 0:
 - Filter out assigned issues
 - Apply sort and cap
 
+**Pre-queue: check for existing PRs covering each issue.** Before declaring the queue final, scan open PRs for closing-keyword references to each queued issue. If any hit, mark that issue as `Existing PR — defer` and remove it from the worker queue. This prevents worktree agents from duplicating an external contributor's work (or your own stale branch).
+
+```bash
+for ISSUE_NUM in "${QUEUE[@]}"; do
+  HITS=$(gh pr list --state open --search "Closes #${ISSUE_NUM} OR Fixes #${ISSUE_NUM} OR Resolves #${ISSUE_NUM}" --json number,title,author --jq '.[] | "#\(.number) by @\(.author.login): \(.title)"')
+  if [ -n "$HITS" ]; then
+    echo "Issue #${ISSUE_NUM} already has open PR(s): $HITS"
+    # Drop from worker queue; surface in the marathon-queue display as deferred
+  fi
+done
+```
+
 **Validate:**
 - At least 1 issue must be open and unassigned
 - If 0 issues match, report and stop
 
-Display the marathon queue:
+Display the marathon queue (deferred issues shown but greyed/marked, so the user can decide whether to override):
 
 ```markdown
 ## Marathon Session — {N} issues, up to {W} waves
@@ -70,6 +82,7 @@ Display the marathon queue:
 | 2 | #15 — Add leaderboard | from-review | Decompose → sub-issues |
 | 3 | #18 — Auth integration tests | enhancement | Implement |
 | — | #16 — Refactor auth module | enhancement | Assigned to @user (skipped) |
+| — | #21 — MCP config parser | from-review | Existing PR #4082 by @external — defer |
 
 **Mode:** Unattended marathon (up to {W} waves)
 **Merge after:** {Yes/No}
