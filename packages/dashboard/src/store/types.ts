@@ -629,6 +629,10 @@ export interface ConnectionState {
   // `prompt_evaluator_changed` event back which updates the session
   // entry — no optimistic update here.
   setPromptEvaluator: (value: boolean) => void;
+  // #3805: toggle the per-session Chroxy context hint. Server broadcasts
+  // a `chroxy_context_hint_changed` event back which updates the
+  // session entry — no optimistic update here.
+  setChroxyContextHint: (value: boolean) => void;
   // #3209: skills runtime API. `requestListSkills` fetches the current
   // skills list (auto + manual + active state) for the bound session.
   // `activateSkill`/`deactivateSkill` toggle a manual skill — the

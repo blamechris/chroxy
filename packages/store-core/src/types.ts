@@ -175,6 +175,10 @@ export interface SessionInfo {
   // older servers that don't include the field don't break the parser.
   // Renderers should treat `undefined` as `false` (toggle off).
   promptEvaluator?: boolean;
+  // #3805: per-session opt-in Chroxy context hint flag. Optional so
+  // older servers (pre-#3805) that omit the field don't break the
+  // parser. Renderers should treat `undefined` as `false` (toggle off).
+  chroxyContextHint?: boolean;
   // #3209: per-session provider capability flags surfaced via
   // session_list. The dashboard reads these to gate UI affordances
   // (e.g. SkillsPanel disables checkboxes when `skillToggle` is

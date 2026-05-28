@@ -408,6 +408,11 @@ export class SessionManager extends EventEmitter {
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
    * @param {boolean} [options.promptEvaluator] - Per-session toggle for the auto-evaluator
    *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
+   * @param {boolean} [options.chroxyContextHint] - Per-session opt-in toggle for
+   *   the Chroxy context-prefix in the system prompt (#3805). Default false —
+   *   when true, BaseSession._buildSystemPrompt prepends a short paragraph
+   *   telling the model it's running inside Chroxy so it can adjust output
+   *   for mobile clients. Persisted across reconnects.
    * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
    *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
    *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
@@ -440,7 +445,7 @@ export class SessionManager extends EventEmitter {
    *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -600,6 +605,14 @@ export class SessionManager extends EventEmitter {
     // to null without crashing session creation.
     if (typeof promptEvaluatorSkipPattern === 'string' && promptEvaluatorSkipPattern.length > 0) {
       providerOpts.promptEvaluatorSkipPattern = promptEvaluatorSkipPattern
+    }
+    // #3805: per-session Chroxy context hint. Same shape as the
+    // promptEvaluator path — only forward when an explicit boolean is
+    // present so omitting the field keeps BaseSession's `false`
+    // default. Restored sessions persist this in session-state.json
+    // (see serializeState below).
+    if (typeof chroxyContextHint === 'boolean') {
+      providerOpts.chroxyContextHint = chroxyContextHint
     }
     // #3540: hydrate the persisted stdin_disabled flag onto the new
     // session so restoreState() round-trips correctly. Only forwarded
@@ -809,6 +822,12 @@ export class SessionManager extends EventEmitter {
           entry.session.promptEvaluatorSkipPattern.length > 0
             ? entry.session.promptEvaluatorSkipPattern
             : null,
+        // #3805: surface the per-session Chroxy-context-hint toggle so the
+        // dashboard can render its checkbox without a separate round-trip.
+        // Strict-boolean coerce so a hypothetical custom provider that
+        // skips the BaseSession field initialiser still round-trips a
+        // valid boolean on the wire.
+        chroxyContextHint: !!entry.session.chroxyContextHint,
         // #3540: surface the latched stdin_disabled flag so reconnecting
         // clients (and clients connecting after a server restart) see
         // the disabled state without waiting for a fresh `error` event.
@@ -1090,6 +1109,11 @@ export class SessionManager extends EventEmitter {
           entry.session.promptEvaluatorSkipPattern.length > 0
             ? entry.session.promptEvaluatorSkipPattern
             : null,
+        // #3805: persist the Chroxy-context-hint toggle so reconnects
+        // across restarts preserve the user's choice. Strict-boolean
+        // coerce so older state files (pre-#3805) round-trip as
+        // `false` rather than `undefined` after restore.
+        chroxyContextHint: !!entry.session.chroxyContextHint,
         // #3540: persist the SidecarProcess `stdin_disabled` latch so a
         // server restart preserves the disabled state. Without this, a
         // client connecting after restart would not see the banner — the
@@ -1176,6 +1200,11 @@ export class SessionManager extends EventEmitter {
           promptEvaluatorSkipPattern: typeof saved.promptEvaluatorSkipPattern === 'string' && saved.promptEvaluatorSkipPattern.length > 0
             ? saved.promptEvaluatorSkipPattern
             : undefined,
+          // #3805: restore the per-session Chroxy-context-hint flag from
+          // disk so reconnects across server restarts preserve the
+          // user's choice. createSession ignores non-boolean inputs so
+          // older state files (pre-#3805, no field) restore as `false`.
+          chroxyContextHint: typeof saved.chroxyContextHint === 'boolean' ? saved.chroxyContextHint : undefined,
           // #3540: forward the persisted stdin_disabled latch. Only
           // truthy values flip the flag; pre-#3540 state files (no
           // field) restore as `false`. The SdkSession constructor

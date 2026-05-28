@@ -707,6 +707,97 @@ describe('BaseSession', () => {
     })
   })
 
+  // #3805: opt-in Chroxy context hint. When enabled, a short paragraph
+  // telling the model it's running inside Chroxy is prepended to the
+  // system prompt so it can adjust output (narrower code blocks, no
+  // wide ASCII diagrams) for mobile clients.
+  describe('chroxyContextHint (#3805)', () => {
+    it('defaults to false when omitted from constructor opts', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.chroxyContextHint, false)
+    })
+
+    it('coerces truthy / falsy constructor values to a strict boolean', () => {
+      const a = new BaseSession({ chroxyContextHint: true, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const b = new BaseSession({ chroxyContextHint: false, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const c = new BaseSession({ chroxyContextHint: 1, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const d = new BaseSession({ chroxyContextHint: undefined, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(a.chroxyContextHint, true)
+      assert.equal(b.chroxyContextHint, false)
+      assert.equal(c.chroxyContextHint, true)
+      assert.equal(typeof c.chroxyContextHint, 'boolean')
+      assert.equal(d.chroxyContextHint, false)
+    })
+
+    describe('_buildSystemPrompt with hint', () => {
+      it('returns empty string when hint is OFF and no skills loaded (default OFF — byte-identical to pre-#3805)', () => {
+        session._skillsText = ''
+        assert.equal(session.chroxyContextHint, false)
+        assert.equal(session._buildSystemPrompt(), '')
+      })
+
+      it('prepends the Chroxy hint paragraph when flag is ON and no skills loaded', () => {
+        session._skillsText = ''
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        assert.ok(out.length > 0, 'hint paragraph is non-empty')
+        assert.ok(/Chroxy/.test(out), `expected output to mention "Chroxy": ${out}`)
+        assert.ok(/mobile/i.test(out), `expected hint to mention mobile context: ${out}`)
+      })
+
+      it('prepends hint BEFORE skills text when both are present (skills not overwritten)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        const hintIdx = out.indexOf('Chroxy')
+        const skillsIdx = out.indexOf('body text')
+        assert.ok(hintIdx >= 0, 'hint present')
+        assert.ok(skillsIdx >= 0, 'skills text still present (not overwritten)')
+        assert.ok(hintIdx < skillsIdx, `hint should precede skills text (hint at ${hintIdx}, skills at ${skillsIdx})`)
+      })
+
+      it('leaves skills text byte-identical when hint is OFF (no observable change for existing users)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        // Compare with the existing pre-#3805 behaviour: skills text only.
+        const out = session._buildSystemPrompt()
+        assert.equal(out, '# Skill: foo\n\nbody text')
+        assert.ok(!out.includes('Chroxy'), 'no Chroxy hint when flag is OFF')
+      })
+    })
+
+    describe('setChroxyContextHint', () => {
+      it('accepts boolean true and updates state', () => {
+        assert.equal(session.chroxyContextHint, false)
+        const result = session.setChroxyContextHint(true)
+        assert.equal(result, true)
+        assert.equal(session.chroxyContextHint, true)
+      })
+
+      it('accepts boolean false and updates state', () => {
+        session.chroxyContextHint = true
+        const result = session.setChroxyContextHint(false)
+        assert.equal(result, true)
+        assert.equal(session.chroxyContextHint, false)
+      })
+
+      it('returns false when value is unchanged (idempotent no-op)', () => {
+        assert.equal(session.chroxyContextHint, false)
+        assert.equal(session.setChroxyContextHint(false), false)
+      })
+
+      it('rejects non-boolean inputs without mutating state', () => {
+        for (const bad of ['true', 1, 0, null, undefined, {}, []]) {
+          assert.equal(session.setChroxyContextHint(bad), false, `expected setChroxyContextHint(${JSON.stringify(bad)}) to return false`)
+          assert.equal(session.chroxyContextHint, false)
+        }
+      })
+    })
+  })
+
   describe('_getSkills', () => {
     it('returns empty array by default (no skills loaded)', () => {
       assert.deepEqual(session._getSkills(), [])

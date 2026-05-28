@@ -214,6 +214,10 @@ export function createMockSession(overrides = {}) {
   // BaseSession.setPromptEvaluatorSkipPattern semantics: empty/null clears,
   // valid regex source flips state, malformed source rejected.
   session.promptEvaluatorSkipPattern = null
+  // #3805: per-session Chroxy context hint, default off. Setter mirrors
+  // BaseSession.setChroxyContextHint: strict-boolean validation, returns
+  // true only when state actually changes.
+  session.chroxyContextHint = false
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
   session.setModel = createSpy()
@@ -230,6 +234,11 @@ export function createMockSession(overrides = {}) {
   session.setPromptEvaluator = createSpy((value) => {
     if (typeof value !== 'boolean' || value === session.promptEvaluator) return false
     session.promptEvaluator = value
+    return true
+  })
+  session.setChroxyContextHint = createSpy((value) => {
+    if (typeof value !== 'boolean' || value === session.chroxyContextHint) return false
+    session.chroxyContextHint = value
     return true
   })
   session.setPromptEvaluatorSkipPattern = createSpy((value) => {
