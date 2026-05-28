@@ -109,6 +109,14 @@ export function buildSidebarContextMenuItems(
         onClick: isTauri && session.cwd ? () => reveal(session.cwd) : undefined,
       },
       {
+        // #4268: Copy path — uses the renderer-side clipboard so it works
+        // in both Tauri and browser dashboard. Gated off when the session
+        // has no cwd; visible-items filter drops the entry in that case.
+        id: 'copy-path',
+        label: 'Copy path',
+        onClick: session.cwd ? () => copyToClipboard(session.cwd as string) : undefined,
+      },
+      {
         id: 'close',
         label: 'Close Session',
         destructive: true,
@@ -130,6 +138,14 @@ export function buildSidebarContextMenuItems(
         id: 'reveal',
         label: 'Open in Finder',
         onClick: isTauri ? () => reveal(repoPath) : undefined,
+      },
+      {
+        // #4268: Copy path for repo group headers — repo nodes always
+        // carry a path (it's how Sidebar groups sessions), so this item
+        // is never capability-gated off.
+        id: 'copy-path',
+        label: 'Copy path',
+        onClick: () => copyToClipboard(repoPath),
       },
     ]
   }

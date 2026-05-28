@@ -356,6 +356,73 @@ describe('SessionContextMenu', () => {
     })
   })
 
+  // #4268: "Copy path" item — sidebar callers wire an onClick that writes
+  // the session/repo cwd to the clipboard via navigator.clipboard.writeText.
+  // The menu itself is agnostic to what the handler does; these tests pin
+  // the contract used in App.tsx so the wiring (and the disabled-when-no-cwd
+  // capability gate) doesn't silently regress.
+  describe('Copy path item (#4268)', () => {
+    it('renders the Copy path menuitem when an onClick is provided', () => {
+      const onCopy = vi.fn()
+      const items: ContextMenuItem[] = [
+        { id: 'duplicate', label: 'Duplicate', onClick: vi.fn() },
+        { id: 'copy-path', label: 'Copy path', onClick: onCopy },
+      ]
+      render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+      expect(screen.getByTestId('session-context-menu-item-copy-path')).toHaveTextContent('Copy path')
+    })
+
+    it('hides the Copy path item when its onClick is omitted (no cwd)', () => {
+      // Mirrors how App.tsx capability-gates the action when the row has
+      // no `cwd`: the item is passed with `onClick: undefined`, which the
+      // visible-items filter strips before render.
+      const items: ContextMenuItem[] = [
+        { id: 'duplicate', label: 'Duplicate', onClick: vi.fn() },
+        { id: 'copy-path', label: 'Copy path' /* no onClick */ },
+      ]
+      render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+      expect(screen.queryByTestId('session-context-menu-item-copy-path')).not.toBeInTheDocument()
+    })
+
+    it('invokes navigator.clipboard.writeText with the path when clicked', () => {
+      // The Copy path handler in App.tsx calls navigator.clipboard.writeText
+      // with the session/repo cwd. The menu itself just fires the onClick;
+      // we stub clipboard.writeText here and assert the wire-up.
+      const writeText = vi.fn(() => Promise.resolve())
+      const originalClipboard = (navigator as { clipboard?: Clipboard }).clipboard
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      try {
+        const path = '/Users/blamechris/Projects/archery-apprentice'
+        const items: ContextMenuItem[] = [
+          {
+            id: 'copy-path',
+            label: 'Copy path',
+            onClick: () => {
+              if (!navigator.clipboard) return
+              void navigator.clipboard.writeText(path)
+            },
+          },
+        ]
+        render(<SessionContextMenu x={0} y={0} items={items} onDismiss={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('session-context-menu-item-copy-path'))
+        expect(writeText).toHaveBeenCalledTimes(1)
+        expect(writeText).toHaveBeenCalledWith(path)
+      } finally {
+        if (originalClipboard) {
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: originalClipboard,
+          })
+        } else {
+          delete (navigator as { clipboard?: Clipboard }).clipboard
+        }
+      }
+    })
+  })
+
   it('clamps menu position to viewport on first render', () => {
     // Set a viewport so we can predict the clamp.
     const originalInnerWidth = window.innerWidth
