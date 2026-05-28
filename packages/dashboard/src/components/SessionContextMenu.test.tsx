@@ -176,6 +176,18 @@ describe('SessionContextMenu', () => {
       expect(close).toHaveAttribute('role', 'menuitem')
     })
 
+    // #4373: WAI-ARIA Authoring Practices recommend declaring the menu's
+    // orientation explicitly when it responds to vertical arrow keys (which
+    // ours does, after #4369). aria-orientation="vertical" tells assistive
+    // tech how the arrow-key navigation maps to spatial layout.
+    it('sets aria-orientation="vertical" on the menu container (#4373)', () => {
+      render(
+        <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
+      )
+      const menu = screen.getByTestId('session-context-menu')
+      expect(menu).toHaveAttribute('aria-orientation', 'vertical')
+    })
+
     it('focuses the first item on mount', () => {
       render(
         <SessionContextMenu x={0} y={0} items={makeItems()} onDismiss={vi.fn()} />,
