@@ -1903,21 +1903,45 @@ export function App() {
                   />
                 ) : (
                   <>
-                    {viewMode === 'chat' && (
+                    {/*
+                      #4305 — Chat and Output stay mounted; the inactive
+                      pane is hidden with display:none rather than
+                      unmounted. Previously each tab switch unmounted
+                      ChatView, which reset every ToolGroup/ToolBubble's
+                      local `expanded` state (and dropped scroll position)
+                      causing the visible "re-fold jump" the issue
+                      describes. Keeping both mounted preserves
+                      user-toggled expand state, the isTail-driven
+                      tail-expanded state, and the chat scroll position
+                      across tab switches. Mirrors the same pattern
+                      MultiTerminalView already uses to preserve per-
+                      session terminal state.
+                    */}
+                    <div
+                      data-testid="chat-pane"
+                      style={{
+                        display: viewMode === 'chat' ? 'contents' : 'none',
+                      }}
+                    >
                       <ChatView
                         messages={chatMessages}
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
                       />
-                    )}
-                    {viewMode === 'terminal' && (
+                    </div>
+                    <div
+                      data-testid="terminal-pane"
+                      style={{
+                        display: viewMode === 'terminal' ? 'contents' : 'none',
+                      }}
+                    >
                       <MultiTerminalView
                         sessions={sessions}
                         activeSessionId={activeSessionId}
                         className="terminal-container"
                       />
-                    )}
+                    </div>
                   </>
                 )}
                 {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
