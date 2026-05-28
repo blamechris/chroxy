@@ -695,31 +695,20 @@ export class ClaudeByokSession extends BaseSession {
     // executions while preserving model-emit order in the final array.
     const toolResults = new Array(toolBlocks.length)
     const gateDecisions = new Array(toolBlocks.length)
-    let abortedDuringGate = false
     let firstUngatedIndex = toolBlocks.length
 
-    // PHASE 1 — sequential permission gating.
-    for (let i = 0; i < toolBlocks.length; i++) {
-      if (signal?.aborted) {
-        abortedDuringGate = true
-        firstUngatedIndex = i
-        break
-      }
-      gateDecisions[i] = await this._gateToolBlock({
-        block: toolBlocks[i],
-        messageId,
-      })
-    }
-
-    // If abort fired mid-gate, fill synthetic 'Interrupted' tool_results
-    // for the unscheduled remainder. The early-aborted blocks never
-    // emitted a tool_start (we didn't even get to the executor), but
-    // the SDK already emitted tool_start when streaming the assistant
-    // turn — so the bubble would hang in 'running…' without a closing
-    // tool_result event (#4108 review).
-    if (abortedDuringGate) {
+    // Synthetic-fill helper (#4108, #4247). Used both for the mid-gate
+    // remainder (blocks that never entered the gate) AND the
+    // inter-phase race (every block was gated, but the signal tripped
+    // before phase 2 schedules — without this guard, write-side tools
+    // that ignore the signal would execute AFTER the user pressed Stop).
+    const fillInterrupted = (startIndex) => {
       const interrupted = 'Interrupted by user before execution'
-      for (let j = firstUngatedIndex; j < toolBlocks.length; j++) {
+      for (let j = startIndex; j < toolBlocks.length; j++) {
+        // Skip slots that already carry a real result (defensive — the
+        // inter-phase guard fires when startIndex === 0, but only the
+        // blocks that *would* have executed in phase 2 need filling).
+        if (toolResults[j]) continue
         const remaining = toolBlocks[j]
         this.emit('tool_result', {
           messageId,
@@ -734,6 +723,48 @@ export class ClaudeByokSession extends BaseSession {
           is_error: true,
         }
       }
+    }
+
+    // PHASE 1 — sequential permission gating.
+    for (let i = 0; i < toolBlocks.length; i++) {
+      if (signal?.aborted) {
+        firstUngatedIndex = i
+        break
+      }
+      gateDecisions[i] = await this._gateToolBlock({
+        block: toolBlocks[i],
+        messageId,
+      })
+    }
+
+    // Mid-gate abort: fill synthetic 'Interrupted' tool_results for the
+    // unscheduled remainder (#4108). The early-aborted blocks never
+    // emitted a tool_start (we didn't even get to the executor), but
+    // the SDK already emitted tool_start when streaming the assistant
+    // turn — so the bubble would hang in 'running…' without a closing
+    // tool_result event.
+    if (firstUngatedIndex < toolBlocks.length) {
+      fillInterrupted(firstUngatedIndex)
+    }
+
+    // Inter-phase race guard (#4247): if the signal tripped while the
+    // last gate was awaiting — or any time after phase 1's loop check
+    // and before phase 2 schedules — short-circuit the remainder into
+    // synthetic-fills rather than launching write-side tools (Read,
+    // Write, Edit, TodoWrite) that don't honour the signal and would
+    // run to completion AFTER the user pressed Stop. Pre-fix, the
+    // sequential-loop's bottom-of-iteration check caught this; the
+    // parallel refactor (#4062) opened a window between phase 1 and
+    // phase 2 where the abort could go unobserved.
+    //
+    // Only applies when phase 1 completed fully (every block was
+    // successfully gated). The mid-gate path above already handled
+    // the partial-gate case and must keep block N's execution — its
+    // gate ran BEFORE the abort tripped, so the user's permission
+    // answer would be wasted if we re-synthesized it here.
+    if (signal?.aborted && firstUngatedIndex === toolBlocks.length) {
+      fillInterrupted(0)
+      firstUngatedIndex = 0
     }
 
     // PHASE 2 — parallel execution of every successfully-gated block.
