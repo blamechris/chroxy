@@ -20,7 +20,7 @@
  * (which carry `cumulativeUsage` from session_list snapshots + the
  * `session_usage` event stream).
  */
-import { useMemo } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
 import { formatCostBadge, getProviderLabel } from '@chroxy/store-core'
 
@@ -147,6 +147,157 @@ export function formatTokenCount(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}M`
 }
 
+/**
+ * #4362: touch-friendly disclosure for explanatory tooltips.
+ *
+ * The native `title=` attribute renders a hover-only tooltip that doesn't
+ * fire on tap, leaving touch users (iPad dashboard, mobile WebView) without
+ * a way to surface the explanation. This component renders a small button
+ * trigger that:
+ *   - Toggles the popover on click/tap (the touch-friendly affordance)
+ *   - Opens on mouseenter / closes on mouseleave (preserves hover UX for
+ *     pointer users; matches the pre-#4362 desktop behavior)
+ *   - Closes on Escape (keyboard dismissal)
+ *   - Closes on click outside (standard popover dismissal)
+ *   - Carries `aria-label` for screen readers and `aria-expanded` for state
+ *
+ * The popover content is rendered inline as a sibling rather than via a
+ * portal — the sidebar panel is already a flex column and the explanatory
+ * text is short, so we don't need positioning trickery.
+ */
+interface InfoDisclosureProps {
+  /** Marker text shown inside the trigger (e.g. "ⓘ" or "—"). */
+  triggerText: string
+  /** Accessible name for the trigger button. */
+  ariaLabel: string
+  /** Class name applied to the trigger button. */
+  triggerClassName: string
+  /** Test id base — popover gets `${testIdBase}-popover`. */
+  testIdBase: string
+  /** Explanation content. Plain text or a node. */
+  children: React.ReactNode
+}
+
+function InfoDisclosure({
+  triggerText,
+  ariaLabel,
+  triggerClassName,
+  testIdBase,
+  children,
+}: InfoDisclosureProps) {
+  const [open, setOpen] = useState(false)
+  const popoverId = useId()
+  const containerRef = useRef<HTMLSpanElement | null>(null)
+  // Track whether the popover was opened via hover (mouse) so a subsequent
+  // mouseleave can close it. Click-opened popovers stay until explicit
+  // dismissal (Escape, click-outside, or second click).
+  const openedByHoverRef = useRef(false)
+  // Touch interactions on mobile browsers synthesize `mouseenter` -> `click`
+  // on a single tap. If we treat the synthesized `mouseenter` as a hover-open
+  // we'd flip-flop on the very tap that's supposed to surface the popover.
+  // Pointer Events expose `pointerType` so we can gate hover-open to genuine
+  // mouse pointers and let the click handler own the toggle on touch.
+  const pointerTypeRef = useRef<string>('mouse')
+
+  // Click-outside + Escape handlers. Only attached when the popover is open
+  // so we don't leak listeners on every mount of the sidebar.
+  useEffect(() => {
+    if (!open) return
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setOpen(false)
+      }
+    }
+    function onPointerDown(e: PointerEvent) {
+      const target = e.target as Node | null
+      if (!target) return
+      if (containerRef.current && containerRef.current.contains(target)) return
+      setOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    // pointerdown covers both mouse and touch click-outside in one listener.
+    // Tests still use fireEvent.mouseDown which dispatches a MouseEvent that
+    // browsers also fire alongside pointerdown — so we listen to mousedown
+    // as well to stay compatible with the jsdom test harness.
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('mousedown', onPointerDown as EventListener)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('mousedown', onPointerDown as EventListener)
+    }
+  }, [open])
+
+  return (
+    <span className="sidebar-token-view-disclosure" ref={containerRef}>
+      <button
+        type="button"
+        className={triggerClassName}
+        data-testid={testIdBase}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        onPointerDown={(e) => {
+          // Record the pointer type so the upcoming click handler can decide
+          // whether to honor a hover-open it just triggered. Touch synthesizes
+          // mouseenter+click on the same tap, which would otherwise flip the
+          // popover closed immediately on touch devices (the bug we're
+          // fixing).
+          pointerTypeRef.current = e.pointerType || 'mouse'
+        }}
+        onClick={() => {
+          // On touch, the synthetic mouseenter may have just opened the
+          // popover. Ignore that and treat the click as the "open" action.
+          if (pointerTypeRef.current === 'touch' && openedByHoverRef.current) {
+            openedByHoverRef.current = false
+            setOpen(true)
+            return
+          }
+          setOpen((prev) => !prev)
+          openedByHoverRef.current = false
+        }}
+        onMouseEnter={() => {
+          openedByHoverRef.current = true
+          setOpen(true)
+        }}
+        onMouseLeave={() => {
+          // Only auto-close on mouseleave if it was opened via hover —
+          // a click-opened popover should stay until explicit dismissal.
+          if (openedByHoverRef.current) {
+            setOpen(false)
+            openedByHoverRef.current = false
+          }
+        }}
+      >
+        {triggerText}
+      </button>
+      {open && (
+        <span
+          id={popoverId}
+          className="sidebar-token-view-popover"
+          data-testid={`${testIdBase}-popover`}
+          role="tooltip"
+        >
+          {children}
+        </span>
+      )}
+    </span>
+  )
+}
+
+const COST_INFO_EXPLANATION =
+  // #4348: the optical illusion is that visible tokens ÷ cost yields a rate
+  // nowhere near Anthropic's published pricing. Spell out the gap between
+  // visible and billed tokens here.
+  'Token counts above are user-visible (new content per turn). ' +
+  'BYOK cost is computed from billed tokens, which include the ' +
+  'full conversation context re-sent on every API call — so ' +
+  'long agentic sessions bill far more input than the visible ' +
+  'count suggests. Pricing follows Anthropic’s published rates.'
+
+const TUI_UNTRACKED_EXPLANATION =
+  'Token count not exposed by claude TUI (PTY-only interface)'
+
 export interface SidebarTokenViewProps {
   /** All known sessions across active + resumable + background. */
   sessions: SessionInfo[]
@@ -178,23 +329,14 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
           <div className="sidebar-token-view-aggregate-row">
             <span className="sidebar-token-view-label">
               Cost (BYOK){' '}
-              <span
-                className="sidebar-token-view-info"
-                data-testid="sidebar-token-view-cost-info"
-                aria-label="Why doesn't this cost match the visible token count?"
-                title={
-                  // #4348: the optical illusion is that visible tokens ÷ cost
-                  // yields a rate nowhere near Anthropic's published pricing.
-                  // Spell out the gap between visible and billed tokens here.
-                  'Token counts above are user-visible (new content per turn). ' +
-                  'BYOK cost is computed from billed tokens, which include the ' +
-                  'full conversation context re-sent on every API call — so ' +
-                  'long agentic sessions bill far more input than the visible ' +
-                  'count suggests. Pricing follows Anthropic’s published rates.'
-                }
+              <InfoDisclosure
+                triggerText={'ⓘ'}
+                ariaLabel="Why doesn't this cost match the visible token count?"
+                triggerClassName="sidebar-token-view-info"
+                testIdBase="sidebar-token-view-cost-info"
               >
-                {'ⓘ'}
-              </span>
+                {COST_INFO_EXPLANATION}
+              </InfoDisclosure>
             </span>
             <span className="sidebar-token-view-value-secondary">
               {formatCostBadge(agg.totals.costUsd)}
@@ -222,13 +364,14 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
                 >
                   <span className="sidebar-token-view-provider-label">{label}</span>
                   {row.untracked ? (
-                    <span
-                      className="sidebar-token-view-provider-untracked"
-                      data-testid={`sidebar-token-view-provider-${row.provider}-untracked`}
-                      title="Token count not exposed by claude TUI (PTY-only interface)"
+                    <InfoDisclosure
+                      triggerText="—"
+                      ariaLabel={`Why does ${label} not show a token count?`}
+                      triggerClassName="sidebar-token-view-provider-untracked"
+                      testIdBase={`sidebar-token-view-provider-${row.provider}-untracked`}
                     >
-                      —
-                    </span>
+                      {TUI_UNTRACKED_EXPLANATION}
+                    </InfoDisclosure>
                   ) : (
                     <span className="sidebar-token-view-provider-tokens">
                       {formatTokenCount(tokens)}
