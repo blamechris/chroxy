@@ -1252,6 +1252,62 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #3805 — toggle the per-session Chroxy context hint flag. Mirrors the
+ * #3185 promptEvaluator handler: strict-boolean payload validation,
+ * idempotent (no-op when value unchanged so the dashboard can re-send
+ * the current value without churning state-file writes), and broadcast
+ * on actual change so multi-client UIs stay in sync.
+ *
+ * Persistence is an immediate `serializeState()` flush rather than the
+ * debounced `schedulePersist` other handlers use. Toggles are operator
+ * actions — rare enough that the synchronous write is free, and a crash
+ * within the debounce window would otherwise silently lose the change.
+ */
+function handleSetChroxyContextHint(ws, client, msg, ctx) {
+  if (typeof msg.value !== 'boolean') {
+    ctx.send(ws, {
+      type: 'session_error',
+      message: 'set_chroxy_context_hint requires a boolean `value`',
+    })
+    return
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  if (typeof entry.session.setChroxyContextHint !== 'function') {
+    // Defensive — every shipping provider extends BaseSession which adds
+    // the setter. A custom provider that bypasses BaseSession would land
+    // here; refuse rather than silently dropping the toggle.
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support chroxyContextHint toggling' })
+    return
+  }
+
+  const changed = entry.session.setChroxyContextHint(msg.value)
+  if (!changed) {
+    // Either invalid input (already validated above so unreachable) or a
+    // redundant set. Either way: no broadcast, no persist.
+    return
+  }
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'chroxy_context_hint_changed',
+    sessionId,
+    value: entry.session.chroxyContextHint,
+  })
+
+  try {
+    ctx.sessionManager?.serializeState?.()
+  } catch (err) {
+    log.warn(`Failed to persist chroxyContextHint toggle for ${sessionId}: ${err?.message || err}`)
+  }
+}
+
 function handleSetPermissionRules(ws, client, msg, ctx) {
   const rules = msg.rules
 
@@ -1327,6 +1383,7 @@ export const settingsHandlers = {
   set_permission_rules: handleSetPermissionRules,
   set_prompt_evaluator: handleSetPromptEvaluator,
   set_prompt_evaluator_skip_pattern: handleSetPromptEvaluatorSkipPattern,
+  set_chroxy_context_hint: handleSetChroxyContextHint,
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,

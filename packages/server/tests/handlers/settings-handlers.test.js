@@ -680,6 +680,85 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #3805: per-session Chroxy context hint toggle. Mirrors the #3185
+  // pattern — strict-boolean payload validation, broadcast on actual
+  // change, immediate persist. Default OFF so existing users see no
+  // observable behaviour change.
+  describe('set_chroxy_context_hint (#3805)', () => {
+    it('rejects non-boolean values with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: 'true' }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /boolean/)
+      assert.equal(session.setChroxyContextHint.callCount, 0)
+    })
+
+    it('rejects when no active session', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('toggles to true and broadcasts chroxy_context_hint_changed', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(session.setChroxyContextHint.callCount, 1)
+      assert.equal(session.setChroxyContextHint.lastCall[0], true)
+      assert.equal(session.chroxyContextHint, true)
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'chroxy_context_hint_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, true)
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('idempotent on no-op (already false — default OFF)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: false }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('rejects when the session does not implement setChroxyContextHint', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      delete session.setChroxyContextHint
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /does not support chroxyContextHint/)
+    })
+  })
+
   // #3639: per-session promptEvaluatorSkipPattern setter. Mirrors the
   // #3185 pattern — strict-string payload validation, idempotent on
   // unchanged value, broadcast `prompt_evaluator_skip_pattern_changed`

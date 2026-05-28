@@ -164,6 +164,15 @@ export const ServerPromptEvaluatorSkipPatternChangedSchema = z.object({
     sessionId: z.string(),
     value: z.union([z.string(), z.null()]),
 });
+// #3805: per-session Chroxy context hint toggle changed. Broadcast to
+// every client bound to `sessionId` whenever the value actually flips.
+// Mirrors ServerPromptEvaluatorChangedSchema — clients re-render the
+// toggle and may refetch session_list for confirmation.
+export const ServerChroxyContextHintChangedSchema = z.object({
+    type: z.literal('chroxy_context_hint_changed'),
+    sessionId: z.string(),
+    value: z.boolean(),
+});
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *
@@ -344,6 +353,10 @@ export const ServerSessionListEntrySchema = z.object({
     // dashboard can show / edit this; the server falls back to
     // `config.promptEvaluatorSkipPattern` when null.
     promptEvaluatorSkipPattern: z.union([z.string(), z.null()]).optional(),
+    // #3805: per-session opt-in Chroxy context hint flag. Optional because
+    // older servers (pre-#3805) omit the field; the dashboard treats
+    // `undefined` as `false` (toggle off).
+    chroxyContextHint: z.boolean().optional(),
     stdinForwardingDisabled: z.boolean().optional(),
     // #3573: cumulative stdin_dropped totals seeded into the handshake so a
     // late-joining client sees the running counter without waiting for the

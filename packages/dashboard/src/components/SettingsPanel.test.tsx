@@ -60,6 +60,7 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     activeSessionId: null,
     sessions: [],
     setPromptEvaluator: vi.fn(),
+    setChroxyContextHint: vi.fn(),
     // #4052: BYOK credentials defaults — refresh is a no-op spy by
     // default; individual tests override status / actions as needed.
     byokCredentialsStatus: null,
@@ -428,6 +429,70 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const section = screen.getByTestId('active-session-section')
       expect(section.textContent).toContain('this session')
+    })
+  })
+
+  // #3805: per-session Chroxy context hint toggle. Mirrors the
+  // promptEvaluator capability-gated pattern — only renders when the
+  // active session reports a boolean `chroxyContextHint` field.
+  describe('Active session — chroxyContextHint toggle (#3805)', () => {
+    function setActiveSessionState(extra: Record<string, unknown>) {
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', ...extra }],
+        setChroxyContextHint: vi.fn(),
+      })
+    }
+
+    it('does not render the Chroxy hint toggle when no active session reports the field', () => {
+      setActiveSessionState({})
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('chroxy-context-hint-toggle')).toBeNull()
+    })
+
+    it('renders the toggle when the active session reports a boolean chroxyContextHint', () => {
+      setActiveSessionState({ chroxyContextHint: false })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('active-session-section')).toBeInTheDocument()
+      expect(screen.getByTestId('chroxy-context-hint-toggle')).toBeInTheDocument()
+    })
+
+    it('reflects chroxyContextHint=true as a checked checkbox', () => {
+      setActiveSessionState({ chroxyContextHint: true })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const cb = screen.getByTestId('chroxy-context-hint-toggle') as HTMLInputElement
+      expect(cb.checked).toBe(true)
+    })
+
+    it('reflects chroxyContextHint=false as an unchecked checkbox (default OFF)', () => {
+      setActiveSessionState({ chroxyContextHint: false })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const cb = screen.getByTestId('chroxy-context-hint-toggle') as HTMLInputElement
+      expect(cb.checked).toBe(false)
+    })
+
+    it('emits true when toggling on', () => {
+      const setChroxyContextHint = vi.fn()
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', chroxyContextHint: false }],
+        setChroxyContextHint,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('chroxy-context-hint-toggle'))
+      expect(setChroxyContextHint).toHaveBeenCalledWith(true)
+    })
+
+    it('emits false when toggling off', () => {
+      const setChroxyContextHint = vi.fn()
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', chroxyContextHint: true }],
+        setChroxyContextHint,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('chroxy-context-hint-toggle'))
+      expect(setChroxyContextHint).toHaveBeenCalledWith(false)
     })
   })
 

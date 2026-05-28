@@ -71,6 +71,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const sessions = useConnectionStore(s => s.sessions)
   const setPromptEvaluator = useConnectionStore(s => s.setPromptEvaluator)
+  // #3805: per-session Chroxy context hint toggle. Opt-in by default —
+  // when on, the server prepends a short paragraph to the system prompt
+  // telling the model it's running inside Chroxy so it can adjust
+  // output for mobile clients (narrower code blocks, no wide ASCII
+  // diagrams). Only shown when the active session reports a boolean
+  // `chroxyContextHint` field; older servers (pre-#3805) omit it.
+  const setChroxyContextHint = useConnectionStore(s => s.setChroxyContextHint)
   // #4052: BYOK credentials state + actions. Status arrives via the WS
   // byok_credentials_status message; the raw key is never stored — only
   // the masked preview.
@@ -79,6 +86,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const setByokCredentials = useConnectionStore(s => s.setByokCredentials)
   const clearByokCredentials = useConnectionStore(s => s.clearByokCredentials)
   const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
+  // #3805: same capability gate pattern as promptEvaluator — only
+  // render the toggle when the active session reports the boolean
+  // field. Older servers omit it; rendering a non-functional control
+  // would mislead.
+  const activeSessionChroxyContextHint = sessions.find(s => s.sessionId === activeSessionId)?.chroxyContextHint
   const themes = getAvailableThemes()
   const inTauri = isTauri()
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
@@ -312,29 +324,52 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
 
           {/* Active session — per-session toggles. Only renders when the
               active session reports a capability (e.g. boolean
-              promptEvaluator). Older servers (pre-#3185) omit the field
-              entirely, in which case showing a non-functional toggle
-              would mislead. */}
-          {typeof activeSessionPromptEvaluator === 'boolean' && (
+              promptEvaluator OR chroxyContextHint). Older servers
+              (pre-#3185 / pre-#3805) omit the fields entirely, in which
+              case showing a non-functional toggle would mislead. */}
+          {(typeof activeSessionPromptEvaluator === 'boolean' || typeof activeSessionChroxyContextHint === 'boolean') && (
             <section className="settings-section" data-testid="active-session-section">
               <h3>Active session</h3>
-              <div className="settings-field settings-field-checkbox">
-                <label htmlFor="prompt-evaluator-toggle">
-                  <input
-                    id="prompt-evaluator-toggle"
-                    type="checkbox"
-                    checked={activeSessionPromptEvaluator}
-                    onChange={(e) => setPromptEvaluator(e.target.checked)}
-                    data-testid="prompt-evaluator-toggle"
-                  />
-                  Auto-evaluate prompts before send
-                </label>
-                <p className="settings-hint">
-                  Run a quality check on each prompt before it's sent. Catches
-                  ambiguous wording and surfaces clarifications inline. Applies
-                  to this session only.
-                </p>
-              </div>
+              {typeof activeSessionPromptEvaluator === 'boolean' && (
+                <div className="settings-field settings-field-checkbox">
+                  <label htmlFor="prompt-evaluator-toggle">
+                    <input
+                      id="prompt-evaluator-toggle"
+                      type="checkbox"
+                      checked={activeSessionPromptEvaluator}
+                      onChange={(e) => setPromptEvaluator(e.target.checked)}
+                      data-testid="prompt-evaluator-toggle"
+                    />
+                    Auto-evaluate prompts before send
+                  </label>
+                  <p className="settings-hint">
+                    Run a quality check on each prompt before it's sent. Catches
+                    ambiguous wording and surfaces clarifications inline. Applies
+                    to this session only.
+                  </p>
+                </div>
+              )}
+              {typeof activeSessionChroxyContextHint === 'boolean' && (
+                <div className="settings-field settings-field-checkbox">
+                  <label htmlFor="chroxy-context-hint-toggle">
+                    <input
+                      id="chroxy-context-hint-toggle"
+                      type="checkbox"
+                      checked={activeSessionChroxyContextHint}
+                      onChange={(e) => setChroxyContextHint(e.target.checked)}
+                      data-testid="chroxy-context-hint-toggle"
+                    />
+                    Tell the model it's running inside Chroxy
+                  </label>
+                  <p className="settings-hint">
+                    Prepends a short note to the system prompt so the model
+                    knows it's bridged to a phone over a Cloudflare tunnel and
+                    can prefer concise, mobile-friendly output (narrower code
+                    blocks, no wide ASCII diagrams). Applies to this session
+                    only.
+                  </p>
+                </div>
+              )}
             </section>
           )}
 
