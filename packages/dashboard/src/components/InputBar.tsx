@@ -5,7 +5,7 @@
  * Supports file picker (@ trigger), attachment chips, slash command picker (/ trigger),
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
-import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
+import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent } from 'react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
@@ -766,6 +766,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     }
   }, [disabled, onImageDrop])
 
+  // #4403 — keep the overlay scroll-sync handler referentially stable so
+  // every keystroke (while the highlight overlay is on) doesn't allocate a
+  // fresh function. Only `overlayRef` is read, which is a ref, so this has
+  // no closure deps.
+  const handleOverlayScrollSync = useCallback((e: UIEvent<HTMLTextAreaElement>) => {
+    const ov = overlayRef.current
+    if (ov) ov.scrollTop = e.currentTarget.scrollTop
+  }, [])
+
   const hasImages = imageAttachments && imageAttachments.length > 0
 
   return (
@@ -892,14 +901,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          onScroll={tokens ? (e) => {
-            // Scroll-sync the overlay to the textarea so multi-line drafts
-            // keep keyword highlights aligned as the user scrolls within
-            // the textarea. Direct DOM write (not state) — same reason as
-            // the auto-resize logic in handleChange.
-            const ov = overlayRef.current
-            if (ov) ov.scrollTop = e.currentTarget.scrollTop
-          } : undefined}
+          // Scroll-sync the overlay to the textarea so multi-line drafts
+          // keep keyword highlights aligned as the user scrolls within the
+          // textarea. Direct DOM write (not state) — same reason as the
+          // auto-resize logic in handleChange. Handler is memoised (#4403)
+          // so it doesn't churn a fresh function per keystroke.
+          onScroll={tokens ? handleOverlayScrollSync : undefined}
           disabled={disabled}
           placeholder={isBusy ? 'Type to send follow-up...' : placeholder}
           aria-label="Message input"
