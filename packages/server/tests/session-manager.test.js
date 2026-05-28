@@ -266,6 +266,36 @@ describe('SessionManager.serializeState', () => {
     assert.equal(typeof onEntry.promptEvaluator, 'boolean')
   })
 
+  // #3805: persisted chroxyContextHint survives the round-trip so a
+  // restart restores the toggle state.
+  it('serializes chroxyContextHint on each session entry (#3805)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionOn = new EventEmitter()
+    sessionOn.model = 'sonnet'
+    sessionOn.permissionMode = 'approve'
+    sessionOn.chroxyContextHint = true
+    Object.defineProperty(sessionOn, 'resumeSessionId', { get: () => null })
+    sessionOn.destroy = () => {}
+    mgr._sessions.set('s-on', { session: sessionOn, name: 'HintOn', cwd: '/tmp' })
+
+    const sessionOff = new EventEmitter()
+    sessionOff.model = 'sonnet'
+    sessionOff.permissionMode = 'approve'
+    sessionOff.chroxyContextHint = false
+    Object.defineProperty(sessionOff, 'resumeSessionId', { get: () => null })
+    sessionOff.destroy = () => {}
+    mgr._sessions.set('s-off', { session: sessionOff, name: 'HintOff', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    const onEntry = state.sessions.find(s => s.name === 'HintOn')
+    const offEntry = state.sessions.find(s => s.name === 'HintOff')
+    assert.equal(onEntry.chroxyContextHint, true)
+    assert.equal(offEntry.chroxyContextHint, false)
+    assert.equal(typeof onEntry.chroxyContextHint, 'boolean')
+    assert.equal(typeof offEntry.chroxyContextHint, 'boolean')
+  })
+
   // #3639: per-session promptEvaluatorSkipPattern survives the
   // round-trip so a restart preserves the operator's per-session
   // skip-list override.
@@ -681,6 +711,43 @@ describe('SessionManager.restoreState', () => {
     // `undefined` on the wire.
     assert.equal(withoutEval.promptEvaluator, false)
     assert.equal(typeof withoutEval.promptEvaluator, 'boolean')
+
+    mgr.destroyAll()
+  })
+
+  // #3805: chroxyContextHint round-trips. A state file written with the
+  // flag ON must restore with the flag still ON (so a long-running
+  // session keeps the model "mobile-aware" across a daemon restart);
+  // pre-#3805 state files (no field) restore as `false` so legacy state
+  // files keep the safe default. This also exercises the full plumbing
+  // — `createSession` → providerOpts → SdkSession/CliSession constructor
+  // → super(...) → BaseSession field. The middle-layer forwarding bug
+  // [[feedback_jsonl_subprocess_middle_layer]] surfaces here as the
+  // restored session having `chroxyContextHint=false` despite the
+  // state file saying true.
+  it('restores chroxyContextHint across the state cycle (#3805)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'HintOn', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, chroxyContextHint: true },
+        { name: 'HintOff', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, chroxyContextHint: false },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    const hintOn = sessions.find(s => s.name === 'HintOn')
+    const hintOff = sessions.find(s => s.name === 'HintOff')
+    const noField = sessions.find(s => s.name === 'NoField')
+    assert.equal(hintOn.chroxyContextHint, true,
+      'a state file with chroxyContextHint:true must round-trip through createSession + providerOpts + provider constructor + super() into the BaseSession field')
+    assert.equal(hintOff.chroxyContextHint, false)
+    assert.equal(noField.chroxyContextHint, false,
+      'pre-#3805 state files (no field) restore with the flag OFF — safe default')
+    assert.equal(typeof noField.chroxyContextHint, 'boolean')
 
     mgr.destroyAll()
   })
