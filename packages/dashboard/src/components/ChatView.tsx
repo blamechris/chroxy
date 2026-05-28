@@ -6,7 +6,7 @@
  * - Shows scroll-to-bottom button when scrolled up
  * - Deduplicates messages by id for reconnect replay
  */
-import { useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
+import { memo, useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { ThinkingDots } from './ThinkingDots'
 import { renderMarkdown } from '../lib/markdown'
 
@@ -99,6 +99,20 @@ export interface ChatViewProps {
   isBusy?: boolean
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
+  /**
+   * #4398 — when true, the ChatView is mounted but hidden via a parent
+   * `display:none` wrapper (sibling-tab kept-alive pattern from #4305).
+   * The memo wrapper below uses this flag to skip re-renders entirely
+   * while hidden: parent prop changes from store updates won't trigger
+   * markdown re-parsing or renderMessage invocations. On the first render
+   * after `hidden` flips back to false, React applies the latest props
+   * in a single batch, so user-visible state is up-to-date instantly.
+   *
+   * Hook-local state (`userScrolledUp`, scroll position, child
+   * `ToolGroup`/`ToolBubble` expand state) is preserved across the
+   * hidden window because the component instance never unmounts.
+   */
+  hidden?: boolean
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -121,7 +135,7 @@ function formatTime(ts: number): string {
   return `${h}:${m} ${ampm}`
 }
 
-export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
@@ -278,4 +292,28 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
     </div>
   )
 }
+
+/**
+ * #4398 — skip re-rendering while the parent has hidden us. After #4305
+ * (Bug B) we stay mounted across tab switches so user-set expand state
+ * survives the round-trip, but the trade-off was that every store
+ * update still flowed in and re-rendered the off-screen ChatView. On
+ * long sessions that doubled the per-update render cost (markdown
+ * re-parse, dedup pass, renderMessage callbacks for every tool group)
+ * for work nobody could see.
+ *
+ * This comparator returns `true` (skip re-render) only when we were
+ * hidden AND we're still hidden. The first render where `hidden` flips
+ * to `false` always proceeds — at that point React has already
+ * committed the latest props, so the user sees an up-to-date view in
+ * the very same frame they switched tabs. Going from visible → hidden
+ * still renders once so the wrapper transition completes cleanly.
+ *
+ * Note: a parent that wants the hidden ChatView to skip work MUST pass
+ * `hidden={true}`. Without the prop (e.g. SplitPane path), every render
+ * proceeds — the optimization is opt-in.
+ */
+export const ChatView = memo(ChatViewImpl, (prev, next) => {
+  return Boolean(prev.hidden) && Boolean(next.hidden)
+})
 

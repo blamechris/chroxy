@@ -434,10 +434,13 @@ describe('App', () => {
         viewMode: 'chat',
       }
       render(<App />)
-      // System messages should NOT appear in chat
-      expect(screen.queryByText('iPhone connected')).not.toBeInTheDocument()
-      // Regular messages should appear
-      expect(screen.getByText('Hello from Claude')).toBeInTheDocument()
+      // #4397 — the system-pane is now kept mounted (hidden) alongside the
+      // chat-pane, so 'iPhone connected' renders into the hidden system
+      // ChatView. Scope the assertion to the visible chat-pane so we still
+      // pin the filtering contract for the chat tab specifically.
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).queryByText('iPhone connected')).not.toBeInTheDocument()
+      expect(within(chatPane).getByText('Hello from Claude')).toBeInTheDocument()
     })
 
     it('shows system messages in system view', () => {
@@ -555,20 +558,104 @@ describe('App', () => {
         viewMode: 'chat',
       }
       const { rerender } = render(<App />)
-      const chatViewBefore = screen.getByTestId('chat-view')
+      // #4397 — system-pane is now also kept mounted, so `chat-view` is a
+      // multi-match testid. Scope to the chat-pane wrapper to assert on
+      // the chat tab's ChatView specifically.
+      const chatPane = screen.getByTestId('chat-pane')
+      const chatViewBefore = within(chatPane).getByTestId('chat-view')
 
       // Flip to terminal then back to chat.
       stateOverrides = { ...stateOverrides, viewMode: 'terminal' }
       rerender(<App />)
       // chat-view is still in the DOM (just hidden via the wrapper) —
       // pre-fix it was unmounted and so would be missing.
-      expect(screen.getByTestId('chat-view')).toBe(chatViewBefore)
+      expect(within(screen.getByTestId('chat-pane')).getByTestId('chat-view')).toBe(chatViewBefore)
 
       stateOverrides = { ...stateOverrides, viewMode: 'chat' }
       rerender(<App />)
       // And still the same node reference after coming back — no
       // remount happened across the round-trip.
-      expect(screen.getByTestId('chat-view')).toBe(chatViewBefore)
+      expect(within(screen.getByTestId('chat-pane')).getByTestId('chat-view')).toBe(chatViewBefore)
+    })
+  })
+
+  // #4397 — same display:none kept-alive treatment for the System tab.
+  // Pre-fix the system tab was a plain conditional render
+  // (`{viewMode === 'system' && <ChatView .../>}`), so switching
+  // chat → system → chat unmounted the system ChatView and dropped its
+  // scroll position + any expand state on system-side tool groups.
+  describe('system tab preserves mount (#4397)', () => {
+    const connectedState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('keeps system-pane mounted whenever the connection is ready, regardless of viewMode', () => {
+      stateOverrides = { ...connectedState, viewMode: 'chat' }
+      const { rerender } = render(<App />)
+      expect(screen.getByTestId('system-pane')).toBeInTheDocument()
+
+      stateOverrides = { ...connectedState, viewMode: 'system' }
+      rerender(<App />)
+      expect(screen.getByTestId('system-pane')).toBeInTheDocument()
+
+      stateOverrides = { ...connectedState, viewMode: 'terminal' }
+      rerender(<App />)
+      expect(screen.getByTestId('system-pane')).toBeInTheDocument()
+    })
+
+    it('hides system-pane with display:none unless viewMode === "system"', () => {
+      stateOverrides = { ...connectedState, viewMode: 'chat' }
+      const { rerender } = render(<App />)
+      expect(screen.getByTestId('system-pane').style.display).toBe('none')
+
+      stateOverrides = { ...connectedState, viewMode: 'system' }
+      rerender(<App />)
+      expect(screen.getByTestId('system-pane').style.display).toBe('contents')
+
+      stateOverrides = { ...connectedState, viewMode: 'terminal' }
+      rerender(<App />)
+      expect(screen.getByTestId('system-pane').style.display).toBe('none')
+    })
+
+    it('system ChatView DOM node survives a chat → system → chat round-trip', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [
+            { id: 'sys-1', type: 'system', content: 'iPhone connected', timestamp: 1 },
+          ],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        viewMode: 'system',
+      }
+      const { rerender } = render(<App />)
+      const systemPane = screen.getByTestId('system-pane')
+      const systemViewBefore = within(systemPane).getByTestId('chat-view')
+
+      // Switch to chat — system-pane stays mounted (hidden).
+      stateOverrides = { ...stateOverrides, viewMode: 'chat' }
+      rerender(<App />)
+      expect(within(screen.getByTestId('system-pane')).getByTestId('chat-view')).toBe(systemViewBefore)
+
+      // Switch back to system — same node, no remount.
+      stateOverrides = { ...stateOverrides, viewMode: 'system' }
+      rerender(<App />)
+      expect(within(screen.getByTestId('system-pane')).getByTestId('chat-view')).toBe(systemViewBefore)
+    })
+
+    it('does not mount system-pane while connecting (no flicker before connection settles)', () => {
+      stateOverrides = { connectionPhase: 'connecting' }
+      render(<App />)
+      expect(screen.queryByTestId('system-pane')).not.toBeInTheDocument()
     })
   })
 

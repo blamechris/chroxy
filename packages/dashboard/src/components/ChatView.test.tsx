@@ -222,6 +222,109 @@ describe('ChatView', () => {
     )
     expect(screen.getByText('Fallback content')).toBeInTheDocument()
   })
+
+  // #4398 — when the parent passes `hidden`, ChatView is memoized so a
+  // stream of prop changes (new messages, fresh renderMessage callback,
+  // etc.) does NOT re-render the hidden component. The first render
+  // where `hidden` flips back to `false` always proceeds with the
+  // latest props, so the user sees the up-to-date view immediately on
+  // tab switch.
+  describe('hidden memoization (#4398)', () => {
+    it('skips renderMessage invocations while hidden=true on subsequent renders', () => {
+      const renderMessage = vi.fn(() => null)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      // First mount renders once — establishes the baseline.
+      expect(renderMessage).toHaveBeenCalledTimes(1)
+      renderMessage.mockClear()
+
+      // Re-render with new messages while still hidden — memo comparator
+      // returns true, so renderMessage is NOT invoked.
+      const updated: ChatViewMessage[] = [
+        ...initial,
+        { id: 'msg-2', type: 'response', content: 'Second', timestamp: 2 },
+      ]
+      rerender(
+        <ChatView messages={updated} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      expect(renderMessage).not.toHaveBeenCalled()
+    })
+
+    it('re-renders with latest props when hidden flips false', () => {
+      const renderMessage = vi.fn((m: ChatViewMessage) => <span>{`custom:${m.content}`}</span>)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      renderMessage.mockClear()
+
+      // Accumulate updates while hidden — none should reach the render tree.
+      const updated: ChatViewMessage[] = [
+        ...initial,
+        { id: 'msg-2', type: 'response', content: 'Second', timestamp: 2 },
+      ]
+      rerender(
+        <ChatView messages={updated} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      expect(renderMessage).not.toHaveBeenCalled()
+      expect(screen.queryByText('custom:Second')).not.toBeInTheDocument()
+
+      // Flip hidden=false — memo lets the render through with latest props.
+      rerender(
+        <ChatView messages={updated} isStreaming={false} hidden={false} renderMessage={renderMessage} />
+      )
+      expect(renderMessage).toHaveBeenCalled()
+      expect(screen.getByText('custom:Second')).toBeInTheDocument()
+    })
+
+    it('renders normally when hidden is omitted (default visible)', () => {
+      const renderMessage = vi.fn(() => null)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} renderMessage={renderMessage} />
+      )
+      renderMessage.mockClear()
+
+      const updated: ChatViewMessage[] = [
+        ...initial,
+        { id: 'msg-2', type: 'response', content: 'Second', timestamp: 2 },
+      ]
+      rerender(
+        <ChatView messages={updated} isStreaming={false} renderMessage={renderMessage} />
+      )
+      // Without `hidden`, memo comparator returns false → normal re-render.
+      expect(renderMessage).toHaveBeenCalled()
+    })
+
+    it('does not skip render on the visible→hidden transition (so display:none takes effect)', () => {
+      const renderMessage = vi.fn(() => null)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} hidden={false} renderMessage={renderMessage} />
+      )
+      renderMessage.mockClear()
+
+      // visible → hidden — comparator's `prev.hidden && next.hidden`
+      // is false (prev.hidden=false), so this render proceeds. That
+      // matters because the parent's display:none wrapper takes effect
+      // in the same commit, and we want the latest props applied right
+      // before we go dark.
+      rerender(
+        <ChatView messages={initial} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      expect(renderMessage).toHaveBeenCalled()
+    })
+  })
 })
 
 describe('ThinkingDots', () => {
