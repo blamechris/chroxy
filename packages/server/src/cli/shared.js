@@ -128,11 +128,17 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.provider !== undefined) cliOverrides.provider = options.provider
   if (options.logFormat !== undefined) cliOverrides.logFormat = options.logFormat
   if (options.environments) cliOverrides.environments = { enabled: true }
-  // #4209: only forward when the flag was explicitly passed. Commander
-  // sets the property to `true` when present and leaves it `undefined`
-  // when absent, so we never write a coerced `false` that would mask a
-  // pre-existing `skipPermissions: true` in the on-disk config file.
-  if (options.dangerouslySkipPermissions) cliOverrides.skipPermissions = true
+  // #4209 / #4246: only forward when the flag was explicitly passed.
+  // Commander sets the property to `true` when present and leaves it
+  // `undefined` when absent, so we never write a coerced `false` that
+  // would mask a pre-existing `dangerouslySkipPermissions: true` (or
+  // legacy `skipPermissions: true`) in the on-disk config file.
+  //
+  // #4246 — forward as the canonical `dangerouslySkipPermissions`
+  // key. The legacy `skipPermissions` key is still read by
+  // `resolveSkipPermissions()` for backwards compatibility with
+  // existing config.json files.
+  if (options.dangerouslySkipPermissions) cliOverrides.dangerouslySkipPermissions = true
 
   const defaults = {
     port: 8765,

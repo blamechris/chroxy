@@ -33,11 +33,21 @@ const CONFIG_SCHEMA = {
   tunnelHostname: 'string',
   tunnelConfig: 'object',
   legacyCli: 'boolean',
-  // #4209: server-wide default for the per-session `skipPermissions`
-  // option. Honoured only by the claude-tui provider (spawns claude with
-  // `--dangerously-skip-permissions` + elides chroxy's permission hook).
-  // Wired from `chroxy start --dangerously-skip-permissions`; can also be
-  // pinned in config.json for headless deploys.
+  // #4209 / #4246: server-wide default for the per-session
+  // `skipPermissions` option. Honoured only by the claude-tui provider
+  // (spawns claude with `--dangerously-skip-permissions` + elides
+  // chroxy's permission hook). Wired from
+  // `chroxy start --dangerously-skip-permissions`; can also be pinned
+  // in config.json for headless deploys.
+  //
+  // #4246 — the canonical config-file key is now
+  // `dangerouslySkipPermissions` (mirrors the CLI flag). The legacy
+  // `skipPermissions` key is still honoured for backwards compatibility
+  // but `resolveSkipPermissions()` emits a deprecation warning when only
+  // the legacy key is set. Operators should rename the key in their
+  // config.json — both keys remain in the schema so a config.json with
+  // either key passes validation cleanly.
+  dangerouslySkipPermissions: 'boolean',
   skipPermissions: 'boolean',
   provider: 'string',
   // Providers the user opted into during `chroxy init`. Informational
@@ -423,6 +433,65 @@ function parseEnvValue(key, value) {
   }
 
   return value
+}
+
+/**
+ * Resolve the effective `dangerouslySkipPermissions` value from a merged
+ * config object (#4246).
+ *
+ * Precedence:
+ *   1. `dangerouslySkipPermissions` (canonical, mirrors the CLI flag name)
+ *   2. `skipPermissions` (legacy alias from #4209 — kept for one
+ *      deprecation window; emits a warning that the resolver returns so
+ *      the caller can surface it once at boot).
+ *
+ * The resolver does NOT log directly — it returns a `deprecationWarning`
+ * string so the caller decides when/where to surface it (server-cli logs
+ * it once at startup; tests assert on the value). When the canonical key
+ * is set the legacy key is ignored as a value-source but its mere
+ * presence still triggers the warning (to nudge cleanup of stale
+ * duplicates).
+ *
+ * @param {object | null | undefined} config
+ * @returns {{
+ *   enabled: boolean,
+ *   source: 'dangerouslySkipPermissions' | 'skipPermissions' | null,
+ *   deprecationWarning: string | null,
+ * }}
+ */
+export function resolveSkipPermissions(config) {
+  const c = config || {}
+  const canonical = c.dangerouslySkipPermissions
+  const legacy = c.skipPermissions
+  const legacyPresent = Object.prototype.hasOwnProperty.call(c, 'skipPermissions')
+
+  const deprecationWarning = legacyPresent
+    ? "config key 'skipPermissions' is deprecated — rename it to 'dangerouslySkipPermissions' to match the CLI flag name. Both keys are honoured for now; the legacy key will be removed in a future release."
+    : null
+
+  if (typeof canonical === 'boolean') {
+    return {
+      enabled: canonical,
+      source: 'dangerouslySkipPermissions',
+      // Even when the canonical key wins, surface the warning if the
+      // legacy key is also set — operators should clean up the duplicate.
+      deprecationWarning,
+    }
+  }
+
+  if (typeof legacy === 'boolean') {
+    return {
+      enabled: legacy,
+      source: 'skipPermissions',
+      deprecationWarning,
+    }
+  }
+
+  return {
+    enabled: false,
+    source: null,
+    deprecationWarning: null,
+  }
 }
 
 const DEFAULT_CONFIG_PATH = join(homedir(), '.chroxy', 'config.json')

@@ -26,6 +26,7 @@ import { loadModelsCache, getModels } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
+import { resolveSkipPermissions } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -321,6 +322,22 @@ export async function startCliServer(config) {
 
   const providerType = config.provider || 'claude-sdk'
 
+  // #4209 / #4246: resolve the effective skip-permissions setting from the
+  // merged config (CLI flag > canonical `dangerouslySkipPermissions` >
+  // legacy `skipPermissions` alias). When enabled, log a loud security
+  // banner identifying which key/source surfaced it — operators scanning
+  // their config.json shouldn't have to wonder why their TUI sessions
+  // started spawning with --dangerously-skip-permissions. When the legacy
+  // alias is used, also surface the deprecation warning so they're
+  // nudged to rename the key.
+  const skipPerms = resolveSkipPermissions(config)
+  if (skipPerms.deprecationWarning) {
+    log.warn(`[security] ${skipPerms.deprecationWarning}`)
+  }
+  if (skipPerms.enabled) {
+    log.warn(`[security] dangerouslySkipPermissions=true (source: config.${skipPerms.source}) — claude-tui sessions will spawn with --dangerously-skip-permissions and chroxy's permission gate is BYPASSED for those sessions`)
+  }
+
   // Create environment manager for persistent container environments (optional)
   let environmentManager = null
   if (config?.environments?.enabled) {
@@ -337,10 +354,14 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
-    // #4209: seed the auto-created Default session + any subsequent
-    // createSession() that omits the field. Only honoured by the
-    // claude-tui provider; other providers ignore it harmlessly.
-    defaultSkipPermissions: !!config.skipPermissions,
+    // #4209 / #4246: seed the auto-created Default session + any
+    // subsequent createSession() that omits the field. Only honoured by
+    // the claude-tui provider; other providers ignore it harmlessly.
+    // Resolved via `resolveSkipPermissions()` so both the canonical
+    // `dangerouslySkipPermissions` key and the legacy `skipPermissions`
+    // alias are honoured (with a deprecation warning for the latter —
+    // see the [security] log lines above).
+    defaultSkipPermissions: skipPerms.enabled,
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
