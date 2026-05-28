@@ -1,18 +1,26 @@
 /**
- * Tests for the TUI-only "Skip permission prompts" checkbox on the Create
- * Session modal (#4208).
+ * Tests for the TUI-only skip-permissions control on the Create Session modal
+ * (#4208, #4244).
  *
- * The checkbox MUST:
+ * The control is a tri-state radio group (#4244):
+ *   - 'inherit' (default) — emits `skipPermissions: undefined`, server applies
+ *     its `defaultSkipPermissions` (#4209)
+ *   - 'on' — emits `skipPermissions: true`, session spawns with
+ *     `--dangerously-skip-permissions` regardless of server default
+ *   - 'off' — emits `skipPermissions: false`, explicitly blocks the flag even
+ *     when the server was launched with `chroxy start
+ *     --dangerously-skip-permissions`. This is the case the pre-#4244 checkbox
+ *     could not represent.
+ *
+ * The control MUST:
  *   - render only when the active provider is `claude-tui`
- *   - default to unchecked on fresh modal open
- *   - forward `skipPermissions: true` on onCreate when checked
- *   - omit `skipPermissions` entirely when unchecked (so the server-side
- *     `defaultSkipPermissions` from #4209 still wins on a server launched
- *     with --dangerously-skip-permissions)
- *   - NOT forward the flag even when checked if the user switches provider
- *     to something other than claude-tui before submit (belt + braces; the
- *     checkbox hides on provider change, but the underlying state could
- *     theoretically persist mid-render — the submit guard catches it)
+ *   - default to 'inherit' on fresh modal open
+ *   - forward the correct `skipPermissions` value (undefined / true / false)
+ *     for each state
+ *   - NOT forward the flag even when 'on' is selected if the user switches
+ *     provider to something other than claude-tui before submit (belt +
+ *     braces; the group hides on provider change, but the underlying state
+ *     could theoretically persist mid-render — the submit guard catches it)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
@@ -75,27 +83,41 @@ function openAdvanced() {
   fireEvent.click(screen.getByRole('button', { name: /advanced/i }))
 }
 
-describe('CreateSessionModal skip-permissions checkbox (#4208)', () => {
-  it('renders the checkbox when active provider is claude-tui', async () => {
+describe('CreateSessionModal skip-permissions tri-state (#4208, #4244)', () => {
+  it('renders the tri-state radio group when active provider is claude-tui', async () => {
     mockStore('claude-tui')
     const CreateSessionModal = await loadModal()
     render(<CreateSessionModal {...baseProps} onCreate={vi.fn()} />)
     openAdvanced()
-    const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-    expect(cb).toBeInTheDocument()
-    expect(cb.checked).toBe(false)
+    expect(screen.getByTestId('skip-permissions-field')).toBeInTheDocument()
+    expect(screen.getByTestId('skip-permissions-radio-inherit')).toBeInTheDocument()
+    expect(screen.getByTestId('skip-permissions-radio-on')).toBeInTheDocument()
+    expect(screen.getByTestId('skip-permissions-radio-off')).toBeInTheDocument()
   })
 
-  it('does NOT render the checkbox for non-TUI providers (claude-sdk)', async () => {
+  it('defaults to "inherit" on fresh open', async () => {
+    mockStore('claude-tui')
+    const CreateSessionModal = await loadModal()
+    render(<CreateSessionModal {...baseProps} onCreate={vi.fn()} />)
+    openAdvanced()
+    const inherit = screen.getByTestId('skip-permissions-radio-inherit') as HTMLInputElement
+    const on = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+    const off = screen.getByTestId('skip-permissions-radio-off') as HTMLInputElement
+    expect(inherit.checked).toBe(true)
+    expect(on.checked).toBe(false)
+    expect(off.checked).toBe(false)
+  })
+
+  it('does NOT render the radio group for non-TUI providers (claude-sdk)', async () => {
     mockStore('claude-sdk')
     const CreateSessionModal = await loadModal()
     render(<CreateSessionModal {...baseProps} onCreate={vi.fn()} />)
     openAdvanced()
-    expect(screen.queryByTestId('skip-permissions-checkbox')).not.toBeInTheDocument()
     expect(screen.queryByTestId('skip-permissions-field')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('skip-permissions-radio-inherit')).not.toBeInTheDocument()
   })
 
-  it('warning copy calls out the danger explicitly', async () => {
+  it('warning copy on the "on" option calls out the danger explicitly', async () => {
     mockStore('claude-tui')
     const CreateSessionModal = await loadModal()
     render(<CreateSessionModal {...baseProps} onCreate={vi.fn()} />)
@@ -105,15 +127,26 @@ describe('CreateSessionModal skip-permissions checkbox (#4208)', () => {
     expect(hint.textContent).toMatch(/dangerously-skip-permissions/i)
   })
 
-  it('forwards skipPermissions: true on onCreate when checked', async () => {
+  it('emits skipPermissions: undefined when "inherit" is selected (default)', async () => {
+    mockStore('claude-tui')
+    const CreateSessionModal = await loadModal()
+    const onCreate = vi.fn()
+    render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
+    // Don't open Advanced; the default state is 'inherit'. Submit straight away.
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(onCreate.mock.calls[0]![0].skipPermissions).toBeUndefined()
+  })
+
+  it('emits skipPermissions: true when "on" is selected', async () => {
     mockStore('claude-tui')
     const CreateSessionModal = await loadModal()
     const onCreate = vi.fn()
     render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
     openAdvanced()
-    const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-    fireEvent.click(cb)
-    expect(cb.checked).toBe(true)
+    const on = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+    fireEvent.click(on)
+    expect(on.checked).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     expect(onCreate).toHaveBeenCalledTimes(1)
     expect(onCreate.mock.calls[0]![0]).toMatchObject({
@@ -122,24 +155,52 @@ describe('CreateSessionModal skip-permissions checkbox (#4208)', () => {
     })
   })
 
-  it('omits skipPermissions on onCreate when checkbox stays unchecked', async () => {
+  it('emits skipPermissions: false when "off" is selected (#4244 — overrides server default)', async () => {
     mockStore('claude-tui')
     const CreateSessionModal = await loadModal()
     const onCreate = vi.fn()
     render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
-    // Don't open Advanced; just submit. The field must be undefined so the
-    // server-side default (set via `chroxy start --dangerously-skip-permissions`
-    // per #4209) is still the source of truth.
+    openAdvanced()
+    const off = screen.getByTestId('skip-permissions-radio-off') as HTMLInputElement
+    fireEvent.click(off)
+    expect(off.checked).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     expect(onCreate).toHaveBeenCalledTimes(1)
+    // CRITICAL: must be literal `false`, not `undefined`. Server-side
+    // defaultSkipPermissions: true would be honoured if we emitted undefined.
+    expect(onCreate.mock.calls[0]![0]).toMatchObject({
+      provider: 'claude-tui',
+      skipPermissions: false,
+    })
+    expect(onCreate.mock.calls[0]![0].skipPermissions).toBe(false)
+  })
+
+  it('user can flip across all three states; final selection wins', async () => {
+    mockStore('claude-tui')
+    const CreateSessionModal = await loadModal()
+    const onCreate = vi.fn()
+    render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
+    openAdvanced()
+    const on = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+    const off = screen.getByTestId('skip-permissions-radio-off') as HTMLInputElement
+    const inherit = screen.getByTestId('skip-permissions-radio-inherit') as HTMLInputElement
+    fireEvent.click(on)
+    expect(on.checked).toBe(true)
+    fireEvent.click(off)
+    expect(off.checked).toBe(true)
+    expect(on.checked).toBe(false)
+    fireEvent.click(inherit)
+    expect(inherit.checked).toBe(true)
+    expect(off.checked).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
     expect(onCreate.mock.calls[0]![0].skipPermissions).toBeUndefined()
   })
 
   it('omits skipPermissions when provider is NOT claude-tui (defence in depth)', async () => {
     // Reload with the SDK provider as default and no TUI in the list so
-    // the checkbox can't even be rendered, then submit. The submit guard
-    // (`provider === 'claude-tui' && skipPermissions`) must keep
-    // skipPermissions undefined.
+    // the group can't even be rendered, then submit. The submit guard
+    // (`provider === 'claude-tui' ? ... : undefined`) must keep
+    // skipPermissions undefined regardless of the underlying state.
     mockStore('claude-sdk', [SDK_PROVIDER])
     const CreateSessionModal = await loadModal()
     const onCreate = vi.fn()
