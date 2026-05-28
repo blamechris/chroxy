@@ -350,6 +350,39 @@ export function App() {
   )
   usePermissionNotification(permissionPrompts)
 
+  // #3698 — derive the user-message history for the InputBar's terminal-
+  // style Up/Down navigation. Oldest-first (matches the natural arrival
+  // order of `messages`), and trims out empty bodies so a stray no-op
+  // user_input never recalls a blank string.
+  //
+  // `storeMessages` re-references on every streaming delta flush (the
+  // delta-batch path rebuilds the array even when no user_input was added),
+  // so a naive `[storeMessages]` dep would rebuild `userMessageHistory` on
+  // every assistant token and trip InputBar's array-identity reset, wiping
+  // the user's in-flight Up/Down cycle. We memoise on a stable fingerprint
+  // (count + last user_input id) so a fresh array is only produced when the
+  // actual user-message slice changes (new send, session switch, history
+  // replay on reconnect). Equal-content updates reuse the previous array
+  // reference, keeping InputBar's cycling state stable.
+  const userMessageHistoryFingerprint = useMemo(() => {
+    let count = 0
+    let lastId = ''
+    for (const m of storeMessages) {
+      if (m.type === 'user_input' && typeof m.content === 'string' && m.content.length > 0) {
+        count++
+        lastId = m.id
+      }
+    }
+    return `${count}\x1f${lastId}`
+  }, [storeMessages])
+  const userMessageHistory = useMemo(
+    () => storeMessages
+      .filter(m => m.type === 'user_input' && typeof m.content === 'string' && m.content.length > 0)
+      .map(m => m.content),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [userMessageHistoryFingerprint],
+  )
+
   const slashCommands = useConnectionStore(s => s.slashCommands)
 
   // Store actions (stable refs)
@@ -1974,6 +2007,7 @@ export function App() {
               pastedTextBlocks={pastedTextBlocks}
               onInspectPastedText={handleInspectPastedText}
               onRemovePastedText={handleRemovePastedText}
+              userMessageHistory={userMessageHistory}
             />
           </>
         )}
