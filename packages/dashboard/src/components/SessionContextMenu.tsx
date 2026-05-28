@@ -169,6 +169,10 @@ export function SessionContextMenu({
       className="session-context-menu"
       data-testid="session-context-menu"
       role="menu"
+      // #4373: WAI-ARIA Authoring Practices recommend declaring orientation
+      // explicitly for menus that respond to vertical arrow keys (we wire
+      // ArrowUp/ArrowDown to roving focus in the keyDown handler below).
+      aria-orientation="vertical"
       style={{
         position: 'fixed',
         left: initialLeft,
