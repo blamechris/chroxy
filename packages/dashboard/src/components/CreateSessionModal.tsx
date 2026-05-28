@@ -262,7 +262,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // submit-time guard (`provider === 'claude-tui' && skipPermissions`)
   // still acts as belt + braces in case this reset races a submit.
   useEffect(() => {
-    setSkipPermissions(false)
+    setSkipPermissions('inherit')
   }, [provider])
 
   // #4340: gate the Create button on the selected provider being ready.

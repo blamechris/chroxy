@@ -217,24 +217,24 @@ describe('CreateSessionModal skip-permissions tri-state (#4208, #4244)', () => {
   // guard caught the cross-provider case at submit time, but the user
   // wouldn't be re-prompted to confirm the dangerous flag.
   describe('provider-switch reset (#4245)', () => {
-    it('resets skipPermissions to false when switching from claude-tui to claude-sdk and back', async () => {
+    it('resets skipPermissions to inherit when switching from claude-tui to claude-sdk and back', async () => {
       mockStore('claude-tui')
       const CreateSessionModal = await loadModal()
       const onCreate = vi.fn()
       render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
       openAdvanced()
-      // Tick the checkbox under claude-tui
-      const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-      fireEvent.click(cb)
-      expect(cb.checked).toBe(true)
-      // Switch to claude-sdk — checkbox hides
+      // Select 'on' under claude-tui
+      const on = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+      fireEvent.click(on)
+      expect(on.checked).toBe(true)
+      // Switch to claude-sdk — radio group hides
       const select = screen.getByLabelText(/select provider/i) as HTMLSelectElement
       fireEvent.change(select, { target: { value: 'claude-sdk' } })
-      expect(screen.queryByTestId('skip-permissions-checkbox')).not.toBeInTheDocument()
-      // Switch back to claude-tui — checkbox renders again, must be unchecked
+      expect(screen.queryByTestId('skip-permissions-radio-on')).not.toBeInTheDocument()
+      // Switch back to claude-tui — radio group renders again, must be back to 'inherit'
       fireEvent.change(select, { target: { value: 'claude-tui' } })
-      const cb2 = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-      expect(cb2.checked).toBe(false)
+      const inherit2 = screen.getByTestId('skip-permissions-radio-inherit') as HTMLInputElement
+      expect(inherit2.checked).toBe(true)
     })
 
     it('resets skipPermissions when switching away from claude-tui even without coming back', async () => {
@@ -243,9 +243,9 @@ describe('CreateSessionModal skip-permissions tri-state (#4208, #4244)', () => {
       const onCreate = vi.fn()
       render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
       openAdvanced()
-      const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-      fireEvent.click(cb)
-      expect(cb.checked).toBe(true)
+      const on = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+      fireEvent.click(on)
+      expect(on.checked).toBe(true)
       // Switch to claude-sdk and submit — the submit guard already strips
       // the flag on non-TUI providers, but the underlying state should
       // also be reset so the UX is consistent.
@@ -265,15 +265,15 @@ describe('CreateSessionModal skip-permissions tri-state (#4208, #4244)', () => {
       const onCreate = vi.fn()
       render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
       openAdvanced()
-      const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-      fireEvent.click(cb)
-      expect(cb.checked).toBe(true)
+      const on = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+      fireEvent.click(on)
+      expect(on.checked).toBe(true)
       // An unrelated state change (typing in the session name) must not
-      // reset the checkbox — only provider changes do.
+      // reset the selection — only provider changes do.
       const nameInput = screen.getByLabelText(/session name/i) as HTMLInputElement
       fireEvent.change(nameInput, { target: { value: 'my-session' } })
-      const cbAfter = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
-      expect(cbAfter.checked).toBe(true)
+      const onAfter = screen.getByTestId('skip-permissions-radio-on') as HTMLInputElement
+      expect(onAfter.checked).toBe(true)
       fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
       expect(onCreate).toHaveBeenCalledTimes(1)
       expect(onCreate.mock.calls[0]![0]).toMatchObject({
