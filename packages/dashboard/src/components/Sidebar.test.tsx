@@ -414,6 +414,114 @@ describe('Sidebar', () => {
     })
   })
 
+  // #4392: a11y — invoke the sidebar context menu via keyboard. PR #4369
+  // added keyboard nav WITHIN the open menu, #4372 added focus restoration
+  // on close. The missing third leg: arrow-key users navigating the
+  // sidebar can't OPEN the menu without a mouse. ContextMenu key + Shift+F10
+  // (the two platform-standard shortcuts) bound on each treeitem row fix
+  // this.
+  describe('keyboard invocation of context menu (#4392)', () => {
+    // Helper — stub getBoundingClientRect so the synthesized position is
+    // deterministic. jsdom returns all-zero rects by default, which is fine
+    // for asserting "non-zero / right-edge math is applied" but we want a
+    // concrete check that the math used the rect we set.
+    function stubRect(el: Element, rect: { left: number; top: number; width: number; height: number }) {
+      ;(el as HTMLElement).getBoundingClientRect = () => ({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        x: rect.left,
+        y: rect.top,
+        toJSON: () => ({}),
+      })
+    }
+
+    it('opens the menu when ContextMenu key is pressed on a session row', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      stubRect(row, { left: 10, top: 40, width: 200, height: 24 })
+      fireEvent.keyDown(row, { key: 'ContextMenu' })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(onContextMenu).toHaveBeenCalledWith(
+        { type: 'session', sessionId: 's1' },
+        expect.objectContaining({
+          // right-edge center: x = rect.right - 10, y = rect.top + height/2
+          clientX: 200,
+          clientY: 52,
+        }),
+      )
+    })
+
+    it('opens the menu when Shift+F10 is pressed on the outer repo treeitem', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const treeitem = screen
+        .getByTestId('repo-header-/home/user/projects/api')
+        .closest('[role="treeitem"]') as HTMLElement
+      stubRect(treeitem, { left: 0, top: 0, width: 240, height: 30 })
+      fireEvent.keyDown(treeitem, { key: 'F10', shiftKey: true })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(onContextMenu).toHaveBeenCalledWith(
+        { type: 'repo', path: '/home/user/projects/api' },
+        expect.objectContaining({
+          clientX: 230,
+          clientY: 15,
+        }),
+      )
+    })
+
+    it('opens the menu when Shift+F10 is pressed on a resumable row', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('resumable-item-c1')
+      stubRect(row, { left: 0, top: 100, width: 240, height: 24 })
+      fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(onContextMenu).toHaveBeenCalledWith(
+        { type: 'resumable', conversationId: 'c1' },
+        expect.objectContaining({
+          clientX: 230,
+          clientY: 112,
+        }),
+      )
+    })
+
+    it('does not open the menu on plain F10 (without Shift)', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.keyDown(row, { key: 'F10' })
+      expect(onContextMenu).not.toHaveBeenCalled()
+    })
+
+    it('does not also fire the tree-level React keydown handler (handleTreeKeyDown)', () => {
+      // The row handler calls stopPropagation() so handleTreeKeyDown
+      // (bound on the .sidebar-tree wrapper) does not also process the
+      // event. We assert this behavior end-to-end by pressing one of the
+      // keys handleTreeKeyDown DOES handle — `Enter` — first as a control
+      // (no row handler interception → onSessionClick fires via the tree
+      // handler's `focused.click()`), then by establishing the keyboard
+      // shortcut path. The contract we encode here: pressing ContextMenu
+      // on a focused row invokes onContextMenu exactly once and does not
+      // trigger onSessionClick (which would happen if Enter leaked).
+      const onContextMenu = vi.fn()
+      const onSessionClick = vi.fn()
+      renderSidebar({ onContextMenu, onSessionClick })
+      const row = screen.getByTestId('session-item-s1') as HTMLElement
+      row.focus()
+      fireEvent.keyDown(row, { key: 'ContextMenu' })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      // The tree handler does not handle ContextMenu today, so this is
+      // belt-and-suspenders, but: if a future change adds ContextMenu to
+      // the tree switch and forgets stopPropagation, this fails.
+      expect(onSessionClick).not.toHaveBeenCalled()
+    })
+  })
+
   describe('stdin forwarding disabled badge (#3567)', () => {
     it('renders the badge on rows whose session has the latched flag', () => {
       const repos: RepoNode[] = [

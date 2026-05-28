@@ -10,6 +10,7 @@
  */
 
 import type {
+  ActiveTool,
   AgentInfo,
   ChatMessage,
   Checkpoint,
@@ -239,9 +240,19 @@ export function handleClaudeReady(): { claudeReady: true } {
  * shutdown). Pre-#3170 the 5s safety timer in `sendInput` recovered this
  * case; post-#3170 the timer is bypassed once `tool_start` bumps the value,
  * so `agent_idle` is the remaining recovery hook. See #3171.
+ *
+ * #4308 — also clears `activeTools` as a safety net: a missed `tool_result`
+ * (server crash mid-turn, dropped broadcast, etc.) would otherwise leave a
+ * phantom "Running X" indicator visible for the rest of the session. Idle
+ * is a guaranteed turn-boundary, so it's the right place to drop any
+ * still-tracked in-flight tools.
  */
-export function handleAgentIdle(): { isIdle: true; streamingMessageId: null } {
-  return { isIdle: true, streamingMessageId: null }
+export function handleAgentIdle(): {
+  isIdle: true
+  streamingMessageId: null
+  activeTools: ActiveTool[]
+} {
+  return { isIdle: true, streamingMessageId: null, activeTools: [] }
 }
 
 /** State patch for `agent_busy`. */
@@ -3210,6 +3221,24 @@ export interface ToolStartPayload {
    * dashboard's terminal-data side-effect at the call site. Always a string.
    */
   toolName: string
+  /**
+   * #4308 — ActiveTool entry the caller should push onto the target session's
+   * `activeTools[]` array. `null` when the message would not produce a fresh
+   * tool_use bubble (replay dedup, missing toolUseId), so the caller can skip
+   * the push in lockstep with the `shouldDispatch` check.
+   *
+   * `applyTo` dedupes by `toolUseId`: if a matching entry is already present
+   * (e.g. duplicate tool_start broadcasts), the same array reference is
+   * returned and no new entry is pushed.
+   */
+  activeTool: ActiveTool | null
+  /**
+   * #4308 — apply the new ActiveTool to a session's `activeTools[]`. Dedupes
+   * by `toolUseId`. Returns the same array reference (no-op) when
+   * `activeTool === null` or when the entry already exists, so callers can
+   * skip the state write in lockstep with the rest of this payload.
+   */
+  applyToActiveTools: (current: ActiveTool[]) => ActiveTool[]
 }
 
 /**
@@ -3254,10 +3283,23 @@ export function handleToolStart(
   const toolName = tool || 'tool'
   const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
   const toolId = messageId || nextMessageId('tool')
+  const toolUseId = typeof msg.toolUseId === 'string' ? msg.toolUseId : undefined
+  const serverName = typeof msg.serverName === 'string' ? msg.serverName : undefined
+
+  // #4308 — noop applyTo for the early-return paths so the call site can
+  // unconditionally invoke `applyToActiveTools` without a presence check.
+  const noopApply = (current: ActiveTool[]) => current
 
   if (receivingHistoryReplay) {
     if (cachedMessages.some((m) => m.id === toolId)) {
-      return { shouldDispatch: false, sessionId, chatMessage: null, toolName }
+      return {
+        shouldDispatch: false,
+        sessionId,
+        chatMessage: null,
+        toolName,
+        activeTool: null,
+        applyToActiveTools: noopApply,
+      }
     }
   }
 
@@ -3266,12 +3308,42 @@ export function handleToolStart(
     type: 'tool_use',
     content: msg.input ? JSON.stringify(msg.input) : tool || '',
     tool,
-    toolUseId: typeof msg.toolUseId === 'string' ? msg.toolUseId : undefined,
-    serverName: typeof msg.serverName === 'string' ? msg.serverName : undefined,
+    toolUseId,
+    serverName,
     timestamp: Date.now(),
   }
 
-  return { shouldDispatch: true, sessionId, chatMessage, toolName }
+  // #4308 — build the ActiveTool entry. Skip when `toolUseId` is missing
+  // (non-string / absent): the wire schema requires it (#121 server.ts),
+  // but be defensive — without a stable id we can't dedup or remove the
+  // entry on tool_result.
+  const activeTool: ActiveTool | null = toolUseId
+    ? {
+        toolUseId,
+        tool: toolName,
+        ...(serverName !== undefined ? { serverName } : {}),
+        ...(msg.input !== undefined ? { input: msg.input } : {}),
+        startedAt: chatMessage.timestamp,
+      }
+    : null
+
+  const applyToActiveTools = (current: ActiveTool[]): ActiveTool[] => {
+    if (!activeTool) return current
+    // Dedup by toolUseId — duplicate tool_start broadcasts (history replay
+    // landing alongside a live event, server retry, etc.) must not create
+    // ghost entries the activity indicator would surface forever.
+    if (current.some((t) => t.toolUseId === activeTool.toolUseId)) return current
+    return [...current, activeTool]
+  }
+
+  return {
+    shouldDispatch: true,
+    sessionId,
+    chatMessage,
+    toolName,
+    activeTool,
+    applyToActiveTools,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3299,6 +3371,14 @@ export interface ToolResultPayload {
    * no-op).
    */
   applyTo: (messages: ChatMessage[]) => ChatMessage[]
+  /**
+   * #4308 — remove the matching entry (by `toolUseId`) from a session's
+   * `activeTools[]`. Returns the same array reference (no-op) when no
+   * matching entry is present, so callers can skip the state write when
+   * nothing changed. Mirrors the no-match no-op contract used by
+   * {@link applyTo} for `messages`.
+   */
+  applyToActiveTools: (current: ActiveTool[]) => ActiveTool[]
 }
 
 /**
@@ -3357,6 +3437,11 @@ export function handleToolResult(
       const updated = [...messages]
       updated[idx] = { ...updated[idx]!, ...patch }
       return updated
+    },
+    // #4308 — remove the in-flight ActiveTool entry by toolUseId.
+    applyToActiveTools: (current) => {
+      const filtered = current.filter((t) => t.toolUseId !== toolUseId)
+      return filtered.length === current.length ? current : filtered
     },
   }
 }

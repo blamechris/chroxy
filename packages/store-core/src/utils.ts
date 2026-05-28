@@ -80,6 +80,7 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     lastClientActivityAt: null,
     health: 'healthy',
     activeAgents: [],
+    activeTools: [],
     isPlanPending: false,
     planAllowedPrompts: [],
     primaryClientId: null,
