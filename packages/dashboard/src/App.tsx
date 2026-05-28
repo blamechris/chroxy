@@ -2072,6 +2072,11 @@ export function App() {
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
         contextWindow={(availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow) ?? DEFAULT_CONTEXT_WINDOW}
+        // #3857: surface a clickable "/compact" suggestion past 80% so the
+        // user gets a remedy hint rather than just a red bar. Only enabled
+        // when there's an active session to route the input through — without
+        // that, the chip would have nowhere to send /compact to.
+        onCompact={isConnected && activeSessionId ? () => sendInput('/compact') : undefined}
       />
 
       {/* Settings panel */}

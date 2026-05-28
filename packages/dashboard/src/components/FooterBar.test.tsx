@@ -66,11 +66,24 @@ describe('FooterBar', () => {
     expect(screen.getByText('45%')).toBeInTheDocument()
   })
 
-  it('clamps context percentage display at 100%', () => {
+  // #3857: the bar FILL is still clamped to 100% width (a bar can't render
+  // wider than its container), but the LABEL now shows the true over-budget
+  // percent so the user gets a real signal that they're past the window.
+  // The aria-valuenow stays clamped because aria-valuemax is 100 and exceeding
+  // it would be invalid ARIA — the label carries the over-budget delta.
+  it('shows true over-budget percent in the label past 100% (#3857)', () => {
     const { container } = render(<FooterBar {...baseProps} context="250k tokens" contextPercent={134} />)
     const bar = container.querySelector('.footer-context-bar')
+    // aria-valuenow stays clamped because aria-valuemax is 100 — exceeding
+    // it would violate the ARIA progressbar spec.
     expect(bar).toHaveAttribute('aria-valuenow', '100')
-    expect(screen.getByText('100%')).toBeInTheDocument()
+    // Label shows true value so the user knows they're over budget.
+    expect(screen.getByText('134%')).toBeInTheDocument()
+    // Bar fill width stays clamped at 100% (it's a bar, not a number).
+    const fill = container.querySelector('.footer-context-fill') as HTMLElement
+    expect(fill.style.width).toBe('100%')
+    // Bar gets an over-budget marker class so the visual matches the label.
+    expect(bar?.classList.contains('over-budget')).toBe(true)
   })
 
   it('applies medium class for context usage 50-80%', () => {
@@ -209,5 +222,66 @@ describe('FooterBar', () => {
     render(<FooterBar {...baseProps} onShowQr={onShowQr} />)
     screen.getByLabelText('Show QR code').click()
     expect(onShowQr).toHaveBeenCalledOnce()
+  })
+
+  // -----------------------------------------------------------------
+  // #3857 — high-utilization compact-suggestion chip
+  // -----------------------------------------------------------------
+  describe('#3857 compact suggestion at high context utilization', () => {
+    it('does not render the compact chip below 80%', () => {
+      render(<FooterBar {...baseProps} context="100k tokens" contextPercent={50} onCompact={vi.fn()} />)
+      expect(screen.queryByTestId('btn-compact-session')).not.toBeInTheDocument()
+    })
+
+    it('renders the compact chip at 80%', () => {
+      render(<FooterBar {...baseProps} context="320k tokens" contextPercent={80} onCompact={vi.fn()} />)
+      expect(screen.getByTestId('btn-compact-session')).toBeInTheDocument()
+    })
+
+    it('renders the compact chip at 100%+', () => {
+      render(<FooterBar {...baseProps} context="400k tokens" contextPercent={100} onCompact={vi.fn()} />)
+      expect(screen.getByTestId('btn-compact-session')).toBeInTheDocument()
+    })
+
+    it('hides the compact chip when onCompact is undefined (read-only embed)', () => {
+      render(<FooterBar {...baseProps} context="400k tokens" contextPercent={100} />)
+      // No CTA should render when the consumer can't route it anywhere.
+      expect(screen.queryByTestId('btn-compact-session')).not.toBeInTheDocument()
+    })
+
+    it('fires onCompact when the chip is clicked', () => {
+      const onCompact = vi.fn()
+      render(<FooterBar {...baseProps} context="400k tokens" contextPercent={100} onCompact={onCompact} />)
+      screen.getByTestId('btn-compact-session').click()
+      expect(onCompact).toHaveBeenCalledOnce()
+    })
+
+    it('chip carries an explanatory tooltip + accessible label', () => {
+      render(<FooterBar {...baseProps} context="350k tokens" contextPercent={90} onCompact={vi.fn()} />)
+      const chip = screen.getByTestId('btn-compact-session')
+      expect(chip.getAttribute('title')).toMatch(/\/compact/i)
+      expect(chip.getAttribute('aria-label')).toMatch(/compact/i)
+    })
+
+    it('chip tooltip distinguishes near-limit vs over-budget', () => {
+      // Near-limit case
+      const { rerender } = render(
+        <FooterBar {...baseProps} context="320k tokens" contextPercent={85} onCompact={vi.fn()} />
+      )
+      const near = screen.getByTestId('btn-compact-session')
+      expect(near.getAttribute('title')).toMatch(/filling up/i)
+      expect(near.classList.contains('over-budget')).toBe(false)
+
+      // Over-budget case — more urgent copy + distinct class.
+      rerender(<FooterBar {...baseProps} context="500k tokens" contextPercent={125} onCompact={vi.fn()} />)
+      const over = screen.getByTestId('btn-compact-session')
+      expect(over.getAttribute('title')).toMatch(/full|truncating/i)
+      expect(over.classList.contains('over-budget')).toBe(true)
+    })
+
+    it('chip is hidden when contextPercent is null (no usage data yet)', () => {
+      render(<FooterBar {...baseProps} context="0 tokens" contextPercent={null} onCompact={vi.fn()} />)
+      expect(screen.queryByTestId('btn-compact-session')).not.toBeInTheDocument()
+    })
   })
 })
