@@ -5,15 +5,19 @@ import { addServerOptions } from '../src/cli/shared.js'
 
 /**
  * CLI flag wiring for `--dangerously-skip-permissions` on `chroxy start` /
- * `chroxy dev` (#4209).
+ * `chroxy dev` (#4209, refined in #4246).
  *
  * Mirrors the precedent set by `chroxy resume --dangerously-skip-permissions`
  * (packages/server/src/cli/session-cmd.js:59), but on the server-launch
  * commands so operators running a TUI-provider chroxy headlessly can opt
- * in without round-tripping through the dashboard. The flag flows into
- * `cliOverrides.skipPermissions` -> SessionManager `defaultSkipPermissions`
- * -> ClaudeTuiSession constructor (-> `--dangerously-skip-permissions`
- * literal on the claude PTY spawn).
+ * in without round-tripping through the dashboard. As of #4246 the flag
+ * flows into `cliOverrides.dangerouslySkipPermissions` (canonical config
+ * key, mirrors the CLI flag name); the legacy `skipPermissions` key is
+ * still honoured for backwards compat — see config-skip-permissions.test.js
+ * for the resolver. From there:
+ * `resolveSkipPermissions(mergedConfig)` -> SessionManager
+ * `defaultSkipPermissions` -> ClaudeTuiSession constructor
+ * (-> `--dangerously-skip-permissions` literal on the claude PTY spawn).
  */
 describe('chroxy start --dangerously-skip-permissions wiring (#4209)', () => {
   function makeServerCmd() {
