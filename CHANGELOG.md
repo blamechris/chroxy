@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-05-27
+
+Same-day sweep release of the 16-PR follow-up marathon to v0.9.7. Focus areas: cross-client UX (chat composer history, sidebar Copy path, tri-state skipPermissions on CreateSessionModal, touch-friendly cost-gap tooltip), server-side correctness (byok abort-race + tool_start fallback parity, config-key rename with backwards-compat alias, opt-in Chroxy system-prompt context), mobile parity (unknown-permission-mode catch-all), a11y (SessionContextMenu keyboard nav, populated context menus for resumable rows), and several supporting refactors (import-type re-exports, build.rs cache key, supply-chain SHA pinning).
+
+### Added
+
+- **Up/Down history in chat composer (#3698 / #4379):** terminal-style recall of previous user messages from `InputBar.tsx`. Up at first/last-line boundary cycles back through history; Down moves forward; Escape (or Down past newest) clears to the draft. Per-session reset so switching sessions doesn't bleed history. Closed #3854 as a duplicate of #3698 via cross-reference comment.
+- **Tri-state `skipPermissions` on CreateSessionModal (#4244 / #4368):** "inherit" (default) / "off" (require permissions) / "on" (dangerously skip). Lets users override a server-side default in either direction. Wire field stays boolean (`true`/`false`/`undefined`); the radio→payload mapping happens at submit.
+- **`SessionContextMenu` keyboard navigation (#4248 / #4369):** WAI-ARIA menu pattern — Up/Down with wrap-around, Home/End, Enter/Space activate, Escape closes, focus returns to the trigger on close. Roving tabindex pattern; `role="menu"` + `role="menuitem"` on items.
+- **Sidebar Copy path (#4268 / #4382):** new menu item on session rows + repo group headers writes the cwd to the system clipboard via `navigator.clipboard.writeText`. Capability-gated off when the session has no cwd. Toast on success/failure; works in both Tauri and browser dashboards.
+- **Resumable rows now have menu items (#4249 / #4377):** prior to this, right-clicking a "Resumable" sidebar row opened an empty menu (silent dead-click). Now: Resume, Copy Conversation ID, Open in Finder (Tauri + cwd). Extracted the menu-item builder to `sidebarContextMenuItems.ts` so the per-target branch logic is unit-testable without rendering App.
+- **Mobile catch-all for unknown permission mode (#4251 / #4376):** mobile app `PermissionPromptScreen` mirrors the dashboard #4019 catch-all so a future server-emitted mode renders the friendly hint instead of breaking the screen.
+- **Touch-friendly disclosure for sidebar cost-gap tooltip (#4362 / #4371):** the v0.9.7 cost-gap hint (#4352) was hover-only — useless on iPad / touchscreen laptops. New `InfoDisclosure` component is tap-to-toggle, dismissed by click-outside or Escape; hover-on-pointer-mouse still works. PointerType-aware so a touch-tap doesn't flip-flop the popover closed via the synthetic mouseenter+click sequence.
+- **Opt-in Chroxy system-prompt context hint (#3805 / #4380):** new server config flag `chroxyContextHint` (default OFF). When ON, every provider session prepends a short line letting the model know it's running inside Chroxy. In-PR critical fix plumbed the flag through 6 provider constructors so SDK/CLI/TUI/Codex/Gemini sessions all honor it consistently (and the session-manager restore path doesn't drop it).
+
+### Fixed
+
+- **`skipPermissions` survives provider switch (#4245 / #4375):** ticking the dangerous-flag radio for `claude-tui`, switching to `claude-sdk`, then switching back, used to leave the choice persisted with no fresh confirmation. Now: `useEffect` on `provider` resets the state to `'inherit'`, forcing a re-confirmation per provider switch.
+- **byok phase-1 / phase-2 abort race in `_processToolBlocks` (#4247 / #4378):** abort firing between the gate (permission/approval check) and the schedule (actually run the tool) used to slip through and schedule the tool anyway. Re-check `aborted` between phases and emit a synthetic-abort `tool_result` if true; new `fillInterrupted` helper unifies the in-flight + inter-phase abort paths. Three timing-window tests pin every abort site.
+- **byok `tool_start` fallback toolUseId parity (#4262 follow-up — #4364 / #4381):** v0.9.7's #4361 fixed the per-tool-id path, but the fallback (when `content_block.id` is missing) still emitted `toolUseId: undefined`, mismatching `sdk-session.js`'s parity (`toolUseId: messageId`). Now both paths match.
+- **Strip stale `toolName` from byok-session test stubs (#4363 / #4374):** the 11 `_executeToolBlock` mock stubs still emitted `toolName: block.name` after v0.9.7's #4355 removed it from the production emit. Pure test cleanup, no behavior change.
+- **`build.rs` speech-helper cache key tracks `APPLE_KEYCHAIN_PATH` (#4252 / #4366):** a keychain swap on the build machine now invalidates the cached signed helper so re-builds pick up the new identity instead of silently re-using the stale signature.
+
+### Changed
+
+- **Config: `skipPermissions` → `dangerouslySkipPermissions` (#4246 / #4383):** the CLI flag has always been `--dangerously-skip-permissions` (loud about its risk); the config key was just `skipPermissions` (gentle). Renamed for danger parity. Legacy key works with a `[security]` log-warn deprecation alias, no breaking change. Wire field unchanged. (Filed #4384 to add env-var binding for `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS`, #4385 to document the rename in CONFIG.md.)
+- **`getInputSummary` now used by ToolGroup too (#4259 / #4356):** dashboard ToolGroup migrated to the shared `@chroxy/store-core` helper that ToolBubble + mobile ToolBubble already use.
+- **Sidebar context-menu items extracted to `buildSidebarContextMenuItems` (#4249 / #4377):** per-target-type branching is now pure and unit-testable, decoupling action wiring from the `App.tsx` render tree.
+- **Refactor: `store/connection` re-export imports converted to `import type` (#4250 / #4370):** stricter TS treeshaking + isolatedModules correctness.
+- **Security: `actions/setup-node` SHA-pinned via repo-relay v1.0.1 (#3819 / #4367):** upstream `blamechris/repo-relay` cut v1.0.1 with `setup-node` pinned by SHA. chroxy's CI now references it. Post-merge: `sha_pinning_required` re-enabled on the repo's Actions permissions.
+
 ## [0.9.7] - 2026-05-27
 
 Sweep release of the 11-PR marathon following v0.9.6 dogfood. Focus areas: BYOK cost/protocol cleanup (cost-vs-token clarity, per-tool content_block IDs, redundant toolName strip), TUI prompt-write hardening (multi-byte, mid-loop PTY guard, bulk-write threshold), dashboard a11y (unnested ToolGroup interactive roles), voice-input portability (Web Speech API fallback for browser + Tauri-Win/Linux), and several store-core helper migrations that cut duplicate logic between dashboard and mobile.
