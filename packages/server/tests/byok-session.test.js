@@ -1046,9 +1046,16 @@ describe('ClaudeByokSession', () => {
       // `${turnMessageId}-tool`. Pin only that the emitted messageId is
       // a non-empty string ending with `-tool` so future renames of the
       // turn id format don't pointlessly break this test.
-      const { messageId } = starts[0].payload
+      const { messageId, toolUseId } = starts[0].payload
       assert.equal(typeof messageId, 'string', 'messageId is a string even on fallback')
       assert.ok(messageId.endsWith('-tool'), `fallback messageId ends with -tool (got: ${messageId})`)
+      // #4364: toolUseId mirrors the fallback messageId (parity with
+      // sdk-session.js:635-641). Pre-#4364 this was `undefined`, which
+      // violates ServerToolStartSchema.toolUseId: z.string() — the
+      // schema isn't enforced on the broadcast path today, but the
+      // wire-shape contract should be honored on every path.
+      assert.equal(typeof toolUseId, 'string', 'toolUseId is a string even on fallback')
+      assert.equal(toolUseId, messageId, 'toolUseId mirrors messageId on the fallback path')
       await session.destroy()
     })
   })
