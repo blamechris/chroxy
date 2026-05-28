@@ -175,6 +175,137 @@ describe('config.dangerouslySkipPermissions (#4246)', () => {
     })
   })
 
+  describe('env-var binding (#4384)', () => {
+    // #4384 — `envKeyForConfig` had no entry for either the canonical
+    // `dangerouslySkipPermissions` key or the legacy `skipPermissions`
+    // key, so mergeConfig fell back to `key.toUpperCase()` (i.e.
+    // `DANGEROUSLYSKIPPERMISSIONS` / `SKIPPERMISSIONS`) instead of the
+    // documented `CHROXY_*` prefix. These tests pin the canonical
+    // `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` env var and its legacy
+    // `CHROXY_SKIP_PERMISSIONS` alias, including the deprecation warning
+    // path that mirrors the file-side legacy key behaviour.
+    let originalEnv
+    const envKeys = [
+      'CHROXY_DANGEROUSLY_SKIP_PERMISSIONS',
+      'CHROXY_SKIP_PERMISSIONS',
+      // Defensive: strip the accidental uppercased fallbacks too so a
+      // leaked value from a previous codepath can't taint the test.
+      'DANGEROUSLYSKIPPERMISSIONS',
+      'SKIPPERMISSIONS',
+    ]
+
+    beforeEach(() => {
+      originalEnv = {}
+      for (const k of envKeys) {
+        originalEnv[k] = process.env[k]
+        delete process.env[k]
+      }
+    })
+
+    afterEach(() => {
+      for (const k of envKeys) {
+        if (originalEnv[k] !== undefined) {
+          process.env[k] = originalEnv[k]
+        } else {
+          delete process.env[k]
+        }
+      }
+    })
+
+    it('CHROXY_DANGEROUSLY_SKIP_PERMISSIONS=true flows through mergeConfig and enables skip-permissions', () => {
+      process.env.CHROXY_DANGEROUSLY_SKIP_PERMISSIONS = 'true'
+      const merged = mergeConfig({})
+      assert.equal(merged.dangerouslySkipPermissions, true,
+        'canonical env var must land in the canonical config key')
+      assert.equal(merged.skipPermissions, undefined,
+        'canonical env var must NOT populate the legacy key')
+      const resolved = resolveSkipPermissions(merged)
+      assert.equal(resolved.enabled, true)
+      assert.equal(resolved.source, 'dangerouslySkipPermissions')
+      assert.equal(resolved.deprecationWarning, null,
+        'canonical env-var path must not emit a deprecation warning')
+    })
+
+    it('CHROXY_DANGEROUSLY_SKIP_PERMISSIONS=1 also enables (boolean parser accepts 1)', () => {
+      process.env.CHROXY_DANGEROUSLY_SKIP_PERMISSIONS = '1'
+      const merged = mergeConfig({})
+      assert.equal(merged.dangerouslySkipPermissions, true)
+    })
+
+    it('CHROXY_DANGEROUSLY_SKIP_PERMISSIONS=false explicitly disables and overrides file legacy true', () => {
+      process.env.CHROXY_DANGEROUSLY_SKIP_PERMISSIONS = 'false'
+      const merged = mergeConfig({ fileConfig: { skipPermissions: true } })
+      assert.equal(merged.dangerouslySkipPermissions, false,
+        'canonical env explicit-disable must land in the canonical key')
+      const resolved = resolveSkipPermissions(merged)
+      assert.equal(resolved.enabled, false,
+        'canonical env false must mask a stale file-side legacy true')
+      assert.equal(resolved.source, 'dangerouslySkipPermissions')
+    })
+
+    it('CHROXY_SKIP_PERMISSIONS=true (legacy env var) flows through with deprecation warning', () => {
+      process.env.CHROXY_SKIP_PERMISSIONS = 'true'
+      const merged = mergeConfig({})
+      assert.equal(merged.skipPermissions, true,
+        'legacy env var must land in the legacy config key')
+      assert.equal(merged.dangerouslySkipPermissions, undefined,
+        'legacy env var must NOT populate the canonical key')
+      const resolved = resolveSkipPermissions(merged)
+      assert.equal(resolved.enabled, true)
+      assert.equal(resolved.source, 'skipPermissions')
+      assert.ok(resolved.deprecationWarning,
+        'legacy env-var path MUST emit a deprecation warning, same as the file-side legacy key')
+      assert.match(resolved.deprecationWarning, /skipPermissions/)
+      assert.match(resolved.deprecationWarning, /dangerouslySkipPermissions/)
+    })
+
+    it('canonical env var overrides legacy env var', () => {
+      process.env.CHROXY_DANGEROUSLY_SKIP_PERMISSIONS = 'true'
+      process.env.CHROXY_SKIP_PERMISSIONS = 'false'
+      const merged = mergeConfig({})
+      const resolved = resolveSkipPermissions(merged)
+      assert.equal(resolved.enabled, true,
+        'canonical env var must win over a contradictory legacy env var')
+      assert.equal(resolved.source, 'dangerouslySkipPermissions')
+    })
+
+    it('canonical env var overrides file legacy skipPermissions (ENV > file precedence)', () => {
+      process.env.CHROXY_DANGEROUSLY_SKIP_PERMISSIONS = 'true'
+      const merged = mergeConfig({ fileConfig: { skipPermissions: false } })
+      assert.equal(merged.dangerouslySkipPermissions, true)
+      const resolved = resolveSkipPermissions(merged)
+      assert.equal(resolved.enabled, true)
+      assert.equal(resolved.source, 'dangerouslySkipPermissions')
+    })
+
+    it('CLI --dangerously-skip-permissions overrides canonical env var', () => {
+      process.env.CHROXY_DANGEROUSLY_SKIP_PERMISSIONS = 'true'
+      const merged = mergeConfig({ cliOverrides: { dangerouslySkipPermissions: false } })
+      assert.equal(merged.dangerouslySkipPermissions, false,
+        'CLI must take precedence over the canonical env var')
+    })
+
+    it('does NOT read the uppercased-key fallback DANGEROUSLYSKIPPERMISSIONS', () => {
+      // Pre-#4384 regression: when envKeyForConfig had no map entry the
+      // fallback was `key.toUpperCase()` which is `DANGEROUSLYSKIPPERMISSIONS`
+      // (no underscores). Operators were never told to set that — the
+      // documented var is `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS`. Pin
+      // this so a future refactor doesn't quietly reintroduce the
+      // mis-named binding.
+      process.env.DANGEROUSLYSKIPPERMISSIONS = 'true'
+      const merged = mergeConfig({})
+      assert.equal(merged.dangerouslySkipPermissions, undefined,
+        'the uppercased-key fallback must NOT be read — canonical env var is CHROXY_DANGEROUSLY_SKIP_PERMISSIONS')
+    })
+
+    it('does NOT read the uppercased-key fallback SKIPPERMISSIONS', () => {
+      process.env.SKIPPERMISSIONS = 'true'
+      const merged = mergeConfig({})
+      assert.equal(merged.skipPermissions, undefined,
+        'the uppercased-key fallback must NOT be read — legacy env var is CHROXY_SKIP_PERMISSIONS')
+    })
+  })
+
   describe('loadAndMergeConfig end-to-end (canonical key)', () => {
     let tempDir
     let originalExitOverride
