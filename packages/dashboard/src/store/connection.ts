@@ -205,6 +205,9 @@ const EMPTY_AGENTS: never[] = [];
 const EMPTY_PROMPTS: never[] = [];
 const EMPTY_MCP_SERVERS: never[] = [];
 const EMPTY_DEV_PREVIEWS: never[] = [];
+// #4308: stable empty reference for `activeTools` in the flat-state
+// fallback. Same `useShallow` stability rationale as the others above.
+const EMPTY_ACTIVE_TOOLS: never[] = [];
 
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
@@ -492,6 +495,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       health: 'healthy' as const,
       terminalRawBuffer: get().terminalRawBuffer,
       activeAgents: EMPTY_AGENTS,
+      // #4308: parity with the BaseSessionState shape; no live tool tracking
+      // in flat-state fallback (only populated once a real SessionState lands).
+      activeTools: EMPTY_ACTIVE_TOOLS,
       isPlanPending: false,
       planAllowedPrompts: EMPTY_PROMPTS,
       primaryClientId: null,

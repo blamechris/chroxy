@@ -236,6 +236,158 @@ describe('ActivityIndicator — in-flight tool naming (#4308)', () => {
     expect(label.textContent).toMatch(/Running\s+List Files/)
     expect(label.textContent).not.toMatch(/fs/)
   })
+
+  // #4308 — activeTools-driven path (preferred over the messages walk when
+  // present). These tests pin the precedence: activeTools wins over a tool
+  // resolved via the messages walk; sub-agent description wins over both.
+  describe('activeTools / activeAgents state slot (#4308)', () => {
+    it('prefers the activeTools slot over the messages walk', () => {
+      const now = Date.now()
+      // messages walk would pick `Read`, but activeTools says `WebFetch` is
+      // the current in-flight tool — activeTools wins.
+      storeState = {
+        activeSessionId: 'sess-1',
+        serverResultTimeoutMs: 30 * 60 * 1000,
+        sessionStates: {
+          'sess-1': {
+            isIdle: false,
+            lastClientActivityAt: now - 3_000,
+            messages: [
+              { id: 'm1', type: 'tool_use', tool: 'Read', timestamp: now - 6_000, content: '', toolUseId: 'tu-walk' },
+            ],
+            activeTools: [
+              { toolUseId: 'tu-1', tool: 'WebFetch', startedAt: now - 4_000 },
+            ],
+            inactivityWarning: null,
+          },
+        },
+      }
+      render(<ActivityIndicator />)
+      const label = screen.getByTestId('activity-indicator-label')
+      expect(label.textContent).toMatch(/Running\s+WebFetch/)
+      expect(label.textContent).not.toMatch(/Read/)
+    })
+
+    it('uses the most-recent activeTools entry when multiple are in flight', () => {
+      const now = Date.now()
+      storeState = {
+        activeSessionId: 'sess-1',
+        serverResultTimeoutMs: 30 * 60 * 1000,
+        sessionStates: {
+          'sess-1': {
+            isIdle: false,
+            lastClientActivityAt: now - 2_000,
+            messages: [],
+            activeTools: [
+              { toolUseId: 'tu-1', tool: 'Bash', startedAt: now - 10_000 },
+              { toolUseId: 'tu-2', tool: 'WebFetch', startedAt: now - 3_000 },
+            ],
+            inactivityWarning: null,
+          },
+        },
+      }
+      render(<ActivityIndicator />)
+      const label = screen.getByTestId('activity-indicator-label')
+      expect(label.textContent).toMatch(/Running\s+WebFetch/)
+    })
+
+    it('falls through to the messages walk when activeTools is empty', () => {
+      const now = Date.now()
+      storeState = {
+        activeSessionId: 'sess-1',
+        serverResultTimeoutMs: 30 * 60 * 1000,
+        sessionStates: {
+          'sess-1': {
+            isIdle: false,
+            lastClientActivityAt: now - 2_000,
+            messages: [
+              { id: 'm1', type: 'tool_use', tool: 'Read', timestamp: now - 4_000, content: '', toolUseId: 'tu-1' },
+            ],
+            activeTools: [],
+            inactivityWarning: null,
+          },
+        },
+      }
+      render(<ActivityIndicator />)
+      const label = screen.getByTestId('activity-indicator-label')
+      expect(label.textContent).toMatch(/Running\s+Read/)
+    })
+
+    it('surfaces an active sub-agent description, taking precedence over the in-flight tool', () => {
+      const now = Date.now()
+      // Parent agent's Task tool is in flight, but a sub-agent is running.
+      // The chip should name the sub-agent's description, not "Task".
+      storeState = {
+        activeSessionId: 'sess-1',
+        serverResultTimeoutMs: 30 * 60 * 1000,
+        sessionStates: {
+          'sess-1': {
+            isIdle: false,
+            lastClientActivityAt: now - 2_000,
+            messages: [],
+            activeTools: [
+              { toolUseId: 'tu-task', tool: 'Task', startedAt: now - 5_000 },
+            ],
+            activeAgents: [
+              { toolUseId: 'tu-sub', description: 'audit-pr', startedAt: now - 5_000 },
+            ],
+            inactivityWarning: null,
+          },
+        },
+      }
+      render(<ActivityIndicator />)
+      const label = screen.getByTestId('activity-indicator-label')
+      expect(label.textContent).toMatch(/Running\s+audit-pr/)
+      expect(label.textContent).not.toMatch(/Task/)
+    })
+
+    it('uses the most-recent activeAgents entry when multiple sub-agents are running', () => {
+      const now = Date.now()
+      storeState = {
+        activeSessionId: 'sess-1',
+        serverResultTimeoutMs: 30 * 60 * 1000,
+        sessionStates: {
+          'sess-1': {
+            isIdle: false,
+            lastClientActivityAt: now - 2_000,
+            messages: [],
+            activeTools: [],
+            activeAgents: [
+              { toolUseId: 'tu-a', description: 'first-task', startedAt: now - 10_000 },
+              { toolUseId: 'tu-b', description: 'second-task', startedAt: now - 3_000 },
+            ],
+            inactivityWarning: null,
+          },
+        },
+      }
+      render(<ActivityIndicator />)
+      const label = screen.getByTestId('activity-indicator-label')
+      expect(label.textContent).toMatch(/Running\s+second-task/)
+    })
+
+    it('surfaces sub-agent description during the lastActivityAt-null connect race', () => {
+      const now = Date.now()
+      storeState = {
+        activeSessionId: 'sess-1',
+        serverResultTimeoutMs: 30 * 60 * 1000,
+        sessionStates: {
+          'sess-1': {
+            isIdle: false,
+            lastClientActivityAt: null,
+            messages: [],
+            activeTools: [],
+            activeAgents: [
+              { toolUseId: 'tu-a', description: 'do-thing', startedAt: now - 2_000 },
+            ],
+            inactivityWarning: null,
+          },
+        },
+      }
+      render(<ActivityIndicator />)
+      const label = screen.getByTestId('activity-indicator-label')
+      expect(label.textContent).toMatch(/Running\s+do-thing/)
+    })
+  })
 })
 
 /**

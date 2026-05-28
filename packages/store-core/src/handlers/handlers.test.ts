@@ -92,6 +92,7 @@ import {
 } from './index'
 import { nextMessageId } from '../utils'
 import type {
+  ActiveTool,
   AgentInfo,
   ChatMessage,
   Checkpoint,
@@ -354,8 +355,16 @@ describe('handleClaudeReady', () => {
 // handleAgentIdle / handleAgentBusy
 // ---------------------------------------------------------------------------
 describe('handleAgentIdle', () => {
-  it('returns isIdle: true and clears streamingMessageId', () => {
-    expect(handleAgentIdle()).toEqual({ isIdle: true, streamingMessageId: null })
+  it('returns isIdle: true and clears streamingMessageId + activeTools', () => {
+    // #4308 — agent_idle is a guaranteed turn boundary, so it's also the
+    // safety-net clear for activeTools. Any still-tracked in-flight tools
+    // (missed result, server crash mid-turn) are dropped so the activity
+    // indicator can't get stuck on a phantom "Running X".
+    expect(handleAgentIdle()).toEqual({
+      isIdle: true,
+      streamingMessageId: null,
+      activeTools: [],
+    })
   })
 })
 
@@ -5143,6 +5152,139 @@ describe('handleToolStart', () => {
     )
     expect(out.sessionId).toBe('sess-active')
   })
+
+  // #4308 — activeTools tracking
+  describe('activeTools (#4308)', () => {
+    it('emits an ActiveTool entry with tool name, toolUseId, input, startedAt', () => {
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { cmd: 'ls' },
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool).not.toBeNull()
+      expect(out.activeTool!.toolUseId).toBe('tu-1')
+      expect(out.activeTool!.tool).toBe('Bash')
+      expect(out.activeTool!.input).toEqual({ cmd: 'ls' })
+      expect(typeof out.activeTool!.startedAt).toBe('number')
+      expect(out.activeTool!.startedAt).toBeGreaterThan(0)
+    })
+
+    it('omits serverName when not present on the wire', () => {
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool!.serverName).toBeUndefined()
+    })
+
+    it('forwards serverName for MCP tools', () => {
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'mcp__chrome_devtools__take_snapshot',
+          toolUseId: 'tu-1',
+          serverName: 'chrome_devtools',
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool!.serverName).toBe('chrome_devtools')
+    })
+
+    it('returns null activeTool when toolUseId is missing', () => {
+      // Without a stable toolUseId we cannot dedup or remove on tool_result,
+      // so skip the push rather than orphan an entry.
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash' },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool).toBeNull()
+    })
+
+    it('returns null activeTool during replay dedup', () => {
+      const cached: ChatMessage[] = [
+        { id: 'srv-tool-1', type: 'tool_use', content: '', timestamp: 1 },
+      ]
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        true,
+        cached,
+      )
+      expect(out.shouldDispatch).toBe(false)
+      expect(out.activeTool).toBeNull()
+    })
+
+    it('applyToActiveTools pushes the new entry onto the array', () => {
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const next = out.applyToActiveTools([])
+      expect(next).toHaveLength(1)
+      expect(next[0]!.toolUseId).toBe('tu-1')
+      expect(next[0]!.tool).toBe('Bash')
+    })
+
+    it('applyToActiveTools dedupes by toolUseId (same reference on duplicate)', () => {
+      const existing: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+      ]
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const next = out.applyToActiveTools(existing)
+      expect(next).toBe(existing)
+    })
+
+    it('applyToActiveTools is a no-op when activeTool is null (no toolUseId)', () => {
+      const existing: ActiveTool[] = [
+        { toolUseId: 'tu-0', tool: 'Read', startedAt: 1 },
+      ]
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash' }, // no toolUseId
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool).toBeNull()
+      expect(out.applyToActiveTools(existing)).toBe(existing)
+    })
+
+    it('supports parallel in-flight tools (multiple distinct toolUseIds)', () => {
+      const out1 = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const out2 = handleToolStart(
+        { messageId: 'srv-tool-2', tool: 'Read', toolUseId: 'tu-2' },
+        'sess-active',
+        false,
+        [],
+      )
+      const step1 = out1.applyToActiveTools([])
+      const step2 = out2.applyToActiveTools(step1)
+      expect(step2.map((t) => t.toolUseId)).toEqual(['tu-1', 'tu-2'])
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -5338,6 +5480,40 @@ describe('handleToolResult', () => {
       )
       const updated = out!.applyTo(baseMessages)
       expect(updated[1]!.toolResultImages).toEqual(images)
+    })
+  })
+
+  // #4308 — activeTools removal
+  describe('applyToActiveTools (#4308)', () => {
+    it('removes the entry whose toolUseId matches', () => {
+      const out = handleToolResult({ toolUseId: 'tu-1', result: 'ok' }, 'sess-active')
+      const before: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+        { toolUseId: 'tu-2', tool: 'Read', startedAt: 2 },
+      ]
+      const after = out!.applyToActiveTools(before)
+      expect(after).toHaveLength(1)
+      expect(after[0]!.toolUseId).toBe('tu-2')
+    })
+
+    it('returns same array reference when toolUseId is not present (no-op)', () => {
+      const out = handleToolResult({ toolUseId: 'tu-missing', result: 'ok' }, 'sess-active')
+      const before: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+      ]
+      const after = out!.applyToActiveTools(before)
+      expect(after).toBe(before)
+    })
+
+    it('removes only the matching entry when multiple in-flight tools exist', () => {
+      const out = handleToolResult({ toolUseId: 'tu-2', result: 'ok' }, 'sess-active')
+      const before: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+        { toolUseId: 'tu-2', tool: 'Read', startedAt: 2 },
+        { toolUseId: 'tu-3', tool: 'WebFetch', startedAt: 3 },
+      ]
+      const after = out!.applyToActiveTools(before)
+      expect(after.map((t) => t.toolUseId)).toEqual(['tu-1', 'tu-3'])
     })
   })
 })

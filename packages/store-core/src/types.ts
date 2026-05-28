@@ -207,6 +207,38 @@ export interface AgentInfo {
   startedAt: number;
 }
 
+/**
+ * #4308 — one entry per in-flight tool call. Pushed when `tool_start`
+ * arrives, removed (by `toolUseId`) when the matching `tool_result` lands,
+ * and cleared en-masse on `agent_idle` / `result` as a safety net so a
+ * dropped/missed result can't leave a phantom running indicator.
+ *
+ * An array (not a singleton) because there can legitimately be multiple
+ * in-flight tools at once: a sub-agent's tool call while the parent agent
+ * is still mid-turn, or parallel tool calls from a single assistant turn.
+ * Renderers that only have room for one label can use
+ * `activeTools[activeTools.length - 1]` to surface the most-recent.
+ *
+ * Distinct from `messages[].type === 'tool_use'` (which derives in-flight
+ * state by walking the array): `activeTools` is a small, fast slot driven
+ * by the wire events directly. The derive-from-messages path remains a
+ * fallback for history replay and other paths that don't fire tool_start
+ * (#4319 / #4337).
+ *
+ * `tool` is the tool's logical name (`'Bash'`, `'Read'`, etc.) — same value
+ * the server sends on `tool_start`. `serverName` is set only for MCP tools
+ * so renderers can route through `formatToolName(tool, serverName)`. `input`
+ * is the raw tool input verbatim from the wire (best-effort; may be missing
+ * when the input streams via `tool_input_delta`).
+ */
+export interface ActiveTool {
+  toolUseId: string;
+  tool: string;
+  serverName?: string;
+  input?: unknown;
+  startedAt: number;
+}
+
 export interface ConnectedClient {
   clientId: string;
   deviceName: string | null;
@@ -476,6 +508,19 @@ export interface BaseSessionState {
   lastClientActivityAt: number | null;
   health: SessionHealth;
   activeAgents: AgentInfo[];
+  /**
+   * #4308 — in-flight tool calls for this session, in arrival order. See
+   * {@link ActiveTool}. Driven by tool_start / tool_result; cleared on
+   * agent_idle / result as a safety net. Empty when the session is idle
+   * or between tool calls.
+   *
+   * TODO(#4307): when the server starts tracking background-shell tasks,
+   * surface them here too (or in a sibling `activeBackgroundTasks` slot)
+   * so the activity indicator can name pending background work the same
+   * way it names in-flight tools. The exact shape depends on the
+   * server-side schema landed by #4307.
+   */
+  activeTools: ActiveTool[];
   isPlanPending: boolean;
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;
