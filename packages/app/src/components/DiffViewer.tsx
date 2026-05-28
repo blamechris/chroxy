@@ -10,7 +10,8 @@ import {
   ScrollView,
   Platform,
 } from 'react-native';
-import { useConnectionStore, DiffResult, DiffFile, DiffHunk } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
+import type { DiffResult, DiffFile, DiffHunk } from '../store/connection';
 import { COLORS } from '../constants/colors';
 import { ICON_DIFF } from '../constants/icons';
 import { Icon } from './Icon';

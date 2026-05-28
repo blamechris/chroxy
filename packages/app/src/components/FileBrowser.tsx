@@ -11,7 +11,8 @@ import {
   Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, FileListing, FileContent } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
+import type { FileListing, FileContent } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
 import { Icon } from './Icon';
