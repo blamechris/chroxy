@@ -398,6 +398,21 @@ function envKeyForConfig(key) {
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
     hardTimeoutMs: 'CHROXY_HARD_TIMEOUT_MS',
+    // #4384 — canonical env var for the #4246 rename. Without this entry
+    // the fallback was `key.toUpperCase()` (DANGEROUSLYSKIPPERMISSIONS,
+    // no underscores) which is not what we document or what operators
+    // would guess. `resolveSkipPermissions()` is still the single read
+    // site that decides effective behaviour and surfaces the deprecation
+    // warning for the legacy alias below.
+    dangerouslySkipPermissions: 'CHROXY_DANGEROUSLY_SKIP_PERMISSIONS',
+    // #4384 — legacy env-var alias mirroring the legacy config-file
+    // key. mergeConfig is the dumb plumbing layer: it just lands the
+    // value under the legacy `skipPermissions` config key so
+    // resolveSkipPermissions sees it on the same code path as a
+    // file-side legacy key (and therefore emits the same deprecation
+    // warning). Operators should migrate to
+    // `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS`.
+    skipPermissions: 'CHROXY_SKIP_PERMISSIONS',
   }
   return envMap[key] || key.toUpperCase()
 }
