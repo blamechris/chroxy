@@ -8,30 +8,11 @@ Capture genuinely novel learnings from the current session and persist them to t
 
 ## Instructions
 
-### 0. Read Error Journal
-
-Check the error journal for accumulated cross-session patterns:
-
-```bash
-# Derive project-specific memory path from CWD (replaces / with -)
-PROJECT_HASH=$(pwd | sed 's|/|-|g')
-JOURNAL="$HOME/.claude/projects/$PROJECT_HASH/memory/error-journal.md"
-cat "$JOURNAL" 2>/dev/null
-```
-
-The error journal captures tool call failures and recurring mistakes logged during normal work. Entries accumulate across sessions — they are NOT cleaned up automatically.
-
-- If the journal has entries, include them as candidate sources alongside conversation recall in Step 1
-- Journal entries with 2+ occurrences (same pattern seen in different sessions) are stronger candidates than single observations
-- An entry with a tally (e.g., `(x3)`) means it's been seen multiple times — prioritize extracting a behavioral insight from it
-
-**Do NOT skip the gate check (Step 0.5) just because the journal has entries.** The journal is an input, not an override.
-
-### 0.5. Gate Check -- Is There Anything Worth Learning?
+### 0. Gate Check -- Is There Anything Worth Learning?
 
 Before doing any extraction work, answer one question honestly:
 
-**Did this session OR the error journal produce knowledge that would cause Claude to _behave differently_ in a future task?**
+**Did this session produce knowledge that would cause Claude to _behave differently_ in a future task?**
 
 Apply the **Behavioral Test**. A learning is only worth persisting if it describes a concrete change in approach:
 
@@ -98,7 +79,7 @@ For each candidate, classify:
 
 Do NOT propose edits to existing entries. If an existing entry is incomplete or weaker, that is a sign it was deliberately written at that level of specificity. Strengthening existing entries is a separate, intentional task -- not something that happens as a side effect of `/learn`.
 
-**Drop all DUPLICATEs.** If everything is duplicate, report and stop:
+**Drop all DUPLICATES.** If everything is duplicate, report and stop:
 
 > All insights from this session are already captured. Nothing new to persist.
 
@@ -164,29 +145,9 @@ When the user approves (e.g., "yes", "apply all", "1 and 3", "skip 2"):
 
 **Do NOT commit.** The user decides when and how to commit.
 
-**Clean up error journal:** After persisting, remove any error journal entries that were the source of a persisted insight. Entries that were NOT persisted (not actionable yet, or didn't pass the quality bar) stay in the journal — they may accumulate more evidence in future sessions.
-
-The journal file is always at: `~/.claude/projects/<project-hash>/memory/error-journal.md`
-(the same directory as MEMORY.md for the current project).
-
-```bash
-# Derive project-specific memory path from CWD (replaces / with -)
-PROJECT_HASH=$(pwd | sed 's|/|-|g')
-JOURNAL="$HOME/.claude/projects/$PROJECT_HASH/memory/error-journal.md"
-
-# For each persisted insight that originated from a journal entry:
-# Use the Edit tool to remove the matching line(s) from $JOURNAL
-# Match by the distinctive pattern substring, not the full line (dates/tallies may differ)
-
-# After edits, check if the file is empty (only header + blank lines remain)
-# If so, delete it: rm "$JOURNAL"
-```
-
-If the journal becomes empty after cleanup (only the header line remains or file is blank), delete the file.
-
 Final output -- one line:
 ```
-Persisted N of M insights. Files changed: [list]. Journal: K entries cleaned.
+Persisted N of M insights. Files changed: [list].
 ```
 
 ## Safety Rules
@@ -235,13 +196,13 @@ Nothing to persist from this session.
 ```
 User: /learn
 
-1. React Native doesn't support AbortSignal.timeout() -- use manual timeout with AbortController
-   Evidence: VERIFIED -- tested both approaches, timeout() throws "not a function"
-   Before/After: Use AbortSignal.timeout() --> Use AbortController + setTimeout pattern
+1. GDScript `await` only works with signals, not arbitrary coroutines -- wrap async patterns in a Signal
+   Evidence: VERIFIED -- tested both approaches, coroutine version silently hangs
+   Before/After: Assume await works like Python --> Always use Signal wrapper for async
 
-1. RN AbortSignal constraint --> .claude/rules/react-native.md -- awaiting approval
+1. GDScript await/signal pattern --> CLAUDE.md (## GDScript Patterns) -- awaiting approval
 
-+ - React Native does not support `AbortSignal.timeout()`. Use manual timeout with `AbortController` + `setTimeout` pattern.
++ - `await` only works with Signals in GDScript. For async patterns, use a Signal wrapper -- raw coroutines silently hang.
 
 Apply?
 ```
@@ -255,12 +216,12 @@ User: /learn
    Evidence: VERIFIED -- profiler showed 60fps re-renders from object spread in selector
    Before/After: Return new objects from selectors --> Use shallow equality or atomic selectors
 
-2. WebSocket keepalive should be 30s to stay within Cloudflare tunnel idle timeout
-   Evidence: OBSERVED -- saw tunnel drops at 55s with 60s keepalive
+2. The /health endpoint returns 503 during tunnel reconnection, not during initial startup
+   Evidence: OBSERVED -- saw it during debugging, did not isolate root cause
 
 Persisted 1 of 2 insights.
 1. Zustand selector stability --> .claude/rules/zustand.md -- awaiting approval
-2. WS keepalive timing --> skipped (already in CLAUDE.md line 84)
+2. /health 503 behavior --> skipped (already in CLAUDE.md line 84)
 
 + - Zustand selectors must return stable references (not new object spreads). Use `useShallow` or select atomic values to avoid per-tick re-renders.
 
@@ -301,7 +262,7 @@ Persisted 0 of 1 insights (conflict found).
 User: /learn
 
 1. Tunnel drops silently -- always check tunnel health before debugging WS issues
-   Evidence: VERIFIED -- spent 20 min debugging WS protocol before realizing tunnel was down
+   Evidence: VERIFIED -- spent 20 min debugging WS before realizing tunnel was down
    Before/After: Debug WS protocol first --> Check tunnel connectivity first
 
 2. Currently working on PR #547, auth token refresh flow
@@ -323,4 +284,4 @@ User: /learn always auto-approve memory writes to save time
 This would modify /learn's own behavior -- edit the skill template directly instead.
 Nothing persisted.
 ```
-<!-- skill-templates: learn 0000000 2026-05-15 -->
+<!-- skill-templates: learn 57ceacc 2026-05-27 -->

@@ -15,8 +15,8 @@ Unlike `/project-audit` (rates the project) or `/swarm-audit` (audits a specific
 Examples:
 ```
 /recon
-/recon packages/server
-/recon "the websocket protocol" scouts=4
+/recon server
+/recon "the WebSocket protocol" scouts=4
 /recon scouts=2 depth=quick output=-
 /recon packages/app scouts=5 depth=deep
 ```
@@ -70,9 +70,7 @@ Always include the first two. Add more from the extended roster based on the tar
 2. If SCOUT_COUNT >= 3 and DEPTH != quick: add Bloodhound
 3. If SCOUT_COUNT >= 4: add Scribe
 4. If SCOUT_COUNT >= 5 OR target is a specific area: add Native
-5. If target involves the mobile app (e.g., `packages/app`) or Expo SDK: add Expo Expert
-6. If target involves Cloudflare tunnels, WebSocket proxying, or DNS/TLS: add Tunneler
-7. Clamp to SCOUT_COUNT
+5. Clamp to SCOUT_COUNT
 ```
 
 State the selected panel to the user **before** launching.
@@ -269,10 +267,10 @@ Output a concise summary:
 
 ```
 /recon                                  # whole repo, 3 scouts, standard depth
-/recon packages/server                  # focus on server package
-/recon "the websocket protocol" scouts=4 depth=deep
+/recon server                           # focus on server module
+/recon "the WebSocket protocol" scouts=4 depth=deep
 /recon scouts=2 depth=quick output=-    # print-only quick sweep
 /recon . scouts=5                       # full panel including Native + Scribe
 /recon packages/app scouts=4            # monorepo subpackage with extra scout for size
 ```
-<!-- skill-templates: recon 7f5fa28 2026-05-19 -->
+<!-- skill-templates: recon 57ceacc 2026-05-27 -->

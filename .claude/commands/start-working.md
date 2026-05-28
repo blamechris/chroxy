@@ -52,9 +52,9 @@ Categorize each open issue:
 
 | Category | Detection |
 |----------|-----------|
-| Blocked | Has label matching: `blocked`, `wontfix`, `needs-design` |
+| Blocked | Has label matching: `blocked`, `wontfix`, `needs-design`, `on-hold` |
 | Assigned | Has assignees (someone is already working on it) |
-| Ready | Unblocked, unassigned `bug`, `enhancement`, and `from-review` issues |
+| Ready | Unblocked, unassigned `enhancement` or `from-review` issues |
 | Backlog | Open, unassigned, not blocked, but no explicit "ready" signal |
 
 For "Ready" and "Backlog" issues, read the issue body to check for acceptance criteria:
@@ -89,7 +89,19 @@ gh pr checks ${PR_NUM} --json name,state --jq '[.[] | select(.state != "SUCCESS"
 
 #### 1c. Roadmap and Planning Files
 
-Scan for planning documents in common locations.
+Scan for planning documents in common locations:
+
+```bash
+# Check for common planning files (don't fail on missing)
+for f in ROADMAP.md TODO.md CHANGELOG.md; do
+  test -f "$f" && echo "Found: $f"
+done
+
+# Check common planning directories
+for d in docs/roadmap docs/planning docs/TODO; do
+  test -d "$d" && echo "Found: $d/" && ls "$d"
+done
+```
 
 Search for these files (check existence, don't fail if missing):
 - `ROADMAP.md`, `TODO.md`, `CHANGELOG.md` (for recent/planned entries)
@@ -123,8 +135,9 @@ If audit reports exist, read the master assessment for any unaddressed recommend
 Scan for TODO/FIXME/HACK markers in source code:
 
 ```bash
-# Search for actionable markers in server and app files
-grep -r "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" server/**/*.js app/**/*.tsx app/**/*.ts 2>/dev/null | grep -v node_modules | grep -v .godot | grep -v build | grep -v dist
+# Search for actionable markers in server and app source files
+find server -name "*.js" -type f \( ! -path "*/node_modules/*" ! -path "*/.godot/*" ! -path "*/build/*" ! -path "*/dist/*" \) -exec grep -Hn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" {} \;
+find app -name "*.tsx" -o -name "*.ts" -type f \( ! -path "*/node_modules/*" ! -path "*/.godot/*" ! -path "*/build/*" ! -path "*/dist/*" \) -exec grep -Hn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" {} \;
 ```
 
 Use Grep to find `TODO`, `FIXME`, `HACK`, `XXX`, and `WORKAROUND` markers in source files. Exclude:
@@ -143,7 +156,7 @@ Map every finding to a unified priority tier:
 | Tier | Label | Signals |
 |------|-------|---------|
 | P0 | Immediate | PRs with `CHANGES_REQUESTED`, open `bug` issues, failing CI on open PRs |
-| P1 | High | `from-review` issues, milestone-assigned issues, stale PRs |
+| P1 | High | `from-review` issues, unblocked `enhancement` issues with acceptance criteria, stale PRs |
 | P2 | Normal | `enhancement` issues with acceptance criteria, `from-audit` issues, roadmap items |
 | P3 | Exploratory | Codebase TODOs, vague issues without criteria, audit recommendations without issues |
 
@@ -200,8 +213,8 @@ After the summary table, provide detail sections only for sources that had findi
 ### Open Issues ({N} total, {M} ready, {K} blocked)
 
 **Ready to work on:**
-- #18 — Add retry logic to API (`from-review`, `complexity:low`) — has 3 acceptance criteria
-- #25 — Improve error messages (`enhancement`) — milestone v1.2
+- #18 — Add retry logic to API (`from-review`) — has 3 acceptance criteria
+- #25 — Improve error messages (`enhancement`) — clear scope
 
 **Blocked / Needs input:**
 - #30 — Choose auth provider (`needs-design`) — requires decision
@@ -234,9 +247,9 @@ Items from planning docs without corresponding GitHub issues:
 
 | Marker | Count | Top Locations |
 |--------|-------|---------------|
-| TODO | 12 | src/auth/ (5), src/api/ (4), src/utils/ (3) |
-| FIXME | 3 | src/auth/token.js (2), src/db/migrate.js (1) |
-| HACK | 1 | src/api/retry.js:42 |
+| TODO | 12 | server/auth/ (5), server/api/ (4), server/utils/ (3) |
+| FIXME | 3 | server/auth/token.js (2), server/db/migrate.js (1) |
+| HACK | 1 | server/api/retry.js:42 |
 ```
 
 #### Recommended Next Action
@@ -249,7 +262,7 @@ End with a concrete recommendation:
 Based on the work queue:
 - **If you want to fix what's broken:** Address P0 items first — {description}
 - **If you want to build features:** Run `/autonomous-dev-flow {issue_numbers}` for the P1/P2 ready issues
-- **If you want to clean up:** The {N} TODOs in src/auth/ suggest a refactoring pass
+- **If you want to clean up:** The {N} TODOs in server/auth/ suggest a refactoring pass
 ```
 
 ### 4. Quick Audit (Fallback — Only If Queue Is Empty)
@@ -261,10 +274,9 @@ When the queue is truly empty, perform a lightweight codebase scan to surface po
 #### 4a. Test Coverage Gaps
 
 ```bash
-# Server tests (run from workspace root)
-npm test -w packages/server
-# App tests (run from workspace root)
-npm test -w packages/app
+# Check which source directories have corresponding test files
+# Server: npm test
+# App: npx jest
 ```
 
 - Check which source directories have corresponding test files
@@ -274,13 +286,13 @@ npm test -w packages/app
 #### 4b. Dependency Health
 
 ```bash
-# Check for outdated dependencies and vulnerabilities
+# Check for outdated dependencies
 npm outdated
 npm audit
 ```
 
 - Count outdated dependencies
-- Check for known vulnerabilities if tooling is available (`npm audit`, `pip-audit`, etc.)
+- Check for known vulnerabilities if tooling is available
 
 #### 4c. Code Quality Signals
 
@@ -312,13 +324,13 @@ No actionable items found in the standard work sources. Here's what a quick code
 
 ### Suggested Investigations
 
-1. **Add tests for {module}** — {N} files in `src/{path}/` have no tests. Effort: M
+1. **Add tests for {module}** — {N} files in `server/{path}/` have no tests. Effort: M
 2. **Split {file}** — {file} is {N} lines. Consider extracting {concept}. Effort: S
 3. **Update README** — Missing: setup instructions, environment variables. Effort: S
 
 ### Want a Deep Audit?
 
-Run `/swarm-audit` for a comprehensive multi-agent analysis with detailed recommendations.
+Run `/project-audit` for a comprehensive multi-agent analysis with detailed recommendations.
 ```
 
 ## Critical Rules
@@ -331,4 +343,4 @@ Run `/swarm-audit` for a comprehensive multi-agent analysis with detailed recomm
 6. **Respect blocked/assigned** — Show blocked and assigned items for context but clearly separate them from the actionable queue. Never recommend working on a blocked or assigned item.
 7. **Composable output** — The "Recommended Next Action" section should include copy-pasteable commands (e.g., `/autonomous-dev-flow #12 #18 #25`) so the user can immediately act on the findings.
 8. **No file writes** — The fallback audit in Phase 4 outputs to the conversation only. Unlike `/project-audit`, it does NOT write report files or create a `docs/` directory.
-<!-- skill-templates: start-working 59a26f3 2026-02-26 -->
+<!-- skill-templates: start-working 57ceacc 2026-05-27 -->

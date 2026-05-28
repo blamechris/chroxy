@@ -32,7 +32,7 @@ When the user is the sole tester driving real workflows through a working build,
    ```
 4. **On confirmation**:
    - `git checkout -b manual-testing/v{NEXT}`
-   - Bump version across all version-bearing files: `package.json` (root), `packages/{app,desktop,protocol,dashboard,store-core,server}/package.json`, `packages/desktop/src-tauri/Cargo.toml`, `packages/desktop/src-tauri/tauri.conf.json`
+   - Bump version across all version-bearing files: `package.json` (root), `packages/server/package.json`, `packages/app/package.json`, `packages/desktop/package.json`, `packages/protocol/package.json`, `packages/dashboard/package.json`, `packages/store-core/package.json`, `packages/desktop/src-tauri/tauri.conf.json`, `packages/desktop/src-tauri/Cargo.toml`
    - Run `grep '"version":' package.json packages/*/package.json packages/desktop/src-tauri/tauri.conf.json && grep '^version' packages/desktop/src-tauri/Cargo.toml` and confirm each file shows the new version.
    - Commit: `chore(release): bump version to {NEXT}` with a body explaining why (so manual-testing builds are visibly distinct from main).
 5. **Save bootstrap state** to a session-scoped task list (use TaskCreate) for the running list of filed issues:
@@ -179,6 +179,8 @@ In that case:
 4. **Never silently switch modes.** When you decide to fix instead of file, say so explicitly: `Switching to fix mode for #{N}. Investigating now.`
 5. **Default to short responses.** The user is in flow — they don't need essays back. One sentence per filed issue. Save long-form for the wrap-up summary.
 6. **Re-enter the mode if interrupted.** If the user breaks out for an unrelated task (e.g., asks a question about a different repo), pause the mode. Resume on next bug-shaped message.
+7. **Rebuild reminder for desktop UI bugs.** When filing a visual bug on the desktop app, remind the user after the issue is filed that the Tauri bundle is aggressively cached. To verify a fix locally: (1) `cd packages/dashboard && TAURI_ENV_PLATFORM=darwin npm run build`, (2) `cd packages/desktop && bash scripts/bundle-server.sh`, (3) `touch src-tauri/src/lib.rs && cd src-tauri && cargo build --release`, (4) `rm -rf target/release/bundle && cargo tauri bundle`, (5) `pkill Chroxy 2>/dev/null; rm -rf /Applications/Chroxy.app && cp -R target/release/bundle/macos/Chroxy.app /Applications/`.
+8. **Smoke test after fix-mode commits.** After a fix-mode commit on the manual-testing branch, prompt the user: *"Want me to run /smoke-test before we move on?"* — only for desktop/dashboard surface fixes.
 
 ## What this skill does NOT do
 
@@ -220,4 +222,4 @@ A: ## Manual testing session: v0.6.11 (2026-04-26)
 
 Want me to open a PR for the fixes, or leave the branch local?
 ```
-<!-- skill-templates: manual-testing-mode a696a37 2026-05-18 -->
+<!-- skill-templates: manual-testing-mode 57ceacc 2026-05-27 -->

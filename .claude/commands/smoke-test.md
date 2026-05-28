@@ -1,6 +1,6 @@
 # /smoke-test
 
-Run an automated visual smoke test of the Chroxy web dashboard using Playwright. Launches a headless browser, navigates through key UI flows, takes screenshots, and reports pass/fail results.
+Run an automated visual smoke test of the application using Playwright. Launches a headless browser, navigates through key UI flows, takes screenshots, and reports pass/fail results.
 
 ## Arguments
 
@@ -16,8 +16,6 @@ Run an automated visual smoke test of the Chroxy web dashboard using Playwright.
 Verify Playwright is installed and the test script exists:
 
 ```bash
-cd packages/server
-
 # Check Playwright is available
 node -e "require('playwright')" 2>/dev/null || {
   echo "Installing Playwright..."
@@ -26,64 +24,52 @@ node -e "require('playwright')" 2>/dev/null || {
 }
 
 # Check smoke test script exists
-ls tests/smoke-test.mjs || {
-  echo "ERROR: tests/smoke-test.mjs not found"
+test -f packages/server/tests/smoke-test.mjs || {
+  echo "Smoke test script not found at packages/server/tests/smoke-test.mjs"
   exit 1
 }
 ```
 
-### 1. Rebuild Dashboard
+### 1. Ensure Application is Running
 
-The dashboard serves a compiled Vite bundle. Always rebuild before testing to pick up any source changes:
-
-```bash
-cd packages/server
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
-```
-
-### 2. Ensure Server is Running
-
-The smoke test connects to a running chroxy server. Check if one is already running:
+The smoke test connects to a running application instance. Check if one is already running, or start one:
 
 ```bash
-# Probe common ports
-for PORT in 8765 3131 8080 3000; do
-  if curl -s "http://localhost:$PORT/" > /dev/null 2>&1 || \
-     curl -s "http://localhost:$PORT/" 2>&1 | grep -q "403"; then
-    echo "Found server on port $PORT"
-    break
+# Probe for running server on common ports
+for port in 8765 3131 8080 3000; do
+  if curl -s http://localhost:$port/health >/dev/null 2>&1; then
+    echo "Server already running on port $port"
+    exit 0
   fi
 done
+
+# No server found — start one
+echo "Starting chroxy server..."
+npx chroxy start
 ```
 
-If no server is running, the test script will start one automatically and stop it when done.
-
-### 3. Run the Smoke Test
+### 2. Run the Smoke Test
 
 ```bash
 cd packages/server
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" node tests/smoke-test.mjs $ARGUMENTS
+npm run dashboard:build
+node tests/smoke-test.mjs $ARGUMENTS
 ```
 
-Parse the arguments:
-- If `$ARGUMENTS` contains `--headed`, pass it through
-- If `$ARGUMENTS` contains `--keep-screenshots`, note it for cleanup step
+The test script should:
+- Connect to the running application
+- Navigate through key UI flows
+- Take screenshots at each step (saved to a gitignored directory)
+- Output PASS/FAIL for each check
+- Exit 0 (all pass) or 1 (failures)
 
-The test script:
-- Reads auth token from `~/.chroxy/config.json`
-- Connects to `http://localhost:{port}/dashboard/?token={token}`
-- Waits for WebSocket connection (sidebar appears)
-- Runs checks across 4 categories
-- Takes screenshots at each step
-- Outputs PASS/FAIL for each check
-- Exits 0 (all pass) or 1 (failures)
-
-### 4. Read Screenshots
+### 3. Read Screenshots
 
 After the test runs, read each screenshot to visually verify the UI:
 
 ```bash
-ls packages/server/tests/screenshots/*.png
+# Screenshots are saved to packages/server/tests/screenshots/
+ls -la packages/server/tests/screenshots/
 ```
 
 Use the Read tool to view each screenshot image. For each screenshot:
@@ -91,77 +77,127 @@ Use the Read tool to view each screenshot image. For each screenshot:
 - Check for visual regressions (missing elements, broken layouts, overlapping content)
 - Note any issues that the automated checks might have missed
 
-**This visual review is the primary value of the skill** — automated checks confirm DOM presence, but screenshot review catches z-index issues, color problems, overlapping text, and other visual regressions.
+### 4. Report Results
 
-### 5. Report Results
-
-Combine the automated test output with your visual review:
+Output a summary table:
 
 ```markdown
 ## Smoke Test Results
 
 | # | Check | Status | Notes |
 |---|-------|--------|-------|
-| 1 | Dashboard loads | PASS | HTTP 200 |
-| 2 | WebSocket connects | PASS | — |
-| ... | ... | ... | ... |
+| 1 | Dashboard loads | PASS | HTTP 200, WS connected |
+| 2 | Session creation | PASS | Modal opens, form works |
+| 3 | Keyboard shortcuts | PASS | Ctrl+N, Ctrl+K, ? all work |
 
-**Automated:** X/Y passed
-**Visual review:** [describe any issues seen in screenshots]
-**Overall:** PASS / FAIL (with details)
+**Screenshots reviewed:** N
+**Visual issues found:** M (describe any issues)
 ```
 
-If any checks fail:
-- Read the relevant screenshot to diagnose the visual state
-- Check if it's a test selector issue (test bug) vs. a real UI issue (app bug)
-- For real issues, suggest a fix or create an issue
-
-### 6. Cleanup
-
-Unless `--keep-screenshots` was passed:
+### 5. Cleanup
 
 ```bash
-rm -rf packages/server/tests/screenshots
+# Remove screenshots unless --keep-screenshots was passed
+if [[ "$ARGUMENTS" != *"--keep-screenshots"* ]]; then
+  rm -rf packages/server/tests/screenshots/
+fi
 ```
 
-## Test Categories
+If the application was started by this skill (not already running), stop it.
 
-| Category | Checks | What They Verify |
-|----------|--------|-----------------|
-| Dashboard Core | Page loads, WS connects, version badge, sidebar, session tabs, full-width layout, input bar | Basic rendering and connectivity |
-| Session Creation | Ctrl+N opens modal, session name input, CWD combobox, provider picker (SDK/CLI) | New session flow works |
-| Keyboard Shortcuts | `?` help overlay, `Ctrl+N` new session | Shortcut bindings active |
-| Health | Console errors | No JS exceptions |
+## Writing the Smoke Test Script
 
-## Adding New Checks
+If the test script doesn't exist yet, create it following these patterns:
 
-To add checks, edit `packages/server/tests/smoke-test.mjs`. Each check follows this pattern:
+### Script Structure
 
 ```javascript
-// 1. Act — interact with the UI
+/**
+ * Smoke Test — Playwright-based visual verification
+ *
+ * Prerequisites: application must be running.
+ * Screenshots saved to packages/server/tests/screenshots/ (gitignored).
+ */
+
+import { chromium } from 'playwright'
+// ... setup
+
+async function run() {
+  // 1. Find running application
+  // 2. Launch browser
+  // 3. Navigate to app URL (with auth if needed)
+  // 4. Wait for app to be ready (WebSocket, data loading, etc.)
+  // 5. Run checks — each one:
+  //    a. Interact with UI (click, type, navigate)
+  //    b. Take screenshot
+  //    c. Assert element exists / is visible / has correct content
+  //    d. Log PASS or FAIL
+  // 6. Output summary
+  // 7. Exit with appropriate code
+}
+```
+
+### Check Patterns
+
+Each check should:
+1. **Act** — Navigate, click, type
+2. **Screenshot** — Capture current state
+3. **Assert** — Verify expected elements/content
+4. **Report** — Log PASS/FAIL with details
+
+```javascript
+// Example: Check a modal opens
 await page.keyboard.press('Control+n')
 await page.waitForTimeout(500)
-
-// 2. Screenshot — capture current state
 await screenshot(page, '02-modal-open')
 
-// 3. Assert — verify expected result
 const modal = await page.$('.modal-overlay')
 if (modal && await modal.isVisible()) {
   pass('Modal opens')
 } else {
-  fail('Modal opens', 'Not visible')
+  fail('Modal opens', 'Not visible after Ctrl+N')
 }
 ```
 
-Prefer stable selectors: `aria-label` > `role` > class names > text content.
+### Selector Strategy
+
+Prefer stable selectors in this order:
+1. `aria-label`, `role`, `data-testid` attributes
+2. Class names matching component names
+3. Semantic HTML elements (`header`, `main`, `nav`)
+4. Text content (last resort — fragile)
+
+### Connection Handling
+
+Many apps need a backend connection before the full UI renders. Always wait for the "ready" state:
+
+```javascript
+// Wait for app to be fully loaded and connected
+await page.waitForFunction(() => {
+  const body = document.body.innerText
+  return !body.includes('Disconnected') && !body.includes('Connecting...')
+}, { timeout: 10000 })
+```
+
+## Test Categories
+
+Organize checks into logical groups:
+
+| Category | What to Verify |
+|----------|---------------|
+| Dashboard Core | Page loads (HTTP 200), WS connects, version badge, sidebar, session tabs, full-width layout, input bar |
+| Session Creation | Ctrl+N opens modal, session name input, CWD combobox, provider picker (SDK/CLI options) |
+| Keyboard Shortcuts | `?` opens help overlay, `Ctrl+K` command palette, `Ctrl+N` new session |
+| Health | No critical console errors |
 
 ## Critical Rules
 
-1. **Never send real messages** — Smoke tests verify UI, not Claude. Don't submit the input bar.
-2. **Rebuild dashboard first** — The server serves compiled bundles. Source changes aren't visible until `npm run dashboard:build`.
-3. **Screenshots are temporary** — Always clean up unless `--keep-screenshots`. They're gitignored.
-4. **Server lifecycle** — The test auto-starts a server if none is running, and stops it when done. If one is already running, it reuses it.
-5. **Visual review is mandatory** — Read every screenshot. The automated checks are necessary but not sufficient.
-6. **Idempotent** — Safe to run repeatedly. Don't create sessions or send messages.
-<!-- skill-templates: smoke-test 0000000 2026-05-15 -->
+1. **Never send real messages** — Smoke tests verify UI, not backend processing. Don't submit forms that trigger expensive operations.
+2. **Screenshots are temporary** — Always clean up unless `--keep-screenshots`. Add the directory to `.gitignore`.
+3. **Fail fast on no connection** — If the app isn't running or can't connect, report immediately instead of running checks that will all fail.
+4. **Stable selectors** — Use aria labels and roles, not brittle CSS class names that change with refactors.
+5. **Visual verification is the point** — The automated checks catch DOM presence. Reading screenshots catches visual regressions (z-index, color, spacing).
+6. **Idempotent** — Safe to run repeatedly. Don't create persistent state (sessions, data, etc.) that would affect the next run.
+7. **Dashboard rebuild required** — Always run `npm run dashboard:build` before testing. Provider picker CSS and other assets are not visible without rebuild.
+8. **Keyboard shortcut quirk** — `?` shortcut fails if textarea has focus (key goes to input, not shortcut handler). Click body first before testing the shortcut.
+<!-- skill-templates: smoke-test 57ceacc 2026-05-27 -->
