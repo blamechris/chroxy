@@ -224,6 +224,47 @@ export function Sidebar({
     })
   }, [])
 
+  // #4392: a11y — invoke the sidebar context menu via keyboard. PR #4369
+  // added arrow-key nav WITHIN the open menu, #4372 returned focus to the
+  // row on close. This is the missing third leg: keyboard users navigating
+  // the sidebar (Tab/ArrowDown) couldn't OPEN the menu without a mouse.
+  //
+  // Two platform-standard shortcuts:
+  //   - `ContextMenu` key (dedicated menu key on most PC keyboards)
+  //   - Shift+F10 (Windows/Linux convention; harmless on macOS where the
+  //     key normally only adjusts speaker volume — Shift+F10 isn't bound)
+  //
+  // The handler synthesizes a position from the row's bounding rect
+  // (right-edge center) and forwards a MouseEvent-shaped payload to the
+  // existing onContextMenu prop. App.tsx reads `clientX/clientY` and
+  // `currentTarget.focus()` from the event — both are stubbed here so the
+  // keyboard path lights up the same code as a real right-click.
+  const invokeContextMenuFromKey = useCallback((
+    e: React.KeyboardEvent<HTMLElement>,
+    target: ContextMenuTarget,
+  ) => {
+    if (!(e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) return
+    e.preventDefault()
+    e.stopPropagation()
+    const row = e.currentTarget
+    const rect = row.getBoundingClientRect()
+    // Right-edge center: places the menu's top-left near the visible
+    // right side of the row, which lines up well with a left-to-right
+    // sidebar where the menu opens into the editor area.
+    const x = rect.right - 10
+    const y = rect.top + rect.height / 2
+    const synthetic = {
+      clientX: x,
+      clientY: y,
+      currentTarget: row,
+      target: row,
+      preventDefault: () => e.preventDefault(),
+      stopPropagation: () => e.stopPropagation(),
+      nativeEvent: e.nativeEvent,
+    } as unknown as React.MouseEvent
+    onContextMenu(target, synthetic)
+  }, [onContextMenu])
+
   // Keyboard handler for WAI-ARIA TreeView pattern
   const handleTreeKeyDown = useCallback((e: React.KeyboardEvent) => {
     const items = getVisibleItems()
@@ -372,6 +413,11 @@ export function Sidebar({
                     e.preventDefault()
                     onContextMenu({ type: 'repo', path: repo.path }, e)
                   }}
+                  // #4392: keyboard invocation of the context menu via the
+                  // ContextMenu key or Shift+F10. invokeContextMenuFromKey
+                  // is a no-op for any other key, so this does not
+                  // interfere with the tree-level arrow nav.
+                  onKeyDown={e => invokeContextMenuFromKey(e, { type: 'repo', path: repo.path })}
                 >
                   <div
                     className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
@@ -428,6 +474,11 @@ export function Sidebar({
                               e.stopPropagation()
                               onContextMenu({ type: 'session', sessionId: session.sessionId }, e)
                             }}
+                            // #4392: keyboard invocation (ContextMenu /
+                            // Shift+F10). stopPropagation inside the helper
+                            // keeps the event from also reaching the outer
+                            // repo treeitem's onKeyDown.
+                            onKeyDown={e => invokeContextMenuFromKey(e, { type: 'session', sessionId: session.sessionId })}
                           >
                             <span className={`sidebar-session-dot status-${status}`} title={statusTitle} />
                             <span className="sidebar-session-name">{session.name}</span>
@@ -496,6 +547,10 @@ export function Sidebar({
                             e.stopPropagation()
                             onContextMenu({ type: 'resumable', conversationId: conv.conversationId }, e)
                           }}
+                          // #4392: keyboard invocation (ContextMenu /
+                          // Shift+F10), see matching binding on session
+                          // rows above.
+                          onKeyDown={e => invokeContextMenuFromKey(e, { type: 'resumable', conversationId: conv.conversationId })}
                         >
                           <span className="sidebar-resumable-dot" title="Resumable conversation" />
                           <span className="sidebar-session-name">
