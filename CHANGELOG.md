@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-05-28
+
+Same-day follow-up to v0.9.9. Same theme — dashboard polish and dogfood-driven correctness — picking up everything #4396 spilled over, plus stale Codex context-window values, customizable keyboard shortcuts, and three small follow-ups to v0.9.9's thinking-keyword work.
+
+### Added
+
+- **Customizable keyboard shortcuts via Settings UI (#3852 / #4410):** shortcut registry (`packages/dashboard/src/shortcuts/`) with default bindings, rebind UI in the existing `ShortcutHelp` cheat sheet, key-capture input for capturing combos, conflict detection, and persistence across restarts. Scope-reduced from "migrate every shortcut" to "register one shortcut end-to-end + UI"; [#4412](https://github.com/blamechris/chroxy/issues/4412) tracks migrating the remaining hand-rolled shortcuts (Cmd+1-9, Cmd+Shift+[/], Cmd+W, etc.). In-PR critical fix: `App.tsx`'s `SHORTCUTS` useMemo dep was the stable registry reference, so a rebind didn't recompute the cheat sheet — now keyed on the effective bindings.
+- **Codex context-window learn-loop + 100% compact-suggestion CTA (#3857 / #4411):** server now ratchets the registered context window upward when a Codex session reports a higher token total (capped at 2,000,000 with NaN/Infinity/negative input rejection), and the dashboard footer meter shows a "Try /compact" CTA when usage hits 100% — `prefers-reduced-motion` honoured on the over-budget pulse. Follow-ups [#4413](https://github.com/blamechris/chroxy/issues/4413) (persist ratchets across server restart) and [#4414](https://github.com/blamechris/chroxy/issues/4414) (extend to Gemini) are tracked.
+
+### Fixed
+
+- **ChatView state preserved across System-tab switch + skip hidden re-renders (#4397 + #4398 / #4408):** picks up the two follow-ups #4396 spilled over from #4305. The System tab now uses the same `display: contents` / `display: none` keep-alive pattern as Chat/Output, so `ToolGroup`/`ToolBubble` expand state survives switching to System and back. Separately, `ChatView` is wrapped in `React.memo` with a `Boolean(prev.hidden) && Boolean(next.hidden)` comparator that skips `renderMessage` entirely while hidden — long sessions no longer pay the re-render cost for the inactive pane. Always re-renders with latest props on the visible transition.
+- **Thinking-keyword regex tightened to horizontal whitespace + reuse module-level regex (#4402 + #4404 / #4409):** v0.9.9's `\s+` between multi-word entries (`think\s+harder`) matched arbitrary newline runs, so "think" + Enter + "harder" across two lines would falsely escalate. Replaced with `[ \t]+` in both `detect-thinking-keyword.js` and `thinking-keyword-tokens.ts`. Also fixed the dashboard tokenizer cloning the module-level regex per call — it now reuses the module-level instance with `lastIndex = 0` between calls.
+
+### Performance
+
+- **InputBar overlay onScroll handler memoised (#4403 / #4407):** previously created fresh per render as an inline arrow function. Now wrapped in `useCallback` with a stable reference — same change applied to the gate's `tokens ? ... : undefined` form.
+
 ## [0.9.9] - 2026-05-28
 
 Dashboard UX bug-bundle release. Focus areas: making the working session look alive (in-flight tool naming, spinners, thinking-keyword escalation) and fixing two long-standing chat/output rendering bugs that made dogfooded TUI sessions feel broken. Also adds the keyboard-only third leg of the sidebar context menu story (Shift+F10 / ContextMenu key) and several skill-template / process improvements for handling external contributors.
