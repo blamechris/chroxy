@@ -247,6 +247,18 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [open, availableProviders, provider])
 
+  // #4245: reset skipPermissions whenever the provider changes. The
+  // checkbox is hidden for non-TUI providers, but the underlying state
+  // survives a provider switch — so a user who ticks the box for
+  // claude-tui, tabs to claude-sdk, then tabs back to claude-tui would
+  // see the checkbox pre-checked with no fresh warning. Force a
+  // re-confirmation by clearing the state on every provider change. The
+  // submit-time guard (`provider === 'claude-tui' && skipPermissions`)
+  // still acts as belt + braces in case this reset races a submit.
+  useEffect(() => {
+    setSkipPermissions(false)
+  }, [provider])
+
   // #4340: gate the Create button on the selected provider being ready.
   // Pre-#4340 the dropdown disabled unready options so they couldn't be
   // selected; now we let the user navigate to any provider to read its

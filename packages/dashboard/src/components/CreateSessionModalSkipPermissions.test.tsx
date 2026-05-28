@@ -148,4 +148,77 @@ describe('CreateSessionModal skip-permissions checkbox (#4208)', () => {
     expect(onCreate).toHaveBeenCalledTimes(1)
     expect(onCreate.mock.calls[0]![0].skipPermissions).toBeUndefined()
   })
+
+  // #4245: the skipPermissions state must reset when the user switches
+  // provider. Before the fix, ticking the box for claude-tui, switching to
+  // claude-sdk, then switching back to claude-tui would leave the checkbox
+  // pre-checked with no fresh warning — a security-UX wart. The submit
+  // guard caught the cross-provider case at submit time, but the user
+  // wouldn't be re-prompted to confirm the dangerous flag.
+  describe('provider-switch reset (#4245)', () => {
+    it('resets skipPermissions to false when switching from claude-tui to claude-sdk and back', async () => {
+      mockStore('claude-tui')
+      const CreateSessionModal = await loadModal()
+      const onCreate = vi.fn()
+      render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
+      openAdvanced()
+      // Tick the checkbox under claude-tui
+      const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
+      fireEvent.click(cb)
+      expect(cb.checked).toBe(true)
+      // Switch to claude-sdk — checkbox hides
+      const select = screen.getByLabelText(/select provider/i) as HTMLSelectElement
+      fireEvent.change(select, { target: { value: 'claude-sdk' } })
+      expect(screen.queryByTestId('skip-permissions-checkbox')).not.toBeInTheDocument()
+      // Switch back to claude-tui — checkbox renders again, must be unchecked
+      fireEvent.change(select, { target: { value: 'claude-tui' } })
+      const cb2 = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
+      expect(cb2.checked).toBe(false)
+    })
+
+    it('resets skipPermissions when switching away from claude-tui even without coming back', async () => {
+      mockStore('claude-tui')
+      const CreateSessionModal = await loadModal()
+      const onCreate = vi.fn()
+      render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
+      openAdvanced()
+      const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
+      fireEvent.click(cb)
+      expect(cb.checked).toBe(true)
+      // Switch to claude-sdk and submit — the submit guard already strips
+      // the flag on non-TUI providers, but the underlying state should
+      // also be reset so the UX is consistent.
+      const select = screen.getByLabelText(/select provider/i) as HTMLSelectElement
+      fireEvent.change(select, { target: { value: 'claude-sdk' } })
+      fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+      expect(onCreate).toHaveBeenCalledTimes(1)
+      expect(onCreate.mock.calls[0]![0]).toMatchObject({
+        provider: 'claude-sdk',
+      })
+      expect(onCreate.mock.calls[0]![0].skipPermissions).toBeUndefined()
+    })
+
+    it('does NOT reset skipPermissions when the provider stays the same (state survives unrelated re-renders)', async () => {
+      mockStore('claude-tui')
+      const CreateSessionModal = await loadModal()
+      const onCreate = vi.fn()
+      render(<CreateSessionModal {...baseProps} onCreate={onCreate} />)
+      openAdvanced()
+      const cb = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
+      fireEvent.click(cb)
+      expect(cb.checked).toBe(true)
+      // An unrelated state change (typing in the session name) must not
+      // reset the checkbox — only provider changes do.
+      const nameInput = screen.getByLabelText(/session name/i) as HTMLInputElement
+      fireEvent.change(nameInput, { target: { value: 'my-session' } })
+      const cbAfter = screen.getByTestId('skip-permissions-checkbox') as HTMLInputElement
+      expect(cbAfter.checked).toBe(true)
+      fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+      expect(onCreate).toHaveBeenCalledTimes(1)
+      expect(onCreate.mock.calls[0]![0]).toMatchObject({
+        provider: 'claude-tui',
+        skipPermissions: true,
+      })
+    })
+  })
 })
