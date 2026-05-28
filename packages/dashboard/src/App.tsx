@@ -1532,24 +1532,31 @@ export function App() {
     return null
   }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
 
+  // #3852: pull the effective bindings for the four registry-managed
+  // shortcuts out into render-time locals so the useMemo below can
+  // observe them in its dep array. Reading `shortcutRegistry` alone is
+  // not enough — the registry reference is stable, so a dep of
+  // `[shortcutRegistry]` would skip recomputation after a rebind and
+  // the cheat sheet would show stale combos. The hook (re-)renders us
+  // whenever a binding changes, so reading getBinding() here picks up
+  // the new value on that render.
+  const isMacForCheatsheet = isMacPlatform()
+  const paletteBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('palette.toggle'), isMacForCheatsheet)
+  const sidebarBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('sidebar.toggle'), isMacForCheatsheet)
+  const settingsBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('settings.open'), isMacForCheatsheet)
+  const newSessionBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('session.new'), isMacForCheatsheet)
+
   const SHORTCUTS: ShortcutEntry[] = useMemo(() => {
     // #2883: author entries with canonical `Cmd+...` labels and rewrite to
     // `Ctrl+...` at render time on non-Mac platforms so the cheat-sheet
     // matches the modifier the user can actually press.
-    // #3852: customizable IDs read their effective binding from the
-    // registry so user overrides show up in the cheat sheet too.
-    const isMac = isMacPlatform()
-    const customBinding = (id: string, fallback: string) => {
-      const entry = shortcutRegistry.get(id)
-      return entry ? formatBindingForDisplay(entry.binding, isMac) : fallback
-    }
     const rawEntries: ShortcutEntry[] = [
       { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
-      { keys: customBinding('palette.toggle', 'Cmd+K'), description: 'Command palette', section: 'Global' },
+      { keys: paletteBindingDisplay || 'Cmd+K', description: 'Command palette', section: 'Global' },
       { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
-      { keys: customBinding('session.new', 'Cmd+N'), description: 'New session', section: 'Global' },
-      { keys: customBinding('sidebar.toggle', 'Cmd+B'), description: 'Toggle sidebar', section: 'Global' },
-      { keys: customBinding('settings.open', 'Cmd+,'), description: 'Settings', section: 'Global' },
+      { keys: newSessionBindingDisplay || 'Cmd+N', description: 'New session', section: 'Global' },
+      { keys: sidebarBindingDisplay || 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
+      { keys: settingsBindingDisplay || 'Cmd+,', description: 'Settings', section: 'Global' },
       { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
       { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
       { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
@@ -1574,7 +1581,7 @@ export function App() {
       })
     }
     return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
-  }, [shortcutRegistry])
+  }, [paletteBindingDisplay, sidebarBindingDisplay, settingsBindingDisplay, newSessionBindingDisplay])
 
   // Compute context window usage percentage from active model metadata
   const contextPercent = useMemo(() => {

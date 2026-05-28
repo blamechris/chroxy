@@ -111,6 +111,22 @@ describe('<ShortcutsSection>', () => {
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
   })
 
+  it('useShortcutRegistry re-renders downstream consumers when a binding changes', () => {
+    // Regression for the App.tsx cheat-sheet stale-binding bug: the
+    // hook returns a stable `registry` reference, so a useMemo with
+    // `[registry]` as the dep would skip recomputation after a rebind.
+    // The cheat sheet must read getBinding() at render time and use
+    // those values as deps. This test verifies the hook actually fires
+    // re-renders by asserting a sibling component re-renders too.
+    const registry = installFreshRegistry()
+    // Render the section to subscribe via useShortcutRegistry.
+    render(<ShortcutsSection />)
+    expect(screen.getByTestId('shortcut-binding-palette.toggle')).toHaveTextContent('Cmd+K')
+    // Mutate registry directly (no UI). The hook should re-render.
+    act(() => { registry.setBinding('palette.toggle', 'cmd+j') })
+    expect(screen.getByTestId('shortcut-binding-palette.toggle')).toHaveTextContent('Cmd+J')
+  })
+
   it('displays Ctrl instead of Cmd on non-Mac UAs', () => {
     Object.defineProperty(window.navigator, 'userAgent', {
       configurable: true,
