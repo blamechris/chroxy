@@ -105,8 +105,30 @@ describe('detectThinkingKeyword', () => {
       assert.equal(detectThinkingKeyword('please think  harder').keyword, 'think harder')
     })
 
-    it('matches "think\\nharder" across a newline', () => {
-      assert.equal(detectThinkingKeyword('please think\nharder').keyword, 'think harder')
+    it('matches "think\\tharder" with a tab', () => {
+      assert.equal(detectThinkingKeyword('please think\tharder').keyword, 'think harder')
+    })
+
+    // #4402: `\s+` used to swallow newlines, falsely matching unrelated
+    // thoughts on consecutive lines (e.g. "think.\n\nNow let's go harder.").
+    // Horizontal whitespace only now — single-line space/tab runs only.
+    it('does NOT match "think\\nharder" across a newline (#4402)', () => {
+      // `think` on its own is still a whole-word match, so the result here
+      // is the single-word `think` budget, NOT the escalated `think harder`.
+      const result = detectThinkingKeyword('please think\nharder')
+      assert.equal(result.keyword, 'think')
+    })
+
+    it('does NOT match "think\\n\\nharder" across a paragraph boundary (#4402)', () => {
+      const result = detectThinkingKeyword('please think\n\nharder')
+      assert.equal(result.keyword, 'think')
+    })
+
+    it('does NOT match "think hard" split across lines as "think\\nhard" (#4402)', () => {
+      // Same rationale — `\n` between `think` and `hard` is no longer
+      // considered a keyword boundary; falls back to bare `think`.
+      const result = detectThinkingKeyword('please think\nhard about it')
+      assert.equal(result.keyword, 'think')
     })
   })
 

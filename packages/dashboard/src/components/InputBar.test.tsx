@@ -2358,4 +2358,43 @@ describe('InputBar — thinking-keyword highlight overlay (#4306)', () => {
     const overlay = screen.getByTestId('thinking-keyword-overlay')
     expect(overlay.getAttribute('aria-hidden')).toBe('true')
   })
+
+  // #4403 — guard against the inline-arrow regression: the overlay scroll-sync
+  // handler used to be allocated fresh on every render, churning a function
+  // per keystroke while the overlay is enabled. Wrapping it in useCallback
+  // keeps the same reference across re-renders, so the textarea's onScroll
+  // prop must be referentially stable as long as the overlay stays on.
+  it('keeps the textarea onScroll handler referentially stable across re-renders (#4403)', () => {
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ultrathink the architecture"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // React stores the props for a DOM node on a `__reactProps$<id>` key. We
+    // can't predict the suffix so look it up by prefix — the alternative is
+    // wiring a test-only spy into the component, which we'd rather avoid.
+    const propsKey = Object.keys(textarea).find(k => k.startsWith('__reactProps'))
+    expect(propsKey).toBeDefined()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstOnScroll = (textarea as any)[propsKey!].onScroll
+    expect(typeof firstOnScroll).toBe('function')
+
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ultrathink the architecture again"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const secondOnScroll = (textarea as any)[propsKey!].onScroll
+    expect(secondOnScroll).toBe(firstOnScroll)
+  })
 })
