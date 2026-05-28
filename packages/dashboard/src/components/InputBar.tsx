@@ -106,6 +106,31 @@ export interface InputBarProps {
   onInspectPastedText?: (id: number) => void
   /** #3797 — × handler that removes the chip and strips the inline marker. */
   onRemovePastedText?: (id: number) => void
+  /**
+   * #3698 — terminal-style Up/Down history. **Oldest-first** list of the
+   * user's previously sent message texts in the current session (i.e. the
+   * natural array order from `messages.filter(m => m.type === 'user_input')`).
+   * Up at caret==0 (or at caret==value.length with the caret collapsed)
+   * recalls the most recent message; further Ups walk further back; Down
+   * walks forward toward the most recent; Down past the newest restores the
+   * in-progress draft.
+   *
+   * The component treats index `length-1` as the newest entry and `0` as the
+   * oldest — this matches how App.tsx already orders messages by arrival, so
+   * the caller can pass the filtered array verbatim without a reverse() copy.
+   *
+   * History is per-session: pass a fresh array reference when the active
+   * session changes (App.tsx already does this since `messages` comes
+   * from `getActiveSessionState()`). The component resets its cycling
+   * index whenever this prop's array identity changes — so a fresh
+   * session, a newly sent message (history grows), or any other reason
+   * the parent rebuilds the array will start the next Up at the newest
+   * entry rather than continuing from a stale index.
+   *
+   * Omit the prop (or pass `undefined`) to disable history navigation
+   * entirely — Up/Down then revert to plain cursor movement.
+   */
+  userMessageHistory?: string[]
 }
 
 type EvaluatorState =
@@ -114,7 +139,7 @@ type EvaluatorState =
   | { kind: 'result', result: EvaluatorResultPayload }
   | { kind: 'error', message: string }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -129,6 +154,32 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   // #3068 — manual prompt evaluator state machine. Lives in InputBar because
   // applying a rewrite has to swap the textarea value and re-focus it.
   const [evaluatorState, setEvaluatorState] = useState<EvaluatorState>({ kind: 'idle' })
+
+  // #3698 — terminal-style Up/Down history cycling. `historyIndex === null`
+  // means we're not currently cycling (so the next Up may stash the in-
+  // progress draft and step to the newest entry). A non-null index walks
+  // newest → oldest as the user presses Up; Down steps back toward newest,
+  // and Down past index 0 exits cycling and restores the stashed draft.
+  //
+  // Both pieces of state are intentionally ephemeral — they live in the
+  // component (not the Zustand store) because they're pure UI state with no
+  // persistence requirement. See the prop JSDoc above for the per-session
+  // reset behaviour driven by `userMessageHistory` array identity.
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  const [draftBeforeCycle, setDraftBeforeCycle] = useState<string>('')
+
+  // Reset the cycling state whenever the history array reference changes.
+  // This covers two natural triggers:
+  //   1. The user sends a message → App.tsx pushes a new user_input entry,
+  //      which rebuilds the filtered history array → identity changes → reset.
+  //   2. The user switches sessions → activeSessionId flips →
+  //      getActiveSessionState() returns a different messages array → reset.
+  // We intentionally key only on the array reference, not its contents, so we
+  // don't pay a deep-compare cost on every render.
+  useEffect(() => {
+    setHistoryIndex(null)
+    setDraftBeforeCycle('')
+  }, [userMessageHistory])
 
   const handleEvaluate = useCallback(async () => {
     if (!onEvaluate) return
@@ -262,6 +313,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     // #3068: drop any visible evaluator panel — its draft has been sent so the
     // result no longer applies to the current input value.
     setEvaluatorState({ kind: 'idle' })
+    // #3698: sending exits cycling mode. The userMessageHistory effect already
+    // resets when the parent rebuilds the array, but doing it here too makes
+    // the local state consistent immediately (before the parent re-render
+    // pushes the new history through).
+    setHistoryIndex(null)
+    setDraftBeforeCycle('')
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -314,6 +371,33 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     textareaRef.current?.focus()
     return true
   }, [value, attachments, imageAttachments, pastedTextBlocks, onRemoveAttachment, onRemoveImage, onRemovePastedText, setValue])
+
+  // #3698 — recall a history entry by depth (0 = newest, 1 = one back, …).
+  // Walks the textarea value through the parent's setValue (so controlled
+  // mode stays in sync) and parks the caret at the end on the next animation
+  // frame so the user can immediately edit at the tail of the recalled text —
+  // matches shell `up-arrow` UX. The array is oldest-first, so depth maps to
+  // `length - 1 - depth`.
+  const recallHistoryAtDepth = useCallback((depth: number) => {
+    const entries = userMessageHistory
+    if (!entries || entries.length === 0) return
+    const arrayIdx = entries.length - 1 - depth
+    if (arrayIdx < 0 || arrayIdx >= entries.length) return
+    const entry = entries[arrayIdx]
+    if (entry === undefined) return
+    setValue(entry)
+    setHistoryIndex(depth)
+    // Park the caret at the end on the next frame, after React applies the
+    // controlled-value update. Without rAF the setSelectionRange runs before
+    // the new value is reflected in textarea.value, so the caret ends up at
+    // the wrong spot.
+    requestAnimationFrame(() => {
+      const t = textareaRef.current
+      if (!t) return
+      const end = t.value.length
+      t.setSelectionRange(end, end)
+    })
+  }, [userMessageHistory, setValue])
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Slash command picker keyboard handling
@@ -375,6 +459,66 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       }
     }
 
+    // #3698 — terminal-style Up/Down history. Only fires when:
+    //   - both pickers are closed (handled above, which return early),
+    //   - history exists,
+    //   - selection is collapsed (no text selected — preserves shift-select),
+    //   - and the caret is at a textarea boundary (start for Up, end for Down,
+    //     mirroring the "first line / last line" heuristic).
+    // We use absolute caret positions (`selectionStart === 0` for Up,
+    // `selectionStart === value.length` for Down) so a multi-line draft only
+    // recalls history when the user is *already* at the very top or bottom —
+    // line-up / line-down movement inside the textarea still works normally.
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && userMessageHistory && userMessageHistory.length > 0) {
+      const ta = e.currentTarget
+      const start = ta.selectionStart
+      const end = ta.selectionEnd
+      const collapsed = start === end
+      const atStart = start === 0
+      const atEnd = start === value.length
+      if (collapsed) {
+        if (e.key === 'ArrowUp' && (atStart || atEnd)) {
+          // `historyIndex` is a depth: 0 = newest, length-1 = oldest. Up walks
+          // deeper into history; we silently swallow Up at the oldest entry
+          // rather than wrapping (matches bash/zsh).
+          if (historyIndex === null) {
+            e.preventDefault()
+            setDraftBeforeCycle(value)
+            recallHistoryAtDepth(0)
+            return
+          }
+          if (historyIndex < userMessageHistory.length - 1) {
+            e.preventDefault()
+            recallHistoryAtDepth(historyIndex + 1)
+            return
+          }
+          // At the oldest entry — preventDefault so the caret doesn't jump out
+          // of the textarea, but don't update value.
+          e.preventDefault()
+          return
+        }
+        if (e.key === 'ArrowDown' && atEnd && historyIndex !== null) {
+          e.preventDefault()
+          if (historyIndex > 0) {
+            recallHistoryAtDepth(historyIndex - 1)
+          } else {
+            // Down past the newest entry → exit cycling, restore draft.
+            setValue(draftBeforeCycle)
+            setHistoryIndex(null)
+            // Mirror recallHistoryAtDepth's caret-at-end policy so the user
+            // can immediately edit the restored draft without re-positioning.
+            requestAnimationFrame(() => {
+              const t = textareaRef.current
+              if (!t) return
+              const endPos = t.value.length
+              t.setSelectionRange(endPos, endPos)
+            })
+          }
+          return
+        }
+      }
+    }
+
     if (e.key === 'Enter') {
       if (sendOnEnter && !e.shiftKey) {
         e.preventDefault()
@@ -384,6 +528,21 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         send()
       }
     } else if (e.key === 'Escape') {
+      // #3698 — while cycling history, Escape exits cycling and restores the
+      // stashed draft instead of firing the interrupt. Once cycling is reset,
+      // Escape resumes its original behaviour (`onInterrupt`).
+      if (historyIndex !== null) {
+        e.preventDefault()
+        setValue(draftBeforeCycle)
+        setHistoryIndex(null)
+        requestAnimationFrame(() => {
+          const t = textareaRef.current
+          if (!t) return
+          const endPos = t.value.length
+          t.setSelectionRange(endPos, endPos)
+        })
+        return
+      }
       e.preventDefault()
       onInterrupt()
     } else if ((e.key === 'l' || e.key === 'L') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
@@ -395,11 +554,27 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         e.preventDefault()
       }
     }
-  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer])
+  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
     setValue(newValue)
+
+    // #3698 — any direct user edit exits cycling. We only reset when the new
+    // value isn't the one we just recalled (recallHistoryAtDepth's setValue()
+    // flows through the parent and re-renders, but onChange itself doesn't
+    // fire for controlled updates). The cheap guard is "did `historyIndex`
+    // get set?" — programmatic recall sets it; real user typing leaves it
+    // untouched before this handler runs. The recalled-text equality check
+    // covers the edge case where the user retypes the recalled string
+    // verbatim (rare).
+    if (historyIndex !== null && userMessageHistory) {
+      const recalled = userMessageHistory[userMessageHistory.length - 1 - historyIndex]
+      if (newValue !== recalled) {
+        setHistoryIndex(null)
+        setDraftBeforeCycle('')
+      }
+    }
 
     // Slash command detection: "/" at start of input
     if (slashCommands && newValue.startsWith('/')) {
@@ -454,7 +629,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       ? outerHeight
       : outerHeight - paddingY - borderY
     el.style.height = assignedHeight + 'px'
-  }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
+  }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger, historyIndex, userMessageHistory, setValue])
 
   // Merge voice transcript into input value via effect (not during render)
   const prevTranscriptRef = useRef('')

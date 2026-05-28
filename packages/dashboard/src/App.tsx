@@ -349,6 +349,20 @@ export function App() {
   )
   usePermissionNotification(permissionPrompts)
 
+  // #3698 — derive the user-message history for the InputBar's terminal-
+  // style Up/Down navigation. Oldest-first (matches the natural arrival
+  // order of `messages`), and trims out empty bodies so a stray no-op
+  // user_input never recalls a blank string. The memo re-runs only when
+  // `storeMessages` reference changes, and InputBar's per-prop reset
+  // ensures cycling state resets on session switch (the active session's
+  // messages array is a different reference) and on send (history grows).
+  const userMessageHistory = useMemo(
+    () => storeMessages
+      .filter(m => m.type === 'user_input' && typeof m.content === 'string' && m.content.length > 0)
+      .map(m => m.content),
+    [storeMessages],
+  )
+
   const slashCommands = useConnectionStore(s => s.slashCommands)
 
   // Store actions (stable refs)
@@ -2019,6 +2033,7 @@ export function App() {
               pastedTextBlocks={pastedTextBlocks}
               onInspectPastedText={handleInspectPastedText}
               onRemovePastedText={handleRemovePastedText}
+              userMessageHistory={userMessageHistory}
             />
           </>
         )}
