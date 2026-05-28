@@ -62,7 +62,9 @@ npx chroxy tunnel setup
 **When user says "Resume" or "Let's start":**
 1. `cat CLAUDE.md` - Read this file
 2. `git status && git log --oneline -5` - Check current state
-3. Review any open PRs: `gh pr list`
+3. Review open PRs, **separated by author** so external contributions don't get lost in your own queue:
+   - Yours: `gh pr list --state open --author @me`
+   - **External:** `gh pr list --state open --search "-author:@me"` — flag any results for review attention before starting new marathons (an open external PR may already cover an issue you'd otherwise queue)
 4. Check for skill template updates: `~/Projects/skill-templates/sync.sh chroxy`
 
 ### Skill Templates
