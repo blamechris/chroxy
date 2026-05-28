@@ -2233,3 +2233,129 @@ describe('InputBar history navigation (#3698)', () => {
     expect(onValueChange).toHaveBeenLastCalledWith('b-new')
   })
 })
+
+// #4306 — thinking-keyword highlight overlay. The overlay is gated on a
+// `highlightThinkingKeywords` prop driven by the active provider's
+// `capabilities.thinkingLevel` flag, so providers that can't honour the
+// keyword (CLI `-p`, codex, gemini) get no highlight — otherwise we'd
+// imply an escalation that isn't happening server-side.
+describe('InputBar — thinking-keyword highlight overlay (#4306)', () => {
+  it('does NOT render the overlay when highlightThinkingKeywords is omitted (default)', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    expect(screen.queryByTestId('thinking-keyword-overlay')).not.toBeInTheDocument()
+  })
+
+  it('does NOT render the overlay when highlightThinkingKeywords is false', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="please ultrathink this"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords={false}
+      />,
+    )
+    // Even with a matching keyword in the value, the overlay stays absent
+    // — this is the "do not lie to the user" gate for non-escalating
+    // providers.
+    expect(screen.queryByTestId('thinking-keyword-overlay')).not.toBeInTheDocument()
+    expect(screen.queryAllByTestId('thinking-keyword')).toHaveLength(0)
+  })
+
+  it('renders the overlay when highlightThinkingKeywords is true', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    // Overlay container is present even when empty — necessary so the
+    // mirror div is mounted before the first keystroke fires onChange.
+    expect(screen.getByTestId('thinking-keyword-overlay')).toBeInTheDocument()
+    // …but with no keywords typed yet, there are no matched spans.
+    expect(screen.queryAllByTestId('thinking-keyword')).toHaveLength(0)
+  })
+
+  it('wraps a matched keyword in a highlight span', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="please ultrathink the architecture"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const spans = screen.getAllByTestId('thinking-keyword')
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.textContent).toBe('ultrathink')
+  })
+
+  it('wraps multiple keywords in the same input', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="first ultrathink then think harder"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const spans = screen.getAllByTestId('thinking-keyword')
+    expect(spans).toHaveLength(2)
+    expect(spans.map(s => s.textContent)).toEqual(['ultrathink', 'think harder'])
+  })
+
+  it('does NOT wrap substrings inside other words (word boundary)', () => {
+    // `unthinkingly` contains `think` as a substring but not at a word
+    // boundary — the overlay must agree with the server-side detection
+    // (which is the gating contract for #4306) and NOT highlight here.
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="I unthinkingly committed this"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    expect(screen.queryAllByTestId('thinking-keyword')).toHaveLength(0)
+  })
+
+  it('preserves the user`s original casing inside the highlight span', () => {
+    // The overlay carries the user's literal characters — case-folded
+    // matching only governs WHETHER something is a keyword, never what
+    // is displayed. This matters because the textarea (behind the
+    // overlay) still has the original characters and the overlay must
+    // align with them character-for-character.
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ULTRATHINK now"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const spans = screen.getAllByTestId('thinking-keyword')
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.textContent).toBe('ULTRATHINK')
+  })
+
+  it('marks the overlay aria-hidden so the textarea is the only accessible input', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ultrathink"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const overlay = screen.getByTestId('thinking-keyword-overlay')
+    expect(overlay.getAttribute('aria-hidden')).toBe('true')
+  })
+})

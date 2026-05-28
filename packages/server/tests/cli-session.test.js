@@ -351,6 +351,28 @@ describe('CliSession properties', () => {
   })
 })
 
+// #4306 — thinking-keyword escalation is implemented in SdkSession only.
+// CliSession runs `claude -p` (non-interactive, stream-json) and declares
+// `thinkingLevel: false` in its capabilities (cli-session.js:90); the
+// dashboard hides the dropdown for this provider, and there is no
+// per-turn maxThinkingTokens hook in the stream-json wire. Re-asserting
+// the structural no-op so future refactors do not accidentally bolt a
+// keyword handler onto the CLI provider without also wiring a budget
+// control to honour it. (Otherwise the dashboard's highlight gate —
+// see #4306 Part 2 — and the keyword would silently disagree.)
+describe('CliSession — thinking keyword is a structural no-op (#4306)', () => {
+  it('declares thinkingLevel: false in static capabilities', () => {
+    assert.equal(CliSession.capabilities.thinkingLevel, false,
+      'cli-session has no per-turn thinking budget hook; keyword escalation must remain a no-op')
+  })
+
+  it('does not expose setThinkingLevel on session instances', () => {
+    const session = createSession()
+    assert.equal(typeof session.setThinkingLevel, 'undefined',
+      'no setThinkingLevel method means handleSetThinkingLevel returns "not supported" and the keyword cannot escalate either way')
+  })
+})
+
 describe('CliSession agent tracking', () => {
   it('tracks Task tool as agent_spawned', () => {
     const session = createReadySession()

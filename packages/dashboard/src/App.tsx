@@ -2016,6 +2016,13 @@ export function App() {
               onInspectPastedText={handleInspectPastedText}
               onRemovePastedText={handleRemovePastedText}
               userMessageHistory={userMessageHistory}
+              // #4306 — only highlight when the active provider actually
+              // honours the magic thinking keyword. Reuses `showThinkingLevel`
+              // (capabilities.thinkingLevel) as the truth-source: if the
+              // dropdown is hidden because the provider can't take a thinking
+              // budget, the keyword wouldn't escalate either — so we must
+              // not visually imply otherwise.
+              highlightThinkingKeywords={dropdownFlags.showThinkingLevel}
             />
           </>
         )}

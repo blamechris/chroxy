@@ -2968,6 +2968,78 @@
   line-height: 1.4;
 }
 
+/* ---- Thinking-keyword overlay (#4306) ----
+ * The wrap sits in the flex slot where the textarea used to live and
+ * stacks the overlay (absolute) under the textarea (relative). Both
+ * children share identical box metrics — font, padding, border, line-
+ * height, white-space — so character cells align pixel-perfect.
+ *
+ * Only `.has-overlay` flips the textarea to transparent text; without
+ * the overlay, the wrap is transparent and the textarea renders normally,
+ * preserving the visual baseline for sessions/providers that don't gate
+ * the highlight on. */
+.input-bar-textarea-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+
+.input-bar-textarea-wrap > textarea {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.input-bar-textarea-wrap.has-overlay > textarea {
+  /* Safari ignores `color: transparent` for the textarea text but respects
+   * -webkit-text-fill-color. Set both for cross-browser parity. The caret
+   * follows `caret-color`, which we restore so the user still sees where
+   * they're typing. */
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-primary);
+}
+
+.input-bar-textarea-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  /* Mirror the textarea's box metrics so each character lands in the
+   * same x/y. Any drift between these values and `.input-bar textarea`
+   * will shift the highlight relative to the user's typed text. */
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: var(--text-md);
+  font-family: inherit;
+  line-height: 1.4;
+  /* Reproduce textarea wrapping behaviour: pre-wrap preserves whitespace
+   * (including the leading spaces a user types) and wraps on the same
+   * soft-wrap rules the textarea uses. */
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  word-break: break-word;
+  overflow: hidden;
+  color: var(--text-primary);
+}
+
+.input-bar-textarea-overlay .thinking-keyword {
+  /* Accent colour + soft tinted background. Critically we do NOT change
+   * the font-weight, font-style, or text-transform because any of those
+   * would alter the glyph advance widths and the overlay would drift one
+   * keyword width out of sync with the textarea's caret/selection. The
+   * native CLI gets its "ALL CAPS" look from a monospace context where
+   * widths are uniform; in our proportional textarea we use colour +
+   * background tint to convey the same signal without breaking
+   * alignment. */
+  color: var(--accent-blue);
+  background-color: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+  border-radius: 3px;
+}
+
 .input-bar textarea:focus {
   outline: none;
   border-color: var(--accent-blue);
