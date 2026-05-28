@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.11] - 2026-05-28
+
+Focused release shipping the long-standing dogfood pain point: TUI / SDK sessions waiting on a backgrounded shell no longer look idle/dead and can no longer be reaped by `CHROXY_SESSION_TIMEOUT`. Closes #4307 (the `priority:high` server bug) plus its dashboard renderer follow-up #4418, completing the user-visible feature in a single version.
+
+### Added
+
+- **Server tracks pending `run_in_background` shells per session (#4307 / #4416):** new `background-shells.js` module + Zod schema in `@chroxy/protocol`. `BaseSession._pendingBackgroundShells` is populated when a `Bash` tool result carries `"Command running in background with ID: <id>"`, cleared when a matching `BashOutput` arrives, and cleared on `destroy()`. Both `claude-tui` (PTY) and SDK providers ship with full parity. Exposed to clients via a new WS event `background_work_changed` *and* extended the session-list snapshot field so late-joiners catch up — store-core handlers mirror the `activeTools` pattern from #4308. Two follow-ups tracked: [#4417](https://github.com/blamechris/chroxy/issues/4417) (persist across restart or document as transient) and [#4418](https://github.com/blamechris/chroxy/issues/4418) (renderer — landed in this release).
+- **ActivityIndicator surfaces "Waiting on background work" with command text (#4418 / #4419):** renderer companion to #4307. When `isIdle && pendingBackgroundShells.length > 0`, the dashboard chip shows the pending shell instead of "Idle". When `_isBusy === true`, the existing "Running <tool>" path still wins — pending shells are a secondary indicator during an active turn. Multi-shell case picks the most-recently-started one for the chip; full-list disclosure deferred to [#4421](https://github.com/blamechris/chroxy/issues/4421). Mobile-app surface deferred to [#4422](https://github.com/blamechris/chroxy/issues/4422); chip text overflow handling deferred to [#4420](https://github.com/blamechris/chroxy/issues/4420).
+
+### Fixed
+
+- **Waiting sessions are no longer reaped by `CHROXY_SESSION_TIMEOUT` (#4307 / #4416):** `BaseSession.isRunning` now also reports true when `_pendingBackgroundShells.size > 0`, so the idle-timeout skip-check in `SessionTimeoutManager` treats waiting sessions as not-idle. Operators running with the timeout enabled will no longer lose long-running background work. The 2h hard-cap (`base-session.js:53`) still applies — the assumption is that a real foreground turn will resume before then to surface the completion notification.
+
 ## [0.9.10] - 2026-05-28
 
 Same-day follow-up to v0.9.9. Same theme — dashboard polish and dogfood-driven correctness — picking up everything #4396 spilled over, plus stale Codex context-window values, customizable keyboard shortcuts, and three small follow-ups to v0.9.9's thinking-keyword work.
