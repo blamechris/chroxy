@@ -12,7 +12,7 @@
  * after extracting the builder out of App.tsx the per-branch wiring is
  * unit-testable without a render tree.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { SessionInfo, ConversationSummary } from '@chroxy/store-core'
 import {
   buildSidebarContextMenuItems,
@@ -61,7 +61,6 @@ function makeArgs(
     conversationHistory: [makeConversation()],
     isTauri: false,
     createSession: vi.fn(),
-    destroySession: vi.fn(),
     resumeConversation: vi.fn(),
     revealInFinder: vi.fn(() => Promise.resolve()),
     onRevealError: vi.fn(),
@@ -189,10 +188,12 @@ describe('buildSidebarContextMenuItems', () => {
         makeArgs({ isTauri: true, revealInFinder, onRevealError }),
       )
       items.find(i => i.id === 'reveal')?.onClick?.()
-      // Let the rejected promise's .catch microtask run.
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(onRevealError).toHaveBeenCalledTimes(1)
+      // vi.waitFor flushes microtasks until the assertion passes; sturdier
+      // than counting `await Promise.resolve()` ticks if the promise chain
+      // ever grows.
+      await vi.waitFor(() => {
+        expect(onRevealError).toHaveBeenCalledTimes(1)
+      })
       expect(onRevealError.mock.calls[0]![0]).toContain('boom')
     })
 
@@ -210,10 +211,6 @@ describe('buildSidebarContextMenuItems', () => {
   })
 
   describe('session branch (#4045 contract)', () => {
-    beforeEach(() => {
-      // no-op — each test builds its own args via makeArgs.
-    })
-
     it('returns [] when the session id no longer matches any live session', () => {
       const items = buildSidebarContextMenuItems(
         makeArgs({

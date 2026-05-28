@@ -43,7 +43,6 @@ export interface BuildSidebarContextMenuItemsArgs {
     environmentId?: string
     skipPermissions?: boolean
   }) => void
-  destroySession: (sessionId: string) => void
   resumeConversation: (conversationId: string, cwd?: string) => void
   revealInFinder: (path: string) => Promise<unknown>
   /** Surface a Rust-side reveal failure as a toast (matches App.tsx pattern). */
@@ -52,7 +51,10 @@ export interface BuildSidebarContextMenuItemsArgs {
   copyToClipboard: (text: string) => void
   /** Open the CreateSessionModal at a given cwd (for the repo branch). */
   openCreateSessionAt: (cwd: string) => void
-  /** Wrapper around `destroySession` that prompts the user first. */
+  /**
+   * Wrapper around the store's `destroySession` that prompts the user first
+   * (the session-row Close action must not destroy without confirmation).
+   */
   confirmCloseSession: (sessionId: string) => void
 }
 

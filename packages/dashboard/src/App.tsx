@@ -552,7 +552,6 @@ export function App() {
       conversationHistory,
       isTauri: isTauri(),
       createSession,
-      destroySession,
       resumeConversation,
       revealInFinder,
       onRevealError: (message) => {
@@ -581,7 +580,6 @@ export function App() {
     sessions,
     conversationHistory,
     createSession,
-    destroySession,
     resumeConversation,
     handleCloseSession,
   ])
