@@ -1928,6 +1928,7 @@ export function App() {
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
+                        hidden={viewMode !== 'chat'}
                       />
                     </div>
                     <div
@@ -1947,13 +1948,31 @@ export function App() {
                 {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />
                 )}
-                {viewMode === 'system' && connectionPhase !== 'connecting' && !isSwitchingSession && (
-                  <ChatView
-                    messages={systemMessages}
-                    isStreaming={false}
-                    isBusy={false}
-                    renderMessage={renderMessage}
-                  />
+                {/*
+                  #4397 — system tab uses the same display:none kept-alive
+                  pattern as the chat/output toggle above (#4305). Pre-fix,
+                  switching chat → system → chat unmounted the system
+                  ChatView and dropped its scroll position + any expand
+                  state on system-side tool groups. The wrapper is mounted
+                  whenever the connection is ready, so React preserves the
+                  ChatView instance (and its hooks-local scroll state)
+                  across tab switches in either direction.
+                */}
+                {connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <div
+                    data-testid="system-pane"
+                    style={{
+                      display: viewMode === 'system' ? 'contents' : 'none',
+                    }}
+                  >
+                    <ChatView
+                      messages={systemMessages}
+                      isStreaming={false}
+                      isBusy={false}
+                      renderMessage={renderMessage}
+                      hidden={viewMode !== 'system'}
+                    />
+                  </div>
                 )}
                 {viewMode === 'console' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <ConsolePage />
