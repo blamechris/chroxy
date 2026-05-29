@@ -523,10 +523,6 @@ export class CliSession extends BaseSession {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._hardTimeoutMs)
     log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
-    const messageId = this._currentMessageId
-    if (this._currentCtx?.hasStreamStarted) {
-      this.emit('stream_end', { messageId })
-    }
     // Fire permission_expired for every pending permission we know about
     // so the client clears the stale prompt.
     for (const requestId of this._pendingPermissionIds) {
@@ -536,7 +532,7 @@ export class CliSession extends BaseSession {
       })
     }
     this._pendingPermissionIds.clear()
-    this._clearMessageState()
+    this._emitInterruptedTurnResult(this._hardTimeoutMs)
     this.emit('error', { message: `Response timed out after ${friendly}` })
   }
 
@@ -913,6 +909,12 @@ export class CliSession extends BaseSession {
    * Suppresses auto-respawn during the kill, clears timers, and starts fresh.
    */
   _killAndRespawn() {
+    // #4471: emit synthetic terminating events BEFORE setting _respawning,
+    // otherwise the _handleChildClose guard short-circuits and the dashboard
+    // never receives `agent_idle` — Stop stays stuck on panic-button +
+    // mid-turn setModel paths.
+    this._emitInterruptedTurnResult()
+
     this._respawning = true
     this._processReady = false
     this._sessionId = null
@@ -1050,10 +1052,22 @@ export class CliSession extends BaseSession {
     }
   }
 
-  // `result` emit is load-bearing: event-normalizer fans it to `agent_idle`,
-  // which clears the dashboard's streamingMessageId/isIdle. Without it, an
-  // interrupted CLI turn leaves Stop stuck visible and "Thinking…" permanent.
-  // Mirrors TUI #4010 (claude-tui-session.js:1328). cost:null skips billing.
+  // Synthetic terminating events for an interrupted turn. The `result` emit
+  // is load-bearing: event-normalizer fans it to `agent_idle`, which clears
+  // the dashboard's streamingMessageId/isIdle. Without it, an interrupted
+  // turn leaves Stop stuck visible and "Thinking…" permanent.
+  // Mirrors TUI #4010. cost:null skips session-manager billing.
+  _emitInterruptedTurnResult(duration = 0) {
+    if (!this._isBusy || !this._currentMessageId) return
+    const messageId = this._currentMessageId
+    const sessionId = this._sessionId
+    if (this._currentCtx?.hasStreamStarted) {
+      this.emit('stream_end', { messageId })
+    }
+    this._clearMessageState()
+    this.emit('result', { cost: null, duration, usage: null, sessionId })
+  }
+
   _handleChildClose(code) {
     this._cleanupReadlines()
     this._processReady = false
@@ -1062,15 +1076,7 @@ export class CliSession extends BaseSession {
     if (this._destroying) return
     if (this._respawning) return
 
-    if (this._isBusy && this._currentMessageId) {
-      const messageId = this._currentMessageId
-      const sessionId = this._sessionId
-      if (this._currentCtx?.hasStreamStarted) {
-        this.emit('stream_end', { messageId })
-      }
-      this._clearMessageState()
-      this.emit('result', { cost: null, duration: 0, usage: null, sessionId })
-    }
+    this._emitInterruptedTurnResult()
 
     log.info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
@@ -1095,11 +1101,7 @@ export class CliSession extends BaseSession {
       this._interruptTimer = null
       if (this._isBusy) {
         log.warn('Interrupt safety timeout — force-clearing busy state')
-        const messageId = this._currentMessageId
-        if (this._currentCtx?.hasStreamStarted) {
-          this.emit('stream_end', { messageId })
-        }
-        this._clearMessageState()
+        this._emitInterruptedTurnResult()
       }
     }, 5000)
   }

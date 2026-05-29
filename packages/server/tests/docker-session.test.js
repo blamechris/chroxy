@@ -583,3 +583,44 @@ describe('DockerSession real import (capabilities only)', () => {
     }
   })
 })
+
+describe('DockerSession inherits CliSession close-handler fix (#4469)', () => {
+  it('_handleChildClose is the inherited CliSession method (not overridden)', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    const { CliSession } = await import('../src/cli-session.js')
+    // Docker MUST NOT carry its own override — the inherited helper is what
+    // emits `result` so the dashboard recovers from Stop. If a future change
+    // re-introduces a docker override, this test flags it.
+    assert.equal(
+      DockerSession.prototype._handleChildClose,
+      CliSession.prototype._handleChildClose,
+      'docker-session must inherit _handleChildClose so the synthetic result emit fires (#4469)',
+    )
+  })
+
+  it('emits stream_end + result + error on mid-turn close (via inherited handler)', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    // Construct without spawning anything — we only exercise the close path.
+    const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+
+    session._processReady = true
+    session._isBusy = true
+    session._currentMessageId = 'msg_docker'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_docker'
+
+    const events = []
+    session.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+    session.on('result', (p) => events.push({ name: 'result', payload: p }))
+    session.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+    session._handleChildClose(137)
+    clearTimeout(session._respawnTimer)
+    session._respawnTimer = null
+
+    assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result', 'error'])
+    assert.equal(events[0].payload.messageId, 'msg_docker')
+    assert.equal(events[1].payload.sessionId, 'sess_docker')
+    assert.equal(events[1].payload.cost, null)
+  })
+})
