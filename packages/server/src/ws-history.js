@@ -8,7 +8,7 @@ import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } 
 import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders } from './providers.js'
 import { createLogger } from './logger.js'
-import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 
 const log = createLogger('ws')
 
@@ -27,7 +27,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     encryptionEnabled, localhostBypass, keyExchangeTimeoutMs,
     protocolVersion, minProtocolVersion, webTaskManager,
     send, broadcast, getConnectedClientList, permissions,
-    resultTimeoutMs, hardTimeoutMs,
+    resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs,
   } = ctx
   const client = clients.get(ws)
 
@@ -103,6 +103,18 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     Number.isSafeInteger(hardTimeoutMs) && hardTimeoutMs > 0
       ? hardTimeoutMs
       : DEFAULT_HARD_TIMEOUT_MS
+  // #4477: stream-stall window. Semantics differ from the two timeouts above —
+  // 0 is a meaningful operator-set value ("explicitly disabled") that must
+  // survive intact to the dashboard so the chip (#4476) can hide instead of
+  // rendering against a disabled timer. Use `>= 0` here, not `> 0`.
+  // Negative / fractional / NaN / Infinity / string inputs fail
+  // isSafeInteger and fall back to the default — they'd otherwise fail the
+  // protocol schema's int().nonnegative().max(MAX_SANE_DURATION_MS) gate at
+  // the client and silently break dashboard message handling.
+  const effectiveStreamStallTimeoutMs =
+    Number.isSafeInteger(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
+      ? streamStallTimeoutMs
+      : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
   send(ws, {
     type: 'auth_ok',
@@ -123,6 +135,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     capabilities,
     resultTimeoutMs: effectiveResultTimeoutMs,
     hardTimeoutMs: effectiveHardTimeoutMs,
+    streamStallTimeoutMs: effectiveStreamStallTimeoutMs,
     ...extra,
   })
 

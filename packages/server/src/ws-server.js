@@ -271,7 +271,7 @@ function _isSecureRequest(req) {
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms — #3760, #3905)
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms, streamStallTimeoutMs = stream-stall recovery window in ms (0 = disabled) — #3760, #3905, #4477)
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
@@ -588,6 +588,12 @@ export class WsServer {
       // after construction are reflected. #3905 adds the parallel hard-cap.
       get resultTimeoutMs() { return self.config?.resultTimeoutMs ?? null },
       get hardTimeoutMs() { return self.config?.hardTimeoutMs ?? null },
+      // #4477: effective stream-stall recovery window in ms. null = use
+      // BaseSession's DEFAULT_STREAM_STALL_TIMEOUT_MS (5min); 0 = operator
+      // explicitly disabled stall recovery (preserved as-is on the wire so
+      // the dashboard chip can hide instead of rendering against a
+      // disabled timer).
+      get streamStallTimeoutMs() { return self.config?.streamStallTimeoutMs ?? null },
     }
     this._authCtx = {
       get clients() { return self.clients },
