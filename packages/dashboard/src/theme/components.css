@@ -1600,18 +1600,21 @@
 
 /* #4476: stream-stall chip — replaces the generic red error bubble for
    recoverable stalls (server PR #4475 error{code: 'stream_stall'}).
-   Yellow/amber palette communicates "recoverable" vs the red "broken"
-   bubble; inline Retry button surfaces the most common follow-up so the
-   user doesn't have to retype their last message. */
+   Amber palette communicates "recoverable" vs the red "broken" bubble;
+   inline Retry button surfaces the most common follow-up so the user
+   doesn't have to retype their last message. Uses --warning-fg /
+   --warning-bg-subtle (the canonical chroxy warning surface, theme.css
+   line ~99) so the chip themes correctly across light/dark mode and
+   doesn't introduce a new ad-hoc palette. */
 .stream-stall-chip {
   display: inline-flex;
   align-items: center;
   gap: 12px;
   padding: 6px 12px;
   border-radius: 16px;
-  background: var(--accent-yellow-subtle, rgba(250, 204, 21, 0.12));
-  color: var(--accent-yellow, #facc15);
-  border: 1px solid var(--accent-yellow, #facc15);
+  background: var(--warning-bg-subtle);
+  color: var(--warning-fg);
+  border: 1px solid var(--warning-fg);
   align-self: center;
   font-size: var(--text-base);
 }
@@ -1629,7 +1632,7 @@
 }
 .stream-stall-chip-retry:hover,
 .stream-stall-chip-retry:focus {
-  background: var(--accent-yellow, #facc15);
+  background: var(--warning-fg);
   color: var(--bg-primary);
   outline: none;
 }
