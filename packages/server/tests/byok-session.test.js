@@ -3151,6 +3151,42 @@ describe('ClaudeByokSession', () => {
       assert.equal(session.model, 'claude-sonnet-4-6')
       await session.destroy()
     })
+
+    it('setPermissionMode(auto) drains open MCP trust prompts WITHOUT persisting (#4462)', async () => {
+      // Mirror sdk-session.js:1133-1135: flipping to auto must drain
+      // pending prompts so the user isn't left staring at modals.
+      // BUT MCP trust prompts MUST NOT persist via the bypass — they
+      // get denied so ~/.chroxy/mcp-trust.json stays untouched.
+      const { existsSync, readFileSync } = await import('node:fs')
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      await session.start()
+
+      // Fire an MCP trust prompt directly on the session's permission
+      // manager (same path byok-mcp-fleet's trustGate uses).
+      const trustPromise = session._permissions.requestMcpTrust({
+        name: 'tofu',
+        command: 'node',
+        args: ['tofu-mcp.js'],
+        envKeys: [],
+      })
+      // Sanity: there's a pending prompt before the bypass.
+      assert.equal(session._permissions._pendingPermissions.size, 1)
+
+      // Bypass flip — autoAllowPending denies MCP trust prompts (#4462).
+      session.setPermissionMode('auto')
+
+      const allowed = await trustPromise
+      assert.equal(allowed, false, 'MCP trust must NOT be granted via auto-mode bypass')
+
+      // The fleet's gate is: `if (allowed) recordTrust(...)`. With
+      // allowed=false, no recordTrust call fires — assert by checking
+      // the trust store path was never created.
+      const trustStorePath = process.env.CHROXY_MCP_TRUST_PATH
+      assert.equal(existsSync(trustStorePath), false, 'trust store must not be written on bypass')
+
+      await session.destroy()
+    })
   })
 
   describe('MCP tool_use dispatch (#4079)', () => {

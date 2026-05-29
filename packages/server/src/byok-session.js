@@ -1063,8 +1063,19 @@ export class ClaudeByokSession extends BaseSession {
 
   setPermissionMode(mode) {
     if (!super.setPermissionMode(mode)) return
-    // PR 1 has no permission gating, so this is purely persisted state
-    // for PR 2 to consume.
+    // #3729 / #4462: flipping to auto/bypass mid-turn must drain any
+    // open permission prompts so the user isn't left staring at modals
+    // after declaring "approve everything". Mirrors sdk-session.js's
+    // setPermissionMode behaviour.
+    //
+    // MCP trust prompts are exempt — autoAllowPending denies them so
+    // the bypass doesn't silently persist a binary to the trust store
+    // (a panic-button shouldn't grant forever-trust). See
+    // permission-manager.js:autoAllowPending and the byok-mcp-trust
+    // recordTrust path.
+    if (mode === 'auto') {
+      this._permissions.autoAllowPending()
+    }
   }
 
   // #4078: assemble the per-turn tools array. BUILTIN_TOOLS first
