@@ -3182,4 +3182,156 @@ describe('dashboard message-handler dispatch', () => {
       expect((store.getState() as any).sessionStates.s1.inactivityWarning).toBeNull()
     })
   })
+
+  // #4466: switching tabs sends `switch_session`, which causes the server to
+  // dispatch history_replay_start → all past events → history_replay_end.
+  // Pre-fix, the dashboard's pre-handler logic ran the lastClientActivityAt
+  // bump (#3758) and inactivityWarning dismiss (#3899) for EVERY replayed
+  // event, plus the activeTools rebuild restarted the in-flight tool clock.
+  // Visible symptoms: "Working… last activity Ns ago" reset to 1s, "Agent
+  // quiet for Nm Ns" disappeared entirely, and the green "Running <tool> ·
+  // Ns" pill restarted at 1s. The fix gates all three on the existing
+  // `_receivingHistoryReplay` flag.
+  describe('history replay must not reset activity timers (#4466)', () => {
+    function seedSession(extra: Partial<ReturnType<typeof createEmptySessionState>> = {}) {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), ...extra } },
+      }))
+      setStore(store)
+    }
+
+    it('does not bump lastClientActivityAt for replayed activity events', () => {
+      seedSession({ lastClientActivityAt: 100 })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      // tool_start is in ACTIVITY_EVENT_TYPES — pre-fix this bumped to Date.now().
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { command: 'ls' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      // The pre-seeded "stale" 100ms timestamp must survive — replay is NOT
+      // fresh activity. Without this guard, every tab switch resets the
+      // "last activity Ns ago" pill to "1s ago" no matter how long the
+      // session has actually been idle.
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.lastClientActivityAt).toBe(100)
+    })
+
+    it('does not dismiss inactivityWarning for replayed activity events', () => {
+      // "Agent quiet for 46m 32s · Status update?" chip is mid-display when
+      // the user clicks back to this tab. Pre-fix, the first replayed
+      // tool_start / message / result wiped it (because the activity-bump
+      // path also clears inactivityWarning). User loses the chip and has
+      // no idea anything is waiting on them.
+      const warning = { idleMs: 2_792_000, prefab: 'Status update?', receivedAt: 200 }
+      seedSession({ inactivityWarning: warning })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.inactivityWarning).toEqual(warning)
+    })
+
+    it('preserves activeTools across history_replay_start (no clock reset)', () => {
+      // Pre-fix: history_replay_start cleared activeTools, then the replayed
+      // tool_start rebuilt the entry with startedAt = Date.now(). The "Running
+      // <tool> · Ns" pill restarted at 1s. Preserving the in-flight set
+      // through the replay boundary keeps the elapsed clock intact — the
+      // tool_result events that follow will still correctly drop resolved
+      // entries.
+      const startedAt = 100
+      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep 999' }, startedAt }
+      seedSession({ activeTools: [inFlightTool] })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].toolUseId).toBe('tu-1')
+      // Specifically the original startedAt must be preserved — that's what
+      // drives the elapsed-time display.
+      expect(ss.activeTools[0].startedAt).toBe(startedAt)
+    })
+
+    it('live activity AFTER history_replay_end still bumps lastClientActivityAt', () => {
+      // Regression guard: the replay flag is cleared on history_replay_end,
+      // so the next genuine live event must resume bumping the timestamp —
+      // otherwise the gate would freeze activity tracking forever after the
+      // first replay.
+      seedSession({ lastClientActivityAt: 100 })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      // Live activity event after replay closes — must bump.
+      handleMessage(
+        { type: 'tool_start', messageId: 't', tool: 'Bash', toolUseId: 'tu-2', sessionId: 's1' },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.lastClientActivityAt).toBeGreaterThan(100)
+    })
+
+    it('live activity AFTER history_replay_end still dismisses inactivityWarning', () => {
+      const warning = { idleMs: 2_792_000, prefab: 'Status update?', receivedAt: 200 }
+      seedSession({ inactivityWarning: warning })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.inactivityWarning).toBeNull()
+    })
+
+    // Regression for the agent-review critical finding (#4491): `result`
+    // events are recorded in the per-session history ring buffer
+    // (session-message-history.js) and replayed via PROXIED_EVENTS
+    // (session-manager.js). The `case 'result'` handler also clears
+    // activeTools — without a replay gate on THAT clear, every tab switch
+    // on a session with at least one completed prior turn fires a replayed
+    // result mid-replay, wiping the activeTools that history_replay_start
+    // had intentionally preserved. Tested explicitly: a replayed result
+    // must NOT touch activeTools, but a live result still must (#4308
+    // turn-boundary sweep stays intact for the legitimate "missed
+    // tool_result" case after a server crash / dropped broadcast).
+    it('replayed result events do NOT clear activeTools (regression #4491)', () => {
+      const startedAt = 100
+      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep' }, startedAt }
+      seedSession({ activeTools: [inFlightTool] })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      // result fires during the replay window — pre-fix this wiped activeTools.
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].toolUseId).toBe('tu-1')
+      expect(ss.activeTools[0].startedAt).toBe(startedAt)
+    })
+
+    it('live result events still clear activeTools (#4308 turn-boundary sweep preserved)', () => {
+      // After history_replay_end clears the flag, a live result must still
+      // sweep stale in-flight tools — that was the original #4308 behaviour
+      // for missed tool_results from server crashes / dropped broadcasts.
+      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep' }, startedAt: 100 }
+      seedSession({ activeTools: [inFlightTool] })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+    })
+  })
 })
