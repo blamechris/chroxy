@@ -207,6 +207,24 @@ function getDefaultCachePath() {
 }
 
 /**
+ * Per-provider cache path resolver (#4413). Non-Claude providers
+ * (codex, gemini, …) persist learned context-window ratchets to their own
+ * disk file so a server restart doesn't lose state and the default Claude
+ * cache (`models-cache.json`) stays untouched.
+ *
+ * The provider name is sanitised to a filename-safe slug so an unexpected
+ * `providerName` value can't escape the config dir via path metacharacters.
+ *
+ * @param {string} providerName
+ * @returns {string}
+ */
+function getProviderCachePath(providerName) {
+  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  const safe = String(providerName).replace(/[^a-zA-Z0-9_-]/g, '_')
+  return join(configDir, `models-cache.${safe}.json`)
+}
+
+/**
  * Canonical JSON stringifier — sorts object keys recursively so equivalent
  * data produces an identical string regardless of construction order.
  *
@@ -340,6 +358,13 @@ function humanizeModelId(id) {
  *   Optional provider lookup that can return `{id,label,fullId,contextWindow}`
  *   for a known model fullId. When present it is consulted first during
  *   `updateModels()` to reuse provider-authoritative metadata.
+ * @param {() => string} [hooks.cachePath] - Resolver for the disk cache path
+ *   used by `loadCache()` / `saveCache()` when no explicit path is passed.
+ *   Lazy so the path is re-read from `CHROXY_CONFIG_DIR` after env edits in
+ *   tests. Defaults to the shared Claude cache at
+ *   `~/.chroxy/models-cache.json`. Non-Claude providers should supply a
+ *   provider-scoped path (e.g. `~/.chroxy/models-cache.codex.json`) so the
+ *   default Claude cache stays untouched by per-provider learn-loops (#4413).
  */
 export function createModelsRegistry(hooks = {}) {
   const fallbackModels = hooks.fallbackModels ?? FALLBACK_MODELS
@@ -347,6 +372,7 @@ export function createModelsRegistry(hooks = {}) {
   const resolveContextWindowFn = typeof hooks.resolveContextWindow === 'function'
     ? hooks.resolveContextWindow
     : resolveClaudeContextWindow
+  const cachePathFn = typeof hooks.cachePath === 'function' ? hooks.cachePath : getDefaultCachePath
   const getModelMetadataFn = typeof hooks.getModelMetadata === 'function' ? hooks.getModelMetadata : null
 
   let activeModels = fallbackModels
@@ -639,7 +665,7 @@ export function createModelsRegistry(hooks = {}) {
      * older or hand-edited cache files don't leave the picker with empty
      * labels or a default context window.
      */
-    loadCache(path = getDefaultCachePath()) {
+    loadCache(path = cachePathFn()) {
       try {
         const raw = readFileSync(path, 'utf-8')
         const parsed = JSON.parse(raw)
@@ -754,7 +780,7 @@ export function createModelsRegistry(hooks = {}) {
      * leave a truncated cache, and permissions are locked down via
      * writeFileRestricted (0600).
      */
-    saveCache(path = getDefaultCachePath()) {
+    saveCache(path = cachePathFn()) {
       return saveCacheImpl(path)
     },
   }
@@ -838,6 +864,26 @@ export function registerProviderRegistry(providerName, ProviderClass) {
 }
 
 /**
+ * Test helper (#4413). Drops the cached provider registries so the next
+ * `getRegistryForProvider()` call rebuilds — and re-runs `loadCache()` —
+ * from disk. Used by the persistence test suite to simulate "server
+ * restart": save → wipe in-memory state → re-read.
+ *
+ * Not exported via the public API surface beyond tests; the name leads
+ * with an underscore to signal that.
+ *
+ * @param {string} [providerName] - When provided, drop only that provider's
+ *   cached registry; when omitted, drop all of them.
+ */
+export function _resetProviderRegistryCacheForTests(providerName) {
+  if (typeof providerName === 'string' && providerName.length > 0) {
+    providerRegistryCache.delete(providerName)
+    return
+  }
+  providerRegistryCache.clear()
+}
+
+/**
  * Lazily create and cache a provider-scoped registry.
  *
  * Claude providers (including docker-based variants) share the module-level
@@ -879,7 +925,21 @@ export function getRegistryForProvider(providerName) {
         : null
       return meta?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
     },
+    // #4413: provider-scoped cache path. Lazy resolver so tests that mutate
+    // `CHROXY_CONFIG_DIR` after registry creation still hit the temp dir.
+    cachePath: () => getProviderCachePath(providerName),
   })
+  // #4413: hydrate the registry from its own cache file before serving the
+  // first getModels() call. A miss (no file, malformed, all-stale) is a
+  // silent no-op so cold-boot semantics are unchanged. This restores any
+  // previously-learned context-window ratchet (gpt-5/gpt-5-codex 400k →
+  // 550k after a series of large turns) so the dashboard meter is honest
+  // immediately, not only after the next over-budget turn.
+  try {
+    registry.loadCache()
+  } catch (err) {
+    log.warn(`getRegistryForProvider(${providerName}): loadCache threw unexpectedly: ${err?.message || err}`)
+  }
   providerRegistryCache.set(providerName, registry)
   return registry
 }
