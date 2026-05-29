@@ -699,14 +699,27 @@ export function createModelsRegistry(hooks = {}) {
             if (minor === null) return true
             return fallbackByFamily.get(family).has(minor)
           })
-          .map(m => ({
-            id: m.id,
-            fullId: m.fullId,
-            label: typeof m.label === 'string' && m.label.length > 0 ? m.label : humanizeModelId(m.id),
-            contextWindow: typeof m.contextWindow === 'number' && m.contextWindow > 0
-              ? m.contextWindow
-              : resolveContextWindowFn(m.fullId),
-          }))
+          .map(m => {
+            // #4434: when the cached label is missing/empty (older cache
+            // files, or operators hand-editing the on-disk cache that
+            // landed in #4413), prefer the provider's own metadata label
+            // before falling back to `humanizeModelId`. The humanize
+            // helper assumes Claude-style ids ("opus-4-7" → "Opus 4.7")
+            // and mangles non-Claude ids ("gpt-5-codex" → "Gpt 5.codex").
+            // Mirrors the post-filter merge step below which already
+            // consults `getModelMetadataFn` for the same reason.
+            const providerMeta = getModelMetadataFn ? getModelMetadataFn(m.fullId) : null
+            return {
+              id: m.id,
+              fullId: m.fullId,
+              label: typeof m.label === 'string' && m.label.length > 0
+                ? m.label
+                : (providerMeta?.label || humanizeModelId(m.id)),
+              contextWindow: typeof m.contextWindow === 'number' && m.contextWindow > 0
+                ? m.contextWindow
+                : resolveContextWindowFn(m.fullId),
+            }
+          })
 
         const droppedStaleCount = valid.length - models.length
         if (droppedStaleCount > 0) {
