@@ -24,7 +24,7 @@
  * iteration can add expiry timestamps without breaking the file format.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 
@@ -154,7 +154,18 @@ export function recordTrust(server, filePath = defaultTrustStorePath()) {
   const tmp = `${filePath}.tmp`
   writeFileSync(tmp, JSON.stringify({ trustedTuples: entries }, null, 2), { mode: 0o600 })
   try { chmodSync(tmp, 0o600) } catch {}
-  renameSync(tmp, filePath)
+  // #4463: when renameSync throws (cross-device link, FS quota, ACL) the
+  // temp file would otherwise be left behind. Unlink it on the failure
+  // path and re-throw the ORIGINAL rename error so the caller sees the
+  // real failure rather than a cleanup-side ENOENT. The cleanup unlink
+  // swallows its own errors (the temp may already be gone if the rename
+  // partially succeeded or the FS removed it).
+  try {
+    renameSync(tmp, filePath)
+  } catch (err) {
+    try { unlinkSync(tmp) } catch {}
+    throw err
+  }
   return loadTrustStore(filePath)
 }
 

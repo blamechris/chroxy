@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, statSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -337,4 +337,71 @@ describe('byok-mcp-trust', () => {
       }
     })
   })
+
+  describe('recordTrust rename failure cleanup (#4463)', () => {
+    // #4463: when renameSync fails (cross-device link, FS quota, ACL)
+    // the .tmp file is left behind. recordTrust now wraps rename in a
+    // try/catch that unlinks .tmp on failure and re-throws the original
+    // error. Module mocks are required because the bug is in the
+    // failure path of a sync fs operation — there's no portable way to
+    // force a real rename failure that's deterministic across tmpfs /
+    // ext4 / APFS.
+    if (typeof mock.module !== 'function') {
+      it('skipped — mock.module requires --experimental-test-module-mocks', (t) => {
+        t.skip('re-run with --experimental-test-module-mocks to exercise these tests')
+      })
+    } else {
+      it('unlinks the leaked .tmp file when renameSync fails', async () => {
+        const realFs = await import('node:fs')
+        let renameError = new Error('EXDEV cross-device link')
+        let unlinkCalls = []
+        const mockFs = {
+          ...realFs,
+          renameSync: () => { throw renameError },
+          unlinkSync: (p) => { unlinkCalls.push(p) },
+        }
+        mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+        try {
+          const { recordTrust: rt } = await import(`../src/byok-mcp-trust.js?cacheBust=4463-${Date.now()}`)
+          let threw = null
+          try {
+            rt({ name: 'leak', command: 'node', args: ['leak.js'] }, storePath)
+          } catch (err) {
+            threw = err
+          }
+          assert.ok(threw, 'recordTrust must re-throw the rename failure')
+          assert.match(threw.message, /EXDEV/, 'original error is surfaced')
+          assert.equal(unlinkCalls.length, 1, '.tmp must be unlinked exactly once')
+          assert.ok(unlinkCalls[0].endsWith('.tmp'), 'cleanup targets the .tmp file')
+        } finally {
+          mock.restoreAll()
+        }
+      })
+
+      it('tolerates the .tmp already being absent during cleanup', async () => {
+        const realFs = await import('node:fs')
+        const renameError = new Error('original rename failure')
+        const mockFs = {
+          ...realFs,
+          renameSync: () => { throw renameError },
+          unlinkSync: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) },
+        }
+        mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+        try {
+          const { recordTrust: rt } = await import(`../src/byok-mcp-trust.js?cacheBust=4463b-${Date.now()}`)
+          let threw = null
+          try {
+            rt({ name: 'gone', command: 'node', args: ['gone.js'] }, storePath)
+          } catch (err) {
+            threw = err
+          }
+          assert.ok(threw)
+          assert.match(threw.message, /original rename failure/, 'original error surfaces, not the cleanup ENOENT')
+        } finally {
+          mock.restoreAll()
+        }
+      })
+    }
+  })
+
 })
