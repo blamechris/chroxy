@@ -61,15 +61,24 @@ export const DEFAULT_CONTEXT_WINDOW_RATCHET_CAP = 2_000_000
  * @returns {number}
  */
 export function getRatchetCap(providerName) {
-  return CONTEXT_WINDOW_RATCHET_CAPS[providerName] || DEFAULT_CONTEXT_WINDOW_RATCHET_CAP
+  // `Object.hasOwn` so a prototype-key lookup (`'constructor'`, `'toString'`,
+  // etc.) doesn't return the inherited member and NaN-poison the ratchet math
+  // downstream (`Math.min(n * 1.1, Object)` → NaN). In practice providerName
+  // only ever comes from registered names, but this closes the theoretical
+  // hole for ~one extra line.
+  if (Object.hasOwn(CONTEXT_WINDOW_RATCHET_CAPS, providerName)) {
+    return CONTEXT_WINDOW_RATCHET_CAPS[providerName]
+  }
+  return DEFAULT_CONTEXT_WINDOW_RATCHET_CAP
 }
 
 /**
  * Shared learn-loop helper. Ratchets the registered context window for
  * `modelId` upward when `inputTokens` exceeds the current entry. No-ops on:
  *
- *   - unknown provider (no registry registered)
- *   - unknown model id (caller's responsibility to fall back via deriveId)
+ *   - unknown model id (an unknown providerName falls through to the default
+ *     Claude registry via `getRegistryForProvider`, so the no-op fires at the
+ *     entry lookup — not at the registry lookup)
  *   - inputTokens not a finite positive number (corrupt JSONL — NaN * 1.1 =
  *     NaN; Infinity * 1.1 = Infinity → unbounded growth)
  *   - inputTokens at or below the registered window (no drift signal)

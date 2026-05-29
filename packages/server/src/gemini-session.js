@@ -389,6 +389,13 @@ export class GeminiSession extends JsonlSubprocessSession {
 
       case 'result': {
         const usage = event.usage || {}
+        // NOTE: the context-window learn-loop (`maybeRatchetContextWindow`)
+        // is deliberately NOT wired in here. Production routes end-of-turn
+        // events through `_processJsonlLine`, which owns the ratchet call.
+        // This legacy path exists only for tests / direct callers and is
+        // intentionally minimal — duplicating the ratchet would risk
+        // double-emitting `models_updated` if both paths ever fire on the
+        // same event.
         this.emit('result', {
           cost: null,
           duration: null,
