@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
+import { recordTrust } from '../src/byok-mcp-trust.js'
+
+function preTrustStub() {
+  recordTrust(
+    { name: 'stub', command: process.execPath, args: [MCP_STUB], env: {} },
+    process.env.CHROXY_MCP_TRUST_PATH,
+  )
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const MCP_STUB = join(__dirname, 'fixtures', 'mcp-stub.mjs')
@@ -108,13 +116,19 @@ describe('ClaudeByokSession', () => {
   let tmpHome
   let originalHome
   let originalApiKey
+  let originalMcpTrustPath
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-byok-test-'))
     originalHome = process.env.HOME
     originalApiKey = process.env.ANTHROPIC_API_KEY
+    originalMcpTrustPath = process.env.CHROXY_MCP_TRUST_PATH
     process.env.HOME = tmpHome
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
+    // #4457: per-test isolated trust store so spawning the MCP stub
+    // doesn't pollute the developer's real ~/.chroxy/mcp-trust.json,
+    // and tests that pre-trust the stub tuple don't leak across runs.
+    process.env.CHROXY_MCP_TRUST_PATH = join(tmpHome, 'mcp-trust.json')
   })
 
   afterEach(() => {
@@ -122,6 +136,8 @@ describe('ClaudeByokSession', () => {
     else delete process.env.HOME
     if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
     else delete process.env.ANTHROPIC_API_KEY
+    if (originalMcpTrustPath) process.env.CHROXY_MCP_TRUST_PATH = originalMcpTrustPath
+    else delete process.env.CHROXY_MCP_TRUST_PATH
     rmSync(tmpHome, { recursive: true, force: true })
   })
 
@@ -178,6 +194,14 @@ describe('ClaudeByokSession', () => {
     })
 
     it('surfaces parsed MCP server metadata without spawning tools', async () => {
+      // #4457: pre-trust the fake github config so the trust gate doesn't
+      // wait its full timeout for a responder that never comes. The fake
+      // server still fails to start (`github-mcp.js` doesn't exist) — that
+      // failure path is what this test exercises.
+      recordTrust(
+        { name: 'github', command: 'node', args: ['github-mcp.js'] },
+        process.env.CHROXY_MCP_TRUST_PATH,
+      )
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({
         mcpServers: {
@@ -233,6 +257,7 @@ describe('ClaudeByokSession', () => {
     })
 
     it('#4077: lazy-spawns an MCPFleet for configured servers and reaches READY before emitting ready', async () => {
+      preTrustStub()
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({
         mcpServers: {
@@ -251,6 +276,7 @@ describe('ClaudeByokSession', () => {
     })
 
     it('#4078: messages.stream receives BUILTIN_TOOLS + MCP tools merged for the turn', async () => {
+      preTrustStub()
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({
         mcpServers: {
@@ -309,7 +335,55 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('#4457: untrusted MCP server fires a permission_request prompt; deny → DEAD without spawn', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: {} },
+        },
+      }))
+      const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      const prompts = []
+      session._permissions.on('permission_request', (data) => {
+        prompts.push(data)
+        // Simulate the user clicking "Deny" in the dashboard / mobile UI.
+        session._permissions.respondToPermission(data.requestId, 'deny')
+      })
+      await session.start()
+      assert.equal(prompts.length, 1, 'exactly one trust prompt fires')
+      assert.equal(prompts[0].tool, 'mcp_spawn')
+      assert.equal(prompts[0].input.mcpServer.name, 'stub')
+      assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.DEAD, 'denied server is DEAD')
+      assert.equal(session._mcpFleet.clients[0].tools.length, 0)
+      await session.destroy()
+    })
+
+    it('#4457: untrusted server; allow → spawns + persists trust for next session', async () => {
+      const fs = await import('node:fs')
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: {} },
+        },
+      }))
+      const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      session._permissions.on('permission_request', (data) => {
+        session._permissions.respondToPermission(data.requestId, 'allow')
+      })
+      await session.start()
+      assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+      // Trust was persisted to the per-test trust store
+      assert.ok(fs.existsSync(process.env.CHROXY_MCP_TRUST_PATH))
+      const stored = JSON.parse(fs.readFileSync(process.env.CHROXY_MCP_TRUST_PATH, 'utf8'))
+      assert.equal(stored.trustedTuples.length, 1)
+      assert.equal(stored.trustedTuples[0].name, 'stub')
+      await session.destroy()
+    })
+
     it('#4077: destroy() kills MCP children and clears the fleet reference', async () => {
+      preTrustStub()
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({
         mcpServers: {

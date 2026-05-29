@@ -845,4 +845,44 @@ describe('PermissionManager', () => {
       custom.destroy()
     })
   })
+
+  describe('requestMcpTrust (#4457)', () => {
+    it('emits permission_request with tool=mcp_spawn and server detail', () => {
+      const events = []
+      pm.on('permission_request', (e) => events.push(e))
+      pm.requestMcpTrust({ name: 'github', command: 'node', args: ['gh.js'], envKeys: ['GITHUB_TOKEN'] })
+      assert.equal(events.length, 1)
+      assert.equal(events[0].tool, 'mcp_spawn')
+      assert.equal(events[0].input.mcpServer.name, 'github')
+      assert.equal(events[0].input.mcpServer.command, 'node')
+      assert.deepEqual(events[0].input.mcpServer.args, ['gh.js'])
+      assert.deepEqual(events[0].input.mcpServer.envKeys, ['GITHUB_TOKEN'])
+      assert.match(events[0].description, /Spawn MCP server "github"/)
+    })
+
+    it('resolves to true when respondToPermission says allow', async () => {
+      const events = []
+      pm.on('permission_request', (e) => events.push(e))
+      const promise = pm.requestMcpTrust({ name: 'x', command: 'true' })
+      pm.respondToPermission(events[0].requestId, 'allow')
+      assert.equal(await promise, true)
+    })
+
+    it('resolves to false on deny', async () => {
+      const events = []
+      pm.on('permission_request', (e) => events.push(e))
+      const promise = pm.requestMcpTrust({ name: 'x', command: 'true' })
+      pm.respondToPermission(events[0].requestId, 'deny')
+      assert.equal(await promise, false)
+    })
+
+    it('auto-denies on timeout (fail-closed)', async () => {
+      const custom = createManager({ timeoutMs: 80 })
+      const events = []
+      custom.on('permission_request', (e) => events.push(e))
+      const promise = custom.requestMcpTrust({ name: 'x', command: 'true' })
+      assert.equal(await promise, false)
+      custom.destroy()
+    })
+  })
 })

@@ -12,6 +12,7 @@
  */
 
 import { MCPClient, MCP_STATES } from './byok-mcp-client.js'
+import { loadTrustStore, recordTrust, isTrusted } from './byok-mcp-trust.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
 
@@ -21,7 +22,36 @@ function mcpToolName(serverName, toolName) {
 
 export class MCPFleet {
   constructor(configs, opts = {}) {
-    this._clients = configs.map((cfg) => new MCPClient(cfg, opts))
+    // #4457: build a per-client trust gate when a PermissionManager is
+    // available. The gate consults the on-disk trust store first (zero
+    // user friction for tuples already trusted in a prior session); on
+    // a miss it asks the PermissionManager — emitting a prompt visible to
+    // the dashboard / mobile permission UI — and persists allow decisions
+    // to the store so the prompt only fires once per (name, command, args[0]).
+    //
+    // No PermissionManager → no gate → spawn behaves exactly as in #4077.
+    // This keeps the lifecycle module testable in isolation; integration
+    // (session passes its _permissions in) is wired in byok-session.
+    const permissionManager = opts.permissionManager || null
+    const trustStorePath = opts.trustStorePath  // tests override; undefined falls through to default
+    this._clients = configs.map((cfg) => {
+      const clientOpts = { ...opts }
+      if (permissionManager) {
+        clientOpts.trustGate = async () => {
+          const store = loadTrustStore(trustStorePath, { log: opts.log })
+          if (isTrusted(store, cfg)) return true
+          const allowed = await permissionManager.requestMcpTrust({
+            name: cfg.name,
+            command: cfg.command,
+            args: cfg.args,
+            envKeys: Object.keys(cfg.env || {}).sort(),
+          })
+          if (allowed) recordTrust(cfg, trustStorePath)
+          return allowed
+        }
+      }
+      return new MCPClient(cfg, clientOpts)
+    })
   }
 
   get clients() { return this._clients }

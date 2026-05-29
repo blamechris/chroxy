@@ -112,6 +112,45 @@ describe('MCPClient', () => {
     })
   })
 
+  describe('trust gate (#4457)', () => {
+    it('denies → state=DEAD with no child spawned', async () => {
+      let spawned = false
+      const client = new MCPClient(stubConfig(), {
+        log: silentLog(),
+        trustGate: async () => false,
+      })
+      // Hook spawn detection — child should never be created.
+      const origSpawnAndHandshake = client._spawnAndHandshake.bind(client)
+      client._spawnAndHandshake = (...a) => { spawned = true; return origSpawnAndHandshake(...a) }
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      assert.equal(spawned, false, 'trust-denied client must not spawn')
+      assert.equal(client.tools.length, 0)
+      await client.destroy()
+    })
+
+    it('allows → spawns and reaches READY normally', async () => {
+      const client = new MCPClient(stubConfig(), {
+        log: silentLog(),
+        trustGate: async () => true,
+      })
+      await client.start()
+      assert.equal(client.state, MCP_STATES.READY)
+      assert.equal(client.tools.length, 1)
+      await client.destroy()
+    })
+
+    it('treats trust gate throw as deny (fail-closed)', async () => {
+      const client = new MCPClient(stubConfig(), {
+        log: silentLog(),
+        trustGate: async () => { throw new Error('store unreadable') },
+      })
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      await client.destroy()
+    })
+  })
+
   describe('destroy()', () => {
     it('cancels a pending restart timer (no spawn after destroy)', async () => {
       const client = new MCPClient(

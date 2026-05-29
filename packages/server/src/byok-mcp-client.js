@@ -40,6 +40,11 @@ export class MCPClient extends EventEmitter {
     this.name = config.name
     this._config = config
     this._log = opts.log || createLogger('byok-mcp')
+    // #4457: optional async gate consulted before EACH start() (not each
+    // restart — a trust decision applies to the whole (name, command, args[0])
+    // tuple, which doesn't change between restart attempts). Returns true →
+    // proceed; false → state=DEAD permanently, no child is ever spawned.
+    this._trustGate = opts.trustGate || null
     this._state = MCP_STATES.IDLE
     this._tools = []
     this._child = null
@@ -58,6 +63,23 @@ export class MCPClient extends EventEmitter {
     if (this._destroyed) throw new Error('MCPClient destroyed')
     if (this._state === MCP_STATES.READY) return
     if (this._state === MCP_STATES.DEAD) return
+    // #4457: trust gate fires BEFORE spawn. Deny → permanent DEAD, no child
+    // process is ever created. Trust gate throwing is treated as deny so
+    // the spawn surface fails closed.
+    if (this._trustGate) {
+      let allowed
+      try {
+        allowed = await this._trustGate()
+      } catch (err) {
+        this._log.warn(`MCP server ${this.name}: trust gate threw: ${err?.message || err}`)
+        allowed = false
+      }
+      if (!allowed) {
+        this._setState(MCP_STATES.DEAD)
+        this.emit('dead')
+        return
+      }
+    }
     this._spawnAndHandshake()
     // Resolve when state stabilises — first READY (handshake success) or
     // DEAD (max restart attempts exhausted). RESTARTING intermediate states
