@@ -50,16 +50,29 @@ interface SessionPillProps {
   isActive: boolean;
   health: SessionHealth;
   notificationCount: number;
+  // #4422 — number of backgrounded shells the session is still waiting on.
+  // Projected from sessionStates[id]?.pendingBackgroundShells?.length so the
+  // pill can surface a "z" dot when the session is idle but parked on a
+  // long-running shell. SECONDARY to the busy pulse — the busy dot wins
+  // during an active turn.
+  pendingShellCount: number;
   onPress: () => void;
   onLongPress: () => void;
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, health, notificationCount, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, notificationCount, pendingShellCount, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isCrashed = health === 'crashed';
   const hasNotification = notificationCount > 0 && !isActive;
   const showBusy = !isCrashed && session.isBusy;
-  const hasIndicators = isCrashed || showBusy || hasNotification;
+  // #4422 — only surface the pending-shells dot when the session is idle
+  // (showBusy=false). During an active turn the busy pulse already conveys
+  // "work happening"; the pending-shells indicator is for the "idle but
+  // waiting on background work" gap the dashboard ActivityIndicator now
+  // surfaces (#4419). Skip on crashed too — a crashed session's red dot is
+  // the more urgent signal.
+  const showPendingShells = !isCrashed && !showBusy && pendingShellCount > 0;
+  const hasIndicators = isCrashed || showBusy || hasNotification || showPendingShells;
   // Mobile parity with dashboard SessionBar chips (#3940): surface the
   // provider's short label as a small badge on the pill so claude-tui,
   // codex, gemini, docker-cli, etc. are distinguishable at-a-glance
@@ -82,14 +95,15 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}`}
+      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}${showPendingShells ? `, waiting on ${pendingShellCount} background ${pendingShellCount === 1 ? 'shell' : 'shells'}` : ''}`}
       accessibilityState={{ selected: isActive }}
-      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : undefined}
+      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : showPendingShells ? 'Session is idle but waiting on a backgrounded shell' : undefined}
     >
       {hasIndicators && (
         <View style={styles.indicators} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
           {isCrashed && <View style={styles.crashDot} />}
           {showBusy && <PulsingDot />}
+          {showPendingShells && <View style={styles.pendingShellsDot} />}
           {hasNotification && <NotificationBadge count={notificationCount} />}
         </View>
       )}
@@ -283,6 +297,11 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             isActive={session.sessionId === activeSessionId}
             health={sessionStates[session.sessionId]?.health || 'healthy'}
             notificationCount={notificationCounts.get(session.sessionId) || 0}
+            // #4422 — project the per-session pendingBackgroundShells count
+            // from sessionStates. `?? 0` covers both pre-#4307 servers (field
+            // is undefined) and sessions whose state slot hasn't been seeded
+            // yet (no entry in sessionStates).
+            pendingShellCount={sessionStates[session.sessionId]?.pendingBackgroundShells?.length ?? 0}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
             onLayout={(e) => handlePillLayout(session.sessionId, e)}
@@ -427,6 +446,17 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: COLORS.accentBlue,
+  },
+  // #4422 — pending-background-shell dot. Static (no pulse) and styled
+  // green to match the dashboard ActivityIndicator chip (#4419) — both
+  // surfaces say the same thing in the same colour: "idle, but parked on
+  // backgrounded work". Distinct from the blue busyDot (pulsing) so users
+  // can tell the two states apart at-a-glance.
+  pendingShellsDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentGreen,
   },
   badge: {
     minWidth: 16,
