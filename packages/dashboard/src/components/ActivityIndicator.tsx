@@ -249,10 +249,23 @@ export function ActivityIndicator() {
       if (!target) return
       if (popoverRef.current && popoverRef.current.contains(target)) return
       if (disclosureRef.current && disclosureRef.current.contains(target)) return
+      // #4445 — outside-click dismiss intentionally does NOT restore focus
+      // to the disclosure button: the user explicitly clicked elsewhere,
+      // so stealing focus back would fight their pointer intent. Escape
+      // dismiss (below) is the keyboard-only path that needs focus
+      // restoration per WAI-ARIA APG disclosure guidance.
       setPopoverOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setPopoverOpen(false)
+      if (event.key === 'Escape') {
+        setPopoverOpen(false)
+        // #4445 — WAI-ARIA APG: a disclosure-triggered dialog dismissed
+        // via Escape should return focus to the invoker so keyboard users
+        // don't get parked on document.body and lose their place in the
+        // tab order. The popover has role="dialog" which reinforces the
+        // expectation.
+        disclosureRef.current?.focus()
+      }
     }
     document.addEventListener('mousedown', onMouseDown)
     document.addEventListener('keydown', onKeyDown)
