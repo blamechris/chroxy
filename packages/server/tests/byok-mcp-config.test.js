@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  CLAUDE_CONFIG_MAX_BYTES,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
   toMcpServerMetadata,
@@ -94,6 +95,20 @@ describe('byok-mcp-config', () => {
     assert.deepEqual(loaded.servers, [])
     assert.equal(loaded.warnings.length, 1)
     assert.match(loaded.warnings[0], /Failed to parse MCP config/)
+  })
+
+  it('bails out with a warning when the config file exceeds the size cap', () => {
+    const path = join(dir, '.claude.json')
+    // Write a JSON-shaped payload just over the size cap; content shape does not
+    // matter because the loader must bail before parsing.
+    const padding = ' '.repeat(CLAUDE_CONFIG_MAX_BYTES + 1)
+    writeFileSync(path, `{"mcpServers":{}}${padding}`)
+    const loaded = loadClaudeMcpConfig(path)
+    assert.equal(loaded.missing, false)
+    assert.deepEqual(loaded.servers, [])
+    assert.equal(loaded.warnings.length, 1)
+    assert.match(loaded.warnings[0], /exceeds size cap/)
+    assert.match(loaded.warnings[0], new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   })
 
   it('metadata redacts env values but keeps env keys', () => {

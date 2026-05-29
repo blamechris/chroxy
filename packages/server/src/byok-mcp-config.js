@@ -6,9 +6,18 @@
  * children or wire tools.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+
+/**
+ * Defensive upper bound on the size of `~/.claude.json`. Today the file is
+ * small (a few KB), but it is owned by Claude Code, not by us — a future
+ * schema change that starts persisting conversation history into it could
+ * grow it substantially. Reading hundreds of MB synchronously at session-start
+ * would block the server, so we bail with a single warning above this cap.
+ */
+export const CLAUDE_CONFIG_MAX_BYTES = 10 * 1024 * 1024
 
 export function defaultClaudeConfigPath() {
   return process.env.CHROXY_CLAUDE_CONFIG || join(homedir(), '.claude.json')
@@ -121,6 +130,14 @@ export function loadClaudeMcpConfig(filePath = defaultClaudeConfigPath()) {
     return { servers: [], warnings: [], missing: true }
   }
   try {
+    // statSync is cheap; do it before readFileSync so a pathologically large
+    // file (see CLAUDE_CONFIG_MAX_BYTES) does not block startup.
+    const stat = statSync(filePath)
+    if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
+      const warning = `MCP config ${filePath} exceeds size cap (${stat.size} bytes > ${CLAUDE_CONFIG_MAX_BYTES} bytes); skipping load`
+      console.warn(`[byok-mcp-config] ${warning}`)
+      return { servers: [], warnings: [warning], missing: false }
+    }
     const raw = JSON.parse(readFileSync(filePath, 'utf8'))
     return { ...parseClaudeMcpConfig(raw), missing: false }
   } catch (err) {
