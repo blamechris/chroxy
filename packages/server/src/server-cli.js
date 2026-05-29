@@ -1,5 +1,6 @@
 import { SessionManager } from './session-manager.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
@@ -250,23 +251,35 @@ function isWithinHome(dir) {
  *   resultTimeoutMs: number|null,
  *   hardTimeoutMs: number|null,
  *   streamStallTimeoutMs: number|null,
+ *   mcpToolCallTimeoutMs: number|null,
  *   effectiveResultTimeoutMs: number,
  *   effectiveHardTimeoutMs: number,
  *   effectiveStreamStallTimeoutMs: number,
+ *   effectiveMcpToolCallTimeoutMs: number,
  * }}
  */
 export function resolveStartupTimeouts(config = {}, log = { warn: () => {} }) {
   const resultOk = isOperatorTimeoutInRange(config.resultTimeoutMs, { name: 'resultTimeoutMs', log })
   const hardOk = isOperatorTimeoutInRange(config.hardTimeoutMs, { name: 'hardTimeoutMs', log })
   const stallOk = isOperatorTimeoutInRange(config.streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
+  // #4517: mcpToolCallTimeoutMs joined the ceiling-clamped family. Same
+  // `> 0` gate as the soft/hard timeouts (0 fires the callTool deadline
+  // immediately and would make every MCP tool look broken); same fall-back-
+  // to-null contract so byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS (30s)
+  // applies. The config.js validator already gates file-loaded values to
+  // 1s-10min — this guardrail catches programmatic instantiation and acts
+  // as defense-in-depth for any future config path that bypasses validation.
+  const mcpOk = isOperatorTimeoutInRange(config.mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
 
   return {
     resultTimeoutMs: resultOk ? config.resultTimeoutMs : null,
     hardTimeoutMs: hardOk ? config.hardTimeoutMs : null,
     streamStallTimeoutMs: stallOk ? config.streamStallTimeoutMs : null,
+    mcpToolCallTimeoutMs: mcpOk ? config.mcpToolCallTimeoutMs : null,
     effectiveResultTimeoutMs: resultOk ? config.resultTimeoutMs : DEFAULT_RESULT_TIMEOUT_MS,
     effectiveHardTimeoutMs: hardOk ? config.hardTimeoutMs : DEFAULT_HARD_TIMEOUT_MS,
     effectiveStreamStallTimeoutMs: stallOk ? config.streamStallTimeoutMs : DEFAULT_STREAM_STALL_TIMEOUT_MS,
+    effectiveMcpToolCallTimeoutMs: mcpOk ? config.mcpToolCallTimeoutMs : DEFAULT_TOOL_CALL_TIMEOUT_MS,
   }
 }
 
@@ -434,10 +447,10 @@ export async function startCliServer(config) {
     // #4482: per-MCP-call timeout (ms). null = byok-mcp-client default (30s).
     // Unlike streamStallTimeoutMs, 0 is not a meaningful disable — every
     // MCP tool would look broken — so non-positive falls back to null.
-    mcpToolCallTimeoutMs:
-      Number.isFinite(config.mcpToolCallTimeoutMs) && config.mcpToolCallTimeoutMs > 0
-        ? config.mcpToolCallTimeoutMs
-        : null,
+    // #4517: ceiling-clamped via `resolveStartupTimeouts()` above; an
+    // over-24h operator value falls back to null here so byok-mcp-client
+    // applies its default (and the operator gets a warn log).
+    mcpToolCallTimeoutMs: startupTimeouts.mcpToolCallTimeoutMs,
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
     maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
