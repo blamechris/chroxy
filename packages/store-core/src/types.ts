@@ -52,6 +52,15 @@ export interface ChatMessage {
   toolUseId?: string;
   toolResult?: string;
   toolResultTruncated?: boolean;
+  /**
+   * #4476: structured error code for `type: 'error'` bubbles. Mirrors the
+   * `code` field on `ServerMessageSchema` — populated when the server tags
+   * an error with a known machine-readable identifier (e.g. `'stream_stall'`
+   * from #4475). Renderers can switch on this to surface a distinct
+   * affordance (chip + retry button) instead of the generic red bubble.
+   * Undefined for legacy errors that carry no code.
+   */
+  code?: string;
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   /**

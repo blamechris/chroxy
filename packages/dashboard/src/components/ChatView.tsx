@@ -90,6 +90,13 @@ export interface ChatViewMessage {
   content: string
   timestamp: number
   isStreaming?: boolean
+  /**
+   * #4476: structured error code mirrored from the store ChatMessage.
+   * Renderers may switch on this to surface a distinct variant for known
+   * error categories (e.g. `'stream_stall'` → chip + retry). Undefined
+   * for legacy errors without a structured code.
+   */
+  code?: string
 }
 
 export interface ChatViewProps {

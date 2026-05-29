@@ -4784,6 +4784,75 @@ describe('handleMessage', () => {
     }
   })
 
+  // #4476: server PR #4475 emits `error{code: 'stream_stall'}` when the CLI
+  // child has been silent for the configured stall window (default 5min).
+  // The discriminator field flows through event-normalizer.js (#4467) and
+  // lands here as a top-level `message` with `messageType: 'error'` and a
+  // populated `code`. The dashboard chip needs that `code` on the
+  // ChatMessage so it can render the distinct 'Stream stalled — retry?'
+  // affordance instead of the generic red error bubble.
+  it('preserves the structured error code on the ChatMessage (#4476)', () => {
+    const out = handleMessage(
+      {
+        messageType: 'error',
+        content: 'Stream stalled — no response for 5 minutes',
+        code: 'stream_stall',
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.type).toBe('error')
+      expect(out.chatMessage.code).toBe('stream_stall')
+    }
+  })
+
+  it('leaves chatMessage.code undefined when the wire message omits code', () => {
+    // Existing generic errors (no structured code) must continue to render
+    // as the plain red bubble — the chip variant only kicks in when the
+    // server explicitly tags the error.
+    const out = handleMessage(
+      {
+        messageType: 'error',
+        content: 'something exploded',
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.code).toBeUndefined()
+    }
+  })
+
+  it('coerces a non-string code to undefined rather than passing junk through', () => {
+    // Defense in depth — the protocol schema already constrains `code` to
+    // a string at the wire boundary, but the runtime type of `msg` is
+    // `Record<string, unknown>` and a malformed payload could land here
+    // with `code: 42`. Drop it instead of storing the wrong type on
+    // ChatMessage.
+    const out = handleMessage(
+      {
+        messageType: 'error',
+        content: 'something exploded',
+        code: 42,
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.code).toBeUndefined()
+    }
+  })
+
   it('skips user_input outside replay (live echo handled elsewhere)', () => {
     const out = handleMessage(
       { messageType: 'user_input', content: 'hi', timestamp: 1 },
