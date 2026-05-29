@@ -201,6 +201,48 @@ describe('MCPFleet', () => {
       assert.equal(fleet.clients[0].state, MCP_STATES.READY)
       await fleet.destroy()
     })
+
+    it('serialises concurrent trust prompts across fleet clients (#4460)', async () => {
+      // Two untrusted servers in the same fleet start in parallel via
+      // Promise.all (MCPFleet.start). Without the per-path lock, both
+      // gates' loadTrustStore calls observe an empty store and both
+      // call recordTrust — the second write reads stale state and
+      // clobbers the first. With the lock, prompts surface one at a
+      // time and both allow decisions persist to disk.
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}-serial.json`
+      const fs = await import('node:fs')
+      let activePrompts = 0
+      let maxConcurrentPrompts = 0
+      let totalPrompts = 0
+      const fakePermissionManager = {
+        requestMcpTrust: async () => {
+          activePrompts += 1
+          totalPrompts += 1
+          if (activePrompts > maxConcurrentPrompts) maxConcurrentPrompts = activePrompts
+          // Force a yield so a non-serialised implementation would let
+          // the other gate's request enter concurrently.
+          await new Promise((r) => setTimeout(r, 10))
+          activePrompts -= 1
+          return true
+        },
+      }
+      const fleet = new MCPFleet(
+        [cfg('one'), cfg('two')],
+        { log: silentLog(), permissionManager: fakePermissionManager, trustStorePath: tmpStorePath },
+      )
+      try {
+        await fleet.start()
+        assert.equal(totalPrompts, 2, 'both untrusted servers must prompt')
+        assert.equal(maxConcurrentPrompts, 1, 'prompts must surface one at a time')
+        assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+        assert.equal(fleet.clients[1].state, MCP_STATES.READY)
+        const raw = JSON.parse(fs.readFileSync(tmpStorePath, 'utf8'))
+        assert.equal(raw.trustedTuples.length, 2, 'both allow decisions must persist (no lost-write)')
+      } finally {
+        await fleet.destroy()
+        try { fs.rmSync(tmpStorePath) } catch {}
+      }
+    })
   })
 
   describe('callTool routing (#4079)', () => {
