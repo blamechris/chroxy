@@ -205,7 +205,15 @@ const INITIAL_ENCRYPTION_CONTEXT: EncryptionContext = {
 
 interface MessageHandlerContext extends EncryptionContext {
   // History replay
-  receivingHistoryReplay: boolean;
+  //
+  // #4512 — per-session replay tracking (mirror of dashboard #4493). The
+  // server's `replayHistory()` chunks over `setImmediate` (ws-history.js),
+  // which yields the event loop between chunks, so live broadcasts from
+  // OTHER sessions can interleave with session A's replay. A per-connection
+  // boolean would gate all sessions on A's replay state and drop legitimate
+  // live activity for sessions B/C/etc. Scope the flag per-session id and
+  // gate per-target.
+  replayingSessions: Set<string>;
   isSessionSwitchReplay: boolean;
   pendingSwitchSessionId: string | null;
 
@@ -234,7 +242,7 @@ interface MessageHandlerContext extends EncryptionContext {
 function createDefaultContext(): MessageHandlerContext {
   return {
     ...INITIAL_ENCRYPTION_CONTEXT,
-    receivingHistoryReplay: false,
+    replayingSessions: new Set<string>(),
     isSessionSwitchReplay: false,
     pendingSwitchSessionId: null,
     postPermissionSplits: new Set<string>(),
@@ -488,7 +496,7 @@ export function setPendingSwitchSessionId(id: string | null): void {
 }
 
 export function resetReplayFlags(): void {
-  _ctx.receivingHistoryReplay = false;
+  _ctx.replayingSessions.clear();
   _ctx.isSessionSwitchReplay = false;
   _ctx.pendingSwitchSessionId = null;
 }
@@ -913,12 +921,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // without waiting for the user to dismiss it manually. Mirrors the
   // equivalent clear in packages/dashboard/src/store/message-handler.ts.
   //
-  // #4492 — gate on `!_ctx.receivingHistoryReplay` (mobile's per-connection
-  // equivalent of the dashboard's `_receivingHistoryReplay` module flag —
-  // see #4466 / PR #4490). switch_session and reconnect both replay past
-  // events through this handler via history_replay_start → events →
-  // history_replay_end, and replayed tool_start / message / result is NOT
-  // fresh activity. Without this gate, every reconnect or session switch:
+  // #4492 — gate on the replay set (mobile's per-connection equivalent of
+  // the dashboard's `_receivingHistoryReplay` module flag — see #4466 /
+  // PR #4490). switch_session and reconnect both replay past events through
+  // this handler via history_replay_start → events → history_replay_end,
+  // and replayed tool_start / message / result is NOT fresh activity.
+  // Without this gate, every reconnect or session switch:
   //   1) bumps lastClientActivityAt to Date.now(), so "Working… last
   //      activity Ns ago" resets to 1s no matter how idle the session was;
   //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
@@ -926,9 +934,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // Live activity events arriving AFTER history_replay_end clears the flag
   // still bump correctly — verified by the regression-guard test in
   // message-handler.test.ts.
-  if (isActivityEvent(msg.type) && !_ctx.receivingHistoryReplay) {
+  //
+  // #4512 — gate per target session id (Set membership), not a connection
+  // flag. `replayHistory()` chunks over setImmediate, so live broadcasts
+  // from session B can interleave with A's replay. A per-connection boolean
+  // would wrongly suppress B's live activity bump for the duration of A's
+  // replay.
+  if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-    if (targetId && get().sessionStates[targetId]) {
+    if (targetId && get().sessionStates[targetId] && !_ctx.replayingSessions.has(targetId)) {
       updateSession(targetId, (ss) => {
         const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
         if (ss.inactivityWarning) patch.inactivityWarning = null;
@@ -943,8 +957,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       return;
 
     case 'auth_ok': {
-      // Reset replay flags — fresh auth means clean slate
-      _ctx.receivingHistoryReplay = false;
+      // Reset replay flags — fresh auth means clean slate (#4512: clear the
+      // per-session replaying set so a reconnect doesn't leave stale ids
+      // gating future activity bumps).
+      _ctx.replayingSessions.clear();
       _ctx.isSessionSwitchReplay = false;
       _ctx.pendingSwitchSessionId = null;
       if (!ctx.isReconnect) hapticSuccess();
@@ -1391,7 +1407,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         msg,
         get().activeSessionId,
       );
-      _ctx.receivingHistoryReplay = true;
+      // #4512 — track per-session. Falls back to activeSessionId via
+      // sharedHistoryReplayStart, matching the gate's targetId resolution.
+      if (replayTargetId) _ctx.replayingSessions.add(replayTargetId);
       // Full history replay (from request_full_history): clear messages before replay
       if (fullHistory) {
         _ctx.isSessionSwitchReplay = true;
@@ -1415,7 +1433,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'history_replay_end':
       // Parser is shared via store-core; flag mutation stays here.
-      _ctx.receivingHistoryReplay = sharedHistoryReplayEnd().receivingHistoryReplay;
+      // #4512 — remove this session id from the replaying set. Falls back
+      // to activeSessionId to mirror sharedHistoryReplayStart's resolution.
+      sharedHistoryReplayEnd();
+      {
+        const endTargetId =
+          (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
+        if (endTargetId) _ctx.replayingSessions.delete(endTargetId);
+      }
       _ctx.isSessionSwitchReplay = false;
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
@@ -1452,7 +1477,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // consistent with sharedMessageHandler and the rest of store-core.
       const targetId = resolveSessionId(msg, get().activeSessionId);
       const cached = getSessionMessages(targetId);
-      const result = sharedMessageHandler(msg, get().activeSessionId, _ctx.receivingHistoryReplay, cached);
+      // #4512 — dedup against history only when THIS message's session is
+      // currently replaying. A per-connection boolean would suppress live
+      // messages for session B while A replays.
+      const messageIsReplay = targetId ? _ctx.replayingSessions.has(targetId) : false;
+      const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
       if (!result.shouldDispatch) break;
       const newMsg = result.chatMessage;
       const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
@@ -1588,10 +1617,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'tool_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       const cached = getSessionMessages(targetId);
+      // #4512 — dedup against the cached history only when THIS message's
+      // session is currently replaying. A per-connection boolean would
+      // wrongly suppress live tool_start broadcasts for session B while A
+      // is replaying.
+      const toolStartIsReplay = targetId ? _ctx.replayingSessions.has(targetId) : false;
       const result = sharedToolStart(
         msg,
         get().activeSessionId,
-        _ctx.receivingHistoryReplay,
+        toolStartIsReplay,
         cached,
       );
       if (!result.shouldDispatch || !result.chatMessage) break;
