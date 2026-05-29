@@ -6,6 +6,7 @@ import {
   DEFAULT_HARD_TIMEOUT_MS,
   DEFAULT_STREAM_STALL_TIMEOUT_MS,
 } from '../src/base-session.js'
+import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from '../src/byok-mcp-client.js'
 
 /**
  * #4509: `startCliServer` previously hand-rolled the same
@@ -29,11 +30,13 @@ describe('resolveStartupTimeouts (#4509)', () => {
   // (`*TimeoutMs`) takes `null` for invalid/over-ceiling so BaseSession can
   // apply its default; the log-line side (`effective*`) takes the resolved
   // default so the operator sees the actual wall-clock value that will fire.
+  // #4517: mcpToolCallTimeoutMs joined the helper family — its "effective"
+  // side resolves to DEFAULT_TOOL_CALL_TIMEOUT_MS (byok-mcp-client default).
   function expectShape(out) {
     assert.ok(out && typeof out === 'object', 'helper must return an object')
     for (const k of [
-      'resultTimeoutMs', 'hardTimeoutMs', 'streamStallTimeoutMs',
-      'effectiveResultTimeoutMs', 'effectiveHardTimeoutMs', 'effectiveStreamStallTimeoutMs',
+      'resultTimeoutMs', 'hardTimeoutMs', 'streamStallTimeoutMs', 'mcpToolCallTimeoutMs',
+      'effectiveResultTimeoutMs', 'effectiveHardTimeoutMs', 'effectiveStreamStallTimeoutMs', 'effectiveMcpToolCallTimeoutMs',
     ]) {
       assert.ok(Object.prototype.hasOwnProperty.call(out, k), `missing key: ${k}`)
     }
@@ -48,6 +51,7 @@ describe('resolveStartupTimeouts (#4509)', () => {
       resultTimeoutMs: 90_000,
       hardTimeoutMs: 3_600_000,
       streamStallTimeoutMs: 120_000,
+      mcpToolCallTimeoutMs: 45_000,
     }, { warn: () => {} })
     expectShape(out)
     assert.equal(out.resultTimeoutMs, 90_000)
@@ -56,6 +60,8 @@ describe('resolveStartupTimeouts (#4509)', () => {
     assert.equal(out.effectiveHardTimeoutMs, 3_600_000)
     assert.equal(out.streamStallTimeoutMs, 120_000)
     assert.equal(out.effectiveStreamStallTimeoutMs, 120_000)
+    assert.equal(out.mcpToolCallTimeoutMs, 45_000)
+    assert.equal(out.effectiveMcpToolCallTimeoutMs, 45_000)
   })
 
   it('accepts streamStallTimeoutMs=0 as an explicit disable (does NOT fall back)', () => {
@@ -76,6 +82,10 @@ describe('resolveStartupTimeouts (#4509)', () => {
         // -1 paths are tested separately because 0 is intentional and -1 is
         // just "out of range" without a special-case meaning.
         streamStallTimeoutMs: bad === 0 ? -1 : bad,
+        // #4517: mcpToolCallTimeoutMs follows the same `> 0` gate as the soft/
+        // hard inactivity timeouts — 0 fires immediately and makes every MCP
+        // tool look broken — so it joins the bad-input loop directly.
+        mcpToolCallTimeoutMs: bad,
       }, { warn: () => {} })
       assert.equal(out.resultTimeoutMs, null, `resultTimeoutMs null for ${String(bad)}`)
       assert.equal(out.effectiveResultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
@@ -83,6 +93,8 @@ describe('resolveStartupTimeouts (#4509)', () => {
       assert.equal(out.effectiveHardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
       assert.equal(out.streamStallTimeoutMs, null, `streamStallTimeoutMs null for ${String(bad)}`)
       assert.equal(out.effectiveStreamStallTimeoutMs, DEFAULT_STREAM_STALL_TIMEOUT_MS)
+      assert.equal(out.mcpToolCallTimeoutMs, null, `mcpToolCallTimeoutMs null for ${String(bad)}`)
+      assert.equal(out.effectiveMcpToolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS)
     }
   })
 
@@ -124,11 +136,31 @@ describe('resolveStartupTimeouts (#4509)', () => {
     assert.ok(hit, `expected warn log mentioning streamStallTimeoutMs + MAX_SANE_DURATION_MS, got: ${warnings.join(' | ')}`)
   })
 
-  it('accepts the exact MAX_SANE_DURATION_MS boundary on all three timeouts', () => {
+  it('clamps mcpToolCallTimeoutMs above MAX_SANE_DURATION_MS back to null + DEFAULT and warns (#4517)', () => {
+    // #4517: mcpToolCallTimeoutMs joined the three sibling timeouts in the
+    // ceiling-clamp guardrail. config.js has a tighter 1s-10min validator
+    // applied to file-loaded values (left in place — see PR notes for the
+    // site-4 decision), but defense-in-depth at the resolution layer keeps
+    // programmatic instantiation (tests, embedders) honest.
+    const warnings = []
+    const out = resolveStartupTimeouts(
+      { mcpToolCallTimeoutMs: MAX_SANE_DURATION_MS + 1 },
+      { warn: (msg) => warnings.push(msg) },
+    )
+    assert.equal(out.mcpToolCallTimeoutMs, null,
+      'SessionManager arg side must fall back to null so byok-mcp-client applies its default')
+    assert.equal(out.effectiveMcpToolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS,
+      'log-line side must resolve to DEFAULT_TOOL_CALL_TIMEOUT_MS so operators see the actual effective value')
+    const hit = warnings.find((w) => w.includes('mcpToolCallTimeoutMs') && w.includes('MAX_SANE_DURATION_MS'))
+    assert.ok(hit, `expected warn log mentioning mcpToolCallTimeoutMs + MAX_SANE_DURATION_MS, got: ${warnings.join(' | ')}`)
+  })
+
+  it('accepts the exact MAX_SANE_DURATION_MS boundary on all four timeouts', () => {
     const out = resolveStartupTimeouts({
       resultTimeoutMs: MAX_SANE_DURATION_MS,
       hardTimeoutMs: MAX_SANE_DURATION_MS,
       streamStallTimeoutMs: MAX_SANE_DURATION_MS,
+      mcpToolCallTimeoutMs: MAX_SANE_DURATION_MS,
     }, { warn: () => {} })
     assert.equal(out.resultTimeoutMs, MAX_SANE_DURATION_MS)
     assert.equal(out.effectiveResultTimeoutMs, MAX_SANE_DURATION_MS)
@@ -136,6 +168,8 @@ describe('resolveStartupTimeouts (#4509)', () => {
     assert.equal(out.effectiveHardTimeoutMs, MAX_SANE_DURATION_MS)
     assert.equal(out.streamStallTimeoutMs, MAX_SANE_DURATION_MS)
     assert.equal(out.effectiveStreamStallTimeoutMs, MAX_SANE_DURATION_MS)
+    assert.equal(out.mcpToolCallTimeoutMs, MAX_SANE_DURATION_MS)
+    assert.equal(out.effectiveMcpToolCallTimeoutMs, MAX_SANE_DURATION_MS)
   })
 
   it('returns the same shape with no config (all defaults)', () => {
@@ -147,5 +181,7 @@ describe('resolveStartupTimeouts (#4509)', () => {
     assert.equal(out.effectiveHardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
     assert.equal(out.streamStallTimeoutMs, null)
     assert.equal(out.effectiveStreamStallTimeoutMs, DEFAULT_STREAM_STALL_TIMEOUT_MS)
+    assert.equal(out.mcpToolCallTimeoutMs, null)
+    assert.equal(out.effectiveMcpToolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS)
   })
 })

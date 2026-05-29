@@ -292,8 +292,11 @@ export class SessionManager extends EventEmitter {
     // valid disable here — a 0-ms callTool timeout fires immediately. Only
     // positive finite values are accepted; null falls through to byok-mcp-
     // client's 30s default.
+    // #4517: ceiling check via `isOperatorTimeoutInRange` (same as the three
+    // sibling timeouts in #4509) — a typoed CHROXY_MCP_TOOL_CALL_TIMEOUT_MS
+    // (extra digit / accidental exponent) falls back to null and warns.
     this._mcpToolCallTimeoutMs =
-      Number.isFinite(mcpToolCallTimeoutMs) && mcpToolCallTimeoutMs > 0
+      isOperatorTimeoutInRange(mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
         ? mcpToolCallTimeoutMs
         : null
     // #4456: same defensive shape as mcpToolCallTimeoutMs — only positive

@@ -20,6 +20,7 @@ import { homedir } from 'os'
 import { BaseSession } from './base-session.js'
 import { PermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 import {
   FALLBACK_MODELS,
   ALLOWED_MODEL_IDS,
@@ -153,6 +154,20 @@ export class ClaudeByokSession extends BaseSession {
     }
   }
 
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.cwd]            Working directory for tool execution.
+   * @param {string} [opts.model]          Anthropic model id; falls back to `claude-opus-4-7`.
+   * @param {string} [opts.mcpConfigPath]  Path to a Claude-style MCP config (default: `~/.claude.json` or `$CHROXY_CLAUDE_CONFIG`).
+   *   Canonical name (#4449). Only the `mcpServers` block is read — the rest of the
+   *   file is ignored. A previous `opts.claudeConfigPath` alias was removed because
+   *   it was unused at every call site and added no semantics over `mcpConfigPath`:
+   *   only the MCP portion of the file is consumed by this session, so a single
+   *   "where does the MCP config live" knob is sufficient. Wider Claude-config
+   *   overrides (system prompt, settings) can be added as distinct named opts when
+   *   any of them are actually used.
+   * @param {number} [opts.mcpToolCallTimeoutMs]  Per-tools/call timeout; null/undefined = MCPClient default (30s).
+   */
   constructor(opts = {}) {
     super({ ...opts, provider: opts.provider || 'claude-byok' })
     // Anthropic SDK client; lazily instantiated in start() so unit tests
@@ -235,7 +250,13 @@ export class ClaudeByokSession extends BaseSession {
     // no child spawn, no tool wiring — those land in #4077/#4078/#4079.
     // Malformed configs log a single warn per server and produce an
     // empty list, so a corrupt user config can't take down session start.
-    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath || opts.claudeConfigPath)
+    //
+    // #4449: `mcpConfigPath` is the only supported override. The
+    // earlier `opts.claudeConfigPath` alias was redundant — this
+    // session only reads the `mcpServers` block, so a separate
+    // "whole Claude config" knob added no behavior over
+    // `mcpConfigPath` and had no callers. See constructor JSDoc.
+    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath)
     for (const warning of mcpConfig.warnings) {
       log.warn(`BYOK MCP config: ${warning}`)
     }
@@ -251,8 +272,12 @@ export class ClaudeByokSession extends BaseSession {
     // non-finite / non-positive (NaN, Infinity, 0, -1, strings) falls back
     // to null because setTimeout coerces those to 0 ms and every MCP tool
     // would look broken.
+    // #4517: ceiling check via `isOperatorTimeoutInRange` (same as the three
+    // sibling timeouts in #4509) — defends per-session BYOK assignment
+    // against an over-24h value that would survive session-manager (e.g.
+    // an embedder constructing ClaudeByokSession directly with a typoed opt).
     this._mcpToolCallTimeoutMs =
-      Number.isFinite(opts.mcpToolCallTimeoutMs) && opts.mcpToolCallTimeoutMs > 0
+      isOperatorTimeoutInRange(opts.mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
         ? opts.mcpToolCallTimeoutMs
         : null
     // #4456: wall-clock cap on fleet.start(). null = use the fleet's
