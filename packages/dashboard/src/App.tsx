@@ -693,130 +693,127 @@ export function App() {
         })()
         return
       }
-      // #3852: customizable shortcuts win first. The registry holds the
-      // user-rebindable subset (palette, sidebar, settings, new
-      // session). Each shortcut's id maps to a stable action below; if
-      // the user has rewired Cmd+K to Cmd+J the registry's matchEvent
-      // returns 'palette.toggle' for the new combo. Hardcoded fallbacks
-      // for shortcuts NOT yet in the registry (Cmd+1-9, Cmd+\, etc.)
-      // remain below. Note: we deliberately do NOT gate on text-input
-      // focus — that matches the legacy ladder's behavior (Cmd+K in a
-      // textarea still toggles the palette).
+      // #3852 / #4412: customizable shortcuts win first. The registry
+      // is the single source of truth for the entire global keydown
+      // ladder — every dispatch below is a registry id, never a raw
+      // combo, so user rebinds in Settings propagate automatically.
+      // The registry already evaluates `disabledInTextInput` and
+      // `enabled` predicates internally (see registry.ts matchEvent),
+      // so the per-branch text-input gates the old ladder did inline
+      // are gone — they live on the ShortcutDef instead.
+      //
+      // Note: we deliberately do NOT gate ALL shortcuts on text-input
+      // focus — palette / sidebar / settings / new-session / etc.
+      // should fire even when a textarea has focus. Only shortcuts
+      // declared with `disabledInTextInput: true` are suppressed by
+      // the registry (Shift+Tab, ?).
       const matchedId = shortcutRegistry.matchEvent(e, 'global')
       if (matchedId) {
-        e.preventDefault()
-        if (matchedId === 'palette.toggle') setPaletteOpen(prev => !prev)
-        else if (matchedId === 'sidebar.toggle') setSidebarOpen(prev => !prev)
-        else if (matchedId === 'settings.open') setSettingsOpen(prev => !prev)
-        else if (matchedId === 'session.new') setShowCreateSession(true)
-        return
-      }
-      // Cmd+Shift+P: toggle command palette (VSCode-style alias)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault()
-        setPaletteOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+D: toggle view mode (chat ↔ terminal)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
-        e.preventDefault()
-        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
-        return
-      }
-      // Cmd+1-9: switch to tab by index
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key >= '1' && e.key <= '9') {
-        e.preventDefault()
-        const idx = parseInt(e.key, 10) - 1
-        const target = sessions[idx]
-        if (target) handleSwitchSession(target.sessionId)
-        return
-      }
-      // Cmd+Shift+[ / ]: prev/next tab
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === '[' || e.key === ']')) {
-        e.preventDefault()
-        const currentIdx = sessions.findIndex(s => s.sessionId === activeSessionId)
-        if (currentIdx < 0) return
-        const nextIdx = e.key === '['
-          ? (currentIdx - 1 + sessions.length) % sessions.length
-          : (currentIdx + 1) % sessions.length
-        handleSwitchSession(sessions[nextIdx]!.sessionId)
-        return
-      }
-      // Cmd+W: close active tab (if more than 1 session) — Tauri only (#1378)
-      if (isTauri() && (e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
-        if (activeSessionId && sessions.length > 1) {
-          e.preventDefault()
-          handleCloseSession(activeSessionId)
+        // session.switch.N — index from id suffix; preventDefault only
+        // when we actually have a session for that slot so unused
+        // slots don't swallow OS-level Cmd+digit shortcuts.
+        if (matchedId.startsWith('session.switch.')) {
+          const idx = parseInt(matchedId.slice('session.switch.'.length), 10) - 1
+          const target = sessions[idx]
+          if (target) {
+            e.preventDefault()
+            handleSwitchSession(target.sessionId)
+          }
+          return
         }
-      }
-      // Cmd+B (sidebar) handled by the registry above (#3852).
-      // Cmd+Shift+P: command palette (VSCode alias)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault()
-        setPaletteOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+D: toggle chat/terminal view
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
-        e.preventDefault()
-        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
-        return
-      }
-      // Cmd+\: cycle split mode (none → horizontal → vertical → none)
-      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
-        e.preventDefault()
-        setSplitMode(prev => {
-          const next = prev === null ? 'horizontal' : prev === 'horizontal' ? 'vertical' : null
-          persistSplitMode(next)
-          return next
-        })
-        return
-      }
-      // Cmd+, (settings) handled by the registry above (#3852).
-      // Cmd+Shift+T: copy chat transcript (#3073)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 't') {
-        e.preventDefault()
-        handleCopyTranscript()
-        return
-      }
-      // Cmd+.: interrupt active session
-      if ((e.metaKey || e.ctrlKey) && e.key === '.') {
-        e.preventDefault()
-        sendInterrupt()
-        return
-      }
-      // Shift+Tab: toggle plan mode
-      if (e.shiftKey && e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const tag = (e.target as HTMLElement).tagName
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return  // Allow native reverse-tab
-        e.preventDefault()
-        const state = useConnectionStore.getState()
-        const currentMode = state.permissionMode
-        if (currentMode === 'plan') {
-          // Switch back to previous mode (default to 'approve')
-          setPermissionMode(state.previousPermissionMode || 'approve')
-        } else {
-          // Switch to plan mode
-          setPermissionMode('plan')
+        // session.close (Cmd+W) — Tauri-only via registry `enabled`
+        // predicate. Additional in-action guard: only close when more
+        // than one session exists, otherwise let the event bubble so
+        // Cmd+W still closes the desktop window when there's nothing
+        // left to close inside the app.
+        if (matchedId === 'session.close') {
+          if (activeSessionId && sessions.length > 1) {
+            e.preventDefault()
+            handleCloseSession(activeSessionId)
+          }
+          return
         }
-        return
-      }
-      // ?: toggle shortcut help (no modifiers, not in text input)
-      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const tag = (e.target as HTMLElement).tagName
-        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(e.target as HTMLElement).isContentEditable) {
+        // help.toggle — registry already gates text-input focus, but
+        // the overlay-stack check is App-state knowledge it can't
+        // own. Keep it here.
+        if (matchedId === 'help.toggle') {
           const overlays = document.querySelectorAll('[data-modal-overlay]')
           const onlyShortcutHelp = overlays.length === 1 && overlays[0]?.classList.contains('shortcut-help-overlay')
           if (overlays.length === 0 || onlyShortcutHelp) {
             e.preventDefault()
             setShortcutHelpOpen(prev => !prev)
           }
+          return
         }
+        e.preventDefault()
+        switch (matchedId) {
+          case 'palette.toggle':
+          case 'palette.toggle.vscode':
+            setPaletteOpen(prev => !prev)
+            break
+          case 'sidebar.toggle':
+            setSidebarOpen(prev => !prev)
+            break
+          case 'settings.open':
+            setSettingsOpen(prev => !prev)
+            break
+          case 'session.new':
+            setShowCreateSession(true)
+            break
+          case 'view.toggleChatTerminal':
+            setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
+            break
+          case 'view.cycleSplit':
+            setSplitMode(prev => {
+              const next = prev === null ? 'horizontal' : prev === 'horizontal' ? 'vertical' : null
+              persistSplitMode(next)
+              return next
+            })
+            break
+          case 'session.copyTranscript':
+            handleCopyTranscript()
+            break
+          case 'session.interrupt':
+            sendInterrupt()
+            break
+          case 'session.prev':
+          case 'session.next': {
+            const currentIdx = sessions.findIndex(s => s.sessionId === activeSessionId)
+            if (currentIdx < 0) break
+            const nextIdx = matchedId === 'session.prev'
+              ? (currentIdx - 1 + sessions.length) % sessions.length
+              : (currentIdx + 1) % sessions.length
+            handleSwitchSession(sessions[nextIdx]!.sessionId)
+            break
+          }
+          case 'session.togglePlanMode': {
+            const state = useConnectionStore.getState()
+            const currentMode = state.permissionMode
+            if (currentMode === 'plan') {
+              // Switch back to previous mode (default to 'approve')
+              setPermissionMode(state.previousPermissionMode || 'approve')
+            } else {
+              setPermissionMode('plan')
+            }
+            break
+          }
+          default:
+            // Unknown registry id reached the dispatch table — most
+            // likely a definition was added in defaults.ts without an
+            // App-side handler. Fail loud in dev so the gap is
+            // obvious; silently ignore in prod so a stray
+            // localStorage override can't brick the app.
+            if (import.meta.env?.DEV) {
+              // eslint-disable-next-line no-console
+              console.warn(`[shortcuts] no handler for matched id "${matchedId}"`)
+            }
+        }
+        return
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript, shortcutRegistry])
+  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript, shortcutRegistry, appendImageAttachments, setPermissionMode])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -1532,56 +1529,76 @@ export function App() {
     return null
   }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
 
-  // #3852: pull the effective bindings for the four registry-managed
-  // shortcuts out into render-time locals so the useMemo below can
-  // observe them in its dep array. Reading `shortcutRegistry` alone is
-  // not enough — the registry reference is stable, so a dep of
-  // `[shortcutRegistry]` would skip recomputation after a rebind and
-  // the cheat sheet would show stale combos. The hook (re-)renders us
-  // whenever a binding changes, so reading getBinding() here picks up
-  // the new value on that render.
+  // #4412: registry-driven cheat sheet. Recomputed on every render —
+  // not memoised, by design. The shortcut registry hook re-renders
+  // whenever a binding changes, so reading registry.list() inside
+  // the body picks up the new combos automatically. Memoising on
+  // [shortcutRegistry] would silently skip rebinds because the
+  // registry reference is stable. The work is cheap (constant-size
+  // arrays, simple map) so re-running it per render is fine.
   const isMacForCheatsheet = isMacPlatform()
-  const paletteBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('palette.toggle'), isMacForCheatsheet)
-  const sidebarBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('sidebar.toggle'), isMacForCheatsheet)
-  const settingsBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('settings.open'), isMacForCheatsheet)
-  const newSessionBindingDisplay = formatBindingForDisplay(shortcutRegistry.getBinding('session.new'), isMacForCheatsheet)
-
-  const SHORTCUTS: ShortcutEntry[] = useMemo(() => {
-    // #2883: author entries with canonical `Cmd+...` labels and rewrite to
-    // `Ctrl+...` at render time on non-Mac platforms so the cheat-sheet
-    // matches the modifier the user can actually press.
-    const rawEntries: ShortcutEntry[] = [
-      { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
-      { keys: paletteBindingDisplay || 'Cmd+K', description: 'Command palette', section: 'Global' },
-      { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
-      { keys: newSessionBindingDisplay || 'Cmd+N', description: 'New session', section: 'Global' },
-      { keys: sidebarBindingDisplay || 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
-      { keys: settingsBindingDisplay || 'Cmd+,', description: 'Settings', section: 'Global' },
-      { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
-      { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
-      { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
-      { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
-      { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
-      { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
-      { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
-      { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
+  const SHORTCUTS: ShortcutEntry[] = (() => {
+    // Section labels mirror the Settings panel groupings so the cheat
+    // sheet and customization UI stay coherent.
+    const CATEGORY_TO_SECTION: Record<string, string> = {
+      navigation: 'Global',
+      view: 'Global',
+      session: 'Session',
+      composer: 'Input',
+      other: 'Global',
+    }
+    // Cmd+1-9 collapse: nine separate rows would bloat the cheat
+    // sheet without adding signal. Emit a single "Cmd+1-9" row whose
+    // keys reflect the registry's current first-digit binding so a
+    // rebind (e.g. moving them to Alt+1-9) is still visible.
+    const tabSwitch1 = shortcutRegistry.get('session.switch.1')
+    const tabSwitchKeys = tabSwitch1
+      ? formatBindingForDisplay(tabSwitch1.binding, isMacForCheatsheet).replace(/1$/, '1-9')
+      : 'Cmd+1-9'
+    const registryRows: ShortcutEntry[] = []
+    for (const entry of shortcutRegistry.list()) {
+      // Skip the 2..9 tab-switch entries — collapsed into one row
+      // below. Keep session.switch.1 as the canonical source so its
+      // override drives the collapsed row's display string.
+      if (/^session\.switch\.[2-9]$/.test(entry.id)) continue
+      if (entry.id === 'session.switch.1') {
+        registryRows.push({
+          keys: tabSwitchKeys,
+          description: 'Switch to tab by number',
+          section: CATEGORY_TO_SECTION[entry.category] || 'Global',
+        })
+        continue
+      }
+      registryRows.push({
+        keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
+        description: entry.description,
+        section: CATEGORY_TO_SECTION[entry.category] || 'Global',
+      })
+    }
+    // Non-registry entries: permission shortcuts (handled inside the
+    // permission prompt UI), composer send (handled in InputBar),
+    // Escape (handled per-modal), and the Tauri image-paste shortcut.
+    // None of these live in the global keydown ladder so they don't
+    // belong in the registry.
+    const extraEntries: ShortcutEntry[] = [
       { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
       { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
       { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
       { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
     ]
-    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on macOS,
-    // since on other platforms Ctrl+V is the native text-paste shortcut.
-    // Show the entry only where the shortcut is actually wired.
+    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on
+    // macOS; on other platforms Ctrl+V is the native text-paste
+    // shortcut. Show the entry only where the shortcut is actually
+    // wired.
     if (isTauri() && isMacPlatform()) {
-      rawEntries.push({
+      extraEntries.push({
         keys: 'Ctrl+V',
         description: 'Paste image from clipboard (Cmd+V stays as text paste)',
         section: 'Input',
       })
     }
-    return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
-  }, [paletteBindingDisplay, sidebarBindingDisplay, settingsBindingDisplay, newSessionBindingDisplay])
+    return [...registryRows, ...extraEntries].map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
+  })()
 
   // Compute context window usage percentage from active model metadata
   const contextPercent = useMemo(() => {

@@ -1,19 +1,52 @@
 /**
- * Default shortcut definitions (#3852).
+ * Default shortcut definitions (#3852, #4412).
  *
- * Scope-reduced for the first cut: the most-commonly-rebound shortcuts
- * — palette, sidebar, settings, new session — are user-customizable
- * through the registry. The remaining (Cmd+1-9 tab switching,
- * Cmd+Shift+[/], Cmd+\, etc.) stay in the keydown ladder for now; once
- * this lands they can be migrated in follow-ups without changing the
- * registry contract.
+ * Full migration of App.tsx's global keydown ladder into the registry
+ * so every shortcut is user-rebindable. The four palette/sidebar/
+ * settings/new-session entries from #3852 stay first for source-diff
+ * readability; everything below was migrated in #4412.
+ *
+ * Variadic shortcuts
+ * ------------------
+ * Cmd+1-9 (tab switching by index) and Cmd+Shift+[/] (prev/next tab)
+ * could be modelled as either a single parameterised action or as N
+ * separate entries. We picked N entries because the registry only
+ * needs combo->id matching to stay simple, and per-digit entries let
+ * users rebind individual slots in Settings independently (e.g. wire
+ * Cmd+1 to a different action without losing Cmd+2-9). The trade-off
+ * is nine rows in the Settings panel — acceptable, and they group
+ * cleanly under the "Session" category. The cheat sheet collapses
+ * them back into a single "Cmd+1-9" row for readability.
+ *
+ * Edge cases / gates
+ * ------------------
+ * - Cmd+W (close tab): Tauri-only. Uses `enabled: () => isTauri()`.
+ * - Shift+Tab (toggle plan mode): must NOT fire inside text inputs so
+ *   the user can still reverse-tab between form fields. Uses
+ *   `disabledInTextInput: true`.
+ * - `?` (open cheat sheet): same text-input gate, plus an overlay
+ *   stack check that the App.tsx call site still enforces (the
+ *   registry has no notion of modal stacks).
  *
  * The id namespace is `<area>.<action>` so future shortcuts slot in
  * predictably (e.g. `composer.history.prev` for #3854).
  */
 import type { ShortcutDef } from './registry'
+import { isTauri } from '../utils/tauri'
+
+// 1-indexed digit list for the variadic Cmd+<n> tab-switch entries.
+const TAB_DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const
+
+const tabSwitchShortcuts: ShortcutDef[] = TAB_DIGITS.map(n => ({
+  id: `session.switch.${n}`,
+  defaultBinding: `cmd+${n}`,
+  description: `Switch to tab ${n}`,
+  category: 'session',
+  scope: 'global',
+}))
 
 export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
+  // -- #3852: original migration -----------------------------------
   {
     id: 'palette.toggle',
     defaultBinding: 'cmd+k',
@@ -42,4 +75,86 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     category: 'session',
     scope: 'global',
   },
+  // -- #4412: remaining ladder entries -----------------------------
+  {
+    id: 'palette.toggle.vscode',
+    defaultBinding: 'cmd+shift+p',
+    description: 'Toggle command palette (VSCode alias)',
+    category: 'navigation',
+    scope: 'global',
+  },
+  {
+    id: 'view.toggleChatTerminal',
+    defaultBinding: 'cmd+shift+d',
+    description: 'Toggle chat / terminal view',
+    category: 'view',
+    scope: 'global',
+  },
+  {
+    id: 'view.cycleSplit',
+    defaultBinding: 'cmd+\\',
+    description: 'Cycle split view',
+    category: 'view',
+    scope: 'global',
+  },
+  {
+    id: 'session.copyTranscript',
+    defaultBinding: 'cmd+shift+t',
+    description: 'Copy chat transcript',
+    category: 'session',
+    scope: 'global',
+  },
+  {
+    id: 'session.interrupt',
+    defaultBinding: 'cmd+.',
+    description: 'Interrupt session',
+    category: 'session',
+    scope: 'global',
+  },
+  {
+    id: 'session.togglePlanMode',
+    defaultBinding: 'shift+tab',
+    description: 'Toggle plan mode',
+    category: 'session',
+    scope: 'global',
+    disabledInTextInput: true,
+  },
+  {
+    id: 'help.toggle',
+    defaultBinding: '?',
+    description: 'Show keyboard shortcuts',
+    category: 'other',
+    scope: 'global',
+    disabledInTextInput: true,
+  },
+  // Variadic-ish: prev / next tab. Two entries (one per arm) so users
+  // can rebind them independently and the registry stays a plain
+  // combo->id map. Both dispatch to a single nav action in App.tsx.
+  {
+    id: 'session.prev',
+    defaultBinding: 'cmd+shift+[',
+    description: 'Previous tab',
+    category: 'session',
+    scope: 'global',
+  },
+  {
+    id: 'session.next',
+    defaultBinding: 'cmd+shift+]',
+    description: 'Next tab',
+    category: 'session',
+    scope: 'global',
+  },
+  // Cmd+W close tab — Tauri only. In the browser Cmd+W is reserved by
+  // the OS for closing the tab/window itself, so the `enabled`
+  // predicate keeps the shortcut quiescent there.
+  {
+    id: 'session.close',
+    defaultBinding: 'cmd+w',
+    description: 'Close tab (desktop)',
+    category: 'session',
+    scope: 'global',
+    enabled: () => isTauri(),
+  },
+  // Cmd+1 .. Cmd+9 tab-switch entries — one per digit.
+  ...tabSwitchShortcuts,
 ]
