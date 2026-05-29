@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-05-28
+
+Small follow-up sweep closing seven leftovers from the v0.9.10–v0.9.11 marathons. Theme is "finish what we started": the keyboard-shortcut registry now owns every dashboard binding (the tail #4412 deferred from v0.9.10's #3852), the context-window learn-loop now persists and runs on both Codex and Gemini (the two #4413/#4414 follow-ups from v0.9.10's #3857), and the pending-background-shells feature lights up the mobile app + handles overflow and multi-shell expansion (the three #4420/#4421/#4422 follow-ups from v0.9.11's #4307). No new user-facing features — every change is making an existing v0.9.x feature work the way it was advertised.
+
+### Added
+
+- **Mobile-app surface for pending background shells (#4422 / #4425):** `ActivityIndicator.tsx` (mobile) now shows "Waiting on background work" with the most-recently-started shell's command text, matching the dashboard's #4418 surface from v0.9.11. Uses the same `pendingBackgroundShells` store-core field that already flows through the WS event + snapshot — no protocol changes, just renderer parity.
+- **ActivityIndicator chip handles overflow + multi-shell expand (#4420 + #4421 / #4426):** the chip text now tail-truncates long shell commands with `title=""` fallback so the full command is reachable on hover. Tapping a multi-shell chip expands to the full list of pending shells with start time. Bundled into one PR because both touch `ActivityIndicator.tsx` heavily.
+- **Keyboard-shortcut migration tail — Cmd+1-9, Cmd+Shift+[/], Cmd+W (#4412 / #4429):** the remaining hand-rolled shortcuts deferred from v0.9.10's #3852 are now registered in the shortcut registry, so they show up in the cheat sheet and are rebindable. Three follow-ups left for the operator-visible polish: [#4427](https://github.com/blamechris/chroxy/issues/4427) (outside-click / Escape dismissal), [#4428](https://github.com/blamechris/chroxy/issues/4428) (aria-label off-by-one), [#4431](https://github.com/blamechris/chroxy/issues/4431) (registry-aware conflict-detection predicate), [#4432](https://github.com/blamechris/chroxy/issues/4432) (cheat-sheet collapsed-state mislabel).
+
+### Fixed
+
+- **Codex context-window ratchets survive server restart (#4413 / #4433):** v0.9.10 ratcheted the in-memory registry on every Codex turn but lost the result on restart. Now the bumped value is written through to the provider-scoped cache file (`~/.chroxy/models-cache.codex.json`) via `registry.saveCache()`. `saveCache()` is idempotent (snapshot-deduped) and logs a warn on disk failure rather than throwing, so the in-memory ratchet always succeeds even when the disk path is unwritable. The existing learn-loop test was caught writing to the operator's real cache file mid-run; the fix isolated it to a temp `CHROXY_CONFIG_DIR` per the long-standing `feedback_test_state_contamination.md` rule.
+- **Context-window learn-loop extended to Gemini (#4414 / #4430):** the Codex-specific ratchet from v0.9.10 + #4413's persistence are now factored into a shared `maybeRatchetContextWindow` helper in `packages/server/src/utils/context-window-learn.js` and used by both Codex and Gemini. `Object.hasOwn` guard on the per-provider cap lookup so `getRatchetCap('constructor')` no longer returns `Object` from the prototype chain. `_processGeminiEvent`'s legacy path now has an explanatory comment for why the duplicate emit is intentional. Follow-up [#4431](https://github.com/blamechris/chroxy/issues/4431) tracks tightening the registry-enabled predicate for sessions that haven't reported usage yet.
+
+### Changed
+
+- **`_pendingBackgroundShells` documented as transient by design (#4417 / #4424):** v0.9.11 deferred the question of persistence across restart; this release makes it explicit. The Map is rebuilt from `Bash`/`BashOutput` events on the next foreground turn, so restart loses pending tracking only for the brief window between the shell launching and its first `BashOutput` — a tradeoff worth keeping for the operational simplicity of not writing transient state to disk. Docstring on `background-shells.js` now states this so the next reader doesn't re-relitigate it.
+
 ## [0.9.11] - 2026-05-28
 
 Focused release shipping the long-standing dogfood pain point: TUI / SDK sessions waiting on a backgrounded shell no longer look idle/dead and can no longer be reaped by `CHROXY_SESSION_TIMEOUT`. Closes #4307 (the `priority:high` server bug) plus its dashboard renderer follow-up #4418, completing the user-visible feature in a single version.
