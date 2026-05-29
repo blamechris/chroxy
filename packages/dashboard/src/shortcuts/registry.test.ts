@@ -166,6 +166,38 @@ describe('createShortcutRegistry', () => {
       // bound to Cmd+K — no conflict.
       expect(registry.findConflict('palette.toggle', 'Cmd+K')).toBeNull()
     })
+
+    it('skips runtime-disabled defs when scanning for conflicts (#4431)', () => {
+      // Two shortcuts that can never both be live at once — e.g. a
+      // Tauri-only desktop binding and a browser-only web binding —
+      // sharing the same combo must NOT be flagged as a conflict.
+      // matchEvent already respects `enabled`, so the registry must
+      // mirror that during the conflict scan and during setBinding.
+      let isTauri = true
+      const gated: ShortcutDef[] = [
+        { id: 'tauri.close', defaultBinding: 'Cmd+W', description: 'Tauri close', category: 'session', scope: 'global', enabled: () => isTauri },
+        { id: 'browser.close', defaultBinding: 'Cmd+W', description: 'Browser close', category: 'session', scope: 'global', enabled: () => !isTauri },
+      ]
+      const registry = createShortcutRegistry(gated)
+      // Tauri side live, browser side disabled — no conflict either way.
+      expect(registry.findConflict('tauri.close', 'Cmd+W')).toBeNull()
+      expect(registry.findConflict('browser.close', 'Cmd+W')).toBeNull()
+      // Flip the environment — same expectation, conflict still
+      // suppressed because exactly one side is live.
+      isTauri = false
+      expect(registry.findConflict('tauri.close', 'Cmd+W')).toBeNull()
+      expect(registry.findConflict('browser.close', 'Cmd+W')).toBeNull()
+
+      // setBinding must agree with findConflict — rebinding either side
+      // to a fresh shared combo must succeed when the counterpart is
+      // gated off. Use Cmd+T (not in `defs` because this registry only
+      // has the two gated entries) to exercise the conflict path.
+      isTauri = true
+      registry.setBinding('tauri.close', 'Cmd+T')
+      expect(registry.getBinding('tauri.close')).toBe('cmd+t')
+      registry.setBinding('browser.close', 'Cmd+T')
+      expect(registry.getBinding('browser.close')).toBe('cmd+t')
+    })
   })
 
   it('notifies subscribers when a binding changes', () => {

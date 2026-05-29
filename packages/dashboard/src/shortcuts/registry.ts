@@ -269,9 +269,18 @@ export function createShortcutRegistry(defs: readonly ShortcutDef[]): ShortcutRe
     if (!target) return null
     const canonical = normalizeBinding(binding)
     if (!canonical) return null
+    // If the shortcut being bound is itself runtime-disabled, it can't
+    // collide with anything — its combo will never fire. Symmetrically,
+    // disabled defs below are skipped so two mutually-exclusive
+    // environment gates (e.g. Tauri-only vs browser-only) can share a
+    // combo without false conflicts (#4431).
+    if (target.enabled && !target.enabled()) return null
     for (const def of definitions) {
       if (def.id === id) continue
       if (def.scope !== target.scope) continue
+      // Skip runtime-disabled defs — they don't fire on this combo, so
+      // they can't collide with the binding we're checking.
+      if (def.enabled && !def.enabled()) continue
       if (getBinding(def.id) === canonical) {
         return { ...def, binding: canonical, isCustomized: getBinding(def.id) !== def.defaultBinding }
       }
