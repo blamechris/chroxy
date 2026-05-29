@@ -277,6 +277,102 @@ describe('App', () => {
     expect(event).toBe(true)
   })
 
+  // ── #4412: migrated shortcuts fire through the registry-driven
+  // dispatch table. Each test pins one branch end-to-end: a real
+  // keydown event reaches the App handler, the registry matches it
+  // to the id, the dispatch arm calls the right store action /
+  // setter. We assert on the observable side-effect (store action
+  // spy, modal text, or rendered state) rather than poking React
+  // internals.
+  describe('registry-driven shortcut dispatch (#4412)', () => {
+    const oneSession = [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }]
+    const twoSessions = [
+      { sessionId: 's1', name: 'One', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      { sessionId: 's2', name: 'Two', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+    ]
+
+    it('Cmd+. dispatches session.interrupt', () => {
+      const sendInterrupt = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', sendInterrupt }
+      render(<App />)
+      fireEvent.keyDown(window, { key: '.', metaKey: true })
+      expect(sendInterrupt).toHaveBeenCalled()
+    })
+
+    it('Cmd+Shift+D toggles between chat and terminal view', () => {
+      const setViewMode = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setViewMode, viewMode: 'chat' }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'd', metaKey: true, shiftKey: true })
+      expect(setViewMode).toHaveBeenCalledWith('terminal')
+    })
+
+    it('Cmd+2 switches to the second session', () => {
+      const switchSession = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's1', switchSession }
+      render(<App />)
+      fireEvent.keyDown(window, { key: '2', metaKey: true })
+      expect(switchSession).toHaveBeenCalledWith('s2')
+    })
+
+    it('Cmd+1 with no sessions does NOT call switchSession (no preventDefault, OS gets the key)', () => {
+      const switchSession = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: [], activeSessionId: null, switchSession }
+      render(<App />)
+      fireEvent.keyDown(window, { key: '1', metaKey: true })
+      expect(switchSession).not.toHaveBeenCalled()
+    })
+
+    it('Cmd+Shift+] (next tab) wraps from last back to first', () => {
+      const switchSession = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's2', switchSession }
+      render(<App />)
+      fireEvent.keyDown(window, { key: ']', metaKey: true, shiftKey: true })
+      expect(switchSession).toHaveBeenCalledWith('s1')
+    })
+
+    it('Cmd+Shift+[ (prev tab) wraps from first back to last', () => {
+      const switchSession = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's1', switchSession }
+      render(<App />)
+      fireEvent.keyDown(window, { key: '[', metaKey: true, shiftKey: true })
+      expect(switchSession).toHaveBeenCalledWith('s2')
+    })
+
+    it('Shift+Tab toggles plan mode when focus is OUTSIDE a text input', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setPermissionMode, permissionMode: 'approve' }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+      expect(setPermissionMode).toHaveBeenCalledWith('plan')
+    })
+
+    it('Shift+Tab does NOT toggle plan mode while focus is in the textarea (allows native reverse-tab)', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setPermissionMode, permissionMode: 'approve' }
+      render(<App />)
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+      expect(setPermissionMode).not.toHaveBeenCalled()
+    })
+
+    it('Cmd+Shift+P (VSCode palette alias) opens the command palette', () => {
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1' }
+      render(<App />)
+      expect(screen.queryByTestId('command-palette')).not.toBeInTheDocument()
+      fireEvent.keyDown(window, { key: 'p', metaKey: true, shiftKey: true })
+      expect(screen.getByTestId('command-palette')).toBeInTheDocument()
+    })
+
+    it('Cmd+W does NOT close the only tab (lets the desktop window-close path take over)', () => {
+      const destroySession = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', destroySession }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'w', metaKey: true })
+      expect(destroySession).not.toHaveBeenCalled()
+    })
+  })
+
   it('shows session loading skeleton when connecting', () => {
     stateOverrides = { connectionPhase: 'connecting' }
     render(<App />)

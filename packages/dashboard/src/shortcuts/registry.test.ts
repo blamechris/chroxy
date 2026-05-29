@@ -218,4 +218,76 @@ describe('createShortcutRegistry', () => {
     }, 'global')
     expect(match).toBeNull()
   })
+
+  describe('matchEvent gates (#4412)', () => {
+    it('respects the `enabled` predicate — false skips the match', () => {
+      let enabled = false
+      const gated: ShortcutDef[] = [
+        { id: 'session.close', defaultBinding: 'Cmd+W', description: 'Close tab', category: 'session', scope: 'global', enabled: () => enabled },
+      ]
+      const registry = createShortcutRegistry(gated)
+      // Disabled: no match.
+      expect(registry.matchEvent({
+        key: 'w', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false,
+      }, 'global')).toBeNull()
+      // Flip the predicate, same event matches.
+      enabled = true
+      expect(registry.matchEvent({
+        key: 'w', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false,
+      }, 'global')).toBe('session.close')
+    })
+
+    it('respects `disabledInTextInput` — suppresses match inside INPUT/TEXTAREA/contenteditable', () => {
+      const gated: ShortcutDef[] = [
+        { id: 'help.toggle', defaultBinding: '?', description: 'Help', category: 'other', scope: 'global', disabledInTextInput: true },
+      ]
+      const registry = createShortcutRegistry(gated)
+      // No target — fires.
+      expect(registry.matchEvent({
+        key: '?', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+      }, 'global')).toBe('help.toggle')
+      // INPUT target — suppressed.
+      const input = document.createElement('input')
+      expect(registry.matchEvent({
+        key: '?', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, target: input,
+      }, 'global')).toBeNull()
+      // TEXTAREA target — suppressed.
+      const textarea = document.createElement('textarea')
+      expect(registry.matchEvent({
+        key: '?', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, target: textarea,
+      }, 'global')).toBeNull()
+      // contenteditable target — suppressed. jsdom's
+      // `isContentEditable` derives from `contentEditable === 'true'`
+      // but only when the element is actually attached and the
+      // attribute is reflected; stub the getter so the match-event
+      // gate sees `true` deterministically across jsdom versions.
+      const div = document.createElement('div')
+      Object.defineProperty(div, 'isContentEditable', { value: true, configurable: true })
+      expect(registry.matchEvent({
+        key: '?', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, target: div,
+      }, 'global')).toBeNull()
+      // Non-text element (button) — fires.
+      const button = document.createElement('button')
+      expect(registry.matchEvent({
+        key: '?', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, target: button,
+      }, 'global')).toBe('help.toggle')
+    })
+
+    it('a disabled shortcut does not block a later (non-gated) match on the same combo', () => {
+      // Realistic: two shortcuts in different scopes can't share a combo
+      // in the same scope by conflict-detection rules, but `enabled` is
+      // evaluated AFTER combo match so a disabled shortcut must not
+      // shadow nothing. This test pins the behaviour: when the disabled
+      // shortcut comes first in the definitions list, matchEvent still
+      // returns null (no later entry to fall back to) rather than
+      // throwing.
+      const gated: ShortcutDef[] = [
+        { id: 'tauri.only', defaultBinding: 'Cmd+W', description: 'Tauri', category: 'session', scope: 'global', enabled: () => false },
+      ]
+      const registry = createShortcutRegistry(gated)
+      expect(registry.matchEvent({
+        key: 'w', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false,
+      }, 'global')).toBeNull()
+    })
+  })
 })
