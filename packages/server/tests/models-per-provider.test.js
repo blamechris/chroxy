@@ -1,11 +1,18 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 // Importing providers.js triggers built-in provider registration, which
 // in turn calls registerProviderRegistry() on models.js so that
 // getRegistryForProvider('codex'|'gemini') can resolve to the correct
 // provider class in this test suite.
 import '../src/providers.js'
-import { createModelsRegistry, getRegistryForProvider } from '../src/models.js'
+import {
+  createModelsRegistry,
+  getRegistryForProvider,
+  _resetProviderRegistryCacheForTests,
+} from '../src/models.js'
 import { CodexSession } from '../src/codex-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
 import { SdkSession } from '../src/sdk-session.js'
@@ -188,5 +195,54 @@ describe('getRegistryForProvider(providerName)', () => {
     // Must return something functional — default to Claude for backward compat
     assert.ok(typeof r.getModels === 'function')
     assert.ok(r.getModels().length > 0)
+  })
+})
+
+describe('loadCache() label fill (#4434)', () => {
+  // #4434: loadCache() previously fell back to humanizeModelId() when a
+  // cached entry's `label` was empty, which mangles non-Claude ids
+  // ("gpt-5-codex" → "Gpt 5.codex"). After #4413 cache files live on
+  // disk and operators may hand-edit them, so the empty-label path is
+  // reachable in practice. The fix consults the provider's
+  // getModelMetadata(fullId)?.label before falling back.
+  let tmpConfigDir
+  let origConfigDir
+  beforeEach(() => {
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'chroxy-models-loadcache-'))
+    origConfigDir = process.env.CHROXY_CONFIG_DIR
+    process.env.CHROXY_CONFIG_DIR = tmpConfigDir
+    _resetProviderRegistryCacheForTests()
+  })
+  afterEach(() => {
+    _resetProviderRegistryCacheForTests()
+    if (origConfigDir === undefined) {
+      delete process.env.CHROXY_CONFIG_DIR
+    } else {
+      process.env.CHROXY_CONFIG_DIR = origConfigDir
+    }
+    try { rmSync(tmpConfigDir, { recursive: true, force: true }) } catch {}
+  })
+
+  it('uses provider getModelMetadata().label, not humanizeModelId, when cached label is empty', () => {
+    // Hand-rolled codex cache file with an empty label — simulates an
+    // operator editing the file or an older save before the label was
+    // persisted. The on-disk cache path matches what
+    // getProviderCachePath('codex') produces.
+    const cachePath = join(tmpConfigDir, 'models-cache.codex.json')
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'gpt-5-codex', fullId: 'gpt-5-codex', label: '', contextWindow: 400_000 },
+      ],
+      defaultModelId: null,
+      savedAt: Date.now(),
+    }))
+
+    // Rebuild the codex registry so loadCache() runs against our temp dir.
+    const r = getRegistryForProvider('codex')
+    const entry = r.getModels().find(m => m.fullId === 'gpt-5-codex')
+    assert.ok(entry, 'codex registry should expose the gpt-5-codex entry from cache')
+    // The provider's metadata label, NOT the humanizeModelId mangling.
+    assert.equal(entry.label, 'GPT-5 Codex',
+      `expected provider-supplied 'GPT-5 Codex' label, got '${entry.label}' — humanizeModelId would have produced 'Gpt 5.codex'`)
   })
 })
