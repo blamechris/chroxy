@@ -29,6 +29,24 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     // the client requested, so tests can exercise the negotiation-warn branch.
     const serverProtocolVersion = process.env.MCP_STUB_PROTOCOL_VERSION || '2024-11-05'
     reply(msg.id, { protocolVersion: serverProtocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
+    // #4455: optionally emit an orphan response (id the client never sent)
+    // alongside the real initialize reply. The client should silently log
+    // and drop it.
+    if (process.env.MCP_STUB_EMIT_ORPHAN === '1') {
+      // Use a deliberately-high id so it can't collide with anything the
+      // client will ever send during this short-lived test.
+      reply(999_999, { fake: 'orphan' })
+    }
+    // #4455: optionally emit a notification (id == null) alongside the
+    // real reply. Notifications must be silently dropped — no orphan log,
+    // no warn. Used to assert the non-noise contract.
+    if (process.env.MCP_STUB_EMIT_NOTIFICATION === '1') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'notifications/progress',
+        params: { detail: 'fake notification' },
+      }) + '\n')
+    }
   } else if (msg.method === 'tools/list') {
     // #4454: optionally accept initialize but never reply to tools/list.
     // Exercises the *second* handshake-timeout branch which the existing

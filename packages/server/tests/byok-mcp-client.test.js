@@ -232,6 +232,56 @@ describe('MCPClient', () => {
     })
   })
 
+  describe('orphan responses (#4455)', () => {
+    it('logs orphan JSON-RPC response at debug level', async () => {
+      const debugs = []
+      const log = { info: () => {}, warn: () => {}, debug: (m) => debugs.push(m), error: () => {} }
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_EMIT_ORPHAN: '1' } }),
+        { log },
+      )
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      // The stub emits an orphan response with id=999999 alongside the
+      // real initialize reply. Give the buffer a tick to flush.
+      await new Promise((r) => setTimeout(r, 100))
+      const orphanLog = debugs.find((m) => /orphan JSON-RPC response/i.test(m))
+      assert.ok(orphanLog, `expected an orphan-response debug log, got debugs=${JSON.stringify(debugs)}`)
+      assert.match(orphanLog, /id=999999/, 'orphan log must name the unmatched id')
+      assert.match(orphanLog, /shape=result/, 'orphan log must surface the response shape (result|error)')
+      await client.destroy()
+    })
+
+    it('does NOT log on the happy path — no orphan, no notification', async () => {
+      const debugs = []
+      const log = { info: () => {}, warn: () => {}, debug: (m) => debugs.push(m), error: () => {} }
+      const client = new MCPClient(stubConfig(), { log })
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      await new Promise((r) => setTimeout(r, 100))
+      const orphanLog = debugs.find((m) => /orphan JSON-RPC response/i.test(m))
+      assert.equal(orphanLog, undefined, `unexpected orphan-response log on happy path: ${orphanLog}`)
+      await client.destroy()
+    })
+
+    it('silently drops notifications (id == null) without an orphan log', async () => {
+      const debugs = []
+      const log = { info: () => {}, warn: () => {}, debug: (m) => debugs.push(m), error: () => {} }
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_EMIT_NOTIFICATION: '1' } }),
+        { log },
+      )
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      await new Promise((r) => setTimeout(r, 100))
+      // Notifications are a normal part of the JSON-RPC protocol — they
+      // must not surface as orphan responses (would be noise).
+      const orphanLog = debugs.find((m) => /orphan JSON-RPC response/i.test(m))
+      assert.equal(orphanLog, undefined, `notifications must not log as orphans, got: ${orphanLog}`)
+      await client.destroy()
+    })
+  })
+
   describe('crash + restart', () => {
     it('triggers the 1st restart attempt ~1s after child exit (#4453 — first-attempt timing unchanged)', async () => {
       const client = new MCPClient(
