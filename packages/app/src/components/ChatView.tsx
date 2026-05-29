@@ -20,6 +20,7 @@ import { ActivityGroup } from './chat/ActivityGroup';
 import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
 import { groupMessages, applyStreamingOverlay } from '@chroxy/store-core';
+import { useConnectionStore } from '../store/connection';
 
 // -- Props --
 
@@ -200,6 +201,23 @@ export function ChatView({
     [baseGroups, streamingMessageId, messages],
   );
 
+  // #4496: tail message id + last user input — used to gate the
+  // stream-stall chip's Retry button. Mirrors the dashboard's `isTail`
+  // check (only the most recent stall retry-button-wires; historical
+  // replayed stalls render chip text only). Walking messages once here
+  // is cheaper than recomputing per bubble.
+  const sendInput = useConnectionStore((s) => s.sendInput);
+  const chatTailMessageId = useMemo(
+    () => (messages.length > 0 ? messages[messages.length - 1].id : null),
+    [messages],
+  );
+  const lastUserInputContent = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].type === 'user_input') return messages[i].content;
+    }
+    return null;
+  }, [messages]);
+
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const threshold = 100;
@@ -304,6 +322,17 @@ export function ChatView({
                   onPress={() => onToggleSelection(msg.id)}
                   onOpenDetail={handleOpenDetail}
                   onImagePress={setViewerUri}
+                  onRetryStreamStall={
+                    // #4496: only wire retry when this stall is the tail
+                    // bubble AND there's a user_input to resend. Mirrors
+                    // dashboard App.tsx renderMessage gating.
+                    msg.type === 'error' &&
+                    msg.code === 'stream_stall' &&
+                    msg.id === chatTailMessageId &&
+                    lastUserInputContent != null
+                      ? () => sendInput(lastUserInputContent)
+                      : undefined
+                  }
                 />
               </AnimatedMessage>
             </View>
