@@ -3253,6 +3253,180 @@ describe('history replay must not reset activity timers (#4492)', () => {
   });
 });
 
+// #4512 — the replay flag must be scoped per-session (mirror of dashboard
+// #4493). Pre-fix it was a per-connection boolean (`_ctx.receivingHistoryReplay`):
+// once `history_replay_start` fired for session A, every interleaved live event
+// from session B was treated as replay and dropped its activity bump. The
+// server's `replayHistory()` chunks over `setImmediate`, so live broadcasts
+// from other sessions land between chunks of A's replay.
+describe('replay flag is per-session (#4512)', () => {
+  function seedTwoSessions(
+    sA: Partial<ReturnType<typeof createEmptySessionState>> = {},
+    sB: Partial<ReturnType<typeof createEmptySessionState>> = {},
+  ) {
+    const store = createMockStore({
+      activeSessionId: 'sA',
+      sessions: [
+        { sessionId: 'sA', name: 'A' } as any,
+        { sessionId: 'sB', name: 'B' } as any,
+      ],
+      sessionStates: {
+        sA: { ...createEmptySessionState(), ...sA },
+        sB: { ...createEmptySessionState(), ...sB },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    return store;
+  }
+
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('live tool_start for session B bumps B during session A replay', () => {
+    // Session A is mid-replay; an interleaved live tool_start for B must
+    // still bump B.lastClientActivityAt. Pre-fix the per-connection flag was
+    // true (for A) so B's bump was suppressed.
+    const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-b-1',
+      tool: 'Bash',
+      toolUseId: 'tu-b-1',
+      input: { command: 'echo hi' },
+      sessionId: 'sB',
+    });
+    const ssB = store.getState().sessionStates.sB;
+    expect(ssB.lastClientActivityAt).toBeGreaterThan(100);
+  });
+
+  it('history_replay_end for A clears only A from the replaying set', () => {
+    // With two sessions concurrently replaying, ending one must not
+    // un-gate the other — B's replayed tool_start must still NOT bump.
+    const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sB' });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 'sA' });
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-b-1',
+      tool: 'Bash',
+      toolUseId: 'tu-b-1',
+      input: { command: 'sleep' },
+      sessionId: 'sB',
+    });
+    const ssB = store.getState().sessionStates.sB;
+    expect(ssB.lastClientActivityAt).toBe(100);
+  });
+
+  it('auth_ok clears all session-replay flags (reconnect scenario)', () => {
+    // After a reconnect, fresh auth means clean slate — any stale entries
+    // in the replaying set must be wiped so future live events aren't
+    // wrongly gated against a session that no longer thinks it's replaying.
+    const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
+    // Reconnect context preserves session state through auth_ok.
+    _testMessageHandler.setContext({ ...createMockContext(), isReconnect: true } as any);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sB' });
+    // Reconnect: auth_ok must drop both entries.
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      sessionToken: 'tok',
+      clientId: 'client-1',
+      connectedClients: [],
+    });
+    // A subsequent live tool_start for either session must bump.
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-a-1',
+      tool: 'Bash',
+      toolUseId: 'tu-a-1',
+      input: { command: 'ls' },
+      sessionId: 'sA',
+    });
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-b-1',
+      tool: 'Bash',
+      toolUseId: 'tu-b-1',
+      input: { command: 'ls' },
+      sessionId: 'sB',
+    });
+    const stateAfter = store.getState();
+    expect(stateAfter.sessionStates.sA.lastClientActivityAt).toBeGreaterThan(100);
+    expect(stateAfter.sessionStates.sB.lastClientActivityAt).toBeGreaterThan(100);
+  });
+
+  it('tool_start dedup gate uses target session flag, not any session flag', () => {
+    // Per-session dedup gate. Pre-fix: a single per-connection boolean meant
+    // that whenever ANY session was replaying, every interleaved tool_start
+    // (regardless of which session it belongs to) was treated as replay.
+    // Symptom: session B's pre-existing cached tool_use message at the same
+    // id would cause B's live tool_start to be dropped — even though B is
+    // not the one replaying.
+    const sharedToolId = 'tool-shared-id';
+    const store = createMockStore({
+      activeSessionId: 'sA',
+      sessions: [
+        { sessionId: 'sA', name: 'A' } as any,
+        { sessionId: 'sB', name: 'B' } as any,
+      ],
+      sessionStates: {
+        sA: createEmptySessionState(),
+        sB: {
+          ...createEmptySessionState(),
+          // B already has a cached tool message at this id. A live duplicate
+          // tool_start arriving for B would normally append (no replay), but
+          // with a per-connection boolean it gets wrongly dedup-suppressed
+          // while A is replaying.
+          messages: [
+            { id: sharedToolId, type: 'tool_use', content: 'cached', tool: 'Bash', timestamp: 1 } as any,
+          ],
+        },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Session A starts replay. Session B is NOT replaying.
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+
+    // Live tool_start for B at the cached id — B is NOT replaying, so the
+    // dedup gate must not fire and the new message must be appended.
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: sharedToolId,
+      tool: 'Bash',
+      toolUseId: 'tu-b-live',
+      input: { command: 'live' },
+      sessionId: 'sB',
+    });
+    const msgsB = store.getState().sessionStates.sB.messages;
+    expect(msgsB.length).toBeGreaterThanOrEqual(2);
+
+    // And a replayed tool_start for A still dedups against A's cache (sanity:
+    // the per-session gate must still suppress replay duplicates).
+    // Pre-seed an A message at a new id and replay it.
+    const aId = 'tool-a-cached';
+    store.getState().sessionStates.sA.messages.push(
+      { id: aId, type: 'tool_use', content: 'cached', tool: 'Bash', timestamp: 1 } as any,
+    );
+    const lenBefore = store.getState().sessionStates.sA.messages.length;
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: aId,
+      tool: 'Bash',
+      toolUseId: 'tu-a-replay',
+      input: { command: 'replay' },
+      sessionId: 'sA',
+    });
+    const lenAfter = store.getState().sessionStates.sA.messages.length;
+    expect(lenAfter).toBe(lenBefore);
+  });
+});
+
 // #3141: scoped routing for session-tagged server_error messages on the app
 // (dashboard parity).
 describe('server_error session-scoped routing (#3141)', () => {
