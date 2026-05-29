@@ -1867,7 +1867,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // #3899 — any activity event also dismisses an outstanding inactivity
   // warning: by definition the silence has ended, so the chip should
   // disappear without waiting for the user to dismiss it manually.
-  if (isActivityEvent(msg.type)) {
+  //
+  // #4466 — gate on `!_receivingHistoryReplay`. switch_session on the
+  // server replays every past event in the target session through this
+  // handler, and a replayed tool_start / message / result is NOT fresh
+  // activity. Without this gate the act of switching tabs:
+  //   1) bumps lastClientActivityAt to Date.now(), so "Working… last
+  //      activity Ns ago" resets to 1s no matter how idle the session was;
+  //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
+  //      update?" chip disappears without the user ever seeing it again.
+  // The live activity events that arrive AFTER history_replay_end clears
+  // the flag still bump correctly — verified by the regression-guard tests
+  // in message-handler.test.ts.
+  if (isActivityEvent(msg.type) && !_receivingHistoryReplay) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
     if (targetId && get().sessionStates[targetId]) {
       updateSession(targetId, (ss) => {
@@ -2294,10 +2306,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       updateActiveSession((ss) => {
         const patch: Partial<SessionState> = {};
         if (ss.activeAgents.length > 0) patch.activeAgents = [];
-        // #4308 — same rationale: in-flight tools never survive a replay
-        // boundary; the live tool_start broadcasts that follow rebuild
-        // activeTools as needed.
-        if (ss.activeTools.length > 0) patch.activeTools = [];
+        // #4466: preserve activeTools through the replay boundary. The
+        // earlier #4308 wipe rebuilt entries from replayed tool_start
+        // events with startedAt = Date.now(), so the "Running <tool> · Ns"
+        // pill restarted at 1s every time the user switched tabs. The
+        // in-flight set is authoritative (carried in-memory, not derivable
+        // from history), so keeping it intact preserves the elapsed-time
+        // clock. tool_result events that fire during replay still
+        // correctly drop resolved entries via sharedToolResult, and the
+        // dedup logic in sharedToolStart prevents replayed tool_start
+        // events from re-adding tools already in activeTools.
         if (ss.isPlanPending) {
           patch.isPlanPending = false;
           patch.planAllowedPrompts = [];
