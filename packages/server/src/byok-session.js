@@ -33,7 +33,7 @@ import { translateSdkEvent } from './byok-event-translator.js'
 import { BUILTIN_TOOLS } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
 import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
-import { MCPFleet } from './byok-mcp-fleet.js'
+import { MCPFleet, MCP_TOOL_PREFIX } from './byok-mcp-fleet.js'
 
 const log = createLogger('byok-session')
 
@@ -916,17 +916,21 @@ export class ClaudeByokSession extends BaseSession {
       }
     }
 
-    // Execute locally.
+    // Execute locally. MCP tools (mcp__<server>__<tool>) route through
+    // the fleet to the right child process via stdio JSON-RPC; everything
+    // else runs in-process (Read/Write/Bash/etc).
     const effectiveInput = resolvedDecision.updatedInput || input
-    const { content, isError } = await executeBuiltinTool({
-      toolName,
-      input: effectiveInput,
-      cwd: this.cwd,
-      cwdRealCache: this._cwdRealCache,
-      cwdCacheTtl: CWD_CACHE_TTL_MS,
-      signal,
-      todoStore: this._todos,
-    })
+    const { content, isError } = toolName.startsWith(MCP_TOOL_PREFIX)
+      ? await this._dispatchMcpTool(toolName, effectiveInput)
+      : await executeBuiltinTool({
+          toolName,
+          input: effectiveInput,
+          cwd: this.cwd,
+          cwdRealCache: this._cwdRealCache,
+          cwdCacheTtl: CWD_CACHE_TTL_MS,
+          signal,
+          todoStore: this._todos,
+        })
 
     this.emit('tool_result', {
       messageId,
@@ -940,6 +944,31 @@ export class ClaudeByokSession extends BaseSession {
       tool_use_id: toolUseId,
       content,
       is_error: isError,
+    }
+  }
+
+  /**
+   * Dispatch one MCP tool_use to the fleet. Flattens `{ content: [...],
+   * isError }` from the MCP server into the `{ content: string, isError }`
+   * shape `_executeToolBlock` returns. Concatenates any text blocks; for
+   * non-text blocks (image, resource) we stringify the block so the model
+   * sees the shape and can decide what to do — chroxy itself doesn't
+   * interpret them.
+   *
+   * Errors (server unknown, server dead, RPC error, timeout, child crash
+   * mid-call) become is_error:true tool_results — same shape as
+   * executeBuiltinTool's catch-all. The session keeps running.
+   */
+  async _dispatchMcpTool(toolName, input) {
+    try {
+      const result = await this._mcpFleet.callTool(toolName, input)
+      const blocks = Array.isArray(result?.content) ? result.content : []
+      const text = blocks
+        .map((b) => (typeof b?.text === 'string' ? b.text : JSON.stringify(b)))
+        .join('\n')
+      return { content: text, isError: result?.isError === true }
+    } catch (err) {
+      return { content: `MCP ${toolName} failed: ${err?.message || String(err)}`, isError: true }
     }
   }
 

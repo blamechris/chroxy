@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { MCPFleet, FLEET_KILL_GRACE_MS } from '../src/byok-mcp-fleet.js'
+import { MCPFleet, FLEET_KILL_GRACE_MS, parseMcpToolName } from '../src/byok-mcp-fleet.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -129,6 +129,48 @@ describe('MCPFleet', () => {
       const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
       await fleet.start()
       assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+      await fleet.destroy()
+    })
+  })
+
+  describe('callTool routing (#4079)', () => {
+    it('parseMcpToolName strips the mcp__<server>__ prefix verbatim', () => {
+      assert.deepEqual(parseMcpToolName('mcp__alpha__echo'), { serverName: 'alpha', toolName: 'echo' })
+      assert.deepEqual(parseMcpToolName('mcp__alpha__nested__tool'), { serverName: 'alpha', toolName: 'nested__tool' })
+      assert.equal(parseMcpToolName('Read'), null)
+      assert.equal(parseMcpToolName('mcp__alpha'), null)
+      assert.equal(parseMcpToolName(''), null)
+      assert.equal(parseMcpToolName(null), null)
+    })
+
+    it('routes mcp__<server>__<tool> to the matching client', async () => {
+      const fleet = new MCPFleet([cfg('alpha'), cfg('beta')], { log: silentLog() })
+      await fleet.start()
+      const result = await fleet.callTool('mcp__alpha__echo', { greeting: 'hello' })
+      assert.equal(result.content[0].text, JSON.stringify({ greeting: 'hello' }))
+      await fleet.destroy()
+    })
+
+    it('throws on unknown server name', async () => {
+      const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
+      await fleet.start()
+      await assert.rejects(fleet.callTool('mcp__ghost__echo', {}), /server not found/)
+      await fleet.destroy()
+    })
+
+    it('throws on malformed tool name', async () => {
+      const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
+      await fleet.start()
+      await assert.rejects(fleet.callTool('Read', {}), /malformed/)
+      await fleet.destroy()
+    })
+
+    it('throws when target server is not READY', async () => {
+      const fleet = new MCPFleet([
+        { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+      ], { log: silentLog() })
+      await fleet.start()
+      await assert.rejects(fleet.callTool('mcp__broken__anything', {}), /not ready/)
       await fleet.destroy()
     })
   })

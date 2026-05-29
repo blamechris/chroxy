@@ -7,6 +7,10 @@ function reply(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n')
 }
 
+function replyError(id, code, message) {
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n')
+}
+
 createInterface({ input: process.stdin }).on('line', (line) => {
   let msg
   try { msg = JSON.parse(line) } catch { return }
@@ -15,6 +19,23 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     reply(msg.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
   } else if (msg.method === 'tools/list') {
     reply(msg.id, { tools })
+  } else if (msg.method === 'tools/call') {
+    if (process.env.MCP_STUB_TOOL_DIE === '1') {
+      process.exit(1)
+    }
+    if (process.env.MCP_STUB_TOOL_HANG === '1') {
+      return
+    }
+    if (process.env.MCP_STUB_TOOL_RPC_ERROR === '1') {
+      replyError(msg.id, -32603, 'stub: forced RPC error')
+      return
+    }
+    const args = msg.params?.arguments ?? {}
+    if (process.env.MCP_STUB_TOOL_ERROR === '1') {
+      reply(msg.id, { content: [{ type: 'text', text: JSON.stringify(args) }], isError: true })
+      return
+    }
+    reply(msg.id, { content: [{ type: 'text', text: JSON.stringify(args) }] })
   }
 })
 

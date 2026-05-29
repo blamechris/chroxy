@@ -11,13 +11,19 @@
  * the next turn's tool list.
  */
 
-import { MCPClient, MCP_STATES } from './byok-mcp-client.js'
+import { MCPClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { loadTrustStore, recordTrust, isTrusted } from './byok-mcp-trust.js'
+import { MCP_PREFIX, parseMcpToolName } from './mcp-tools.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
+// #4451: re-export under the legacy name from this module so existing
+// callers (byok-session, tests) keep working. Canonical source is
+// mcp-tools.js to prevent silent parser drift.
+export const MCP_TOOL_PREFIX = MCP_PREFIX
+export { parseMcpToolName }
 
 function mcpToolName(serverName, toolName) {
-  return `mcp__${serverName}__${toolName}`
+  return `${MCP_TOOL_PREFIX}${serverName}__${toolName}`
 }
 
 export class MCPFleet {
@@ -97,6 +103,24 @@ export class MCPFleet {
       description: tool.description || '',
       input_schema: tool.inputSchema || { type: 'object' },
     }))
+  }
+
+  /**
+   * Dispatch a tool_use to the right MCP server. `prefixedName` is the
+   * chroxy-namespaced name the model emitted (`mcp__<server>__<tool>`).
+   * Throws if the prefix is malformed, no client owns that server name,
+   * or the client is not READY. JSON-RPC errors from the server
+   * propagate as throws — caller turns them into is_error tool_results.
+   */
+  async callTool(prefixedName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    const parsed = parseMcpToolName(prefixedName)
+    if (!parsed) throw new Error(`malformed MCP tool name: ${prefixedName}`)
+    const client = this._clients.find((c) => c.name === parsed.serverName)
+    if (!client) throw new Error(`MCP server not found: ${parsed.serverName}`)
+    if (client.state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${parsed.serverName} not ready (state=${client.state})`)
+    }
+    return client.callTool(parsed.toolName, args, timeoutMs)
   }
 
   async destroy() {
