@@ -21,7 +21,7 @@
  * payload (#3760), falling back to BaseSession.DEFAULT_RESULT_TIMEOUT_MS
  * (30 min) when connected to an older server that doesn't broadcast it.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
@@ -227,6 +227,40 @@ export function ActivityIndicator() {
   useEffect(() => {
     if (overflowShells.length === 0 && popoverOpen) setPopoverOpen(false)
   }, [overflowShells.length, popoverOpen])
+
+  // #4427 — refs let the dismiss handlers below decide whether an event
+  // originated inside the popover/disclosure (ignored) or outside (close).
+  // Typed as the concrete element so consumers don't need null guards beyond
+  // the ref-not-yet-attached case.
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const disclosureRef = useRef<HTMLButtonElement | null>(null)
+
+  // #4427 — outside-click + Escape dismiss for the overflow popover. Without
+  // these the popover only closes by re-toggling the same disclosure button or
+  // waiting for every shell to drain, which traps focus and surprises users
+  // who click anywhere else expecting the menu to dismiss.
+  //
+  // Listeners are mounted lazily — only while `popoverOpen` is true — so the
+  // idle chip pays no document-event cost when the popover is closed.
+  useEffect(() => {
+    if (!popoverOpen) return
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (popoverRef.current && popoverRef.current.contains(target)) return
+      if (disclosureRef.current && disclosureRef.current.contains(target)) return
+      setPopoverOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPopoverOpen(false)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [popoverOpen])
   const referenceTimeoutMs = useConnectionStore(
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   )
@@ -289,6 +323,7 @@ export function ActivityIndicator() {
           </span>
           {overflowCount > 0 && (
             <button
+              ref={disclosureRef}
               type="button"
               className="activity-indicator__disclosure"
               data-testid="activity-indicator-disclosure"
@@ -305,6 +340,7 @@ export function ActivityIndicator() {
           {popoverOpen && overflowCount > 0 && (
             <div
               id={popoverId}
+              ref={popoverRef}
               className="activity-indicator__popover"
               data-testid="activity-indicator-popover"
               role="dialog"
