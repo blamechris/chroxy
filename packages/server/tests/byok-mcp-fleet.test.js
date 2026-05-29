@@ -69,6 +69,70 @@ describe('MCPFleet', () => {
     assert.ok(elapsed <= FLEET_KILL_GRACE_MS + 600, `destroy took ${elapsed}ms, expected <= ${FLEET_KILL_GRACE_MS + 600}ms`)
   })
 
+  describe('trust gate (#4457)', () => {
+    it('consults trust store first — trusted tuple spawns without prompting', async () => {
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}.json`
+      const { recordTrust } = await import('../src/byok-mcp-trust.js')
+      const server = { name: 'stub', command: process.execPath, args: [STUB], env: {} }
+      recordTrust(server, tmpStorePath)
+      let promptedCount = 0
+      const fakePermissionManager = {
+        requestMcpTrust: async () => { promptedCount += 1; return false },
+      }
+      const fleet = new MCPFleet([server], {
+        log: silentLog(),
+        permissionManager: fakePermissionManager,
+        trustStorePath: tmpStorePath,
+      })
+      await fleet.start()
+      assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+      assert.equal(promptedCount, 0, 'pre-trusted tuple must NOT prompt')
+      await fleet.destroy()
+      try { (await import('node:fs')).rmSync(tmpStorePath) } catch {}
+    })
+
+    it('prompts on untrusted tuple; deny → DEAD, no persistence', async () => {
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}-deny.json`
+      const fs = await import('node:fs')
+      const fakePermissionManager = { requestMcpTrust: async () => false }
+      const fleet = new MCPFleet([cfg('untrusted')], {
+        log: silentLog(),
+        permissionManager: fakePermissionManager,
+        trustStorePath: tmpStorePath,
+      })
+      await fleet.start()
+      assert.equal(fleet.clients[0].state, MCP_STATES.DEAD)
+      assert.equal(fs.existsSync(tmpStorePath), false, 'deny must not persist trust')
+      await fleet.destroy()
+    })
+
+    it('prompts on untrusted tuple; allow → spawns + persists for next session', async () => {
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}-allow.json`
+      const fs = await import('node:fs')
+      const fakePermissionManager = { requestMcpTrust: async () => true }
+      const fleet = new MCPFleet([cfg('newserver')], {
+        log: silentLog(),
+        permissionManager: fakePermissionManager,
+        trustStorePath: tmpStorePath,
+      })
+      await fleet.start()
+      assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+      assert.equal(fs.existsSync(tmpStorePath), true, 'allow must persist trust to disk')
+      const raw = JSON.parse(fs.readFileSync(tmpStorePath, 'utf8'))
+      assert.equal(raw.trustedTuples.length, 1)
+      assert.equal(raw.trustedTuples[0].name, 'newserver')
+      await fleet.destroy()
+      try { fs.rmSync(tmpStorePath) } catch {}
+    })
+
+    it('no permissionManager → no trust gate, spawn behaves as in #4077', async () => {
+      const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
+      await fleet.start()
+      assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+      await fleet.destroy()
+    })
+  })
+
   describe('anthropicTools (#4078)', () => {
     it('renames inputSchema → input_schema and strips internal markers', async () => {
       const tools = [{ name: 'echo', description: 'e', inputSchema: { type: 'object', properties: { msg: { type: 'string' } } } }]

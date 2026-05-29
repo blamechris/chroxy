@@ -478,6 +478,72 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
+   * #4457: trust gate for spawning an MCP server child. Reuses the
+   * existing _pendingPermissions machinery so the dashboard / mobile
+   * permission UIs render this with zero changes — they receive a
+   * standard `permission_request` event and call `respondToPermission`
+   * with allow/deny.
+   *
+   * Behavior:
+   *  - On allow (or allowAlways): resolves to true; caller persists trust.
+   *  - On deny: resolves to false; caller marks the client DEAD.
+   *  - On timeout (default permissionTimeout): treated as deny.
+   *
+   * @param {{ name: string, command: string, args?: string[], envKeys?: string[] }} server
+   * @returns {Promise<boolean>}
+   */
+  requestMcpTrust(server) {
+    return new Promise((resolve) => {
+      const requestId = `mcp-trust-${++this._permissionCounter}-${Date.now()}`
+      const argv0 = Array.isArray(server.args) && server.args.length > 0 ? server.args[0] : ''
+      const input = {
+        mcpServer: {
+          name: server.name,
+          command: server.command,
+          args: Array.isArray(server.args) ? [...server.args] : [],
+          envKeys: Array.isArray(server.envKeys) ? [...server.envKeys] : [],
+        },
+      }
+      const description = `Spawn MCP server "${server.name}" running ${server.command}${argv0 ? ' ' + argv0 : ''}`
+
+      // Wrap pending entry so respondToPermission's standard mapping
+      // ({behavior:'allow'} or {behavior:'deny'}) translates to a boolean
+      // for the caller. updatedInput / suggestions are unused on the trust
+      // path — we only care about allow-vs-deny.
+      this._pendingPermissions.set(requestId, {
+        resolve: (result) => resolve(result?.behavior === 'allow'),
+        input,
+        suggestions: [],
+      })
+
+      this._logInfo(`MCP trust request ${requestId}: ${server.name}`)
+
+      const permPayload = {
+        requestId,
+        tool: 'mcp_spawn',
+        description,
+        input,
+        remainingMs: this._timeoutMs,
+        createdAt: Date.now(),
+      }
+      this._lastPermissionData.set(requestId, permPayload)
+      this.emit('permission_request', permPayload)
+
+      const timer = setTimeout(() => {
+        this._permissionTimers.delete(requestId)
+        if (this._pendingPermissions.has(requestId)) {
+          this._logInfo(`MCP trust ${requestId} timed out, auto-denying`)
+          this._pendingPermissions.delete(requestId)
+          this._lastPermissionData.delete(requestId)
+          resolve(false)
+          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout' })
+        }
+      }, this._timeoutMs)
+      this._permissionTimers.set(requestId, timer)
+    })
+  }
+
+  /**
    * Clean up all resources.
    */
   destroy() {

@@ -268,7 +268,11 @@ export class ClaudeByokSession extends BaseSession {
     // wait for fleet.start() so this.mcpServers + tools list are stable
     // by the time we emit 'ready'.
     if (this._mcpServerConfigs.length > 0 && this._mcpFleet === null) {
-      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, { log })
+      // #4457: pass the session's PermissionManager so the fleet can
+      // emit a trust prompt for new (name, command, args[0]) tuples.
+      // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
+      // with no prompt; denied tuples set state=DEAD without spawning.
+      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, { log, permissionManager: this._permissions })
       await this._mcpFleet.start()
     }
 
