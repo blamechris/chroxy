@@ -161,8 +161,8 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs })
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
@@ -470,8 +470,10 @@ export class CliSession extends BaseSession {
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)
     if (this._hardTimeout) clearTimeout(this._hardTimeout)
+    if (this._streamStallTimeout) clearTimeout(this._streamStallTimeout)
     this._resultTimeout = null
     this._hardTimeout = null
+    this._streamStallTimeout = null
     if (this._resultTimeoutPaused) return
     this._resultTimeout = setTimeout(() => {
       this._resultTimeout = null
@@ -481,6 +483,13 @@ export class CliSession extends BaseSession {
       this._hardTimeout = null
       this._handleHardTimeout()
     }, this._hardTimeoutMs)
+    // #4467: only arm if configured > 0 (operators can disable).
+    if (this._streamStallTimeoutMs > 0) {
+      this._streamStallTimeout = setTimeout(() => {
+        this._streamStallTimeout = null
+        this._handleStreamStall()
+      }, this._streamStallTimeoutMs)
+    }
   }
 
   /**
@@ -536,6 +545,25 @@ export class CliSession extends BaseSession {
     this.emit('error', { message: `Response timed out after ${friendly}` })
   }
 
+  // #4467: stream-stall recovery. Fires when the child has been silent
+  // for `_streamStallTimeoutMs` despite the session being busy — typically
+  // a half-open TCP to the Anthropic API that the OS hasn't surfaced yet.
+  // Logs with context, emits `error` with `code: 'stream_stall'` so the
+  // dashboard can show a distinct "Stream stalled — retry?" affordance,
+  // then clears busy state so the user CAN actually retry.
+  _handleStreamStall() {
+    if (!this._isBusy) return
+    const friendly = formatIdleDuration(this._streamStallTimeoutMs)
+    log.warn(
+      `Stream stalled (${friendly}, messageId=${this._currentMessageId}) — clearing busy state for retry`,
+    )
+    this._emitInterruptedTurnResult(this._streamStallTimeoutMs)
+    this.emit('error', {
+      code: 'stream_stall',
+      message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+    })
+  }
+
   /**
    * Notify the session that a permission request belonging to it is
    * outstanding — pauses the inactivity timer so the session doesn't
@@ -558,6 +586,11 @@ export class CliSession extends BaseSession {
       if (this._hardTimeout) {
         clearTimeout(this._hardTimeout)
         this._hardTimeout = null
+      }
+      // #4467: clear the stall timer too — waiting on the user is not a stall.
+      if (this._streamStallTimeout) {
+        clearTimeout(this._streamStallTimeout)
+        this._streamStallTimeout = null
       }
     }
   }
@@ -951,6 +984,11 @@ export class CliSession extends BaseSession {
       clearTimeout(this._hardTimeout)
       this._hardTimeout = null
     }
+    // #4467: release the stream-stall timer too for the same reason.
+    if (this._streamStallTimeout) {
+      clearTimeout(this._streamStallTimeout)
+      this._streamStallTimeout = null
+    }
     this._resultTimeoutPaused = false
 
     this._cleanupReadlines()
@@ -1131,6 +1169,10 @@ export class CliSession extends BaseSession {
     if (this._hardTimeout) {
       clearTimeout(this._hardTimeout)
       this._hardTimeout = null
+    }
+    if (this._streamStallTimeout) {
+      clearTimeout(this._streamStallTimeout)
+      this._streamStallTimeout = null
     }
 
     if (this._interruptTimer) {

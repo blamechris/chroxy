@@ -443,6 +443,83 @@ describe('CliSession._killAndRespawn (#4471: panic-button drops dashboard recove
   })
 })
 
+describe('CliSession._handleStreamStall (#4467: stream-stall recovery)', () => {
+  it('emits stream_end + result + error{code:stream_stall} so dashboard can offer retry', () => {
+    const session = createReadySession({ streamStallTimeoutMs: 60_000 })
+    session._isBusy = true
+    session._currentMessageId = 'msg_ss'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_ss'
+
+    const events = []
+    session.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+    session.on('result', (p) => events.push({ name: 'result', payload: p }))
+    session.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+    session._handleStreamStall()
+
+    assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result', 'error'])
+    assert.equal(events[1].payload.sessionId, 'sess_ss')
+    assert.equal(events[1].payload.duration, session._streamStallTimeoutMs)
+    assert.equal(events[2].payload.code, 'stream_stall', 'error MUST carry code:stream_stall so dashboard can distinguish from generic errors')
+    assert.match(events[2].payload.message, /stalled/i)
+  })
+
+  it('no-ops when not busy (timer fired against an idle session)', () => {
+    const session = createReadySession()
+    session._isBusy = false
+
+    const events = []
+    session.on('stream_end', () => events.push('stream_end'))
+    session.on('result', () => events.push('result'))
+    session.on('error', () => events.push('error'))
+
+    session._handleStreamStall()
+    assert.deepEqual(events, [])
+  })
+
+  it('_armResultTimeout arms the stall timer when streamStallTimeoutMs > 0', () => {
+    const session = createReadySession({ streamStallTimeoutMs: 60_000 })
+    session._armResultTimeout()
+    assert.ok(session._streamStallTimeout, 'stall timer must be armed')
+    // Cleanup all three timers
+    clearTimeout(session._resultTimeout)
+    clearTimeout(session._hardTimeout)
+    clearTimeout(session._streamStallTimeout)
+  })
+
+  it('_armResultTimeout does NOT arm the stall timer when streamStallTimeoutMs is 0 (disabled)', () => {
+    const session = createReadySession({ streamStallTimeoutMs: 0 })
+    session._armResultTimeout()
+    assert.equal(session._streamStallTimeout, null, 'stall timer must remain disarmed when configured to 0')
+    clearTimeout(session._resultTimeout)
+    clearTimeout(session._hardTimeout)
+  })
+
+  it('_armResultTimeout resets the stall timer on subsequent activity (timer reference changes)', () => {
+    const session = createReadySession({ streamStallTimeoutMs: 60_000 })
+    session._armResultTimeout()
+    const firstTimer = session._streamStallTimeout
+    session._armResultTimeout()
+    const secondTimer = session._streamStallTimeout
+    assert.notStrictEqual(firstTimer, secondTimer, 'arming again must replace the timer handle, proving the silence window restarts')
+    clearTimeout(session._resultTimeout)
+    clearTimeout(session._hardTimeout)
+    clearTimeout(session._streamStallTimeout)
+  })
+
+  it('notifyPermissionPending clears the stall timer (waiting on the user is not a stall)', () => {
+    const session = createReadySession({ streamStallTimeoutMs: 60_000 })
+    session._isBusy = true
+    session._armResultTimeout()
+    assert.ok(session._streamStallTimeout)
+
+    session.notifyPermissionPending('req-stall-1')
+    assert.equal(session._streamStallTimeout, null, 'stall timer must clear when a permission prompt is outstanding')
+    assert.equal(session._resultTimeoutPaused, true)
+  })
+})
+
 describe('CliSession.destroy', () => {
   it('sets destroying flag and nulls child', () => {
     const session = createReadySession()

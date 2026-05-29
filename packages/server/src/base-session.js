@@ -62,6 +62,23 @@ export const DEFAULT_RESULT_TIMEOUT_MS = 30 * 60 * 1000
 // CHROXY_HARD_TIMEOUT_MS.
 export const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000
 
+// #4467: stream-stall recovery timeout (ms). Resets on ANY stream event from
+// the child (stdout line, stream_delta, tool_start, etc.). When no event has
+// arrived for this long while busy, emit a recoverable error (code:
+// `stream_stall`) and clear busy state so the user can retry. Distinct from
+// the soft inactivity warning — the warning is passive (just a chip); this
+// is active recovery.
+//
+// Default 5 minutes: a stalled HTTPS connection to the Anthropic API
+// (half-open TCP, mobile NAT idle, Cloudflare timeout) typically would have
+// recovered by then if it was going to; longer-than-5min legitimate gaps
+// between events are rare (interactive tools poll faster than that).
+//
+// Operators with workloads that have long compile-then-edit gaps can raise
+// via config.streamStallTimeoutMs or CHROXY_STREAM_STALL_TIMEOUT_MS, or set
+// to 0 to disable.
+export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000
+
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
 // message; Claude (SDK or CLI) appends to the system prompt. Maps the
@@ -148,6 +165,8 @@ export class BaseSession extends EventEmitter {
     // 2h. Override via ~/.chroxy/config.json#hardTimeoutMs or
     // CHROXY_HARD_TIMEOUT_MS.
     hardTimeoutMs,
+    // #4467: stream-stall recovery timeout. See DEFAULT_STREAM_STALL_TIMEOUT_MS.
+    streamStallTimeoutMs,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -258,6 +277,9 @@ export class BaseSession extends EventEmitter {
     // Fires `_handleHardTimeout` when silence reaches `_hardTimeoutMs`
     // even if the user never engages with the soft check-in prompt.
     this._hardTimeout = null
+    // #4467: stream-stall recovery timer. See _streamStallTimeoutMs and
+    // CliSession._handleStreamStall for the active-recovery path.
+    this._streamStallTimeout = null
     // #3749 / #3884 / #3899: effective SOFT-warning timeout in ms.
     // Defaults to 30 minutes; overrides come from
     // SessionManager(resultTimeoutMs:…) which itself reads
@@ -275,6 +297,13 @@ export class BaseSession extends EventEmitter {
       Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
         ? hardTimeoutMs
         : DEFAULT_HARD_TIMEOUT_MS
+    // #4467: stream-stall recovery timer. 0 disables the active recovery
+    // path (the soft warning + hard cap still apply). Non-finite or
+    // negative falls back to the default.
+    this._streamStallTimeoutMs =
+      Number.isFinite(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
+        ? streamStallTimeoutMs
+        : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
     // Provider id (registry key from providers.js — `claude-sdk`, `codex`,
     // etc.). Stored so frontmatter `providers:` filtering (#3198) and
@@ -966,6 +995,11 @@ export class BaseSession extends EventEmitter {
     if (this._hardTimeout) {
       clearTimeout(this._hardTimeout)
       this._hardTimeout = null
+    }
+    // #4467: clear the stream-stall recovery timer too.
+    if (this._streamStallTimeout) {
+      clearTimeout(this._streamStallTimeout)
+      this._streamStallTimeout = null
     }
   }
 }
