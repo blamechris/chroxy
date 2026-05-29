@@ -3334,4 +3334,108 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.activeTools).toEqual([])
     })
   })
+
+  // #4493 — the replay flag must be scoped per-session. Pre-fix it was a
+  // module-level boolean: once `history_replay_start` fired for session A,
+  // every interleaved live event from session B (replayHistory chunks over
+  // setImmediate, so live broadcasts can land between chunks) was treated
+  // as replay and dropped its activity bump / activeTools clear.
+  describe('replay flag is per-session (#4493)', () => {
+    function seedTwoSessions(
+      sA: Partial<ReturnType<typeof createEmptySessionState>> = {},
+      sB: Partial<ReturnType<typeof createEmptySessionState>> = {},
+    ) {
+      store = createMockStore(baseState({
+        activeSessionId: 'sA',
+        sessions: [
+          { sessionId: 'sA', name: 'A' } as any,
+          { sessionId: 'sB', name: 'B' } as any,
+        ],
+        sessionStates: {
+          sA: { ...createEmptySessionState(), ...sA },
+          sB: { ...createEmptySessionState(), ...sB },
+        },
+      }))
+      setStore(store)
+    }
+
+    it('live tool_start for session B bumps B during session A replay', () => {
+      // Session A is mid-replay; an interleaved live tool_start for B must
+      // still bump B.lastClientActivityAt. Pre-fix the module flag was true
+      // (for A) so B's bump was suppressed.
+      seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 })
+      handleMessage({ type: 'history_replay_start', sessionId: 'sA' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-b-1',
+          tool: 'Bash',
+          toolUseId: 'tu-b-1',
+          input: { command: 'echo hi' },
+          sessionId: 'sB',
+        },
+        ctx() as any,
+      )
+      const ssB = (store.getState() as any).sessionStates.sB
+      expect(ssB.lastClientActivityAt).toBeGreaterThan(100)
+    })
+
+    it('replayed tool_start for session A still does NOT bump A', () => {
+      // Sanity: per-session scoping must still suppress replayed events for
+      // the actually-replaying session (the #4466 guarantee).
+      seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 })
+      handleMessage({ type: 'history_replay_start', sessionId: 'sA' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-a-1',
+          tool: 'Bash',
+          toolUseId: 'tu-a-1',
+          input: { command: 'sleep' },
+          sessionId: 'sA',
+        },
+        ctx() as any,
+      )
+      const ssA = (store.getState() as any).sessionStates.sA
+      expect(ssA.lastClientActivityAt).toBe(100)
+    })
+
+    it('live result for session B still clears B.activeTools during A replay', () => {
+      // Mirror of the #4491 gate, per-session: a live `result` for session
+      // B during A's replay window must still run the #4308 turn-boundary
+      // sweep on B.activeTools.
+      const inFlightToolB = { toolUseId: 'tu-b-1', tool: 'Bash', input: { command: 'sleep' }, startedAt: 100 }
+      seedTwoSessions({}, { activeTools: [inFlightToolB] })
+      handleMessage({ type: 'history_replay_start', sessionId: 'sA' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 'sB', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ssB = (store.getState() as any).sessionStates.sB
+      expect(ssB.activeTools).toEqual([])
+    })
+
+    it('history_replay_end for A clears only A from the replaying set', () => {
+      // With two sessions concurrently replaying, ending one must not
+      // un-gate the other.
+      seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 })
+      handleMessage({ type: 'history_replay_start', sessionId: 'sA' }, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 'sB' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 'sA' }, ctx() as any)
+      // sB is still replaying — a replayed tool_start for B must not bump.
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-b-1',
+          tool: 'Bash',
+          toolUseId: 'tu-b-1',
+          input: { command: 'sleep' },
+          sessionId: 'sB',
+        },
+        ctx() as any,
+      )
+      const ssB = (store.getState() as any).sessionStates.sB
+      expect(ssB.lastClientActivityAt).toBe(100)
+    })
+  })
 })
