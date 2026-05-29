@@ -414,3 +414,119 @@ describe('ActivityIndicator — pending-shell disclosure for multiple shells (#4
     expect(screen.queryByTestId('activity-indicator-disclosure')).toBeNull()
   })
 })
+
+describe('ActivityIndicator — popover dismiss paths (#4427)', () => {
+  // Shared fixture for the dismiss-path tests: two pending shells means the
+  // disclosure button + overflow popover render, which is the precondition
+  // for outside-click / Escape dismissal to matter.
+  const seedTwoPendingShells = () => {
+    const now = Date.now()
+    storeState = {
+      activeSessionId: 'sess-1',
+      serverResultTimeoutMs: 30 * 60 * 1000,
+      sessionStates: {
+        'sess-1': {
+          isIdle: true,
+          lastClientActivityAt: now - 2_000,
+          messages: [],
+          activeTools: [],
+          activeAgents: [],
+          pendingBackgroundShells: [
+            { shellId: 'old01', command: 'sleep 60', startedAt: now - 30_000 },
+            { shellId: 'new02', command: 'npm test', startedAt: now - 5_000 },
+          ],
+          inactivityWarning: null,
+        },
+      },
+    }
+  }
+
+  it('closes the popover when the user clicks outside of it', () => {
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    fireEvent.click(screen.getByTestId('activity-indicator-disclosure'))
+    expect(screen.getByTestId('activity-indicator-popover')).toBeTruthy()
+    // mousedown is the listener the component subscribes to (matches the
+    // pre-click moment so the popover dismisses before focus moves).
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
+  })
+
+  it('keeps the popover open when the user mousedowns inside it', () => {
+    // Sanity check: outside-click dismiss must not fire on clicks that hit
+    // popover children (e.g. selecting text in a <code> entry).
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    fireEvent.click(screen.getByTestId('activity-indicator-disclosure'))
+    const popover = screen.getByTestId('activity-indicator-popover')
+    fireEvent.mouseDown(popover)
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeTruthy()
+  })
+
+  it('keeps the popover open when the user mousedowns the disclosure button itself', () => {
+    // The disclosure button owns the toggle; a mousedown there must not race
+    // the click handler and pre-close, otherwise the click would re-open the
+    // popover instead of closing it (and vice versa).
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    const disclosure = screen.getByTestId('activity-indicator-disclosure')
+    fireEvent.click(disclosure)
+    expect(screen.getByTestId('activity-indicator-popover')).toBeTruthy()
+    fireEvent.mouseDown(disclosure)
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeTruthy()
+  })
+
+  it('closes the popover when Escape is pressed', () => {
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    fireEvent.click(screen.getByTestId('activity-indicator-disclosure'))
+    expect(screen.getByTestId('activity-indicator-popover')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
+  })
+
+  it('ignores non-Escape keys', () => {
+    // Regression guard: the keydown listener must filter by `event.key` so
+    // typing in another input doesn't dismiss the popover.
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    fireEvent.click(screen.getByTestId('activity-indicator-disclosure'))
+    fireEvent.keyDown(document, { key: 'a' })
+    fireEvent.keyDown(document, { key: 'Enter' })
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeTruthy()
+  })
+
+  it('does not attach document listeners while the popover is closed', () => {
+    // Idle chip: no perf hit. Spy on document.addEventListener and assert no
+    // mousedown/keydown listeners are attached for the lifetime of the render.
+    const addSpy = vi.spyOn(document, 'addEventListener')
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    // Popover starts closed — no document listener subscriptions yet.
+    const calls = addSpy.mock.calls.map((c) => c[0])
+    expect(calls).not.toContain('mousedown')
+    expect(calls).not.toContain('keydown')
+    // Cross-check: simulating the dismiss events with the popover closed has
+    // no effect on the chip's contents (we'd assert "popover not visible"
+    // either way; this just confirms no stray state mutation).
+    fireEvent.mouseDown(document.body)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
+    addSpy.mockRestore()
+  })
+
+  it('detaches both document listeners when the popover closes', () => {
+    // After Escape closes the popover, a subsequent mousedown / keydown must
+    // not hit a stale handler (closure on prior state, or repeated
+    // setPopoverOpen(false) on an already-closed popover).
+    seedTwoPendingShells()
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+    render(<ActivityIndicator />)
+    fireEvent.click(screen.getByTestId('activity-indicator-disclosure'))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    const removed = removeSpy.mock.calls.map((c) => c[0])
+    expect(removed).toContain('mousedown')
+    expect(removed).toContain('keydown')
+    removeSpy.mockRestore()
+  })
+})
