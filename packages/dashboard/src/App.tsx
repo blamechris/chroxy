@@ -287,6 +287,12 @@ export function App() {
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const connectedClients = useConnectionStore(s => s.connectedClients)
   const pairingRefreshedCount = useConnectionStore(s => s.pairingRefreshedCount)
+  // #4497: server-advertised stream-stall window — threaded into the
+  // StreamStallChip render path so the headline humanises to e.g.
+  // "No response for 5 minutes — retry?" instead of a static phrase.
+  // Null for older servers (server PR #4483 / #4477); chip falls back
+  // to the static copy in that case.
+  const streamStallTimeoutMs = useConnectionStore(s => s.streamStallTimeoutMs)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
@@ -1552,13 +1558,14 @@ export function App() {
         <StreamStallChip
           errorText={storeMsg.content}
           onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
+          timeoutMs={streamStallTimeoutMs ?? undefined}
         />
       )
     }
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders
