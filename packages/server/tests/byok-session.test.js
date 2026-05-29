@@ -2,9 +2,14 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { MCP_STATES } from '../src/byok-mcp-client.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const MCP_STUB = join(__dirname, 'fixtures', 'mcp-stub.mjs')
 
 /**
  * Tests for byok-session.js (PR 1 — chat only, no tool dispatch).
@@ -225,6 +230,43 @@ describe('ClaudeByokSession', () => {
       assert.deepEqual(session._mcpServerConfigs, [])
       assert.ok(captured.find((e) => e.name === 'ready'), 'malformed MCP config must not block startup')
       await session.destroy()
+    })
+
+    it('#4077: lazy-spawns an MCPFleet for configured servers and reaches READY before emitting ready', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: {} },
+        },
+      }))
+      const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      assert.equal(session._mcpFleet, null, 'fleet not created before start()')
+      await session.start()
+      assert.ok(session._mcpFleet, 'fleet created during start()')
+      assert.equal(session._mcpFleet.clients.length, 1)
+      assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+      assert.equal(session._mcpFleet.clients[0].tools.length, 1)
+      await session.destroy()
+    })
+
+    it('#4077: destroy() kills MCP children and clears the fleet reference', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: {} },
+        },
+      }))
+      const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      await session.start()
+      const client = session._mcpFleet.clients[0]
+      assert.equal(client.state, MCP_STATES.READY)
+      const t0 = Date.now()
+      await session.destroy()
+      const elapsed = Date.now() - t0
+      assert.ok(elapsed <= 2500, `destroy took ${elapsed}ms, expected <= 2500ms (FLEET_KILL_GRACE_MS + safety)`)
+      assert.equal(session._mcpFleet, null, 'fleet reference cleared after destroy')
     })
   })
 
