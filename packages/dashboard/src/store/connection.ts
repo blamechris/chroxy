@@ -306,6 +306,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverCommit: null,
   serverProtocolVersion: null,
   serverResultTimeoutMs: null,
+  // #4497: server-advertised stream-stall inactivity window, threaded to
+  // StreamStallChip for the humanised headline.
+  streamStallTimeoutMs: null,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
@@ -920,6 +923,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverCommit: null,
       serverProtocolVersion: null,
       serverResultTimeoutMs: null,
+      streamStallTimeoutMs: null,
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
@@ -996,6 +1000,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverCommit: null,
       serverProtocolVersion: null,
       serverResultTimeoutMs: null,
+      streamStallTimeoutMs: null,
       viewingCachedSession: false,
     });
   },
@@ -1021,6 +1026,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverCommit: null,
       serverProtocolVersion: null,
       serverResultTimeoutMs: null,
+      streamStallTimeoutMs: null,
       viewingCachedSession: false,
     });
   },

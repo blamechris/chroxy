@@ -437,6 +437,15 @@ export interface ConnectionState {
    * the field (the indicator falls back to its built-in default).
    */
   serverResultTimeoutMs: number | null;
+  /**
+   * #4497 — effective server stream-stall (no-stream-data) inactivity
+   * window in ms, as advertised on auth_ok (server PR #4483 / #4477).
+   * Threaded to `StreamStallChip` so the headline can humanise to
+   * "No response for 5 minutes — retry?" instead of a static phrase.
+   * Null when the server omits the field (older servers, or explicit 0
+   * "disabled" sentinel — the chip then falls back to the static copy).
+   */
+  streamStallTimeoutMs: number | null;
 
   // Multi-session state
   sessions: SessionInfo[];

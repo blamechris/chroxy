@@ -9,6 +9,7 @@ import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders } from './providers.js'
 import { createLogger } from './logger.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
@@ -95,12 +96,20 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // value (e.g. `CHROXY_HARD_TIMEOUT_MS=7200000.5` via `parseFloat`)
   // would silently fail client-side schema validation on the auth_ok
   // payload. Falling back to the default lets the wire stay valid.
+  //
+  // #4484: also enforce the `<= MAX_SANE_DURATION_MS` (24h) ceiling that the
+  // protocol schemas apply via `.max(MAX_SANE_DURATION_MS)`. Without this
+  // check an operator value like `CHROXY_HARD_TIMEOUT_MS=99999999999`
+  // (>24h) would pass isSafeInteger here, hit the wire, and fail the
+  // client-side schema's `.max()` gate — silently breaking the auth_ok
+  // parse for every connecting client. Mirroring the ceiling here lets
+  // the server degrade gracefully to the default instead.
   const effectiveResultTimeoutMs =
-    Number.isSafeInteger(resultTimeoutMs) && resultTimeoutMs > 0
+    Number.isSafeInteger(resultTimeoutMs) && resultTimeoutMs > 0 && resultTimeoutMs <= MAX_SANE_DURATION_MS
       ? resultTimeoutMs
       : DEFAULT_RESULT_TIMEOUT_MS
   const effectiveHardTimeoutMs =
-    Number.isSafeInteger(hardTimeoutMs) && hardTimeoutMs > 0
+    Number.isSafeInteger(hardTimeoutMs) && hardTimeoutMs > 0 && hardTimeoutMs <= MAX_SANE_DURATION_MS
       ? hardTimeoutMs
       : DEFAULT_HARD_TIMEOUT_MS
   // #4477: stream-stall window. Semantics differ from the two timeouts above —
@@ -111,8 +120,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // isSafeInteger and fall back to the default — they'd otherwise fail the
   // protocol schema's int().nonnegative().max(MAX_SANE_DURATION_MS) gate at
   // the client and silently break dashboard message handling.
+  // #4484: ceiling check mirrors the protocol schema's `.max()` gate; see
+  // resultTimeoutMs above for the asymmetry rationale.
   const effectiveStreamStallTimeoutMs =
-    Number.isSafeInteger(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
+    Number.isSafeInteger(streamStallTimeoutMs) && streamStallTimeoutMs >= 0 && streamStallTimeoutMs <= MAX_SANE_DURATION_MS
       ? streamStallTimeoutMs
       : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
