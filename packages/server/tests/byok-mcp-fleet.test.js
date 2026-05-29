@@ -68,4 +68,40 @@ describe('MCPFleet', () => {
     const elapsed = Date.now() - t0
     assert.ok(elapsed <= FLEET_KILL_GRACE_MS + 600, `destroy took ${elapsed}ms, expected <= ${FLEET_KILL_GRACE_MS + 600}ms`)
   })
+
+  describe('anthropicTools (#4078)', () => {
+    it('renames inputSchema → input_schema and strips internal markers', async () => {
+      const tools = [{ name: 'echo', description: 'e', inputSchema: { type: 'object', properties: { msg: { type: 'string' } } } }]
+      const fleet = new MCPFleet([cfg('alpha', { MCP_STUB_TOOLS: JSON.stringify(tools) })], { log: silentLog() })
+      await fleet.start()
+      const anth = fleet.anthropicTools
+      assert.equal(anth.length, 1)
+      assert.equal(anth[0].name, 'mcp__alpha__echo')
+      assert.equal(anth[0].description, 'e')
+      assert.deepEqual(anth[0].input_schema, { type: 'object', properties: { msg: { type: 'string' } } })
+      assert.equal(anth[0].inputSchema, undefined, 'inputSchema renamed away')
+      assert.equal(anth[0]._mcpServer, undefined, 'internal marker stripped')
+      assert.equal(anth[0]._mcpOriginalName, undefined, 'internal marker stripped')
+      await fleet.destroy()
+    })
+
+    it('falls back to { type: object } when MCP server omits inputSchema', async () => {
+      const tools = [{ name: 'no_schema', description: 'd' }]
+      const fleet = new MCPFleet([cfg('alpha', { MCP_STUB_TOOLS: JSON.stringify(tools) })], { log: silentLog() })
+      await fleet.start()
+      assert.deepEqual(fleet.anthropicTools[0].input_schema, { type: 'object' })
+      await fleet.destroy()
+    })
+
+    it('excludes anthropicTools from dead servers', async () => {
+      const fleet = new MCPFleet([
+        cfg('alpha'),
+        { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+      ], { log: silentLog() })
+      await fleet.start()
+      const names = fleet.anthropicTools.map((t) => t.name)
+      assert.deepEqual(names, ['mcp__alpha__echo'])
+      await fleet.destroy()
+    })
+  })
 })

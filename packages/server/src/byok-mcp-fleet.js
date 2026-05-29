@@ -46,6 +46,29 @@ export class MCPFleet {
     return out
   }
 
+  /**
+   * Anthropic-shaped tool definitions for messages.stream({ tools }).
+   *
+   * MCP's tools/list returns { name, description, inputSchema } per tool.
+   * Anthropic's API wants { name, description, input_schema }. The rename
+   * happens here so byok-session can `[...BUILTIN_TOOLS, ...fleet.anthropicTools]`
+   * without knowing the MCP shape.
+   *
+   * Internal markers (_mcpServer, _mcpOriginalName) are stripped — they're
+   * useful inside chroxy for routing tool_use back to the right client (#4079)
+   * but the SDK would reject unknown keys.
+   *
+   * Dead servers (post-restart-exhaustion) contribute zero tools because
+   * `this.tools` already filters by READY state.
+   */
+  get anthropicTools() {
+    return this.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description || '',
+      input_schema: tool.inputSchema || { type: 'object' },
+    }))
+  }
+
   async destroy() {
     await Promise.race([
       Promise.all(this._clients.map((c) => c.destroy())),
