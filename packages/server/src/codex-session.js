@@ -3,7 +3,11 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { getRegistryForProvider } from './models.js'
+import {
+  CONTEXT_WINDOW_HEADROOM,
+  getRatchetCap,
+  maybeRatchetContextWindow,
+} from './utils/context-window-learn.js'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -245,43 +249,33 @@ const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
 }))
 
 /**
- * Headroom multiplier for the learn-loop. When `input_tokens` exceeds the
- * registered window for a model, we ratchet to `inputTokens * HEADROOM`
- * so the next turn has slack before it pegs the meter again.
+ * Headroom multiplier for the learn-loop. Re-exported from the shared
+ * `CONTEXT_WINDOW_HEADROOM` constant in `utils/context-window-learn.js`
+ * (#4414) so the value lives in one place and any future provider that
+ * adopts the learn-loop picks up the same headroom.
  *
- * Exported so the test suite can verify the exact ratchet target instead
- * of recomputing the magic number.
+ * Kept exported under the legacy `CODEX_*` name so existing tests and any
+ * consumers continue to compile unchanged.
  */
-export const CODEX_CONTEXT_WINDOW_HEADROOM = 1.1
+export const CODEX_CONTEXT_WINDOW_HEADROOM = CONTEXT_WINDOW_HEADROOM
 
 /**
- * Sanity cap on the learn-loop ratchet target — a single `turn.completed`
- * event with a corrupt or malicious `input_tokens` value (overflow, JSONL
- * parse glitch, future Codex CLI bug) must not be able to balloon the
- * registered window to an absurd number. 2,000,000 tokens is well above
- * today's largest published Codex window (1M for gpt-4.1 / certain 1M
- * GPT-5 variants on plan tiers) — any legit future model that exceeds
- * this should bump this constant, not silently leak through.
+ * Sanity cap on the learn-loop ratchet target for the Codex provider —
+ * a single `turn.completed` event with a corrupt or malicious
+ * `input_tokens` value (overflow, JSONL parse glitch, future Codex CLI
+ * bug) must not be able to balloon the registered window to an absurd
+ * number. 2,000,000 tokens is well above today's largest published Codex
+ * window (1M for gpt-4.1 / certain 1M GPT-5 variants on plan tiers).
+ *
+ * Sourced from the per-provider cap table in `utils/context-window-learn.js`
+ * (#4414) — bump it there if a legit future Codex model exceeds 2M.
  */
-export const CODEX_CONTEXT_WINDOW_RATCHET_CAP = 2_000_000
+export const CODEX_CONTEXT_WINDOW_RATCHET_CAP = getRatchetCap('codex')
 
 /**
- * #3857 learn-loop helper. When Codex's reported `input_tokens` for the
- * most-recent turn exceeds the registered context window for the active
- * model, bump the registry entry to `inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM`
- * (rounded up to the nearest 1k for a clean number) and emit
- * `models_updated` so connected dashboards refresh the meter.
- *
- * No-op when:
- *   - the model isn't in the registry (unknown / custom deploy — caller
- *     handles via the registry's deriveId/resolveContextWindow fallback)
- *   - `input_tokens` is at or below the registered window (no drift signal)
- *   - `input_tokens` is not a finite positive number (corrupt JSONL)
- *   - the model lacks a fullId we can resolve
- *
- * Extracted from `_processJsonlLine` so the logic is testable in isolation
- * — the real method runs as part of the readline pipeline, which is messy
- * to stub directly from a unit test.
+ * #3857 learn-loop helper. Thin Codex-specific wrapper around the shared
+ * `maybeRatchetContextWindow` (#4414) so the existing test suite and any
+ * direct callers continue to compile unchanged.
  *
  * @param {import('events').EventEmitter} session  The CodexSession instance
  * @param {string} modelId  Short id or fullId of the active Codex model
@@ -289,49 +283,10 @@ export const CODEX_CONTEXT_WINDOW_RATCHET_CAP = 2_000_000
  * @returns {boolean}  true when the registry was updated, false when no-op
  */
 export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
-  // Defensive guard against corrupt/malicious JSONL — a non-finite or
-  // negative `input_tokens` must not feed the ratchet math (NaN * 1.1 = NaN,
-  // Infinity * 1.1 = Infinity → unbounded growth). The caller in
-  // `_processJsonlLine` already gates on `>0`, but we re-check here so the
-  // helper is safe to call from any future caller too.
-  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return false
-
-  const registry = getRegistryForProvider('codex')
-  if (!registry) return false
-
-  // Look up the active model in the registry to read its current window.
-  // Match on either short id or fullId — the registry stores both.
-  const models = registry.getModels()
-  const entry = models.find(m => m.id === modelId || m.fullId === modelId)
-  if (!entry) return false
-  if (typeof entry.contextWindow !== 'number' || entry.contextWindow <= 0) return false
-
-  if (inputTokens <= entry.contextWindow) return false
-
-  // Round the bumped value up to the nearest 1k so the meter shows a clean
-  // number ("440k" not "440231") and we don't write a fresh cache entry on
-  // every single turn for sub-1k variation. Capped at
-  // CODEX_CONTEXT_WINDOW_RATCHET_CAP so a single corrupt turn can't balloon
-  // the registry to an absurd value.
-  const raw = Math.min(inputTokens * CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP)
-  const bumped = Math.ceil(raw / 1000) * 1000
-
-  const changed = registry.updateContextWindow(modelId, bumped)
-  if (!changed) return false
-
-  // #4413 — persist the bumped registry to the codex-scoped cache file
-  // (`~/.chroxy/models-cache.codex.json`) so a server restart doesn't lose
-  // the learned window. `saveCache()` is idempotent (snapshot-deduped) and
-  // logs a warn on disk failure rather than throwing, so the in-memory
-  // ratchet always succeeds even when the disk path is unwritable. The
-  // default Claude cache is unaffected — non-Claude providers use their
-  // own path via `getRegistryForProvider`'s `cachePath` hook.
-  registry.saveCache()
-  // Mirror sdk-session.js:763 — broadcast the corrected registry so the
-  // dashboard's `availableModels` (and therefore the footer meter) picks
-  // up the new window without waiting for the next refresh.
-  session.emit('models_updated', { models: registry.getModels() })
-  return true
+  // #4413 persistence behavior is preserved by the shared helper, which
+  // calls `registry.saveCache()` after a successful update. Both Codex
+  // and Gemini providers route through the same path now.
+  return maybeRatchetContextWindow('codex', modelId, inputTokens, session.emit.bind(session))
 }
 
 export class CodexSession extends JsonlSubprocessSession {
