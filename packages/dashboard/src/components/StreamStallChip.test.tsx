@@ -60,4 +60,60 @@ describe('StreamStallChip (#4476)', () => {
     const chip = screen.getByTestId('stream-stall-chip')
     expect(chip.getAttribute('role')).toBe('status')
   })
+
+  // #4497 — humanised headline. When the server advertises
+  // `streamStallTimeoutMs` on auth_ok, the chip swaps the generic phrase
+  // for the more informative "No response for ${humanize(ms)} — retry?"
+  // so the user knows the actual configured inactivity window. The raw
+  // server text on the tooltip must NOT change.
+  describe('humanised headline (#4497)', () => {
+    it('renders the static phrase when timeoutMs is undefined', () => {
+      render(<StreamStallChip errorText="raw server text" />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/Stream stalled — retry\?/)
+    })
+
+    it('renders "No response for 5 minutes — retry?" for 300_000 ms', () => {
+      render(<StreamStallChip errorText="raw server text" timeoutMs={300_000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/No response for 5 minutes — retry\?/)
+      expect(chip.textContent).not.toMatch(/Stream stalled —/)
+    })
+
+    it('renders "30 seconds" for sub-minute timeouts', () => {
+      render(<StreamStallChip errorText="raw" timeoutMs={30_000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/No response for 30 seconds — retry\?/)
+    })
+
+    it('renders singular "1 minute" for 60_000 ms', () => {
+      render(<StreamStallChip errorText="raw" timeoutMs={60_000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/No response for 1 minute — retry\?/)
+    })
+
+    it('renders hours for >= 1h timeouts', () => {
+      render(<StreamStallChip errorText="raw" timeoutMs={2 * 60 * 60 * 1000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/No response for 2 hours — retry\?/)
+    })
+
+    it('leaves the tooltip (raw server text) untouched when timeoutMs is provided', () => {
+      const raw = 'Stream stalled — no response for 5 minutes (provider=claude-sdk session=abc)'
+      render(<StreamStallChip errorText={raw} timeoutMs={300_000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.getAttribute('title')).toBe(raw)
+    })
+
+    it('falls back to the static phrase for non-finite or non-positive timeoutMs', () => {
+      // Defensive: a malformed prop should never produce
+      // "No response for NaN minutes" garbage in the UI.
+      for (const bad of [0, -1, NaN, Infinity, -Infinity]) {
+        cleanup()
+        render(<StreamStallChip errorText="raw" timeoutMs={bad} />)
+        const chip = screen.getByTestId('stream-stall-chip')
+        expect(chip.textContent).toMatch(/Stream stalled — retry\?/)
+      }
+    })
+  })
 })

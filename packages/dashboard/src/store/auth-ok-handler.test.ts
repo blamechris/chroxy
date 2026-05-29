@@ -181,6 +181,34 @@ describe('auth_ok handler', () => {
       }
     })
 
+    // #4497 / #4477 — server advertises its configured stream-stall
+    // inactivity window so the chip can humanise the headline copy
+    // ("No response for 5 minutes — retry?") instead of a generic phrase.
+    it('stores streamStallTimeoutMs when present', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ streamStallTimeoutMs: 5 * 60 * 1000 }), ctx as any)
+
+      expect(store.getState().streamStallTimeoutMs).toBe(5 * 60 * 1000)
+    })
+
+    it('leaves streamStallTimeoutMs null when older server omits the field', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any)
+
+      expect(store.getState().streamStallTimeoutMs).toBeNull()
+    })
+
+    it('ignores malformed streamStallTimeoutMs values (incl. 0 "disabled" sentinel)', () => {
+      // 0 is the protocol's explicit "stall timer disabled" sentinel —
+      // treat it the same as absent so the chip falls back to the static
+      // phrase rather than rendering "No response for 0 seconds".
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '5m', null]) {
+        const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+        handleMessage(createAuthOkMessage({ streamStallTimeoutMs: bad }), ctx as any)
+        expect(store.getState().streamStallTimeoutMs).toBeNull()
+      }
+    })
+
     it('clears connection error and retry count', () => {
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
       handleMessage(createAuthOkMessage(), ctx as any)

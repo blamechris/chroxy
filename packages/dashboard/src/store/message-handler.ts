@@ -1924,6 +1924,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         msg.resultTimeoutMs > 0
           ? msg.resultTimeoutMs
           : null;
+      // #4497 / #4477: server-advertised stream-stall window — threaded to
+      // StreamStallChip so the headline can humanise to "No response for
+      // 5 minutes — retry?". 0 is the protocol's "disabled" sentinel so we
+      // treat it the same as absent: the chip falls back to the static
+      // phrase. Same finite/positive guard as resultTimeoutMs.
+      const authStreamStallTimeoutMs =
+        typeof msg.streamStallTimeoutMs === 'number' &&
+        Number.isFinite(msg.streamStallTimeoutMs) &&
+        msg.streamStallTimeoutMs > 0
+          ? msg.streamStallTimeoutMs
+          : null;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
@@ -1975,6 +1986,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         serverCommit: authServerCommit,
         serverProtocolVersion: authProtocolVersion,
         serverResultTimeoutMs: authResultTimeoutMs,
+        streamStallTimeoutMs: authStreamStallTimeoutMs,
         streamingMessageId: null,
         myClientId: myClientId,
         connectedClients: clients,
