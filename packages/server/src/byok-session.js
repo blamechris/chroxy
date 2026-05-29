@@ -244,6 +244,17 @@ export class ClaudeByokSession extends BaseSession {
     // #4077: MCPFleet is lazy — created in start() only if servers exist.
     // Held here so destroy() can tear down even if start() never ran.
     this._mcpFleet = null
+    // #4482: per-call MCP tools/call timeout (ms). null = use byok-mcp-client's
+    // DEFAULT_TOOL_CALL_TIMEOUT_MS (30s) via the destructured default in
+    // MCPFleet.callTool. Forwarded from session-manager via providerOpts →
+    // opts.mcpToolCallTimeoutMs. Same defensive guard as resultTimeoutMs:
+    // non-finite / non-positive (NaN, Infinity, 0, -1, strings) falls back
+    // to null because setTimeout coerces those to 0 ms and every MCP tool
+    // would look broken.
+    this._mcpToolCallTimeoutMs =
+      Number.isFinite(opts.mcpToolCallTimeoutMs) && opts.mcpToolCallTimeoutMs > 0
+        ? opts.mcpToolCallTimeoutMs
+        : null
   }
 
   async start() {
@@ -961,7 +972,11 @@ export class ClaudeByokSession extends BaseSession {
    */
   async _dispatchMcpTool(toolName, input) {
     try {
-      const result = await this._mcpFleet.callTool(toolName, input)
+      // #4482: pass undefined when the operator didn't set a timeout so
+      // MCPFleet.callTool's destructured default (DEFAULT_TOOL_CALL_TIMEOUT_MS)
+      // fires — duplicating the constant here would silently desync if
+      // MCPClient ever retunes its 30s default.
+      const result = await this._mcpFleet.callTool(toolName, input, this._mcpToolCallTimeoutMs ?? undefined)
       const blocks = Array.isArray(result?.content) ? result.content : []
       const text = blocks
         .map((b) => (typeof b?.text === 'string' ? b.text : JSON.stringify(b)))

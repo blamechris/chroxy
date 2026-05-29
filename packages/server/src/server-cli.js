@@ -386,6 +386,13 @@ export async function startCliServer(config) {
       Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs >= 0
         ? config.streamStallTimeoutMs
         : null,
+    // #4482: per-MCP-call timeout (ms). null = byok-mcp-client default (30s).
+    // Unlike streamStallTimeoutMs, 0 is not a meaningful disable — every
+    // MCP tool would look broken — so non-positive falls back to null.
+    mcpToolCallTimeoutMs:
+      Number.isFinite(config.mcpToolCallTimeoutMs) && config.mcpToolCallTimeoutMs > 0
+        ? config.mcpToolCallTimeoutMs
+        : null,
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
     maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,

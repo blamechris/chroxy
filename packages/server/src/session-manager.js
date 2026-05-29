@@ -214,6 +214,10 @@ export class SessionManager extends EventEmitter {
     // #4467: stream-stall recovery timeout (ms). Forwarded via providerOpts.
     // null = use BaseSession's DEFAULT_STREAM_STALL_TIMEOUT_MS (5min).
     streamStallTimeoutMs,
+    // #4482: per-MCP-call timeout (ms). Forwarded via providerOpts to
+    // byok-session, which threads it into MCPFleet.callTool. null = use
+    // byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS (30s).
+    mcpToolCallTimeoutMs,
 
     // State persistence
     stateFilePath,
@@ -268,6 +272,14 @@ export class SessionManager extends EventEmitter {
     this._streamStallTimeoutMs =
       Number.isFinite(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
         ? streamStallTimeoutMs
+        : null
+    // #4482: per-MCP-call timeout. Unlike streamStallTimeoutMs, 0 is not a
+    // valid disable here — a 0-ms callTool timeout fires immediately. Only
+    // positive finite values are accepted; null falls through to byok-mcp-
+    // client's 30s default.
+    this._mcpToolCallTimeoutMs =
+      Number.isFinite(mcpToolCallTimeoutMs) && mcpToolCallTimeoutMs > 0
+        ? mcpToolCallTimeoutMs
         : null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
     // #4075: per-session crossing threshold. Stored as a runtime-mutable
@@ -584,6 +596,7 @@ export class SessionManager extends EventEmitter {
     if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
     if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs
     if (this._streamStallTimeoutMs != null) providerOpts.streamStallTimeoutMs = this._streamStallTimeoutMs
+    if (this._mcpToolCallTimeoutMs != null) providerOpts.mcpToolCallTimeoutMs = this._mcpToolCallTimeoutMs
     // Skills size budgets — pass through if configured. BaseSession forwards
     // these to loadActiveSkillsLayered. (#3202)
     if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes

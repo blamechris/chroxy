@@ -191,6 +191,35 @@ describe('validateConfig', () => {
       assert.ok(result.warnings.some(w => w.includes('streamStallTimeoutMs') && w.includes('number')))
     })
   })
+
+  // #4482: per-call MCP tools/call timeout. Defaults to 30s (matches
+  // byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS). Allowed range
+  // 1s-10min — below 1s every realistic MCP server times out, above
+  // 10min the model conversation is already lost.
+  describe('mcpToolCallTimeoutMs (#4482)', () => {
+    it('accepts a value within the allowed range', () => {
+      const result = validateConfig({ mcpToolCallTimeoutMs: 60_000 })
+      assert.equal(result.valid, true)
+    })
+
+    it('rejects values below the 1s minimum', () => {
+      const result = validateConfig({ mcpToolCallTimeoutMs: 500 })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('mcpToolCallTimeoutMs') && w.includes('minimum')))
+    })
+
+    it('rejects values above the 10min maximum', () => {
+      const result = validateConfig({ mcpToolCallTimeoutMs: 11 * 60 * 1000 })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('mcpToolCallTimeoutMs') && w.includes('maximum')))
+    })
+
+    it('warns when value is not a number', () => {
+      const result = validateConfig({ mcpToolCallTimeoutMs: '60s' })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('mcpToolCallTimeoutMs') && w.includes('number')))
+    })
+  })
 })
 
 describe('mergeConfig', () => {
@@ -414,6 +443,13 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({})
     assert.equal(merged.streamStallTimeoutMs, 0)
     delete process.env.CHROXY_STREAM_STALL_TIMEOUT_MS
+  })
+
+  it('reads mcpToolCallTimeoutMs from CHROXY_MCP_TOOL_CALL_TIMEOUT_MS env var as number (#4482)', () => {
+    process.env.CHROXY_MCP_TOOL_CALL_TIMEOUT_MS = '90000'
+    const merged = mergeConfig({})
+    assert.equal(merged.mcpToolCallTimeoutMs, 90_000)
+    delete process.env.CHROXY_MCP_TOOL_CALL_TIMEOUT_MS
   })
 })
 
