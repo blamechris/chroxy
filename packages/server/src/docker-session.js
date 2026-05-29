@@ -281,6 +281,17 @@ export class DockerSession extends CliSession {
     }
   }
 
+  // #4473: log the container-specific exit line under the docker-session
+  // namespace before delegating to the inherited handler (#4469). The
+  // inherited code emits its own "Process exited" line; this override
+  // lands first so `docker logs <ctr>` correlation by operators stays easy.
+  _handleChildClose(code) {
+    if (!this._destroying && !this._respawning) {
+      log.info(`Container exec exited (code ${code}), scheduling respawn`)
+    }
+    super._handleChildClose(code)
+  }
+
   /**
    * Destroy the session: stop the exec process, remove the container,
    * then call super.destroy() to clean up CliSession state.

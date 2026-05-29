@@ -441,6 +441,56 @@ describe('CliSession._killAndRespawn (#4471: panic-button drops dashboard recove
 
     assert.deepEqual(events, [])
   })
+
+  // #4474: the production wiring attaches `_handleChildClose` as a child
+  // listener (see _spawnPersistentProcess at cli-session.js:311). When
+  // _killAndRespawn fires, the oldChild carries BOTH listeners: the
+  // production one (which would re-emit result if the `_respawning` guard
+  // were ever dropped) and the closure-scoped respawn() callback.
+  //
+  // Crucially: we do NOT set _destroying. The `_destroying` check in
+  // _handleChildClose precedes the `_respawning` check (cli-session.js:
+  // 1117-1118), so using `_destroying` as a respawn-suppression hatch
+  // would mask the `_respawning` guard the comment claims to pin (#4480).
+  // Instead we stub `start()` to a no-op so the closure respawn()
+  // callback doesn't actually spawn a child in the unit test.
+  it('does NOT double-emit result when the production close listener also fires (#4474)', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_dl'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_dl'
+    // Stub spawn so the closure respawn() callback inside _killAndRespawn
+    // doesn't actually try to spawn a real `claude` process.
+    session.start = () => {}
+
+    const oldChild = session._child
+    // Mirror _spawnPersistentProcess's wiring — this is what makes the
+    // _respawning guard at cli-session.js:1118 load-bearing.
+    oldChild.on('close', (code) => session._handleChildClose(code))
+
+    const results = []
+    const errors = []
+    session.on('result', (p) => results.push(p))
+    session.on('error', (p) => errors.push(p))
+
+    session._killAndRespawn()
+    // Now emit 'close' — BOTH listeners fire on oldChild:
+    //   (a) the manually-attached _handleChildClose → sees _respawning=true,
+    //       short-circuits at the guard (the line we want to pin).
+    //   (b) the closure respawn() callback → calls our stubbed start().
+    // The _emitInterruptedTurnResult emit happens once at the TOP of
+    // _killAndRespawn (before _respawning=true).
+    oldChild.emit('close', 0)
+
+    assert.equal(results.length, 1, 'exactly one result must fire — _emitInterruptedTurnResult at the top of _killAndRespawn')
+    // This is the assertion that BITES on a `_respawning` guard regression:
+    // the inherited _handleChildClose emits `error: "Claude process exited
+    // unexpectedly..."` AFTER the _respawning check. If the guard were
+    // dropped, this error would fire from the manually-attached listener.
+    // The closure respawn() path never emits this error.
+    assert.equal(errors.length, 0, '_handleChildClose must NOT emit the "exited unexpectedly" error during an intentional respawn — pins the _respawning guard at cli-session.js:1118')
+  })
 })
 
 describe('CliSession._handleStreamStall (#4467: stream-stall recovery)', () => {

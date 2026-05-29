@@ -585,17 +585,20 @@ describe('DockerSession real import (capabilities only)', () => {
 })
 
 describe('DockerSession inherits CliSession close-handler fix (#4469)', () => {
-  it('_handleChildClose is the inherited CliSession method (not overridden)', async () => {
+  it('_handleChildClose delegates to CliSession (override is for the docker-namespaced log only, #4473)', async () => {
     const { DockerSession } = await import('../src/docker-session.js')
     const { CliSession } = await import('../src/cli-session.js')
-    // Docker MUST NOT carry its own override — the inherited helper is what
-    // emits `result` so the dashboard recovers from Stop. If a future change
-    // re-introduces a docker override, this test flags it.
-    assert.equal(
+    // Docker MAY override _handleChildClose to log a container-specific
+    // exit line BEFORE delegating (#4473). What it MUST NOT do is replace
+    // the body — the inherited code emits `result` so the dashboard
+    // recovers from Stop (#4469). Behavioural test below verifies the
+    // delegation still fires the result emit.
+    assert.notStrictEqual(
       DockerSession.prototype._handleChildClose,
       CliSession.prototype._handleChildClose,
-      'docker-session must inherit _handleChildClose so the synthetic result emit fires (#4469)',
+      'docker-session has its own _handleChildClose for the container-specific log line (#4473)',
     )
+    assert.equal(typeof CliSession.prototype._handleChildClose, 'function')
   })
 
   it('emits stream_end + result + error on mid-turn close (via inherited handler)', async () => {
