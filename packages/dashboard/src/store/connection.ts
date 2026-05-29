@@ -1319,10 +1319,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // server-emitted stream/tool event, making the answer look dropped.
     // Once a server event arrives, the bump is a no-op (server is
     // authoritative); the timestamp is overwritten in dispatch-activity.
+    //
+    // #4465: also drop the matching activeTools entry. In TUI sessions,
+    // claude TUI may not emit PostToolUse for some AskUserQuestion shapes
+    // (v0.9.12 empirical), so the server never sends tool_result and the
+    // dashboard's footer pill ticks `Running AskUserQuestion · Nm Ns`
+    // indefinitely. Drop the entry optimistically when the user answers
+    // so the pill clears within ~1s of the answer landing. If the server
+    // does later emit tool_result for the same toolUseId, sharedToolResult
+    // is idempotent on missing entries — no double-clear, no re-append.
+    //
+    // Skipped when toolUseId is absent (free-text question prompts that
+    // didn't carry a tool pairing) so the server stays authoritative for
+    // any in-flight tools.
     if (activeSessionId && sessionStates[activeSessionId]) {
-      updateActiveSession(() => ({
+      updateActiveSession((ss) => ({
         isIdle: false,
         lastClientActivityAt: Date.now(),
+        ...(toolUseId
+          ? { activeTools: ss.activeTools.filter(t => t.toolUseId !== toolUseId) }
+          : {}),
       }));
     }
     if (socket && socket.readyState === WebSocket.OPEN) {

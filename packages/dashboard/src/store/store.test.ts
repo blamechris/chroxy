@@ -1483,6 +1483,115 @@ describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
   });
 });
 
+// #4465: when the user answers a TUI AskUserQuestion, claude TUI may or may
+// not emit PostToolUse for it (v0.9.12 — empirical: the prompt resolves but
+// the hook never fires for some question shapes). Without server-side
+// tool_result the dashboard's activeTools entry sits forever, so the footer
+// pill keeps ticking `Running AskUserQuestion · Nm Ns` indefinitely.
+//
+// Fix: when the user answers via the QuestionPrompt UI, optimistically drop
+// the matching activeTools entry. If the server later does fire tool_result,
+// sharedToolResult is idempotent on missing entries. If it doesn't (#4465's
+// stall case), the pill clears anyway.
+describe('sendUserQuestionResponse clears in-flight tool slot (#4465)', () => {
+  it('drops the matching activeTools entry when called with toolUseId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-1', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+            // Sibling in-flight tool that must NOT be cleared.
+            { toolUseId: 'tu-bash-1', tool: 'Bash', input: { command: 'ls' }, startedAt: 150 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'tu-ask-1');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools.map(t => t.toolUseId)).toEqual(['tu-bash-1']);
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('is a no-op on activeTools when called without toolUseId (free-text fallback)', async () => {
+    // Some legacy callsites send the answer without a toolUseId (free-text
+    // question prompts where the dashboard can't pair to a specific tool).
+    // Those must NOT clear any in-flight tool — the server stays
+    // authoritative.
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-1', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('A');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools).toHaveLength(1)
+    expect(ss.activeTools[0]!.toolUseId).toBe('tu-ask-1')
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('a subsequent server-emitted tool_result for the same toolUseId is a no-op (idempotent)', async () => {
+    // After the optimistic clear, if claude TUI does eventually emit
+    // PostToolUse, the resulting tool_result hits sharedToolResult which
+    // looks up by toolUseId and finds nothing — no double-clear, no
+    // re-append. Verifies the cross-PR contract isn't broken.
+    const { useConnectionStore } = await import('./connection');
+    const { handleMessage } = await import('./message-handler');
+
+    const mockSocket = { readyState: 1, send: () => {} };
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-2', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('B', 'tu-ask-2');
+    // Late tool_result arrives.
+    handleMessage(
+      { type: 'tool_result', toolUseId: 'tu-ask-2', result: 'B', sessionId: 's1' },
+      { url: 'wss://t' } as any,
+    );
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools).toEqual([]);
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // PTY dead code removal (#1759)
 // ---------------------------------------------------------------------------
