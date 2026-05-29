@@ -401,10 +401,16 @@ export function setLastConnectedUrl(url: string | null): void {
 // ---------------------------------------------------------------------------
 // History replay flags
 // ---------------------------------------------------------------------------
-let _receivingHistoryReplay = false;
+// #4493 — per-session replay tracking. `replayHistory()` on the server chunks
+// the replay over `setImmediate` (ws-history.js), which yields the event loop
+// between chunks, so live broadcasts from OTHER sessions can interleave with
+// session A's replay. A module-level boolean would gate all sessions on A's
+// replay state and drop legitimate live activity for sessions B/C/etc.
+// Scope the flag per-session id and gate per-target.
+const _replayingSessions = new Set<string>();
 
 export function resetReplayFlags(): void {
-  _receivingHistoryReplay = false;
+  _replayingSessions.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,12 +1473,15 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   // terminal preview write — matches the prior inline ordering.
   const toolName = typeof msg.tool === 'string' ? msg.tool : 'tool';
   get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+  const toolStartTargetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
   const cached = (() => {
-    const targetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
-    const targetState = targetId ? get().sessionStates[targetId] : null;
+    const targetState = toolStartTargetId ? get().sessionStates[toolStartTargetId] : null;
     return targetState ? targetState.messages : get().messages;
   })();
-  const result = sharedToolStart(msg, get().activeSessionId, _receivingHistoryReplay, cached);
+  // #4493 — per-session replay scoping. Dedup against the cached history
+  // only when THIS message's session is currently replaying.
+  const toolStartIsReplay = toolStartTargetId ? _replayingSessions.has(toolStartTargetId) : false;
+  const result = sharedToolStart(msg, get().activeSessionId, toolStartIsReplay, cached);
   if (!result.shouldDispatch || !result.chatMessage) return;
   const toolMsg = result.chatMessage;
   const targetId = result.sessionId;
@@ -1868,20 +1877,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // warning: by definition the silence has ended, so the chip should
   // disappear without waiting for the user to dismiss it manually.
   //
-  // #4466 — gate on `!_receivingHistoryReplay`. switch_session on the
-  // server replays every past event in the target session through this
-  // handler, and a replayed tool_start / message / result is NOT fresh
-  // activity. Without this gate the act of switching tabs:
+  // #4466 — gate on the replay set. switch_session on the server replays
+  // every past event in the target session through this handler, and a
+  // replayed tool_start / message / result is NOT fresh activity. Without
+  // this gate the act of switching tabs:
   //   1) bumps lastClientActivityAt to Date.now(), so "Working… last
   //      activity Ns ago" resets to 1s no matter how idle the session was;
   //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
   //      update?" chip disappears without the user ever seeing it again.
-  // The live activity events that arrive AFTER history_replay_end clears
-  // the flag still bump correctly — verified by the regression-guard tests
-  // in message-handler.test.ts.
-  if (isActivityEvent(msg.type) && !_receivingHistoryReplay) {
+  // The live activity events that arrive AFTER history_replay_end removes
+  // the session from the set still bump correctly — verified by the
+  // regression-guard tests in message-handler.test.ts.
+  //
+  // #4493 — gate per target session id (Set membership), not a module flag.
+  // `replayHistory()` chunks over setImmediate, so live broadcasts from
+  // session B can interleave with A's replay. A module-wide boolean would
+  // wrongly suppress B's live activity bump for the duration of A's replay.
+  if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-    if (targetId && get().sessionStates[targetId]) {
+    if (targetId && get().sessionStates[targetId] && !_replayingSessions.has(targetId)) {
       updateSession(targetId, (ss) => {
         const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
         if (ss.inactivityWarning) patch.inactivityWarning = null;
@@ -1900,8 +1914,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   switch (msg.type) {
 
     case 'auth_ok': {
-      // Reset replay flags — fresh auth means clean slate
-      _receivingHistoryReplay = false;
+      // Reset replay flags — fresh auth means clean slate (#4493: clear the
+      // per-session replaying set so a reconnect doesn't leave stale ids
+      // gating future activity bumps).
+      _replayingSessions.clear();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // Extract server context fields via shared handler (#3102)
@@ -2306,7 +2322,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         msg,
         get().activeSessionId,
       );
-      _receivingHistoryReplay = true;
+      // #4493 — track per-session. Falls back to activeSessionId via
+      // sharedHistoryReplayStart, matching the gate's targetId resolution.
+      if (replayTargetId) _replayingSessions.add(replayTargetId);
       // Full history replay (from request_full_history): clear messages before replay
       if (fullHistory) {
         if (replayTargetId && get().sessionStates[replayTargetId]) {
@@ -2339,7 +2357,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'history_replay_end':
       // Parser is shared via store-core; flag mutation stays here.
-      _receivingHistoryReplay = sharedHistoryReplayEnd().receivingHistoryReplay;
+      sharedHistoryReplayEnd();
+      // #4493 — remove this session id from the replaying set. Falls back
+      // to activeSessionId to mirror sharedHistoryReplayStart's resolution.
+      {
+        const endTargetId =
+          (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
+        if (endTargetId) _replayingSessions.delete(endTargetId);
+      }
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
       updateActiveSession((ss) => {
@@ -2392,7 +2417,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // else the global message log).
       const targetState = targetId ? get().sessionStates[targetId] : null;
       const cached = targetState ? targetState.messages : get().messages;
-      const result = sharedMessageHandler(msg, get().activeSessionId, _receivingHistoryReplay, cached);
+      // #4493 — dedup against history only when THIS message's session is
+      // currently replaying. A module-wide boolean would suppress live
+      // messages for session B while A replays.
+      const messageIsReplay = targetId ? _replayingSessions.has(targetId) : false;
+      const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
       if (!result.shouldDispatch) break;
       const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
@@ -2483,7 +2512,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ...resultPatch,
             messages: [...ss.messages],
           };
-          if (ss.activeTools.length > 0 && !_receivingHistoryReplay) patch.activeTools = [];
+          // #4493 — gate per target session id. A live `result` for
+          // session B during A's replay must still sweep B's activeTools.
+          if (ss.activeTools.length > 0 && !_replayingSessions.has(targetId)) patch.activeTools = [];
           return patch;
         });
       } else {

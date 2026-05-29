@@ -8,6 +8,7 @@ import {
   flushPostAuthQueue,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 // Importing providers.js triggers built-in provider registration, which in turn
 // calls registerProviderRegistry() so getRegistryForProvider('codex'/'gemini')
 // resolves to the correct provider class in per-provider tests below.
@@ -173,6 +174,82 @@ describe('sendPostAuthInfo — resultTimeoutMs (#3760)', () => {
       assert.equal(authOk.resultTimeoutMs, 30 * 60 * 1000, `bad input: ${bad}`)
     }
   })
+
+  // #4484: operator-set value over the MAX_SANE_DURATION_MS (24h) ceiling must
+  // fall back to the default. Without this guard the server would emit the
+  // literal over-ceiling value and the protocol schema's `.max()` would reject
+  // the entire auth_ok payload on every client, silently breaking the
+  // handshake.
+  it('falls back to the default when ctx.resultTimeoutMs exceeds MAX_SANE_DURATION_MS', () => {
+    const ctx = makeCtx({ resultTimeoutMs: MAX_SANE_DURATION_MS + 1 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.resultTimeoutMs, 30 * 60 * 1000)
+  })
+
+  it('accepts the exact MAX_SANE_DURATION_MS boundary for resultTimeoutMs', () => {
+    const ctx = makeCtx({ resultTimeoutMs: MAX_SANE_DURATION_MS })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.resultTimeoutMs, MAX_SANE_DURATION_MS)
+  })
+})
+
+// #3905: surface the effective hard-kill inactivity timeout in auth_ok so the
+// dashboard check-in chip can render a "kill in Xh" countdown against the
+// real configured value instead of assuming the 2-hour default.
+describe('sendPostAuthInfo — hardTimeoutMs (#3905)', () => {
+  it('uses the configured hardTimeoutMs when set', () => {
+    const ctx = makeCtx({ hardTimeoutMs: 3 * 60 * 60 * 1000 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.hardTimeoutMs, 3 * 60 * 60 * 1000)
+  })
+
+  it('falls back to BaseSession default (2h) when ctx.hardTimeoutMs is null', () => {
+    const ctx = makeCtx({ hardTimeoutMs: null })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.hardTimeoutMs, 2 * 60 * 60 * 1000)
+  })
+
+  it('falls back to the default when ctx.hardTimeoutMs is non-positive or non-finite', () => {
+    for (const bad of [0, -1, NaN, Infinity]) {
+      const ctx = makeCtx({ hardTimeoutMs: bad })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws)
+      sendPostAuthInfo(ctx, ws)
+      const authOk = ctx._sends[0]
+      assert.equal(authOk.hardTimeoutMs, 2 * 60 * 60 * 1000, `bad input: ${bad}`)
+    }
+  })
+
+  // #4484: see resultTimeoutMs sibling test for the asymmetry rationale.
+  it('falls back to the default when ctx.hardTimeoutMs exceeds MAX_SANE_DURATION_MS', () => {
+    const ctx = makeCtx({ hardTimeoutMs: MAX_SANE_DURATION_MS + 1 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.hardTimeoutMs, 2 * 60 * 60 * 1000)
+  })
+
+  it('accepts the exact MAX_SANE_DURATION_MS boundary for hardTimeoutMs', () => {
+    const ctx = makeCtx({ hardTimeoutMs: MAX_SANE_DURATION_MS })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.hardTimeoutMs, MAX_SANE_DURATION_MS)
+  })
 })
 
 // #4477: surface the effective stream-stall recovery window in auth_ok so the
@@ -226,6 +303,27 @@ describe('sendPostAuthInfo — streamStallTimeoutMs (#4477)', () => {
       const authOk = ctx._sends[0]
       assert.equal(authOk.streamStallTimeoutMs, 5 * 60 * 1000, `bad input: ${String(bad)}`)
     }
+  })
+
+  // #4484: see resultTimeoutMs sibling test for the asymmetry rationale —
+  // applies the same way to streamStallTimeoutMs (which the protocol schema
+  // also gates with `.max(MAX_SANE_DURATION_MS)`).
+  it('falls back to the default when ctx.streamStallTimeoutMs exceeds MAX_SANE_DURATION_MS', () => {
+    const ctx = makeCtx({ streamStallTimeoutMs: MAX_SANE_DURATION_MS + 1 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.streamStallTimeoutMs, 5 * 60 * 1000)
+  })
+
+  it('accepts the exact MAX_SANE_DURATION_MS boundary for streamStallTimeoutMs', () => {
+    const ctx = makeCtx({ streamStallTimeoutMs: MAX_SANE_DURATION_MS })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.streamStallTimeoutMs, MAX_SANE_DURATION_MS)
   })
 })
 

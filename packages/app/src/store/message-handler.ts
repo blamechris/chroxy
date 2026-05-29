@@ -912,7 +912,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // by definition the silence has ended, so the chip should disappear
   // without waiting for the user to dismiss it manually. Mirrors the
   // equivalent clear in packages/dashboard/src/store/message-handler.ts.
-  if (isActivityEvent(msg.type)) {
+  //
+  // #4492 — gate on `!_ctx.receivingHistoryReplay` (mobile's per-connection
+  // equivalent of the dashboard's `_receivingHistoryReplay` module flag —
+  // see #4466 / PR #4490). switch_session and reconnect both replay past
+  // events through this handler via history_replay_start → events →
+  // history_replay_end, and replayed tool_start / message / result is NOT
+  // fresh activity. Without this gate, every reconnect or session switch:
+  //   1) bumps lastClientActivityAt to Date.now(), so "Working… last
+  //      activity Ns ago" resets to 1s no matter how idle the session was;
+  //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
+  //      update?" chip disappears without the user ever seeing it again.
+  // Live activity events arriving AFTER history_replay_end clears the flag
+  // still bump correctly — verified by the regression-guard test in
+  // message-handler.test.ts.
+  if (isActivityEvent(msg.type) && !_ctx.receivingHistoryReplay) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
     if (targetId && get().sessionStates[targetId]) {
       updateSession(targetId, (ss) => {
