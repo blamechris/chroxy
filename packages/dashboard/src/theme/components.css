@@ -153,6 +153,27 @@
   border-color: var(--accent-blue);
 }
 
+/* #4464: read-only model badge for TUI sessions (claude TUI declares
+   modelSwitch: false). Mirrors the model <select>'s size + chrome so the
+   pill sits cleanly in the same slot; the muted text/border + cursor:default
+   communicates "not interactive" — no click handlers, no focus ring. */
+.chat-settings-readonly-badge {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: var(--text-base);
+  cursor: default;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 180px;
+  max-width: 240px;
+  display: inline-block;
+}
+
 /* (#3185 prompt-evaluator-toggle CSS removed — toggle moved from the
    header dropdown into SettingsPanel which uses .settings-field-checkbox
    for inline-checkbox layout.) */
@@ -4139,6 +4160,15 @@
   .header-center select[data-kind="model"] { min-width: 120px; max-width: 160px; }
   .header-center select[data-kind="permission"] { min-width: 80px; max-width: 110px; }
   .header-center select[data-kind="thinking"] { min-width: 60px; max-width: 80px; }
+  /* #4464: match the model <select>'s narrow-viewport floors. Without
+     this rule the read-only badge keeps the 180–240px desktop floor and
+     overflows the header center column on phone widths. */
+  .header-center .chat-settings-readonly-badge {
+    min-width: 120px;
+    max-width: 160px;
+    font-size: var(--text-sm);
+    padding: 3px 6px;
+  }
   .header-center { gap: 4px; }
   .header-right { gap: 4px; }
   .status-bar { gap: 6px; padding: 4px 6px; }

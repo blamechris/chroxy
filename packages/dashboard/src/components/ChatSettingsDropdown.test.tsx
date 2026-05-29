@@ -207,6 +207,79 @@ describe('ChatSettingsDropdown', () => {
     })
   })
 
+  // #4464 — TUI provider declares `modelSwitch: false` because the claude
+  // TUI binary doesn't expose mid-session model switching. Today the
+  // dashboard hides the picker entirely by passing availableModels=[], so
+  // users running a long TUI session have no UI surface telling them which
+  // model is active. The fix is a non-interactive read-only badge that
+  // shows in the same slot when a read-only model label is passed AND the
+  // picker is hidden (availableModels is empty).
+  describe('read-only model badge (#4464)', () => {
+    it('renders a non-interactive badge when availableModels is empty and readOnlyModel is set', () => {
+      renderDropdown({ availableModels: [], readOnlyModel: 'opus' })
+      // No <select> for model — the picker remains hidden.
+      expect(screen.queryByTestId('chat-settings-trigger')).toBeNull()
+      // The badge IS rendered with a stable testid the Maestro flows can
+      // anchor on.
+      const badge = screen.getByTestId('active-model-badge')
+      expect(badge).toBeInTheDocument()
+      // Crucially NOT a <select> — must be a static span/div so screen
+      // readers + click handlers treat it as read-only.
+      expect(badge.tagName.toLowerCase()).not.toBe('select')
+    })
+
+    it('badge text surfaces the active model id', () => {
+      renderDropdown({ availableModels: [], readOnlyModel: 'opus' })
+      const badge = screen.getByTestId('active-model-badge')
+      expect(badge.textContent).toContain('opus')
+    })
+
+    it('badge falls back to "Default" when readOnlyModel is an empty string', () => {
+      // Per #4464 acceptance: "if `activeModel` is empty/unknown, fall back
+      // to 'default' (whatever ~/.claude/settings.json resolves to)
+      // rather than hiding entirely." Hiding leaves the user blind to which
+      // model the TUI is actually running.
+      renderDropdown({ availableModels: [], readOnlyModel: '' })
+      const badge = screen.getByTestId('active-model-badge')
+      expect(badge.textContent).toMatch(/default/i)
+    })
+
+    it('does NOT render the badge when the picker is shown (availableModels non-empty)', () => {
+      // The picker already displays the active model — a badge alongside
+      // would duplicate the surface.
+      renderDropdown({ availableModels: MODELS, activeModel: 'opus', readOnlyModel: 'opus' })
+      expect(screen.queryByTestId('active-model-badge')).toBeNull()
+      expect(screen.getByTestId('chat-settings-trigger')).toBeInTheDocument()
+    })
+
+    it('does NOT render the badge when readOnlyModel is null', () => {
+      // Transient state where availableModels is empty for some non-TUI
+      // reason (e.g. provider just switched, models not yet broadcast)
+      // — we don't want to flash a "Default" badge during that window.
+      renderDropdown({ availableModels: [], readOnlyModel: null })
+      expect(screen.queryByTestId('active-model-badge')).toBeNull()
+    })
+
+    it('badge surfaces buildActiveModelTooltip output via title and aria-label', () => {
+      // The badge MUST reuse the same tooltip helper as the picker so the
+      // hover text stays in sync (#4464 acceptance: "Hover tooltip matches
+      // existing model picker tooltip").
+      renderDropdown({
+        availableModels: [],
+        activeModel: 'opus',
+        readOnlyModel: 'opus',
+      })
+      const badge = screen.getByTestId('active-model-badge')
+      // When availableModels is empty (the TUI case), the helper still
+      // returns a meaningful "Active model: <id>" line — we don't have
+      // contextWindow metadata, but the headline survives.
+      expect(badge.getAttribute('title')).toMatch(/active model/i)
+      expect(badge.getAttribute('title')).toContain('opus')
+      // Screen reader parity with the picker.
+      expect(badge.getAttribute('aria-label')).toBe(badge.getAttribute('title'))
+    })
+  })
+
   // #4019 / #4211 Copilot review: the description from
   // availablePermissionModes flows onto the permission <select>'s title
   // attribute so the user gets the mid-session trade-off hint on hover.

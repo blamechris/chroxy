@@ -335,10 +335,15 @@ export function App() {
       availableModelsProvider === activeProvider
     return {
       showModelPicker: caps?.modelSwitch !== false && modelsMatchProvider,
+      // #4464: render a non-interactive badge in the picker's slot when the
+      // active provider permanently lacks mid-session model switching (TUI).
+      // null on transient "models not matching provider" (provider just
+      // switched) so we don't flash a stale-label badge during reconnect.
+      readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
       showThinkingLevel: !!caps?.thinkingLevel,
     }
-  }, [sessions, activeSessionId, availableProviders, availableModelsProvider])
+  }, [sessions, activeSessionId, availableProviders, availableModelsProvider, activeModel])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
@@ -1755,6 +1760,7 @@ export function App() {
             activeModel={activeModel}
             defaultModelId={defaultModelId}
             onModelChange={setModel}
+            readOnlyModel={dropdownFlags.readOnlyModel}
             availablePermissionModes={availablePermissionModes}
             permissionMode={permissionMode}
             onPermissionModeChange={setPermissionMode}
