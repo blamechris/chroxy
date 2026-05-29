@@ -341,6 +341,108 @@ describe('CliSession._handleChildClose (interrupt-recovery)', () => {
   })
 })
 
+describe('CliSession._handleHardTimeout (#4470: missing result emit)', () => {
+  it('emits stream_end + result + error so dashboard clears Stop on hard-cap timeout', () => {
+    const session = createReadySession({ hardTimeoutMs: 60_000 })
+    session._isBusy = true
+    session._currentMessageId = 'msg_ht'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_ht'
+
+    const events = []
+    session.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+    session.on('result', (p) => events.push({ name: 'result', payload: p }))
+    session.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+    session._handleHardTimeout()
+
+    assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result', 'error'])
+    assert.equal(events[0].payload.messageId, 'msg_ht')
+    assert.equal(events[1].payload.sessionId, 'sess_ht')
+    assert.equal(events[1].payload.duration, session._hardTimeoutMs, 'duration carries the elapsed cap')
+    assert.equal(events[1].payload.cost, null)
+    assert.match(events[2].payload.message, /timed out/)
+  })
+
+  it('no-ops when not busy (timer fired against an idle session)', () => {
+    const session = createReadySession()
+    session._isBusy = false
+
+    const events = []
+    session.on('stream_end', () => events.push('stream_end'))
+    session.on('result', () => events.push('result'))
+    session.on('error', () => events.push('error'))
+
+    session._handleHardTimeout()
+    assert.deepEqual(events, [])
+  })
+
+  it('fires permission_expired for pending permission ids before clearing state', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_pe'
+    session._currentCtx = { hasStreamStarted: false }
+    session._pendingPermissionIds.add('req-1')
+    session._pendingPermissionIds.add('req-2')
+
+    const expired = []
+    session.on('permission_expired', (p) => expired.push(p.requestId))
+    session.on('error', () => {})
+
+    session._handleHardTimeout()
+
+    assert.deepEqual(expired.sort(), ['req-1', 'req-2'])
+    assert.equal(session._pendingPermissionIds.size, 0)
+  })
+})
+
+describe('CliSession._killAndRespawn (#4471: panic-button drops dashboard recovery)', () => {
+  it('emits stream_end + result BEFORE setting _respawning, so dashboard clears Stop', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_kr'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_kr'
+    session._destroying = true // suppress respawn (no real spawn in unit test)
+
+    const oldChild = session._child
+    const events = []
+    let respawningAtResult = null
+    session.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+    session.on('result', (p) => {
+      events.push({ name: 'result', payload: p })
+      respawningAtResult = session._respawning
+    })
+
+    session._killAndRespawn()
+
+    // Drain the closure-scoped forceKillTimer: emitting 'close' on the
+    // mock child invokes the respawn() callback which clears the timer.
+    oldChild.emit('close', 0)
+
+    assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result'])
+    assert.equal(events[0].payload.messageId, 'msg_kr')
+    assert.equal(events[1].payload.sessionId, 'sess_kr')
+    assert.equal(respawningAtResult, false, 'result emit must precede _respawning=true so subsequent close-handler does not duplicate')
+  })
+
+  it('no-ops emit when not busy (setModel called from idle)', () => {
+    const session = createReadySession()
+    session._isBusy = false
+    session._destroying = true // suppress respawn
+
+    const oldChild = session._child
+    const events = []
+    session.on('stream_end', () => events.push('stream_end'))
+    session.on('result', () => events.push('result'))
+
+    session._killAndRespawn()
+    oldChild.emit('close', 0)
+
+    assert.deepEqual(events, [])
+  })
+})
+
 describe('CliSession.destroy', () => {
   it('sets destroying flag and nulls child', () => {
     const session = createReadySession()

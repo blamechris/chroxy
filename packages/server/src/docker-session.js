@@ -264,25 +264,7 @@ export class DockerSession extends CliSession {
       this._scheduleRespawn()
     })
 
-    child.on('close', (code) => {
-      this._cleanupReadlines()
-      this._processReady = false
-      this._child = null
-
-      if (this._destroying) return
-      if (this._respawning) return
-
-      if (this._isBusy && this._currentMessageId) {
-        if (this._currentCtx?.hasStreamStarted) {
-          this.emit('stream_end', { messageId: this._currentMessageId })
-        }
-        this._clearMessageState()
-      }
-
-      log.info(`Container exec exited (code ${code}), scheduling respawn`)
-      this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
-      this._scheduleRespawn()
-    })
+    child.on('close', (code) => this._handleChildClose(code))
 
     this._processReady = true
     log.info('Container exec started, ready for messages')
