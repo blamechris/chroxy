@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { MCPClient, MCP_STATES, MCP_PROTOCOL_VERSION, MCP_CLIENT_VERSION } from '../src/byok-mcp-client.js'
+import { MCPClient, MCP_STATES, MCP_PROTOCOL_VERSION, MCP_CLIENT_VERSION, DEFAULT_HANDSHAKE_TIMEOUT_MS } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const STUB = join(__dirname, 'fixtures', 'mcp-stub.mjs')
@@ -46,6 +46,109 @@ describe('MCPClient', () => {
       assert.equal(client.state, MCP_STATES.READY)
       assert.equal(client.tools.length, 1)
       assert.equal(client.tools[0].name, 'echo')
+      await client.destroy()
+    })
+
+    it('exposes DEFAULT_HANDSHAKE_TIMEOUT_MS for downstream tuning (#4454)', () => {
+      assert.equal(typeof DEFAULT_HANDSHAKE_TIMEOUT_MS, 'number')
+      assert.ok(DEFAULT_HANDSHAKE_TIMEOUT_MS > 0, 'default must be a positive ms count')
+    })
+
+    it('per-instance opts.handshakeTimeoutMs overrides the default (#4454)', async () => {
+      // The stub never replies to tools/list. A 200ms override on the
+      // client should expire well before the 5s default, surfacing the
+      // restart loop quickly. End-to-end success: client reaches DEAD via
+      // the timeout → kill → restart → repeat path.
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }),
+        { log: silentLog(), handshakeTimeoutMs: 200 },
+      )
+      const t0 = Date.now()
+      await client.start()
+      // start() resolves on DEAD. Three handshakes × 200ms timeout + 3
+      // restart backoffs + spawn overhead → comfortably under 12s for the
+      // test deadline. The point is just that we DID hit DEAD via timeouts,
+      // not via spawn-failure.
+      assert.equal(client.state, MCP_STATES.DEAD)
+      const elapsed = Date.now() - t0
+      assert.ok(elapsed < 12_000, `DEAD took ${elapsed}ms, expected <12s`)
+      await client.destroy()
+    })
+
+    it('per-config handshakeTimeoutMs overrides the default (#4454)', async () => {
+      // Same shape as above but the override lives on `config` (the path
+      // ~/.claude.json → byok-mcp-config will use).
+      const cfg = { ...stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }), handshakeTimeoutMs: 200 }
+      const client = new MCPClient(cfg, { log: silentLog() })
+      const t0 = Date.now()
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      const elapsed = Date.now() - t0
+      assert.ok(elapsed < 12_000, `DEAD took ${elapsed}ms via config override, expected <12s`)
+      await client.destroy()
+    })
+
+    it('opts.handshakeTimeoutMs takes precedence over config.handshakeTimeoutMs (#4454)', async () => {
+      // opts=200, config=60_000 — if precedence is reversed we'd hang for
+      // a minute. A successful 12s-bounded DEAD asserts opts won.
+      const cfg = { ...stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }), handshakeTimeoutMs: 60_000 }
+      const client = new MCPClient(cfg, { log: silentLog(), handshakeTimeoutMs: 200 })
+      const t0 = Date.now()
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      const elapsed = Date.now() - t0
+      assert.ok(elapsed < 12_000, `DEAD took ${elapsed}ms, expected <12s — opts override should have won`)
+      await client.destroy()
+    })
+
+    it('non-finite / non-positive timeouts fall back to the default (#4454)', () => {
+      // Defensive guard: NaN, Infinity, 0, -1, strings — setTimeout coerces
+      // those to 0ms and would make every handshake look broken. Verified
+      // by reading the resolved field rather than running a handshake.
+      for (const bogus of [NaN, Infinity, 0, -1, '5s', null, undefined]) {
+        const client = new MCPClient(stubConfig(), { log: silentLog(), handshakeTimeoutMs: bogus })
+        assert.equal(
+          client._handshakeTimeoutMs,
+          DEFAULT_HANDSHAKE_TIMEOUT_MS,
+          `opts=${String(bogus)} should fall back to DEFAULT_HANDSHAKE_TIMEOUT_MS`,
+        )
+      }
+    })
+
+    it('handshake-timeout path: initialize hang → DEAD with no leaked timers (#4454)', async () => {
+      // Stub accepts the spawn but never replies to initialize. The client
+      // must hit its handshake timeout, kill the child, restart, eventually
+      // declare DEAD. Verifies the negative branch of _handshake() that the
+      // existing tests never exercised. Use a short override so the test
+      // doesn't add ~15s to the suite (3 × default 5s).
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_INITIALIZE_HANG: '1' } }),
+        { log: silentLog(), handshakeTimeoutMs: 200 },
+      )
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      assert.equal(client.tools.length, 0)
+      // The restart timer should have been cleared (DEAD path never schedules
+      // a follow-up). _pending must be empty (every request settled). Verify
+      // no internal handles linger before destroy.
+      assert.equal(client._restartTimer, null, 'restart timer should be cleared on DEAD')
+      assert.equal(client._pending.size, 0, '_pending should be drained when child exits')
+      await client.destroy()
+    })
+
+    it('handshake-timeout path: tools/list hang → DEAD (#4454)', async () => {
+      // Same flow as initialize-hang but the timeout fires on the SECOND
+      // handshake request (tools/list). Asserts the catch-around-handshake
+      // path correctly kills the child after the partially-completed
+      // initialize.
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }),
+        { log: silentLog(), handshakeTimeoutMs: 200 },
+      )
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      assert.equal(client._restartTimer, null)
+      assert.equal(client._pending.size, 0)
       await client.destroy()
     })
 
