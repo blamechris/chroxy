@@ -351,6 +351,14 @@ jobs:
       - name: Build @chroxy/protocol
         run: npm run build
 
+      - name: Check protocol dist is in sync with src
+        working-directory: .
+        run: |
+          git diff --exit-code packages/protocol/dist || {
+            echo "::error::packages/protocol/dist drift detected. Run 'npm run build -w packages/protocol' and commit the changes."
+            exit 1
+          }
+
       - name: Run tests
         run: npm test
 
