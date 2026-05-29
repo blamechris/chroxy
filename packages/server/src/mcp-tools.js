@@ -7,7 +7,7 @@
  * Built-in tools use simple names like "Bash", "Read", "Edit".
  */
 
-const MCP_PREFIX = 'mcp__'
+export const MCP_PREFIX = 'mcp__'
 
 /**
  * Parse an MCP tool name into its server and tool components.

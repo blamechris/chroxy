@@ -13,31 +13,17 @@
 
 import { MCPClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { loadTrustStore, recordTrust, isTrusted } from './byok-mcp-trust.js'
+import { MCP_PREFIX, parseMcpToolName } from './mcp-tools.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
-export const MCP_TOOL_PREFIX = 'mcp__'
+// #4451: re-export under the legacy name from this module so existing
+// callers (byok-session, tests) keep working. Canonical source is
+// mcp-tools.js to prevent silent parser drift.
+export const MCP_TOOL_PREFIX = MCP_PREFIX
+export { parseMcpToolName }
 
 function mcpToolName(serverName, toolName) {
   return `${MCP_TOOL_PREFIX}${serverName}__${toolName}`
-}
-
-/**
- * Parse the `mcp__<server>__<tool>` prefix used by chroxy to route a
- * model-emitted tool name back to (a) the right MCP server name, and (b)
- * the original tool name the server expects in `tools/call`.
- *
- * Returns `{ serverName, toolName }` or `null` if the input is not an
- * MCP-namespaced name. Tool names may contain `__` themselves (rare, but
- * allowed by MCP), so we split on the FIRST `__` after the `mcp__` prefix
- * — not on every `__` — to preserve the original tool name verbatim.
- */
-export function parseMcpToolName(prefixedName) {
-  if (typeof prefixedName !== 'string') return null
-  if (!prefixedName.startsWith(MCP_TOOL_PREFIX)) return null
-  const rest = prefixedName.slice(MCP_TOOL_PREFIX.length)
-  const sep = rest.indexOf('__')
-  if (sep <= 0 || sep >= rest.length - 2) return null
-  return { serverName: rest.slice(0, sep), toolName: rest.slice(sep + 2) }
 }
 
 export class MCPFleet {
