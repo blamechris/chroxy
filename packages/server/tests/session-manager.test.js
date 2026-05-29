@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
+import { assertForwardingPattern } from './helpers/provider-forwarding.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -3207,95 +3208,15 @@ describe('SessionManager cost-threshold soft warning (#4075)', () => {
 // providerOpts (rather than set to null) so each provider's BaseSession-level
 // default applies. The consumer side (byok-session / base-session) has direct
 // coverage for each knob; these tests close the forwarding-side gap (#4487).
+//
+// The `CapturingProvider` + `captureProviderOpts` + `assertForwardingPattern`
+// trio used here was extracted to `helpers/provider-forwarding.js` (#4511) so
+// future per-knob coverage can be added as one-liners.
 describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
-  // Each captured opts snapshot from a test provider constructor is appended
-  // to this array via the shared helper below.
-  let captured
-
-  // Bare-bones provider that records the providerOpts handed to its
-  // constructor. Mirrors the FailingProvider/TestProvider shapes used
-  // elsewhere in this file so registerProvider's validateProviderClass
-  // contract is satisfied.
-  class CapturingProvider extends EventEmitter {
-    constructor(opts) {
-      super()
-      captured.push(opts)
-      this.cwd = opts.cwd
-      this.model = opts.model || null
-      this.permissionMode = opts.permissionMode || 'approve'
-      this.isRunning = false
-      this.resumeSessionId = null
-    }
-    static get capabilities() { return {} }
-    start() {}
-    destroy() {}
-    interrupt() {}
-    sendMessage() {}
-    setModel() {}
-    setPermissionMode() {}
-  }
-
-  // Register the capturing provider once and reuse it across every assertion.
-  // The provider registry is process-global so re-registering under the same
-  // name is a no-op after the first import.
-  let providerRegistered = false
-  async function ensureProvider() {
-    if (providerRegistered) return
-    const { registerProvider } = await import('../src/providers.js')
-    registerProvider('test-timeout-capture', CapturingProvider)
-    providerRegistered = true
-  }
-
-  beforeEach(() => {
-    captured = []
-  })
-
-  /**
-   * Build a SessionManager with `configKey` set to `configValue`, drive
-   * createSession() through the capturing provider, and return the captured
-   * providerOpts so the caller can assert on a single key. Resets the
-   * shared `captured` buffer per call so back-to-back invocations within
-   * one test (set + null) read clean.
-   */
-  async function captureProviderOpts(configKey, configValue) {
-    await ensureProvider()
-    captured.length = 0
-    const mgr = new SessionManager({
-      skipPreflight: true,
-      maxSessions: 5,
-      stateFilePath: tmpStateFile(),
-      [configKey]: configValue,
-    })
-    mgr.createSession({ cwd: '/tmp', provider: 'test-timeout-capture' })
-    assert.equal(captured.length, 1, 'CapturingProvider should be instantiated exactly once per captureProviderOpts call')
-    return captured[0]
-  }
-
-  /**
-   * Shared helper: assert that `configKey` flows through as
-   * `providerOpts[providerOptsKey]` when configured to a positive value, and
-   * is OMITTED (key absent — not set to null/undefined) when configured to
-   * null. The 4 knobs use identical forwarding semantics, so this collapses
-   * the per-knob noise to a single line each.
-   */
-  async function assertForwardingPattern({ configKey, providerOptsKey, setValue }) {
-    const setOpts = await captureProviderOpts(configKey, setValue)
-    assert.equal(
-      setOpts[providerOptsKey],
-      setValue,
-      `${providerOptsKey} should be forwarded verbatim when ${configKey}=${setValue}`,
-    )
-
-    const nullOpts = await captureProviderOpts(configKey, null)
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(nullOpts, providerOptsKey),
-      false,
-      `${providerOptsKey} should be OMITTED from providerOpts when ${configKey} is null (got ${nullOpts[providerOptsKey]})`,
-    )
-  }
-
   it('forwards resultTimeoutMs when set; omits when null (#3749)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'resultTimeoutMs',
       providerOptsKey: 'resultTimeoutMs',
       setValue: 90_000,
@@ -3304,6 +3225,8 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
 
   it('forwards hardTimeoutMs when set; omits when null (#3899)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'hardTimeoutMs',
       providerOptsKey: 'hardTimeoutMs',
       setValue: 3_600_000,
@@ -3312,6 +3235,8 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
 
   it('forwards streamStallTimeoutMs when set; omits when null (#4467)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'streamStallTimeoutMs',
       providerOptsKey: 'streamStallTimeoutMs',
       setValue: 120_000,
@@ -3320,6 +3245,8 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
 
   it('forwards mcpToolCallTimeoutMs when set; omits when null (#4482)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'mcpToolCallTimeoutMs',
       providerOptsKey: 'mcpToolCallTimeoutMs',
       setValue: 45_000,
