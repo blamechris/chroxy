@@ -17,6 +17,9 @@
 
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
 
 const MAX_RESTART_ATTEMPTS = 3
@@ -24,6 +27,35 @@ const RESTART_DELAY_MS = 1000
 const KILL_GRACE_MS = 1000
 const HANDSHAKE_TIMEOUT_MS = 5000
 export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 30_000
+
+// #4452: MCP spec version we request on initialize. Bumping this is a
+// deliberate change — when MCP releases a new spec date and we adopt it,
+// update this constant + verify against the negotiation log-warn output.
+// Servers that don't recognise it should still accept the handshake
+// (per spec) and reply with their own protocolVersion; the negotiation
+// warn surfaces the mismatch without erroring.
+export const MCP_PROTOCOL_VERSION = '2024-11-05'
+
+// #4452: clientInfo.version on initialize. Derived from this package's
+// package.json so MCP-server-side logs/debugging name a real chroxy
+// version instead of the previous '1' placeholder. Synchronous read at
+// module load is fine because the file is tiny and never changes
+// mid-process.
+function readPackageVersion() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const pkgPath = join(here, '..', 'package.json')
+    const raw = readFileSync(pkgPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (typeof parsed?.version === 'string' && parsed.version.length > 0) {
+      return parsed.version
+    }
+  } catch {
+    // Fall through — never block startup on a missing/unreadable package.json.
+  }
+  return '0.0.0'
+}
+export const MCP_CLIENT_VERSION = readPackageVersion()
 
 export const MCP_STATES = Object.freeze({
   IDLE: 'idle',
@@ -129,12 +161,22 @@ export class MCPClient extends EventEmitter {
 
   async _handshake() {
     const initResult = await this._request('initialize', {
-      protocolVersion: '2024-11-05',
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'chroxy-byok', version: '1' },
+      clientInfo: { name: 'chroxy-byok', version: MCP_CLIENT_VERSION },
     }, HANDSHAKE_TIMEOUT_MS)
     if (!initResult || typeof initResult !== 'object') {
       throw new Error('initialize returned non-object result')
+    }
+    // #4452: negotiation log-warn. If the server replies with a different
+    // protocolVersion than we requested, log it once so a future spec
+    // mismatch is debuggable. Per spec the server's value wins — we don't
+    // error, both sides are expected to interoperate at the server's
+    // declared version. Bumping MCP_PROTOCOL_VERSION should silence the
+    // warn for the matching server.
+    const serverVersion = initResult.protocolVersion
+    if (typeof serverVersion === 'string' && serverVersion !== MCP_PROTOCOL_VERSION) {
+      this._log.warn(`MCP server ${this.name}: protocolVersion mismatch — requested=${MCP_PROTOCOL_VERSION} server=${serverVersion} (negotiating to server value)`)
     }
     this._notify('notifications/initialized')
     const toolsResult = await this._request('tools/list', {}, HANDSHAKE_TIMEOUT_MS)
