@@ -45,6 +45,7 @@ import { ToolBubble } from './components/ToolBubble'
 import { ToolGroup } from './components/ToolGroup'
 import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
+import { StreamStallChip } from './components/StreamStallChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -121,6 +122,10 @@ function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
     type: msg.type === 'prompt' ? 'response' : msg.type,
     content: msg.content,
     timestamp: msg.timestamp,
+    // #4476: propagate the structured error code so the chat-view
+    // renderMessage path can switch error bubbles into the
+    // StreamStallChip variant.
+    ...(msg.code ? { code: msg.code } : {}),
   }
 }
 
@@ -1530,9 +1535,30 @@ export function App() {
       return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
     }
 
+    // #4476: distinct chip for stream-stall errors (server PR #4475 emits
+    // `error{code: 'stream_stall'}` after the configured inactivity window).
+    // Generic red bubble reads as "broken"; this affordance signals
+    // "recoverable, just retry" and offers a one-tap resend of the last
+    // user message. Only render the retry button when the stall is the
+    // most recent bubble (chatTailMessageId) — replayed historical stalls
+    // surface the chip text + tooltip for diagnostics, but resending an
+    // ancient user_input from a long-finished turn would be misleading.
+    if (storeMsg.type === 'error' && storeMsg.code === 'stream_stall') {
+      const isTail = msg.id === chatTailMessageId
+      const lastUserInput = isTail
+        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
+        : undefined
+      return (
+        <StreamStallChip
+          errorText={storeMsg.content}
+          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
+        />
+      )
+    }
+
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders

@@ -3276,6 +3276,12 @@ export function handleMessage(
     tool: typeof msg.tool === 'string' ? msg.tool : undefined,
     options: msg.options as ChatMessage['options'],
     timestamp: msg.timestamp,
+    // #4476: preserve the structured error code so renderers can switch
+    // on it (e.g. `stream_stall` → chip + retry, default → generic
+    // bubble). Only forwarded when typed string; non-string `msg.code`
+    // (defensive against malformed payloads) is dropped to keep junk off
+    // the store.
+    ...(typeof msg.code === 'string' ? { code: msg.code } : {}),
   }
 
   // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).
