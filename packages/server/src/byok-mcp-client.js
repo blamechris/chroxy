@@ -22,7 +22,16 @@ import { createLogger } from './logger.js'
 const MAX_RESTART_ATTEMPTS = 3
 const RESTART_DELAY_MS = 1000
 const KILL_GRACE_MS = 1000
-const HANDSHAKE_TIMEOUT_MS = 5000
+// #4454: handshake-request timeout. Some MCP servers (sandboxed containers,
+// servers that download packages on startup) legitimately take >5s to reply
+// to initialize / tools/list. Override per-config via `handshakeTimeoutMs`
+// (preferred — sourced from ~/.claude.json → byok-mcp-config) or per-
+// MCPClient via `opts.handshakeTimeoutMs` (used by tests). The export
+// makes #4078 / future tooling able to read the default without
+// re-deriving it. Both export and the override remain on the same
+// "absolute upper bound for ONE handshake request" semantics — total
+// handshake budget is up to 2× this (initialize + tools/list).
+export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5000
 export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 30_000
 
 export const MCP_STATES = Object.freeze({
@@ -45,6 +54,18 @@ export class MCPClient extends EventEmitter {
     // tuple, which doesn't change between restart attempts). Returns true →
     // proceed; false → state=DEAD permanently, no child is ever spawned.
     this._trustGate = opts.trustGate || null
+    // #4454: per-instance handshake timeout. Precedence (high → low):
+    //   1. opts.handshakeTimeoutMs (constructor; tests / fleet pass-through)
+    //   2. config.handshakeTimeoutMs (per-MCP-server, sourced from ~/.claude.json)
+    //   3. DEFAULT_HANDSHAKE_TIMEOUT_MS module constant
+    // Same defensive guard as resultTimeoutMs in byok-session: non-finite
+    // / non-positive (NaN, Infinity, 0, -1, '5s') falls through to the next
+    // tier because setTimeout coerces those to 0ms and would make every
+    // handshake look broken.
+    this._handshakeTimeoutMs =
+      (Number.isFinite(opts.handshakeTimeoutMs) && opts.handshakeTimeoutMs > 0 && opts.handshakeTimeoutMs) ||
+      (Number.isFinite(config?.handshakeTimeoutMs) && config.handshakeTimeoutMs > 0 && config.handshakeTimeoutMs) ||
+      DEFAULT_HANDSHAKE_TIMEOUT_MS
     this._state = MCP_STATES.IDLE
     this._tools = []
     this._child = null
@@ -132,12 +153,12 @@ export class MCPClient extends EventEmitter {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'chroxy-byok', version: '1' },
-    }, HANDSHAKE_TIMEOUT_MS)
+    }, this._handshakeTimeoutMs)
     if (!initResult || typeof initResult !== 'object') {
       throw new Error('initialize returned non-object result')
     }
     this._notify('notifications/initialized')
-    const toolsResult = await this._request('tools/list', {}, HANDSHAKE_TIMEOUT_MS)
+    const toolsResult = await this._request('tools/list', {}, this._handshakeTimeoutMs)
     const tools = Array.isArray(toolsResult?.tools) ? toolsResult.tools : []
     this._tools = Object.freeze(tools.map((t) => Object.freeze({ ...t })))
     this._restartAttempts = 0

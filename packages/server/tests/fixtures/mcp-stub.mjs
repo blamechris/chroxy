@@ -16,8 +16,17 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   try { msg = JSON.parse(line) } catch { return }
   if (msg.id == null) return
   if (msg.method === 'initialize') {
+    // #4454: optionally never respond to initialize so the client's handshake
+    // timeout branch can be exercised. The stub stays alive (no exit) — the
+    // client must rely on its own timeout, not on EOF.
+    if (process.env.MCP_STUB_INITIALIZE_HANG === '1') return
     reply(msg.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
   } else if (msg.method === 'tools/list') {
+    // #4454: optionally accept initialize but never reply to tools/list.
+    // Exercises the *second* handshake-timeout branch which the existing
+    // MCP_STUB_HANG (whole-process hang) couldn't reach because that knob
+    // also blocks initialize.
+    if (process.env.MCP_STUB_TOOLS_LIST_HANG === '1') return
     reply(msg.id, { tools })
   } else if (msg.method === 'tools/call') {
     if (process.env.MCP_STUB_TOOL_DIE === '1') {
