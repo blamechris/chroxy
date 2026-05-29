@@ -3279,4 +3279,63 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
   })
+
+  // #4482: per-MCP-call timeout knob — operators can stretch the 30s
+  // DEFAULT_TOOL_CALL_TIMEOUT_MS for slow MCP servers (filesystem grep
+  // across large repos, container exec, remote API wrappers) without
+  // patching byok-mcp-client. The session reads opts.mcpToolCallTimeoutMs
+  // (forwarded by session-manager → providerOpts) and passes it as the
+  // third arg to fleet.callTool, which propagates to MCPClient.callTool's
+  // setTimeout. Unset / non-positive falls back to the fleet/client
+  // default — same defensive guard pattern as resultTimeoutMs.
+  describe('MCP tools/call timeout configuration (#4482)', () => {
+    function buildSessionWithMockFleet(opts = {}) {
+      const session = new ClaudeByokSession({ cwd: '/tmp', ...opts })
+      const captured = []
+      session._mcpFleet = {
+        callTool: async (prefixedName, args, timeoutMs) => {
+          captured.push({ prefixedName, args, timeoutMs })
+          return { content: [{ type: 'text', text: 'ok' }] }
+        },
+      }
+      return { session, captured }
+    }
+
+    it('forwards configured mcpToolCallTimeoutMs to fleet.callTool', async () => {
+      const { session, captured } = buildSessionWithMockFleet({ mcpToolCallTimeoutMs: 90_000 })
+      await session._dispatchMcpTool('mcp__stub__echo', { x: 1 })
+      assert.equal(captured.length, 1)
+      assert.equal(captured[0].timeoutMs, 90_000,
+        '_dispatchMcpTool must propagate the configured timeout so MCPClient.callTool can arm setTimeout against it')
+    })
+
+    it('passes undefined (fleet default) when mcpToolCallTimeoutMs is omitted', async () => {
+      // Default behaviour: callers that never set the knob get the
+      // existing 30s DEFAULT_TOOL_CALL_TIMEOUT_MS via the fleet/client
+      // chain — passing `undefined` lets the destructured default in
+      // MCPFleet.callTool fire (rather than forcing 30s here too, which
+      // would duplicate the constant).
+      const { session, captured } = buildSessionWithMockFleet()
+      await session._dispatchMcpTool('mcp__stub__echo', {})
+      assert.equal(captured.length, 1)
+      assert.equal(captured[0].timeoutMs, undefined,
+        'omitted opt must leave fleet/client to apply DEFAULT_TOOL_CALL_TIMEOUT_MS — duplicating the constant here would silently desync if MCPClient later retunes its default')
+    })
+
+    it('falls back to undefined when mcpToolCallTimeoutMs is non-positive or non-finite', async () => {
+      // Same defensive guard as resultTimeoutMs — a config typo
+      // (CHROXY_MCP_TOOL_CALL_TIMEOUT_MS=oops → NaN, or -1, or 0) must
+      // NOT silently pass through to setTimeout, where:
+      //   setTimeout(fn, NaN)      → fires immediately (0ms coercion)
+      //   setTimeout(fn, -1)       → fires immediately (clamped to 0)
+      //   setTimeout(fn, Infinity) → fires immediately (also clamped)
+      // Falling back to undefined lets the fleet's default fire — same
+      // safe behaviour as omitting the opt entirely.
+      for (const bad of [0, -1, NaN, Infinity, '60000']) {
+        const { session, captured } = buildSessionWithMockFleet({ mcpToolCallTimeoutMs: bad })
+        await session._dispatchMcpTool('mcp__stub__echo', {})
+        assert.equal(captured[0].timeoutMs, undefined, `bad input ${String(bad)} must fall back`)
+      }
+    })
+  })
 })

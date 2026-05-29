@@ -161,6 +161,13 @@ const CONFIG_SCHEMA = {
   // and the dashboard can offer a retry. Default 300000 (5 min). Set to
   // 0 to disable (operators with legitimately long event gaps).
   streamStallTimeoutMs: 'number',
+  // #4482: per-call MCP tools/call timeout (ms). Forwarded to
+  // byok-mcp-client.callTool's setTimeout via byok-session →
+  // MCPFleet.callTool → MCPClient.callTool. Default 30000 (30s) at the
+  // client layer matches DEFAULT_TOOL_CALL_TIMEOUT_MS. Range 1s-10min —
+  // below 1s every realistic MCP server times out, above 10min the
+  // model conversation is already lost.
+  mcpToolCallTimeoutMs: 'number',
 }
 
 /**
@@ -273,6 +280,19 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (minimum 5000 / 5s; set 0 to disable)`)
     } else if (config.streamStallTimeoutMs > 24 * 60 * 60 * 1000) {
       warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (maximum 86400000 / 24h)`)
+    }
+  }
+
+  // #4482: per-MCP-call timeout. 1s-10min. Unlike streamStallTimeoutMs,
+  // 0 isn't meaningful here — a 0-ms callTool timeout fires immediately
+  // and makes every MCP tool look broken — so any non-finite / non-
+  // positive value gets a warning and the runtime falls back to the
+  // client default (30s) instead of accepting it.
+  if (Number.isFinite(config.mcpToolCallTimeoutMs)) {
+    if (config.mcpToolCallTimeoutMs < 1_000) {
+      warnings.push(`Invalid value for 'mcpToolCallTimeoutMs': ${config.mcpToolCallTimeoutMs} (minimum 1000 / 1s)`)
+    } else if (config.mcpToolCallTimeoutMs > 10 * 60 * 1000) {
+      warnings.push(`Invalid value for 'mcpToolCallTimeoutMs': ${config.mcpToolCallTimeoutMs} (maximum 600000 / 10min)`)
     }
   }
 
@@ -414,6 +434,7 @@ function envKeyForConfig(key) {
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
     hardTimeoutMs: 'CHROXY_HARD_TIMEOUT_MS',
     streamStallTimeoutMs: 'CHROXY_STREAM_STALL_TIMEOUT_MS',
+    mcpToolCallTimeoutMs: 'CHROXY_MCP_TOOL_CALL_TIMEOUT_MS',
     // #4384 — canonical env var for the #4246 rename. Without this entry
     // the fallback was `key.toUpperCase()` (DANGEROUSLYSKIPPERMISSIONS,
     // no underscores) which is not what we document or what operators
