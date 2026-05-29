@@ -457,15 +457,18 @@ export class CliSession extends BaseSession {
   }
 
   /**
-   * Arm the SOFT-warning + HARD-cap timers in parallel. No-op when paused
-   * because of a pending permission prompt (#2831). Windows are
-   * configurable per server via config.resultTimeoutMs / hardTimeoutMs
-   * (#3749 / #3899).
+   * Arm the SOFT-warning + HARD-cap + STREAM-STALL timers in parallel.
+   * No-op when paused because of a pending permission prompt (#2831).
+   * Windows are configurable per server via config.resultTimeoutMs /
+   * hardTimeoutMs / streamStallTimeoutMs (#3749 / #3899 / #4467).
    *
-   * Both timers are cleared at the top of every call, so any activity-
-   * triggered reset (`_handleStdoutLine`) restarts the silence window
-   * from zero — including the hard cap. That's by design: the hard cap
-   * bounds *silent* stretches, not the wall-clock session duration.
+   * Stall timer is only armed when `_streamStallTimeoutMs > 0` —
+   * operators can disable the active-recovery path via config 0.
+   *
+   * All timers are cleared at the top of every call, so any activity-
+   * triggered reset (`_handleStdoutLine`) restarts the silence windows
+   * from zero. That's by design: every cap bounds *silent* stretches,
+   * not the wall-clock session duration.
    */
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)

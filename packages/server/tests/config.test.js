@@ -161,6 +161,36 @@ describe('validateConfig', () => {
       assert.ok(result.warnings.some(w => w.includes('resultTimeoutMs') && w.includes('number')))
     })
   })
+
+  describe('streamStallTimeoutMs (#4467)', () => {
+    it('accepts a value within the allowed range', () => {
+      const result = validateConfig({ streamStallTimeoutMs: 300_000 })
+      assert.equal(result.valid, true)
+    })
+
+    it('accepts 0 as an explicit disable', () => {
+      const result = validateConfig({ streamStallTimeoutMs: 0 })
+      assert.equal(result.valid, true)
+    })
+
+    it('rejects values below the 5s minimum', () => {
+      const result = validateConfig({ streamStallTimeoutMs: 1000 })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('streamStallTimeoutMs') && w.includes('minimum')))
+    })
+
+    it('rejects values above the 24h maximum', () => {
+      const result = validateConfig({ streamStallTimeoutMs: 25 * 60 * 60 * 1000 })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('streamStallTimeoutMs') && w.includes('maximum')))
+    })
+
+    it('warns when value is not a number', () => {
+      const result = validateConfig({ streamStallTimeoutMs: '5m' })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('streamStallTimeoutMs') && w.includes('number')))
+    })
+  })
 })
 
 describe('mergeConfig', () => {
@@ -370,6 +400,20 @@ describe('mergeConfig', () => {
     process.env.CHROXY_RESULT_TIMEOUT_MS = '600000'
     const merged = mergeConfig({})
     assert.equal(merged.resultTimeoutMs, 600_000)
+  })
+
+  it('reads streamStallTimeoutMs from CHROXY_STREAM_STALL_TIMEOUT_MS env var as number (#4467)', () => {
+    process.env.CHROXY_STREAM_STALL_TIMEOUT_MS = '300000'
+    const merged = mergeConfig({})
+    assert.equal(merged.streamStallTimeoutMs, 300_000)
+    delete process.env.CHROXY_STREAM_STALL_TIMEOUT_MS
+  })
+
+  it('reads streamStallTimeoutMs=0 from env var as explicit disable (#4467)', () => {
+    process.env.CHROXY_STREAM_STALL_TIMEOUT_MS = '0'
+    const merged = mergeConfig({})
+    assert.equal(merged.streamStallTimeoutMs, 0)
+    delete process.env.CHROXY_STREAM_STALL_TIMEOUT_MS
   })
 })
 
