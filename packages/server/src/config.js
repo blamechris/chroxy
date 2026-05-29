@@ -155,6 +155,12 @@ const CONFIG_SCHEMA = {
   // they want tighter runaway-session protection, but it should always
   // be >= resultTimeoutMs (the soft warning fires first).
   hardTimeoutMs: 'number',
+  // #4467: stream-stall recovery (ms). Resets on any stream activity from
+  // the child; when silence reaches this window while busy, the session
+  // emits a recoverable error (code: stream_stall), clears busy state,
+  // and the dashboard can offer a retry. Default 300000 (5 min). Set to
+  // 0 to disable (operators with legitimately long event gaps).
+  streamStallTimeoutMs: 'number',
 }
 
 /**
@@ -258,6 +264,15 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'hardTimeoutMs': ${config.hardTimeoutMs} (maximum 86400000 / 24h)`)
     } else if (Number.isFinite(config.resultTimeoutMs) && config.hardTimeoutMs < config.resultTimeoutMs) {
       warnings.push(`'hardTimeoutMs' (${config.hardTimeoutMs}) is less than 'resultTimeoutMs' (${config.resultTimeoutMs}) — the soft warning will never fire before the hard kill`)
+    }
+  }
+
+  // #4467: stream-stall range. 0 is valid (disable). Otherwise 5s-24h.
+  if (Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs !== 0) {
+    if (config.streamStallTimeoutMs < 5_000) {
+      warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (minimum 5000 / 5s; set 0 to disable)`)
+    } else if (config.streamStallTimeoutMs > 24 * 60 * 60 * 1000) {
+      warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (maximum 86400000 / 24h)`)
     }
   }
 
@@ -398,6 +413,7 @@ function envKeyForConfig(key) {
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
     hardTimeoutMs: 'CHROXY_HARD_TIMEOUT_MS',
+    streamStallTimeoutMs: 'CHROXY_STREAM_STALL_TIMEOUT_MS',
     // #4384 — canonical env var for the #4246 rename. Without this entry
     // the fallback was `key.toUpperCase()` (DANGEROUSLYSKIPPERMISSIONS,
     // no underscores) which is not what we document or what operators

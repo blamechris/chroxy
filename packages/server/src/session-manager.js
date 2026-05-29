@@ -211,6 +211,9 @@ export class SessionManager extends EventEmitter {
     // #3899: HARD-cap inactivity timeout (ms). Forwarded to providers via
     // providerOpts. null = use BaseSession's DEFAULT_HARD_TIMEOUT_MS (2h).
     hardTimeoutMs,
+    // #4467: stream-stall recovery timeout (ms). Forwarded via providerOpts.
+    // null = use BaseSession's DEFAULT_STREAM_STALL_TIMEOUT_MS (5min).
+    streamStallTimeoutMs,
 
     // State persistence
     stateFilePath,
@@ -259,6 +262,12 @@ export class SessionManager extends EventEmitter {
     this._hardTimeoutMs =
       Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
         ? hardTimeoutMs
+        : null
+    // #4467: 0 explicitly disables stream-stall recovery; null = use default;
+    // positive finite value sets the recovery window.
+    this._streamStallTimeoutMs =
+      Number.isFinite(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
+        ? streamStallTimeoutMs
         : null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
     // #4075: per-session crossing threshold. Stored as a runtime-mutable
@@ -574,6 +583,7 @@ export class SessionManager extends EventEmitter {
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
     if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs
+    if (this._streamStallTimeoutMs != null) providerOpts.streamStallTimeoutMs = this._streamStallTimeoutMs
     // Skills size budgets — pass through if configured. BaseSession forwards
     // these to loadActiveSkillsLayered. (#3202)
     if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes

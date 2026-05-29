@@ -1,5 +1,5 @@
 import { SessionManager } from './session-manager.js'
-import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
@@ -379,6 +379,13 @@ export async function startCliServer(config) {
       Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
         ? config.hardTimeoutMs
         : null,
+    // #4467: stream-stall recovery (ms). null = BaseSession default (5min).
+    // 0 explicitly disables (operators with workloads that have legitimate
+    // long event gaps can opt out).
+    streamStallTimeoutMs:
+      Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs >= 0
+        ? config.streamStallTimeoutMs
+        : null,
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
     maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
@@ -394,7 +401,14 @@ export async function startCliServer(config) {
     Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
       ? config.hardTimeoutMs
       : DEFAULT_HARD_TIMEOUT_MS
-  log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms)`)
+  const effectiveStreamStallTimeoutMs =
+    Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs >= 0
+      ? config.streamStallTimeoutMs
+      : DEFAULT_STREAM_STALL_TIMEOUT_MS
+  const stallLabel = effectiveStreamStallTimeoutMs === 0
+    ? 'disabled'
+    : `${formatIdleDuration(effectiveStreamStallTimeoutMs)} (${effectiveStreamStallTimeoutMs}ms)`
+  log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms); stream-stall: ${stallLabel}`)
 
   // 2. Try restoring session state from a previous instance
   let defaultSessionId
