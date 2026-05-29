@@ -153,6 +153,20 @@ export class ClaudeByokSession extends BaseSession {
     }
   }
 
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.mcpConfigPath] Override path for MCP config discovery.
+   *   This is the canonical option name and matches the loader's purpose
+   *   (`loadClaudeMcpConfig`). Today the loader reads the whole `~/.claude.json`
+   *   file and parses only the `mcpServers` block, but the override exists
+   *   strictly to point at an alternate MCP config (e.g. a test fixture, an
+   *   env override). See #4449 for the rationale on picking one name.
+   *
+   *   `claudeConfigPath` was briefly accepted as a synonym in #4446 but is
+   *   intentionally not supported — passing it logs a single deprecation warn
+   *   and is otherwise ignored, so downstream session wrappers should forward
+   *   `mcpConfigPath` only.
+   */
   constructor(opts = {}) {
     super({ ...opts, provider: opts.provider || 'claude-byok' })
     // Anthropic SDK client; lazily instantiated in start() so unit tests
@@ -235,7 +249,16 @@ export class ClaudeByokSession extends BaseSession {
     // no child spawn, no tool wiring — those land in #4077/#4078/#4079.
     // Malformed configs log a single warn per server and produce an
     // empty list, so a corrupt user config can't take down session start.
-    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath || opts.claudeConfigPath)
+    //
+    // #4449: `mcpConfigPath` is the canonical override; `claudeConfigPath`
+    // was a synonym added in #4446 and is intentionally not honored. Warn
+    // once if a caller still forwards it so the deprecation is loud.
+    if (opts.claudeConfigPath != null && opts.mcpConfigPath == null) {
+      log.warn(
+        'BYOK MCP config: opts.claudeConfigPath is not supported — pass opts.mcpConfigPath instead (see #4449)',
+      )
+    }
+    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath)
     for (const warning of mcpConfig.warnings) {
       log.warn(`BYOK MCP config: ${warning}`)
     }

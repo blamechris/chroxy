@@ -8,6 +8,7 @@ import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 function preTrustStub() {
   recordTrust(
@@ -254,6 +255,64 @@ describe('ClaudeByokSession', () => {
       assert.deepEqual(session._mcpServerConfigs, [])
       assert.ok(captured.find((e) => e.name === 'ready'), 'malformed MCP config must not block startup')
       await session.destroy()
+    })
+
+    it('#4449: ignores opts.claudeConfigPath and warns once when it is supplied alone', async () => {
+      // The constructor briefly accepted `claudeConfigPath` as a synonym for
+      // `mcpConfigPath`. #4449 picks `mcpConfigPath` as the single canonical
+      // name. Passing `claudeConfigPath` alone must NOT load that file (so
+      // downstream wrappers cannot rely on it) and must emit a deprecation
+      // warn so the dropped path is debuggable.
+      //
+      // The override file is written outside HOME so the HOME-default loader
+      // path (which is still active because `mcpConfigPath` is null) does
+      // not accidentally pick it up.
+      const overrideDir = mkdtempSync(join(tmpdir(), 'chroxy-byok-4449-override-'))
+      try {
+        const configPath = join(overrideDir, 'override.json')
+        writeFileSync(configPath, JSON.stringify({
+          mcpServers: { github: { command: 'node', args: ['server.js'] } },
+        }))
+        const warnings = []
+        const listener = (entry) => {
+          if (entry.level === 'warn') warnings.push(entry.message)
+        }
+        addLogListener(listener)
+        try {
+          const session = new ClaudeByokSession({ cwd: '/tmp', claudeConfigPath: configPath })
+          assert.deepEqual(session.mcpServers, [], 'claudeConfigPath must not feed the loader')
+          const deprecationWarns = warnings.filter((w) => /claudeConfigPath/.test(w))
+          assert.equal(deprecationWarns.length, 1, 'exactly one deprecation warn')
+          assert.match(deprecationWarns[0], /mcpConfigPath/)
+          assert.match(deprecationWarns[0], /#4449/)
+          await session.destroy()
+        } finally {
+          removeLogListener(listener)
+        }
+      } finally {
+        rmSync(overrideDir, { recursive: true, force: true })
+      }
+    })
+
+    it('#4449: does NOT warn when only mcpConfigPath is supplied', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: { github: { command: 'node', args: ['server.js'] } },
+      }))
+      const warnings = []
+      const listener = (entry) => {
+        if (entry.level === 'warn') warnings.push(entry.message)
+      }
+      addLogListener(listener)
+      try {
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        assert.equal(session.mcpServers.length, 1, 'mcpConfigPath still loads')
+        const deprecationWarns = warnings.filter((w) => /claudeConfigPath/.test(w))
+        assert.equal(deprecationWarns.length, 0)
+        await session.destroy()
+      } finally {
+        removeLogListener(listener)
+      }
     })
 
     it('#4077: lazy-spawns an MCPFleet for configured servers and reaches READY before emitting ready', async () => {
