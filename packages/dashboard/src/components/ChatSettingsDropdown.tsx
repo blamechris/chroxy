@@ -42,6 +42,14 @@ export interface ChatSettingsDropdownProps {
   activeModel: string | null
   defaultModelId: string | null
   onModelChange: (id: string) => void
+  // #4464: render a non-interactive pill instead of the model <select>
+  // when the active provider doesn't expose a mid-session model switch
+  // (today: claude TUI — see claude-tui-session.js capability.modelSwitch=false).
+  // Passing a string here causes the badge to render in the picker's slot
+  // showing that id (or "Default" when empty). Null hides any model UI —
+  // same as today's "availableModels=[]" behaviour for the transient
+  // provider-switch case where we don't want a flash of a stale label.
+  readOnlyModel?: string | null
   // #4019: PermissionMode carries an optional `description` field server-side
   // (PERMISSION_MODES exports it for every mode). Use the typed import from
   // store-core so the title-attribute hint stays in lockstep with the wire shape.
@@ -74,6 +82,7 @@ export function ChatSettingsDropdown({
   showThinkingLevel,
   thinkingLevel,
   onThinkingLevelChange,
+  readOnlyModel = null,
 }: ChatSettingsDropdownProps) {
   const handleModelChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value
@@ -117,6 +126,23 @@ export function ChatSettingsDropdown({
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
         </select>
+      )}
+
+      {/* #4464: read-only badge for providers without modelSwitch (claude TUI).
+          Renders ONLY when the picker is hidden (availableModels empty) AND a
+          read-only label was explicitly passed — never on the transient
+          "models not yet broadcast" window where readOnlyModel stays null. */}
+      {availableModels.length === 0 && readOnlyModel !== null && (
+        <span
+          data-testid="active-model-badge"
+          data-kind="model-readonly"
+          className="chat-settings-readonly-badge"
+          title={modelTitle}
+          aria-label={modelTitle}
+          role="status"
+        >
+          {readOnlyModel || 'Default'}
+        </span>
       )}
 
       {/* Permission Mode */}

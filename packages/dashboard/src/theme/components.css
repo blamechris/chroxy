@@ -153,6 +153,27 @@
   border-color: var(--accent-blue);
 }
 
+/* #4464: read-only model badge for TUI sessions (claude TUI declares
+   modelSwitch: false). Mirrors the model <select>'s size + chrome so the
+   pill sits cleanly in the same slot; the muted text/border + cursor:default
+   communicates "not interactive" — no click handlers, no focus ring. */
+.chat-settings-readonly-badge {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: var(--text-base);
+  cursor: default;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 180px;
+  max-width: 240px;
+  display: inline-block;
+}
+
 /* (#3185 prompt-evaluator-toggle CSS removed — toggle moved from the
    header dropdown into SettingsPanel which uses .settings-field-checkbox
    for inline-checkbox layout.) */
