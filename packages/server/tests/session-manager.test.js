@@ -3234,12 +3234,19 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
   })
 
   it('forwards streamStallTimeoutMs when set; omits when null (#4467)', async () => {
+    // `extraSetValues: [0]` covers the #4508 edge: streamStallTimeoutMs is the
+    // only one of the four knobs that gates on `>= 0` (vs `> 0` for the
+    // others) — operators can explicitly disable stream-stall recovery by
+    // passing 0, which must flow through providerOpts verbatim and not be
+    // dropped by a `!= null` regression (see session-manager.js:607). The
+    // other three knobs reject 0 per their `> 0` gate so they don't need it.
     await assertForwardingPattern({
       SessionManager,
       tmpStateFile,
       configKey: 'streamStallTimeoutMs',
       providerOptsKey: 'streamStallTimeoutMs',
       setValue: 120_000,
+      extraSetValues: [0],
     })
   })
 
