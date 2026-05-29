@@ -204,6 +204,28 @@ export class BaseSession extends EventEmitter {
     // sidecar lifecycle problem, out of scope).
     // TUI provider: same parity — the agent's next turn surfaces the
     // BashOutput call and clears the entry naturally.
+    //
+    // #4417: TRANSIENT BY DESIGN — this map is in-memory only and is
+    // NOT serialized to `~/.chroxy/session-state.json`. A server
+    // restart drops every entry. This is the correct behaviour, not an
+    // oversight:
+    //   - The actual OS-level background shells are owned by the
+    //     claude TUI / SDK runtime, not by chroxy. On server restart
+    //     those processes have either died with the parent or have
+    //     been orphaned beyond chroxy's ability to correlate (we never
+    //     held the PID, only the opaque shellId Claude printed).
+    //   - Persisting the list would therefore re-surface a "waiting
+    //     on <command>" indicator that is at best stale and at worst a
+    //     UX lie — chroxy can't deliver a clear signal because the
+    //     shellId is meaningless to the new claude process.
+    //   - The agent re-discovers reality on its next turn via its own
+    //     context (a fresh `BashOutput` poll, or a `Bash` re-dispatch).
+    //     The user-facing consequence of dropping the map is that the
+    //     activity chip briefly shows idle until the next agent turn —
+    //     a minor, recoverable UX nit, not data loss.
+    // If a future change ever needs to persist this state, it MUST
+    // also reconcile with the (unknown) post-restart claude side —
+    // blindly restoring a stale Map will lock the indicator on forever.
     this._pendingBackgroundShells = new Map()
     // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
     // `run_in_background: true`, keyed by toolUseId. Used to recover the
