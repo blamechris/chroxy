@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/server",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "description": "Chroxy server daemon and CLI",
   "type": "module",
   "main": "src/cli.js",
