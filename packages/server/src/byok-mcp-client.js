@@ -2,12 +2,14 @@
  * MCP child-process lifecycle for the claude-byok provider (#4077).
  *
  * One MCPClient owns one MCP server child. Handles spawn, JSON-RPC handshake
- * (initialize → initialized → tools/list), crash detection with a constant 1s
- * backoff up to MAX_RESTART_ATTEMPTS, and SIGTERM/SIGKILL grace on destroy.
+ * (initialize → initialized → tools/list), crash detection with exponential
+ * backoff between restart attempts (1s/2s/4s, #4453), and SIGTERM/SIGKILL
+ * grace on destroy.
  *
  * Per #4077 scope:
  *   - Lazy spawn: caller decides when to call start().
- *   - Crash detection on child exit / spawn error → schedule restart at 1s.
+ *   - Crash detection on child exit / spawn error → schedule restart per the
+ *     RESTART_BACKOFF_MS schedule (1s/2s/4s).
  *   - After MAX_RESTART_ATTEMPTS failures, state=dead and tools=[].
  *   - Session destroy sends SIGTERM, escalates to SIGKILL at KILL_GRACE_MS.
  *
@@ -17,10 +19,24 @@
 
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
 
-const MAX_RESTART_ATTEMPTS = 3
-const RESTART_DELAY_MS = 1000
+// #4453: exponential restart backoff. The first restart still fires at ~1s
+// after the death (no regression on the existing acceptance test); the
+// second waits ~2s after that failure; the third waits ~4s. Total budget
+// before DEAD is ~7s, up from the previous fixed 3s. This better matches
+// "wedged dependency that needs a moment to recover" failure modes (e.g.
+// a transient port conflict that resolves in ~5s would have been blown
+// past by the previous 1/1/1 schedule).
+//
+// The array length is the authoritative max-attempt count — derive
+// MAX_RESTART_ATTEMPTS from it so an operator who edits the schedule
+// can't accidentally desync the two.
+const RESTART_BACKOFF_MS = [1000, 2000, 4000]
+const MAX_RESTART_ATTEMPTS = RESTART_BACKOFF_MS.length
 const KILL_GRACE_MS = 1000
 // #4454: handshake-request timeout. Some MCP servers (sandboxed containers,
 // servers that download packages on startup) legitimately take >5s to reply
@@ -33,6 +49,35 @@ const KILL_GRACE_MS = 1000
 // handshake budget is up to 2× this (initialize + tools/list).
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5000
 export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 30_000
+
+// #4452: MCP spec version we request on initialize. Bumping this is a
+// deliberate change — when MCP releases a new spec date and we adopt it,
+// update this constant + verify against the negotiation log-warn output.
+// Servers that don't recognise it should still accept the handshake
+// (per spec) and reply with their own protocolVersion; the negotiation
+// warn surfaces the mismatch without erroring.
+export const MCP_PROTOCOL_VERSION = '2024-11-05'
+
+// #4452: clientInfo.version on initialize. Derived from this package's
+// package.json so MCP-server-side logs/debugging name a real chroxy
+// version instead of the previous '1' placeholder. Synchronous read at
+// module load is fine because the file is tiny and never changes
+// mid-process.
+function readPackageVersion() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const pkgPath = join(here, '..', 'package.json')
+    const raw = readFileSync(pkgPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (typeof parsed?.version === 'string' && parsed.version.length > 0) {
+      return parsed.version
+    }
+  } catch {
+    // Fall through — never block startup on a missing/unreadable package.json.
+  }
+  return '0.0.0'
+}
+export const MCP_CLIENT_VERSION = readPackageVersion()
 
 export const MCP_STATES = Object.freeze({
   IDLE: 'idle',
@@ -150,12 +195,22 @@ export class MCPClient extends EventEmitter {
 
   async _handshake() {
     const initResult = await this._request('initialize', {
-      protocolVersion: '2024-11-05',
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'chroxy-byok', version: '1' },
+      clientInfo: { name: 'chroxy-byok', version: MCP_CLIENT_VERSION },
     }, this._handshakeTimeoutMs)
     if (!initResult || typeof initResult !== 'object') {
       throw new Error('initialize returned non-object result')
+    }
+    // #4452: negotiation log-warn. If the server replies with a different
+    // protocolVersion than we requested, log it once so a future spec
+    // mismatch is debuggable. Per spec the server's value wins — we don't
+    // error, both sides are expected to interoperate at the server's
+    // declared version. Bumping MCP_PROTOCOL_VERSION should silence the
+    // warn for the matching server.
+    const serverVersion = initResult.protocolVersion
+    if (typeof serverVersion === 'string' && serverVersion !== MCP_PROTOCOL_VERSION) {
+      this._log.warn(`MCP server ${this.name}: protocolVersion mismatch — requested=${MCP_PROTOCOL_VERSION} server=${serverVersion} (negotiating to server value)`)
     }
     this._notify('notifications/initialized')
     const toolsResult = await this._request('tools/list', {}, this._handshakeTimeoutMs)
@@ -236,8 +291,16 @@ export class MCPClient extends EventEmitter {
 
     this._tools = []
     this._restartAttempts += 1
-    if (this._restartAttempts >= MAX_RESTART_ATTEMPTS) {
-      this._log.warn(`MCP server ${this.name}: dead after ${this._restartAttempts} failed attempts (last exit code=${code} signal=${signal})`)
+    // #4453: gate on `>` (not `>=`) so the FULL RESTART_BACKOFF_MS schedule
+    // is consumed before declaring DEAD. Pre-#4453 the gate fired on `>=`
+    // and MAX_RESTART_ATTEMPTS=3 — meaning only 2 restart delays were
+    // actually applied (the 3rd post-spawn-death went straight to DEAD with
+    // the 3rd entry of the schedule unused). Under `>`, MAX=3 yields 3
+    // applied delays (1s/2s/4s), and DEAD fires after the 4th post-death
+    // count crosses the bound. Issue framing: "max 3 attempts before
+    // declaring dead" means 3 restarts actually happen, then DEAD.
+    if (this._restartAttempts > MAX_RESTART_ATTEMPTS) {
+      this._log.warn(`MCP server ${this.name}: dead after ${this._restartAttempts - 1} failed attempts (last exit code=${code} signal=${signal})`)
       this._setState(MCP_STATES.DEAD)
       this.emit('dead')
       return
@@ -245,11 +308,17 @@ export class MCPClient extends EventEmitter {
 
     this._setState(MCP_STATES.RESTARTING)
     this.emit('restart', { attempt: this._restartAttempts, code, signal })
+    // #4453: pick the delay for this attempt from the backoff schedule.
+    // _restartAttempts was bumped above; subtract 1 to index. Defensive
+    // fallback to the last entry guards against a future refactor that
+    // diverges MAX_RESTART_ATTEMPTS from the array length.
+    const delayIdx = Math.min(this._restartAttempts - 1, RESTART_BACKOFF_MS.length - 1)
+    const delay = RESTART_BACKOFF_MS[delayIdx]
     this._restartTimer = setTimeout(() => {
       this._restartTimer = null
       if (this._destroyed) return
       this._spawnAndHandshake()
-    }, RESTART_DELAY_MS)
+    }, delay)
   }
 
   _killChild() {

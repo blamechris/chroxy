@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  CLAUDE_CONFIG_MAX_BYTES,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
   toMcpServerMetadata,
@@ -30,7 +31,10 @@ describe('byok-mcp-config', () => {
         },
       },
     })
-    assert.deepEqual(parsed.warnings, [])
+    assert.equal(parsed.warnings.length, 1)
+    assert.match(parsed.warnings[0], /filesystem/)
+    assert.match(parsed.warnings[0], /env\.COUNT/)
+    assert.match(parsed.warnings[0], /number/)
     assert.deepEqual(parsed.servers, [
       {
         name: 'filesystem',
@@ -39,6 +43,27 @@ describe('byok-mcp-config', () => {
         env: { API_TOKEN: 'secret' },
       },
     ])
+  })
+
+  it('warns on non-string args entries naming the index and type', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: {
+        github: {
+          command: 'node',
+          args: ['server.js', 42, null, '--flag'],
+        },
+      },
+    })
+    assert.deepEqual(parsed.servers, [
+      { name: 'github', command: 'node', args: ['server.js', '--flag'], env: {} },
+    ])
+    assert.equal(parsed.warnings.length, 2)
+    assert.match(parsed.warnings[0], /github/)
+    assert.match(parsed.warnings[0], /args\[1\]/)
+    assert.match(parsed.warnings[0], /number/)
+    assert.match(parsed.warnings[1], /github/)
+    assert.match(parsed.warnings[1], /args\[2\]/)
+    assert.match(parsed.warnings[1], /object/)
   })
 
   it('parses multiple servers and skips malformed entries with warnings', () => {
@@ -70,6 +95,20 @@ describe('byok-mcp-config', () => {
     assert.deepEqual(loaded.servers, [])
     assert.equal(loaded.warnings.length, 1)
     assert.match(loaded.warnings[0], /Failed to parse MCP config/)
+  })
+
+  it('bails out with a warning when the config file exceeds the size cap', () => {
+    const path = join(dir, '.claude.json')
+    // Write a JSON-shaped payload just over the size cap; content shape does not
+    // matter because the loader must bail before parsing.
+    const padding = ' '.repeat(CLAUDE_CONFIG_MAX_BYTES + 1)
+    writeFileSync(path, `{"mcpServers":{}}${padding}`)
+    const loaded = loadClaudeMcpConfig(path)
+    assert.equal(loaded.missing, false)
+    assert.deepEqual(loaded.servers, [])
+    assert.equal(loaded.warnings.length, 1)
+    assert.match(loaded.warnings[0], /exceeds size cap/)
+    assert.match(loaded.warnings[0], new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   })
 
   it('metadata redacts env values but keeps env keys', () => {

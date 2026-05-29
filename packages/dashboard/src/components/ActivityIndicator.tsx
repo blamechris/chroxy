@@ -21,7 +21,7 @@
  * payload (#3760), falling back to BaseSession.DEFAULT_RESULT_TIMEOUT_MS
  * (30 min) when connected to an older server that doesn't broadcast it.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
@@ -235,6 +235,12 @@ export function ActivityIndicator() {
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const disclosureRef = useRef<HTMLButtonElement | null>(null)
 
+  // #4444 — useId() keeps the disclosure↔popover aria-controls relationship
+  // unique even if <ActivityIndicator /> is ever rendered twice (e.g. a
+  // future split-pane sidebar), and stays stable across SSR/hydration.
+  // Matches the pattern SidebarTokenView and ToolBubble already use.
+  const popoverId = useId()
+
   // #4427 — outside-click + Escape dismiss for the overflow popover. Without
   // these the popover only closes by re-toggling the same disclosure button or
   // waiting for every shell to drain, which traps focus and surprises users
@@ -249,10 +255,23 @@ export function ActivityIndicator() {
       if (!target) return
       if (popoverRef.current && popoverRef.current.contains(target)) return
       if (disclosureRef.current && disclosureRef.current.contains(target)) return
+      // #4445 — outside-click dismiss intentionally does NOT restore focus
+      // to the disclosure button: the user explicitly clicked elsewhere,
+      // so stealing focus back would fight their pointer intent. Escape
+      // dismiss (below) is the keyboard-only path that needs focus
+      // restoration per WAI-ARIA APG disclosure guidance.
       setPopoverOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setPopoverOpen(false)
+      if (event.key === 'Escape') {
+        setPopoverOpen(false)
+        // #4445 — WAI-ARIA APG: a disclosure-triggered dialog dismissed
+        // via Escape should return focus to the invoker so keyboard users
+        // don't get parked on document.body and lose their place in the
+        // tab order. The popover has role="dialog" which reinforces the
+        // expectation.
+        disclosureRef.current?.focus()
+      }
     }
     document.addEventListener('mousedown', onMouseDown)
     document.addEventListener('keydown', onKeyDown)
@@ -307,7 +326,6 @@ export function ActivityIndicator() {
       // The previous "Show N additional…" wording understated the dialog by
       // one and left assistive tech expecting fewer items than rendered.
       const totalShellCount = overflowCount + 1
-      const popoverId = 'activity-indicator-popover'
       return (
         <div
           className="activity-indicator activity-indicator--green"
