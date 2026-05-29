@@ -33,6 +33,21 @@ export interface ShortcutDef {
   description: string
   category: ShortcutCategory
   scope: ShortcutScope
+  /**
+   * Optional runtime predicate: shortcut only fires when this returns
+   * true. Used for environment gates that the registry can't know
+   * about (e.g. Tauri-only shortcuts like Cmd+W close-tab). Evaluated
+   * inside `matchEvent` — a false predicate means the shortcut is
+   * skipped even if the combo matches.
+   */
+  enabled?: () => boolean
+  /**
+   * When true, the shortcut does NOT fire while focus is in a text
+   * input (INPUT / TEXTAREA / contenteditable / SELECT). Mirrors the
+   * inline gates the App.tsx ladder used to do per-branch. Evaluated
+   * inside `matchEvent` when the caller passes a target element.
+   */
+  disabledInTextInput?: boolean
 }
 
 export interface ShortcutListEntry extends ShortcutDef {
@@ -140,6 +155,21 @@ interface KeyEventLike {
   ctrlKey: boolean
   shiftKey: boolean
   altKey: boolean
+  /**
+   * Optional event target — when provided, `matchEvent` respects each
+   * shortcut's `disabledInTextInput` flag. KeyboardEvent already
+   * carries `target` so the standard call site needs no extra plumbing.
+   */
+  target?: EventTarget | null
+}
+
+function isTextInputTarget(target: EventTarget | null | undefined): boolean {
+  if (!target || typeof (target as HTMLElement).tagName !== 'string') return false
+  const el = target as HTMLElement
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (el.isContentEditable) return true
+  return false
 }
 
 export interface ShortcutRegistry {
@@ -297,6 +327,7 @@ export function createShortcutRegistry(defs: readonly ShortcutDef[]): ShortcutRe
   function matchEvent(event: KeyEventLike, scope: ShortcutScope): string | null {
     const eventKey = (event.key || '').toLowerCase()
     const eventMeta = event.metaKey || event.ctrlKey
+    const inTextInput = isTextInputTarget(event.target)
     for (const def of definitions) {
       if (def.scope !== scope) continue
       const binding = getBinding(def.id)
@@ -307,6 +338,11 @@ export function createShortcutRegistry(defs: readonly ShortcutDef[]): ShortcutRe
         parsed.shift === event.shiftKey &&
         parsed.alt === event.altKey
       ) {
+        // Environment / context gates — applied after the combo match
+        // so `enabled` and `disabledInTextInput` short-circuit cleanly
+        // without affecting conflict detection.
+        if (def.disabledInTextInput && inTextInput) continue
+        if (def.enabled && !def.enabled()) continue
         return def.id
       }
     }
