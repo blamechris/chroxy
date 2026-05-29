@@ -280,6 +280,13 @@ export class ClaudeByokSession extends BaseSession {
       isOperatorTimeoutInRange(opts.mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
         ? opts.mcpToolCallTimeoutMs
         : null
+    // #4456: wall-clock cap on fleet.start(). null = use the fleet's
+    // DEFAULT_FLEET_START_CAP_MS (1500ms). Same defensive guard pattern
+    // as _mcpToolCallTimeoutMs.
+    this._mcpStartCapMs =
+      Number.isFinite(opts.mcpStartCapMs) && opts.mcpStartCapMs > 0
+        ? opts.mcpStartCapMs
+        : null
   }
 
   async start() {
@@ -308,7 +315,13 @@ export class ClaudeByokSession extends BaseSession {
       // emit a trust prompt for new (name, command, args[0]) tuples.
       // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
       // with no prompt; denied tuples set state=DEAD without spawning.
-      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, { log, permissionManager: this._permissions })
+      // #4456: forward startCapMs override so operators can tune the
+      // session-start wall-clock cap. Passing undefined lets the fleet's
+      // constructor default (DEFAULT_FLEET_START_CAP_MS) win — exactly
+      // what we want when no override is in play.
+      const fleetOpts = { log, permissionManager: this._permissions }
+      if (this._mcpStartCapMs !== null) fleetOpts.startCapMs = this._mcpStartCapMs
+      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, fleetOpts)
       await this._mcpFleet.start()
     }
 
