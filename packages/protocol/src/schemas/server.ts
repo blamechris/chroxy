@@ -76,6 +76,24 @@ export const ServerAuthOkSchema = z.object({
   // `DEFAULT_HARD_TIMEOUT_MS` exported from `base-session.js` but is
   // not re-exported from this package.)
   hardTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
+  // #4477: stream-stall recovery window in ms surfaced in auth_ok so the
+  // dashboard chip (#4476) can render "Stream stalled — no response for
+  // ${humanize(streamStallTimeoutMs)}" with the real configured value
+  // instead of hardcoding the 5-min default.
+  //
+  // Semantics differ from resultTimeoutMs / hardTimeoutMs: 0 is a valid
+  // emission meaning the operator explicitly disabled stream-stall
+  // recovery (CHROXY_STREAM_STALL_TIMEOUT_MS=0). BaseSession's
+  // `_armResultTimeout` skips arming the stall timer when
+  // `_streamStallTimeoutMs === 0`, so the wire must be able to communicate
+  // that state distinctly from "older server" (field absent). Hence
+  // `.nonnegative()` not `.positive()`.
+  //
+  // Optional because servers from before #4477 don't emit it — clients
+  // fall back to the 5-min default when absent. The matching server-side
+  // constant is `DEFAULT_STREAM_STALL_TIMEOUT_MS` exported from
+  // `base-session.js` but is not re-exported from this package.
+  streamStallTimeoutMs: z.number().int().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

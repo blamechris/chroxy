@@ -58,6 +58,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
     resultTimeoutMs: z.ZodOptional<z.ZodNumber>;
     hardTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    streamStallTimeoutMs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;
@@ -199,6 +200,53 @@ export declare const ServerAgentCompletedSchema: z.ZodObject<{
     type: z.ZodLiteral<"agent_completed">;
     toolUseId: z.ZodString;
 }, z.core.$strip>;
+/**
+ * #4307 — one entry per backgrounded `Bash` shell the session is still
+ * waiting on. Pushed when the agent dispatches a `Bash` tool call with
+ * `run_in_background: true` (the matching tool_result carries the
+ * canonical `Command running in background with ID: <id>` text); cleared
+ * when the agent calls `BashOutput` (acknowledged) or the session is
+ * destroyed.
+ *
+ * `shellId` is the short alphanumeric token Claude prints (e.g.
+ * `brk57kt6pm`). `command` is the original Bash command text the agent
+ * dispatched, stashed at tool_use time so the dashboard can render
+ * "waiting on `<command>`" without a separate roundtrip. `startedAt` is
+ * the server-side wall-clock at the moment the tool_result was parsed —
+ * lets the dashboard surface elapsed wait time without trusting the
+ * client clock.
+ */
+export declare const ServerPendingBackgroundShellSchema: z.ZodObject<{
+    shellId: z.ZodString;
+    command: z.ZodString;
+    startedAt: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * #4307 — transient event: the pending-background-shells snapshot for a
+ * session changed. Emitted both on push (a new `run_in_background` shell
+ * was registered) and on clear (`BashOutput` acknowledged or the session
+ * was destroyed). The full snapshot is on the wire (not a delta) so a
+ * late-joining client sees canonical state.
+ *
+ * Why a full snapshot instead of an event per delta: pending work is a
+ * tiny set (typically 0 or 1 entries) and the event fires rarely, so
+ * the wire cost is negligible. A delta protocol would force every
+ * client to also reconcile against `pendingBackgroundShells` on the
+ * `session_list` snapshot — the full-snapshot shape avoids that.
+ *
+ * Late joiners: `session_list` carries the same `pendingBackgroundShells`
+ * field on each entry, so a client that connects between
+ * `background_work_changed` events catches up via the next snapshot.
+ */
+export declare const ServerBackgroundWorkChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"background_work_changed">;
+    sessionId: z.ZodString;
+    pending: z.ZodArray<z.ZodObject<{
+        shellId: z.ZodString;
+        command: z.ZodString;
+        startedAt: z.ZodNumber;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
 export declare const ServerClientFocusChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_focus_changed">;
     clientId: z.ZodString;
@@ -284,6 +332,11 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
         costUsd: z.ZodNumber;
         turnsBilled: z.ZodNumber;
     }, z.core.$strip>>;
+    pendingBackgroundShells: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        shellId: z.ZodString;
+        command: z.ZodString;
+        startedAt: z.ZodNumber;
+    }, z.core.$strip>>>;
 }, z.core.$loose>;
 export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
@@ -316,6 +369,11 @@ export declare const ServerSessionListSchema: z.ZodObject<{
             costUsd: z.ZodNumber;
             turnsBilled: z.ZodNumber;
         }, z.core.$strip>>;
+        pendingBackgroundShells: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            shellId: z.ZodString;
+            command: z.ZodString;
+            startedAt: z.ZodNumber;
+        }, z.core.$strip>>>;
     }, z.core.$loose>>;
 }, z.core.$strip>;
 /**

@@ -214,6 +214,97 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(ServerAuthOkSchema.safeParse({ ...base, hardTimeoutMs: MAX }).success, 'exactly 24h should pass')
   })
 
+  // #4477: streamStallTimeoutMs is the server's stream-stall recovery window,
+  // surfaced so the dashboard chip (#4476) can render copy with the real
+  // configured value instead of hardcoding the 5-min default. Unlike
+  // result/hardTimeoutMs, 0 is a meaningful value here — it means the
+  // operator explicitly disabled stream-stall recovery, so the schema must
+  // accept nonnegative ints (not just positive).
+  it('validates auth_ok with streamStallTimeoutMs (#4477)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.9.13',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+    })
+    assert.ok(result.success, 'Should validate auth_ok with streamStallTimeoutMs')
+    assert.equal(result.data.streamStallTimeoutMs, 300_000)
+  })
+
+  it('accepts auth_ok with streamStallTimeoutMs=0 (explicitly disabled)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.9.13',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      streamStallTimeoutMs: 0,
+    })
+    assert.ok(result.success, 'Should accept 0 as the "disabled" sentinel — base-session armResultTimeout skips the stall timer when _streamStallTimeoutMs === 0')
+    assert.equal(result.data.streamStallTimeoutMs, 0)
+  })
+
+  it('accepts auth_ok without streamStallTimeoutMs (older servers, pre-#4477)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.9.12',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+    })
+    assert.ok(result.success, 'Should accept auth_ok without streamStallTimeoutMs')
+    assert.equal(result.data.streamStallTimeoutMs, undefined)
+  })
+
+  it('rejects auth_ok with invalid streamStallTimeoutMs (#4477)', async () => {
+    const { ServerAuthOkSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')
+    const base = {
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.9.13',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+    }
+    for (const bad of [-1, 1.5, Infinity, NaN, '300000', MAX + 1]) {
+      const result = ServerAuthOkSchema.safeParse({ ...base, streamStallTimeoutMs: bad })
+      assert.ok(!result.success, `Should reject bad streamStallTimeoutMs: ${String(bad)}`)
+    }
+    assert.ok(ServerAuthOkSchema.safeParse({ ...base, streamStallTimeoutMs: MAX }).success, 'exactly 24h should pass')
+  })
+
   // #3768: same ceiling applied to other ms-typed fields.
   it('rejects permission_request with remainingMs above 24h ceiling (#3768)', async () => {
     const { ServerPermissionRequestSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')

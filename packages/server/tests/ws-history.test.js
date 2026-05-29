@@ -175,6 +175,60 @@ describe('sendPostAuthInfo — resultTimeoutMs (#3760)', () => {
   })
 })
 
+// #4477: surface the effective stream-stall recovery window in auth_ok so the
+// dashboard chip (#4476) can render its humanized copy with the real configured
+// value instead of hardcoding the 5-min default. Unlike resultTimeoutMs, 0 is
+// a meaningful emission (operator explicitly disabled stream-stall recovery) —
+// the wire must communicate that state distinctly from "field absent / older
+// server", so the fallback must NOT fire on a 0 input.
+describe('sendPostAuthInfo — streamStallTimeoutMs (#4477)', () => {
+  it('uses the configured streamStallTimeoutMs when set', () => {
+    const ctx = makeCtx({ streamStallTimeoutMs: 90_000 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.streamStallTimeoutMs, 90_000)
+  })
+
+  it('emits 0 when ctx.streamStallTimeoutMs is 0 (operator explicitly disabled)', () => {
+    // The operator set CHROXY_STREAM_STALL_TIMEOUT_MS=0 to opt out of the
+    // 5-min stall timer (workloads with legitimate long event gaps). The wire
+    // must propagate 0 distinctly so the dashboard hides the chip entirely
+    // rather than rendering "no response for 5min" against a disabled timer.
+    const ctx = makeCtx({ streamStallTimeoutMs: 0 })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.streamStallTimeoutMs, 0)
+  })
+
+  it('falls back to BaseSession default (5 min) when ctx.streamStallTimeoutMs is null', () => {
+    const ctx = makeCtx({ streamStallTimeoutMs: null })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends[0]
+    assert.equal(authOk.streamStallTimeoutMs, 5 * 60 * 1000)
+  })
+
+  it('falls back to the default when ctx.streamStallTimeoutMs is negative, fractional, or non-finite', () => {
+    // Note: 0 is NOT in this list — see the "emits 0 when ctx is 0" test
+    // above. Negative / NaN / Infinity / non-integers fall back to default
+    // because they'd fail the protocol schema's int().nonnegative().max(MAX)
+    // gate and silently break clients.
+    for (const bad of [-1, 1.5, NaN, Infinity, 'oops']) {
+      const ctx = makeCtx({ streamStallTimeoutMs: bad })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws)
+      sendPostAuthInfo(ctx, ws)
+      const authOk = ctx._sends[0]
+      assert.equal(authOk.streamStallTimeoutMs, 5 * 60 * 1000, `bad input: ${String(bad)}`)
+    }
+  })
+})
+
 describe('sendPostAuthInfo — cwd from sessionManager', () => {
   it('uses cwd from defaultSessionId when available', () => {
     const { manager } = createMockSessionManager([
