@@ -1333,13 +1333,40 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // didn't carry a tool pairing) so the server stays authoritative for
     // any in-flight tools.
     if (activeSessionId && sessionStates[activeSessionId]) {
-      updateActiveSession((ss) => ({
-        isIdle: false,
-        lastClientActivityAt: Date.now(),
-        ...(toolUseId
-          ? { activeTools: ss.activeTools.filter(t => t.toolUseId !== toolUseId) }
-          : {}),
-      }));
+      updateActiveSession((ss) => {
+        const patch: Partial<typeof ss> = {
+          isIdle: false,
+          lastClientActivityAt: Date.now(),
+        };
+        if (toolUseId) {
+          patch.activeTools = ss.activeTools.filter(t => t.toolUseId !== toolUseId);
+          // #4499: also patch the matching `tool_use` ChatMessage in
+          // messages[] so the messages-walk fallback
+          // (ActivityIndicator.findInFlightToolUse) stops surfacing the
+          // unresolved AskUserQuestion the moment activeTools is empty.
+          // Without this patch the walk picks it back up (toolResult is
+          // undefined because PostToolUse never fired in the TUI case) and
+          // the "Running AskUserQuestion · Ns" pill re-appears via the
+          // fallback path immediately after the activeTools clear.
+          //
+          // Sentinel `'(resolved by user)'` mirrors the answered-bubble
+          // semantic and is not interpreted as content by any renderer —
+          // only the existence-check in findInFlightToolUse matters.
+          // sharedToolResult will OVERWRITE this if the server eventually
+          // does emit tool_result for the same toolUseId; we never lose
+          // server data, only fill in the gap.
+          let patched = false;
+          const nextMessages = ss.messages.map(m => {
+            if (m.id === toolUseId && m.type === 'tool_use' && m.toolResult === undefined) {
+              patched = true;
+              return { ...m, toolResult: '(resolved by user)' };
+            }
+            return m;
+          });
+          if (patched) patch.messages = nextMessages;
+        }
+        return patch;
+      });
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);

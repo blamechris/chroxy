@@ -1555,6 +1555,89 @@ describe('sendUserQuestionResponse clears in-flight tool slot (#4465)', () => {
     useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
   });
 
+  // Regression for agent-review critical finding (#4499): the
+  // ActivityIndicator messages-walk fallback re-surfaces the AskUserQuestion
+  // tool_use the moment activeTools empties. Optimistically clearing
+  // activeTools alone is insufficient — we must ALSO patch the tool_use
+  // ChatMessage in messages[] so findInFlightToolUse no longer treats it
+  // as in-flight.
+  it('patches the tool_use ChatMessage in messages[] so the walk fallback no longer surfaces it (#4499)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { findInFlightToolUse } = await import('../components/ActivityIndicator');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-walk', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+          // tool_use ChatMessage pushed by handleToolStart — same id as the
+          // toolUseId per claude-tui-session.js:1115. toolResult undefined
+          // because PostToolUse never fired (the #4465 scenario).
+          messages: [
+            { id: 'tu-ask-walk', type: 'tool_use', tool: 'AskUserQuestion', content: '', timestamp: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    // Sanity: before the answer, the walk fallback finds the in-flight tool.
+    const before = findInFlightToolUse(
+      useConnectionStore.getState().sessionStates.s1!.messages,
+    );
+    expect(before).not.toBeNull();
+    expect(before!.tool).toBe('AskUserQuestion');
+
+    useConnectionStore.getState().sendUserQuestionResponse('A', 'tu-ask-walk');
+
+    const after = useConnectionStore.getState().sessionStates.s1!;
+    expect(after.activeTools).toEqual([]);
+    // The walk fallback no longer surfaces the AskUserQuestion because the
+    // tool_use now carries a synthetic toolResult.
+    const post = findInFlightToolUse(after.messages);
+    expect(post).toBeNull();
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('leaves an already-resolved tool_use intact (no double-patch)', async () => {
+    // Defense: if the server's tool_result already landed for the AskUserQuestion
+    // and patched toolResult on the message, the answer-send must NOT overwrite
+    // the real result with our sentinel.
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [],
+          messages: [
+            { id: 'tu-already-resolved', type: 'tool_use', tool: 'AskUserQuestion', content: '', toolResult: 'server answer', timestamp: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('A', 'tu-already-resolved');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    const m = ss.messages.find(x => x.id === 'tu-already-resolved');
+    expect(m?.toolResult).toBe('server answer');
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
   it('a subsequent server-emitted tool_result for the same toolUseId is a no-op (idempotent)', async () => {
     // After the optimistic clear, if claude TUI does eventually emit
     // PostToolUse, the resulting tool_result hits sharedToolResult which
