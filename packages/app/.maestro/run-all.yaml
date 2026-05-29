@@ -43,3 +43,8 @@ name: All E2E flows
 # exercises the #4243 partial-summary extraction via mock-server
 # 'show-bash-partial' trigger (tool_start + streaming tool_input_delta).
 - runFlow: chat-tool-partial-summary.yaml
+
+# Flow 11: StreamStallChip render + retry (#4507) — exercises the
+# #4496 mobile chip adoption of the server's `error{code:'stream_stall'}`
+# wire signal via mock-server 'show-stream-stall' trigger.
+- runFlow: stream-stall-chip.yaml
