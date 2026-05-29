@@ -1,6 +1,7 @@
 import { SessionManager } from './session-manager.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
@@ -224,6 +225,51 @@ function isWithinHome(dir) {
  * @param {{ logLevel?: string, logDir?: string }} config
  * @returns {{ enabled: boolean, level: string, logDir: string|null, error?: string }}
  */
+/**
+ * #4509: resolve the three operator-facing inactivity timeouts
+ * (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs) from a startup
+ * config object into BOTH shapes `startCliServer` needs:
+ *
+ *   - SessionManager constructor args (`*TimeoutMs`): null = let BaseSession
+ *     apply its default. The provider opts forwarding path treats null as
+ *     "omit", which is exactly the behaviour we want for fallback.
+ *   - Startup log line (`effective*TimeoutMs`): the resolved DEFAULT_*
+ *     constant so operators see the actual wall-clock value that will fire
+ *     instead of a misleading `null`.
+ *
+ * Previously these two sites hand-rolled the same
+ * `Number.isFinite(x) && x [>|>=] 0` check independently, with no
+ * MAX_SANE_DURATION_MS ceiling. Consolidating into one helper closes the
+ * #4509 gap and makes the two sites impossible to drift apart.
+ *
+ * @param {object} config - The merged startup config (from `~/.chroxy/config.json`
+ *   + CLI flags + env vars).
+ * @param {{ warn: Function }} log - Logger to emit the over-ceiling
+ *   warning through. Defaults to a no-op so callers can omit it in tests.
+ * @returns {{
+ *   resultTimeoutMs: number|null,
+ *   hardTimeoutMs: number|null,
+ *   streamStallTimeoutMs: number|null,
+ *   effectiveResultTimeoutMs: number,
+ *   effectiveHardTimeoutMs: number,
+ *   effectiveStreamStallTimeoutMs: number,
+ * }}
+ */
+export function resolveStartupTimeouts(config = {}, log = { warn: () => {} }) {
+  const resultOk = isOperatorTimeoutInRange(config.resultTimeoutMs, { name: 'resultTimeoutMs', log })
+  const hardOk = isOperatorTimeoutInRange(config.hardTimeoutMs, { name: 'hardTimeoutMs', log })
+  const stallOk = isOperatorTimeoutInRange(config.streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
+
+  return {
+    resultTimeoutMs: resultOk ? config.resultTimeoutMs : null,
+    hardTimeoutMs: hardOk ? config.hardTimeoutMs : null,
+    streamStallTimeoutMs: stallOk ? config.streamStallTimeoutMs : null,
+    effectiveResultTimeoutMs: resultOk ? config.resultTimeoutMs : DEFAULT_RESULT_TIMEOUT_MS,
+    effectiveHardTimeoutMs: hardOk ? config.hardTimeoutMs : DEFAULT_HARD_TIMEOUT_MS,
+    effectiveStreamStallTimeoutMs: stallOk ? config.streamStallTimeoutMs : DEFAULT_STREAM_STALL_TIMEOUT_MS,
+  }
+}
+
 export function initFileLoggingFromConfig(config = {}) {
   if (process.env.CHROXY_NO_FILE_LOGGING === '1') {
     return { enabled: false, level: 'info', logDir: null }
@@ -346,6 +392,11 @@ export async function startCliServer(config) {
     await logEnvironmentManagerReconnectResult(environmentManager, log)
   }
 
+  // #4509: resolve once so the SessionManager arg side and the startup log
+  // line below can't drift apart, and any over-ceiling operator value emits
+  // a single warning here at boot (not three on each tunable).
+  const startupTimeouts = resolveStartupTimeouts(config, log)
+
   // 1. Create session manager
   const sessionManager = new SessionManager({
     maxSessions: config.maxSessions || 5,
@@ -370,22 +421,16 @@ export async function startCliServer(config) {
     costBudget: config.costBudget || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
     // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). null = BaseSession default (30 min).
-    resultTimeoutMs:
-      Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
-        ? config.resultTimeoutMs
-        : null,
     // #3899: HARD-cap inactivity timeout (ms). null = BaseSession default (2h).
-    hardTimeoutMs:
-      Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
-        ? config.hardTimeoutMs
-        : null,
     // #4467: stream-stall recovery (ms). null = BaseSession default (5min).
-    // 0 explicitly disables (operators with workloads that have legitimate
-    // long event gaps can opt out).
-    streamStallTimeoutMs:
-      Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs >= 0
-        ? config.streamStallTimeoutMs
-        : null,
+    //   0 explicitly disables (operators with workloads that have legitimate
+    //   long event gaps can opt out).
+    // #4509: ceiling-clamped via `resolveStartupTimeouts()` above; an
+    // over-24h operator value falls back to null here so BaseSession applies
+    // its default (and the operator gets a warn log identifying the bad key).
+    resultTimeoutMs: startupTimeouts.resultTimeoutMs,
+    hardTimeoutMs: startupTimeouts.hardTimeoutMs,
+    streamStallTimeoutMs: startupTimeouts.streamStallTimeoutMs,
     // #4482: per-MCP-call timeout (ms). null = byok-mcp-client default (30s).
     // Unlike streamStallTimeoutMs, 0 is not a meaningful disable — every
     // MCP tool would look broken — so non-positive falls back to null.
@@ -400,18 +445,11 @@ export async function startCliServer(config) {
 
   // #3749 / #3899: surface the effective inactivity timeouts at startup so
   // operators can verify their config overrides took effect.
-  const effectiveResultTimeoutMs =
-    Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
-      ? config.resultTimeoutMs
-      : DEFAULT_RESULT_TIMEOUT_MS
-  const effectiveHardTimeoutMs =
-    Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
-      ? config.hardTimeoutMs
-      : DEFAULT_HARD_TIMEOUT_MS
-  const effectiveStreamStallTimeoutMs =
-    Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs >= 0
-      ? config.streamStallTimeoutMs
-      : DEFAULT_STREAM_STALL_TIMEOUT_MS
+  // #4509: re-use the already-clamped values from `resolveStartupTimeouts()`
+  // so the log line can't drift away from the SessionManager constructor
+  // args (e.g. log "12h hard-cap" while passing `null` because only one of
+  // the two sites caught a typo).
+  const { effectiveResultTimeoutMs, effectiveHardTimeoutMs, effectiveStreamStallTimeoutMs } = startupTimeouts
   const stallLabel = effectiveStreamStallTimeoutMs === 0
     ? 'disabled'
     : `${formatIdleDuration(effectiveStreamStallTimeoutMs)} (${effectiveStreamStallTimeoutMs}ms)`

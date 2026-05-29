@@ -1,9 +1,14 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { BaseSession } from '../src/base-session.js'
+import {
+  BaseSession,
+  DEFAULT_RESULT_TIMEOUT_MS,
+  DEFAULT_HARD_TIMEOUT_MS,
+  DEFAULT_STREAM_STALL_TIMEOUT_MS,
+} from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
 
 describe('BaseSession', () => {
@@ -1320,4 +1325,78 @@ describe('BaseSession', () => {
       assert.equal(s._getSkills().length, 1, 'malformed trust file must not break loading')
     })
   })
+})
+
+// #4509: BaseSession's three per-session inactivity timeouts must also clamp
+// to the shared MAX_SANE_DURATION_MS (24h) ceiling. Even when an operator
+// over-ceiling value somehow gets past session-manager (e.g. a provider
+// that hand-builds providerOpts), BaseSession is the final destination — it
+// arms the actual setTimeout against the value and a >24h timer would
+// silently make the inactivity-warning / hard-cap / stream-stall paths
+// effectively never fire.
+describe('BaseSession operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', () => {
+  const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+
+  // Each row: ctor key, internal slot the value lands in, BaseSession default
+  // it falls back to, display name in the warn log.
+  const TIMEOUT_SPECS = [
+    {
+      ctorKey: 'resultTimeoutMs',
+      internalField: '_resultTimeoutMs',
+      fallback: DEFAULT_RESULT_TIMEOUT_MS,
+      displayName: 'resultTimeoutMs',
+    },
+    {
+      ctorKey: 'hardTimeoutMs',
+      internalField: '_hardTimeoutMs',
+      fallback: DEFAULT_HARD_TIMEOUT_MS,
+      displayName: 'hardTimeoutMs',
+    },
+    {
+      ctorKey: 'streamStallTimeoutMs',
+      internalField: '_streamStallTimeoutMs',
+      fallback: DEFAULT_STREAM_STALL_TIMEOUT_MS,
+      displayName: 'streamStallTimeoutMs',
+    },
+  ]
+
+  let skillsDirLocal
+
+  beforeEach(() => {
+    skillsDirLocal = mkdtempSync(join(tmpdir(), 'chroxy-base-ceiling-'))
+  })
+
+  afterEach(() => {
+    if (skillsDirLocal) rmSync(skillsDirLocal, { recursive: true, force: true })
+    skillsDirLocal = null
+    mock.restoreAll()
+  })
+
+  for (const { ctorKey, internalField, fallback, displayName } of TIMEOUT_SPECS) {
+    it(`clamps ${ctorKey} above MAX_SANE_DURATION_MS back to the default and warns`, () => {
+      const warnings = []
+      mock.method(console, 'warn', (msg) => warnings.push(msg))
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: skillsDirLocal,
+        repoSkillsDir: null,
+        [ctorKey]: MAX_SANE_DURATION_MS + 1,
+      })
+      assert.equal(s[internalField], fallback,
+        `${internalField} must fall back to its BaseSession default when ${ctorKey} exceeds the 24h ceiling`)
+      const hit = warnings.find((w) => w.includes(displayName) && w.includes('MAX_SANE_DURATION_MS'))
+      assert.ok(hit, `expected a single warn log mentioning ${displayName} + MAX_SANE_DURATION_MS, got: ${warnings.join(' | ')}`)
+    })
+
+    it(`accepts the exact MAX_SANE_DURATION_MS boundary for ${ctorKey}`, () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: skillsDirLocal,
+        repoSkillsDir: null,
+        [ctorKey]: MAX_SANE_DURATION_MS,
+      })
+      assert.equal(s[internalField], MAX_SANE_DURATION_MS,
+        `the boundary must be INCLUSIVE — clamping it would surprise operators who tuned the dial to exactly 24h`)
+    })
+  }
 })

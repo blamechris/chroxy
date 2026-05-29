@@ -10,7 +10,7 @@ import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMi
 import { GIT } from './git.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
 import { readSessionContext } from './session-context.js'
-import { parseDuration } from './duration.js'
+import { parseDuration, isOperatorTimeoutInRange } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
 import { CostBudgetManager } from './cost-budget-manager.js'
 import { SessionStatePersistence } from './session-state-persistence.js'
@@ -256,21 +256,30 @@ export class SessionManager extends EventEmitter {
     this._sandbox = sandbox || null
     // #3749: per-server inactivity timeout (ms) forwarded to providers
     // via providerOpts. null = use BaseSession's DEFAULT_RESULT_TIMEOUT_MS.
+    //
+    // #4509: the ceiling check inside `isOperatorTimeoutInRange` mirrors the
+    // wire-side guard #4503 added to `ws-history.js sendPostAuthInfo`. An
+    // operator typo (`CHROXY_RESULT_TIMEOUT_MS=99999999999`, extra digit)
+    // would otherwise pass `Number.isFinite > 0` here and silently produce a
+    // >24h internal inactivity timer; the helper instead falls back to null
+    // (→ BaseSession default) and warns once.
     this._resultTimeoutMs =
-      Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
+      isOperatorTimeoutInRange(resultTimeoutMs, { name: 'resultTimeoutMs', log })
         ? resultTimeoutMs
         : null
     // #3899: same shape as resultTimeoutMs — null means "let BaseSession
-    // use DEFAULT_HARD_TIMEOUT_MS (2h)"; a positive finite value flows
-    // through providerOpts to each session subclass.
+    // use DEFAULT_HARD_TIMEOUT_MS (2h)"; a positive finite value (≤ ceiling)
+    // flows through providerOpts to each session subclass.
     this._hardTimeoutMs =
-      Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+      isOperatorTimeoutInRange(hardTimeoutMs, { name: 'hardTimeoutMs', log })
         ? hardTimeoutMs
         : null
     // #4467: 0 explicitly disables stream-stall recovery; null = use default;
-    // positive finite value sets the recovery window.
+    // positive finite value sets the recovery window. `allowZero: true` keeps
+    // the explicit-disable behaviour intact while #4509's ceiling gate clamps
+    // pathological over-24h values back to the default.
     this._streamStallTimeoutMs =
-      Number.isFinite(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
+      isOperatorTimeoutInRange(streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
         ? streamStallTimeoutMs
         : null
     // #4482: per-MCP-call timeout. Unlike streamStallTimeoutMs, 0 is not a

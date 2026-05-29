@@ -3326,3 +3326,57 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
     })
   })
 })
+
+// #4509: SessionManager's three operator-facing inactivity timeouts
+// (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs) are clamped to
+// the shared MAX_SANE_DURATION_MS (24h) ceiling that the protocol schemas
+// apply via `.max(MAX_SANE_DURATION_MS)`. Mirrors the wire-side guard #4503
+// added to `ws-history.js sendPostAuthInfo`. A typoed CHROXY_* env var
+// (extra digit, accidental exponent) is the realistic source of an
+// over-ceiling value; without this guard the operator silently gets a >24h
+// internal inactivity timer instead of the BaseSession default.
+describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', () => {
+  const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+
+  // Spec table — each row is one operator-tunable timeout we expect to be
+  // clamped. `internalField` is the underscore-prefixed slot the constructor
+  // sets; `displayName` is the warn-log token the helper uses (matches the
+  // CHROXY_* env-var stem so an operator scanning logs can correlate).
+  const TIMEOUT_SPECS = [
+    { configKey: 'resultTimeoutMs', internalField: '_resultTimeoutMs', displayName: 'resultTimeoutMs' },
+    { configKey: 'hardTimeoutMs', internalField: '_hardTimeoutMs', displayName: 'hardTimeoutMs' },
+    { configKey: 'streamStallTimeoutMs', internalField: '_streamStallTimeoutMs', displayName: 'streamStallTimeoutMs' },
+  ]
+
+  afterEach(() => {
+    mock.restoreAll()
+  })
+
+  for (const { configKey, internalField, displayName } of TIMEOUT_SPECS) {
+    it(`clamps ${configKey} above MAX_SANE_DURATION_MS back to null and warns`, () => {
+      const warnings = []
+      mock.method(console, 'warn', (msg) => warnings.push(msg))
+      const mgr = new SessionManager({
+        skipPreflight: true,
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        [configKey]: MAX_SANE_DURATION_MS + 1,
+      })
+      assert.equal(mgr[internalField], null,
+        `${internalField} must fall back to null when ${configKey} exceeds the 24h ceiling (operator typo guardrail)`)
+      const hit = warnings.find((w) => w.includes(displayName) && w.includes('MAX_SANE_DURATION_MS'))
+      assert.ok(hit, `expected a single warn log mentioning ${displayName} + MAX_SANE_DURATION_MS, got: ${warnings.join(' | ')}`)
+    })
+
+    it(`accepts the exact MAX_SANE_DURATION_MS boundary for ${configKey}`, () => {
+      const mgr = new SessionManager({
+        skipPreflight: true,
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        [configKey]: MAX_SANE_DURATION_MS,
+      })
+      assert.equal(mgr[internalField], MAX_SANE_DURATION_MS,
+        `the exact boundary is INCLUSIVE — clamping it would surprise operators who tuned the dial to exactly 24h`)
+    })
+  }
+})
