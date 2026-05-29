@@ -3152,4 +3152,131 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
   })
+
+  describe('MCP tool_use dispatch (#4079)', () => {
+    function writeStubMcpConfig({ env = {} } = {}) {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env } },
+      }))
+      return configPath
+    }
+
+    it('round-trips: model emits tool_use mcp__stub__echo → fleet dispatches → tool_result contains echoed input', async () => {
+      preTrustStub()
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: writeStubMcpConfig(),
+      })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_mcp_1', name: 'mcp__stub__echo', input: { greeting: 'hello' },
+      })
+      assert.ok(toolResult, 'round 2 must receive a tool_result block')
+      assert.equal(toolResult.tool_use_id, 'tu_mcp_1')
+      assert.equal(toolResult.is_error, false)
+      // The stub echoes args as the text content of the MCP result;
+      // _dispatchMcpTool flattens content[].text into a single string.
+      assert.equal(toolResult.content, JSON.stringify({ greeting: 'hello' }))
+      const toolResultEvent = captured.find(
+        (e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_mcp_1',
+      )
+      assert.ok(toolResultEvent, 'tool_result event fires for MCP tool')
+      assert.equal(toolResultEvent.payload.isError, false)
+      await session.destroy()
+    })
+
+    it('permission denial blocks dispatch and returns a denial tool_result', async () => {
+      preTrustStub()
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: writeStubMcpConfig(),
+      })
+      // Auto-deny the per-call permission prompt (NOT the trust prompt,
+      // which is pre-resolved by preTrustStub above).
+      session._permissions.on('permission_request', (data) => {
+        if (data.tool === 'mcp_spawn') return
+        session._permissions.respondToPermission(data.requestId, 'deny')
+      })
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_mcp_deny', name: 'mcp__stub__echo', input: {},
+      })
+      assert.ok(toolResult)
+      assert.equal(toolResult.is_error, true)
+      // PermissionManager.respondToPermission emits `User denied` as the
+      // denial message (permission-manager.js:325); the dispatch path
+      // propagates it verbatim into the tool_result.
+      assert.match(toolResult.content, /denied/i)
+      await session.destroy()
+    })
+
+    it('MCP child crash mid-dispatch returns is_error tool_result without crashing the session', async () => {
+      preTrustStub()
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: writeStubMcpConfig({ env: { MCP_STUB_TOOL_DIE: '1' } }),
+      })
+      session.setPermissionMode('auto')
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_mcp_crash', name: 'mcp__stub__echo', input: {},
+      })
+      assert.ok(toolResult, 'session survives the crash and emits a tool_result')
+      assert.equal(toolResult.is_error, true)
+      assert.match(toolResult.content, /MCP mcp__stub__echo failed/)
+      assert.match(toolResult.content, /child exited/)
+      // Session is still usable — sendMessage doesn't reject.
+      await session.destroy()
+    })
+
+    it('MCP RPC error becomes an is_error tool_result', async () => {
+      preTrustStub()
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: writeStubMcpConfig({ env: { MCP_STUB_TOOL_RPC_ERROR: '1' } }),
+      })
+      session.setPermissionMode('auto')
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_mcp_rpc', name: 'mcp__stub__echo', input: {},
+      })
+      assert.ok(toolResult)
+      assert.equal(toolResult.is_error, true)
+      assert.match(toolResult.content, /forced RPC error/)
+      await session.destroy()
+    })
+
+    it('MCP server-reported isError propagates as is_error tool_result', async () => {
+      preTrustStub()
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: writeStubMcpConfig({ env: { MCP_STUB_TOOL_ERROR: '1' } }),
+      })
+      session.setPermissionMode('auto')
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_mcp_err', name: 'mcp__stub__echo', input: { x: 1 },
+      })
+      assert.ok(toolResult)
+      assert.equal(toolResult.is_error, true)
+      assert.equal(toolResult.content, JSON.stringify({ x: 1 }))
+      await session.destroy()
+    })
+
+    it('built-in tools still route through the in-process executor when an MCP fleet is also active', async () => {
+      preTrustStub()
+      const tmpFile = join(tmpHome, 'hello.txt')
+      writeFileSync(tmpFile, 'hi from disk')
+      const session = new ClaudeByokSession({
+        cwd: tmpHome,
+        mcpConfigPath: writeStubMcpConfig(),
+      })
+      session.setPermissionMode('auto')
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_builtin', name: 'Read', input: { file_path: tmpFile },
+      })
+      assert.ok(toolResult)
+      assert.equal(toolResult.is_error, false)
+      assert.match(toolResult.content, /hi from disk/)
+      await session.destroy()
+    })
+  })
 })

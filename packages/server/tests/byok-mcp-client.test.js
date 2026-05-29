@@ -151,6 +151,58 @@ describe('MCPClient', () => {
     })
   })
 
+  describe('callTool (#4079)', () => {
+    it('echoes args via JSON-RPC tools/call when READY', async () => {
+      const client = new MCPClient(stubConfig(), { log: silentLog() })
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      const result = await client.callTool('echo', { msg: 'hi' })
+      assert.equal(result.isError, undefined)
+      assert.equal(result.content[0].type, 'text')
+      assert.equal(result.content[0].text, JSON.stringify({ msg: 'hi' }))
+      await client.destroy()
+    })
+
+    it('throws when client is not READY', async () => {
+      const client = new MCPClient(stubConfig(), { log: silentLog() })
+      await assert.rejects(client.callTool('echo', {}), /not ready/)
+      await client.destroy()
+    })
+
+    it('surfaces JSON-RPC errors from the server', async () => {
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_TOOL_RPC_ERROR: '1' } }),
+        { log: silentLog() },
+      )
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      await assert.rejects(client.callTool('echo', {}), /forced RPC error/)
+      await client.destroy()
+    })
+
+    it('times out a hung tools/call', async () => {
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_TOOL_HANG: '1' } }),
+        { log: silentLog() },
+      )
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      await assert.rejects(client.callTool('echo', {}, 200), /timeout/)
+      await client.destroy()
+    })
+
+    it('mid-call child crash rejects the pending call with "MCP child exited"', async () => {
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_TOOL_DIE: '1' } }),
+        { log: silentLog() },
+      )
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      await assert.rejects(client.callTool('echo', {}), /child exited/)
+      await client.destroy()
+    })
+  })
+
   describe('destroy()', () => {
     it('cancels a pending restart timer (no spawn after destroy)', async () => {
       const client = new MCPClient(

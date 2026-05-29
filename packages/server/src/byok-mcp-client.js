@@ -12,7 +12,6 @@
  *   - Session destroy sends SIGTERM, escalates to SIGKILL at KILL_GRACE_MS.
  *
  * Out of scope (next stages):
- *   - tools/call dispatch (#4079) — only exposes the parsed tools list here.
  *   - Materializing into Anthropic SDK tools[] (#4078).
  */
 
@@ -24,6 +23,7 @@ const MAX_RESTART_ATTEMPTS = 3
 const RESTART_DELAY_MS = 1000
 const KILL_GRACE_MS = 1000
 const HANDSHAKE_TIMEOUT_MS = 5000
+export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 30_000
 
 export const MCP_STATES = Object.freeze({
   IDLE: 'idle',
@@ -143,6 +143,13 @@ export class MCPClient extends EventEmitter {
     this._restartAttempts = 0
     this._setState(MCP_STATES.READY)
     this.emit('ready', this._tools)
+  }
+
+  async callTool(toolName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    if (this._state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
+    }
+    return this._request('tools/call', { name: toolName, arguments: args || {} }, timeoutMs)
   }
 
   _request(method, params, timeoutMs) {

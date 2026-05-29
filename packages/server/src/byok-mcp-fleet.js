@@ -11,13 +11,33 @@
  * the next turn's tool list.
  */
 
-import { MCPClient, MCP_STATES } from './byok-mcp-client.js'
+import { MCPClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { loadTrustStore, recordTrust, isTrusted } from './byok-mcp-trust.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
+export const MCP_TOOL_PREFIX = 'mcp__'
 
 function mcpToolName(serverName, toolName) {
-  return `mcp__${serverName}__${toolName}`
+  return `${MCP_TOOL_PREFIX}${serverName}__${toolName}`
+}
+
+/**
+ * Parse the `mcp__<server>__<tool>` prefix used by chroxy to route a
+ * model-emitted tool name back to (a) the right MCP server name, and (b)
+ * the original tool name the server expects in `tools/call`.
+ *
+ * Returns `{ serverName, toolName }` or `null` if the input is not an
+ * MCP-namespaced name. Tool names may contain `__` themselves (rare, but
+ * allowed by MCP), so we split on the FIRST `__` after the `mcp__` prefix
+ * — not on every `__` — to preserve the original tool name verbatim.
+ */
+export function parseMcpToolName(prefixedName) {
+  if (typeof prefixedName !== 'string') return null
+  if (!prefixedName.startsWith(MCP_TOOL_PREFIX)) return null
+  const rest = prefixedName.slice(MCP_TOOL_PREFIX.length)
+  const sep = rest.indexOf('__')
+  if (sep <= 0 || sep >= rest.length - 2) return null
+  return { serverName: rest.slice(0, sep), toolName: rest.slice(sep + 2) }
 }
 
 export class MCPFleet {
@@ -97,6 +117,24 @@ export class MCPFleet {
       description: tool.description || '',
       input_schema: tool.inputSchema || { type: 'object' },
     }))
+  }
+
+  /**
+   * Dispatch a tool_use to the right MCP server. `prefixedName` is the
+   * chroxy-namespaced name the model emitted (`mcp__<server>__<tool>`).
+   * Throws if the prefix is malformed, no client owns that server name,
+   * or the client is not READY. JSON-RPC errors from the server
+   * propagate as throws — caller turns them into is_error tool_results.
+   */
+  async callTool(prefixedName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    const parsed = parseMcpToolName(prefixedName)
+    if (!parsed) throw new Error(`malformed MCP tool name: ${prefixedName}`)
+    const client = this._clients.find((c) => c.name === parsed.serverName)
+    if (!client) throw new Error(`MCP server not found: ${parsed.serverName}`)
+    if (client.state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${parsed.serverName} not ready (state=${client.state})`)
+    }
+    return client.callTool(parsed.toolName, args, timeoutMs)
   }
 
   async destroy() {
