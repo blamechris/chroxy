@@ -2,12 +2,14 @@
  * MCP child-process lifecycle for the claude-byok provider (#4077).
  *
  * One MCPClient owns one MCP server child. Handles spawn, JSON-RPC handshake
- * (initialize → initialized → tools/list), crash detection with a constant 1s
- * backoff up to MAX_RESTART_ATTEMPTS, and SIGTERM/SIGKILL grace on destroy.
+ * (initialize → initialized → tools/list), crash detection with exponential
+ * backoff between restart attempts (1s/2s/4s, #4453), and SIGTERM/SIGKILL
+ * grace on destroy.
  *
  * Per #4077 scope:
  *   - Lazy spawn: caller decides when to call start().
- *   - Crash detection on child exit / spawn error → schedule restart at 1s.
+ *   - Crash detection on child exit / spawn error → schedule restart per the
+ *     RESTART_BACKOFF_MS schedule (1s/2s/4s).
  *   - After MAX_RESTART_ATTEMPTS failures, state=dead and tools=[].
  *   - Session destroy sends SIGTERM, escalates to SIGKILL at KILL_GRACE_MS.
  *
@@ -22,8 +24,19 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
 
-const MAX_RESTART_ATTEMPTS = 3
-const RESTART_DELAY_MS = 1000
+// #4453: exponential restart backoff. The first restart still fires at ~1s
+// after the death (no regression on the existing acceptance test); the
+// second waits ~2s after that failure; the third waits ~4s. Total budget
+// before DEAD is ~7s, up from the previous fixed 3s. This better matches
+// "wedged dependency that needs a moment to recover" failure modes (e.g.
+// a transient port conflict that resolves in ~5s would have been blown
+// past by the previous 1/1/1 schedule).
+//
+// The array length is the authoritative max-attempt count — derive
+// MAX_RESTART_ATTEMPTS from it so an operator who edits the schedule
+// can't accidentally desync the two.
+const RESTART_BACKOFF_MS = [1000, 2000, 4000]
+const MAX_RESTART_ATTEMPTS = RESTART_BACKOFF_MS.length
 const KILL_GRACE_MS = 1000
 const HANDSHAKE_TIMEOUT_MS = 5000
 export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 30_000
@@ -257,8 +270,16 @@ export class MCPClient extends EventEmitter {
 
     this._tools = []
     this._restartAttempts += 1
-    if (this._restartAttempts >= MAX_RESTART_ATTEMPTS) {
-      this._log.warn(`MCP server ${this.name}: dead after ${this._restartAttempts} failed attempts (last exit code=${code} signal=${signal})`)
+    // #4453: gate on `>` (not `>=`) so the FULL RESTART_BACKOFF_MS schedule
+    // is consumed before declaring DEAD. Pre-#4453 the gate fired on `>=`
+    // and MAX_RESTART_ATTEMPTS=3 — meaning only 2 restart delays were
+    // actually applied (the 3rd post-spawn-death went straight to DEAD with
+    // the 3rd entry of the schedule unused). Under `>`, MAX=3 yields 3
+    // applied delays (1s/2s/4s), and DEAD fires after the 4th post-death
+    // count crosses the bound. Issue framing: "max 3 attempts before
+    // declaring dead" means 3 restarts actually happen, then DEAD.
+    if (this._restartAttempts > MAX_RESTART_ATTEMPTS) {
+      this._log.warn(`MCP server ${this.name}: dead after ${this._restartAttempts - 1} failed attempts (last exit code=${code} signal=${signal})`)
       this._setState(MCP_STATES.DEAD)
       this.emit('dead')
       return
@@ -266,11 +287,17 @@ export class MCPClient extends EventEmitter {
 
     this._setState(MCP_STATES.RESTARTING)
     this.emit('restart', { attempt: this._restartAttempts, code, signal })
+    // #4453: pick the delay for this attempt from the backoff schedule.
+    // _restartAttempts was bumped above; subtract 1 to index. Defensive
+    // fallback to the last entry guards against a future refactor that
+    // diverges MAX_RESTART_ATTEMPTS from the array length.
+    const delayIdx = Math.min(this._restartAttempts - 1, RESTART_BACKOFF_MS.length - 1)
+    const delay = RESTART_BACKOFF_MS[delayIdx]
     this._restartTimer = setTimeout(() => {
       this._restartTimer = null
       if (this._destroyed) return
       this._spawnAndHandshake()
-    }, RESTART_DELAY_MS)
+    }, delay)
   }
 
   _killChild() {
