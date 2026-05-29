@@ -193,6 +193,39 @@ wss.on('connection', (ws) => {
         const text = msg.data || ''
         console.log(`[mock] Input: "${text}"`)
 
+        // #4507: trigger phrase 'show-stream-stall' emits a recoverable
+        // `error{code:'stream_stall'}` so the Maestro stream-stall-chip
+        // flow can exercise the StreamStallChip render + retry path on
+        // a real simulator. Mirrors the production wire shape — see
+        // packages/server/src/event-normalizer.js `error:` builder, which
+        // wraps the emitter's `{ message, code }` into the
+        // `{ type: 'message', messageType: 'error', content, code,
+        // timestamp }` envelope clients consume via
+        // store-core/handlers/index.ts handleMessage. Once dispatched,
+        // ChatView's chip-routing in MessageBubble.tsx (#4496) lights up
+        // `StreamStallChip` because `msg.code === 'stream_stall'`, and
+        // because this is the tail message of the conversation
+        // ChatView wires `onRetryStreamStall` to resend the prior
+        // user_input — i.e. tapping Retry pumps the *previous* user
+        // input back through `sendInput`, which adds a local
+        // optimistic user_input bubble and (here) loops back into this
+        // input handler. We deliberately do NOT emit any `agent_busy`
+        // or `stream_start` for the stall — the server's
+        // `_handleStreamStall` clears busy state via
+        // `_emitInterruptedTurnResult` and then emits the error, so the
+        // chip lands while the session is idle (retry-able).
+        if (text.trim() === 'show-stream-stall') {
+          send(ws, {
+            type: 'message',
+            messageType: 'error',
+            content: 'Stream stalled — no response for 5 minutes. Try sending again.',
+            code: 'stream_stall',
+            timestamp: Date.now(),
+            sessionId: 'mock-sess-1',
+          })
+          break
+        }
+
         // #4195: trigger-phrase 'show-todos' emits a synthetic TodoWrite
         // tool_use + tool_result so the Maestro chat-todolist flow can
         // exercise the structured TodoList renderer end-to-end. This
