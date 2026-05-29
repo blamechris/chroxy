@@ -3175,6 +3175,84 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
   });
 });
 
+// #4492: switching tabs sends `switch_session`, which causes the server to
+// dispatch history_replay_start → all past events → history_replay_end.
+// Pre-fix, the mobile pre-handler logic at message-handler.ts ran the
+// lastClientActivityAt bump (#3758) and inactivityWarning dismiss (#3899) for
+// EVERY replayed event. Visible symptoms mirror the dashboard's #4466:
+// "Working… last activity Ns ago" reset to 1s and the "Agent quiet for
+// Nm Ns" chip disappeared. The fix gates the pre-handler bump on the same
+// per-connection `_ctx.receivingHistoryReplay` flag used elsewhere in this
+// handler — mobile's equivalent of the dashboard's module-level
+// `_receivingHistoryReplay`.
+describe('history replay must not reset activity timers (#4492)', () => {
+  function seedSession(extra: Partial<ReturnType<typeof createEmptySessionState>> = {}) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), ...extra } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    return store;
+  }
+
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('does not bump lastClientActivityAt for replayed activity events', () => {
+    const store = seedSession({ lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    // tool_start is in ACTIVITY_EVENT_TYPES — pre-fix this bumped to Date.now().
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-1',
+      tool: 'Bash',
+      toolUseId: 'tu-1',
+      input: { command: 'ls' },
+      sessionId: 's1',
+    });
+    // The pre-seeded "stale" 100ms timestamp must survive — replay is NOT
+    // fresh activity. Without this guard, every tab switch resets the
+    // "last activity Ns ago" pill to "1s ago" no matter how long the
+    // session has actually been idle.
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBe(100);
+  });
+
+  it('does not dismiss inactivityWarning for replayed activity events', () => {
+    // "Agent quiet for 46m 32s · Status update?" chip is mid-display when
+    // the user switches back to this session. Pre-fix, the first replayed
+    // tool_start / message / result wiped it (the activity-bump path also
+    // clears inactivityWarning). User loses the chip with no chance to act.
+    const warning = { idleMs: 2_792_000, prefab: 'Status update?', receivedAt: 200 };
+    const store = seedSession({ inactivityWarning: warning } as any);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0,
+    });
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.inactivityWarning).toEqual(warning);
+  });
+
+  it('live activity AFTER history_replay_end still bumps lastClientActivityAt', () => {
+    // Regression guard: the replay flag is cleared on history_replay_end,
+    // so the next genuine live event must resume bumping the timestamp —
+    // otherwise the gate would freeze activity tracking forever after the
+    // first replay.
+    const store = seedSession({ lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // Live activity event after replay closes — must bump.
+    _testMessageHandler.handle({
+      type: 'tool_start', messageId: 't', tool: 'Bash', toolUseId: 'tu-2', sessionId: 's1',
+    });
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(100);
+  });
+});
+
 // #3141: scoped routing for session-tagged server_error messages on the app
 // (dashboard parity).
 describe('server_error session-scoped routing (#3141)', () => {
