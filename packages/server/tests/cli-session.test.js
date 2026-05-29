@@ -441,6 +441,39 @@ describe('CliSession._killAndRespawn (#4471: panic-button drops dashboard recove
 
     assert.deepEqual(events, [])
   })
+
+  // #4474: the production wiring attaches `_handleChildClose` as a child
+  // listener (see _spawnPersistentProcess at cli-session.js:311). When
+  // _killAndRespawn fires, the oldChild carries BOTH listeners: the
+  // production one (which would re-emit result if the `_respawning` guard
+  // were ever dropped) and the closure-scoped respawn() callback.
+  // This test attaches the real listener and confirms that emit('close')
+  // does NOT double-emit `result`.
+  it('does NOT double-emit result when the production close listener also fires (#4474)', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_dl'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_dl'
+    session._destroying = true
+
+    const oldChild = session._child
+    // Mirror _spawnPersistentProcess's wiring — this is what makes the
+    // _respawning guard at cli-session.js:1077 load-bearing.
+    oldChild.on('close', (code) => session._handleChildClose(code))
+
+    const results = []
+    session.on('result', (p) => results.push(p))
+
+    session._killAndRespawn()
+    // Now emit 'close' — BOTH listeners fire: the closure respawn() AND
+    // the inherited _handleChildClose. The guard MUST short-circuit the
+    // second result emit, otherwise the dashboard sees agent_idle twice
+    // for the same turn.
+    oldChild.emit('close', 0)
+
+    assert.equal(results.length, 1, '_handleChildClose must short-circuit when _respawning=true to avoid double result emit')
+  })
 })
 
 describe('CliSession._handleStreamStall (#4467: stream-stall recovery)', () => {
