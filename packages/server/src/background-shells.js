@@ -15,6 +15,13 @@
  * We do not depend on the format of the surrounding sentence — only on
  * the canonical `Command running in background with ID: <token>` opener,
  * which has been stable across the claude versions chroxy targets.
+ *
+ * #4417: the pending-shells map populated via these helpers lives in
+ * memory only and is intentionally NOT persisted across server
+ * restart. See `BaseSession._pendingBackgroundShells` for the full
+ * rationale — short version: the OS-level shells are owned by claude,
+ * not chroxy, so a restored map would be stale and the activity
+ * indicator would lie. Dropping the map on restart is the safe choice.
  */
 
 // `[A-Za-z0-9_-]+` is intentionally tight — every shell id observed so

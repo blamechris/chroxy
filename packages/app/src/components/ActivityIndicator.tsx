@@ -80,6 +80,15 @@ export function ActivityIndicator() {
     const id = s.activeSessionId;
     return id ? s.sessionStates[id]?.messages ?? null : null;
   });
+  // #4422 — subscribe to pendingBackgroundShells so the idle-state surface
+  // can name the most-recently-started backgrounded shell. Mirrors the
+  // dashboard's #4419 surface but adapted to React Native. The store
+  // immutably swaps this array on `background_work_changed`, so this only
+  // re-renders when the slot actually mutates.
+  const pendingBackgroundShells = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id ? s.sessionStates[id]?.pendingBackgroundShells ?? null : null;
+  });
   const referenceTimeoutMs = useConnectionLifecycleStore(
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   );
@@ -104,6 +113,20 @@ export function ActivityIndicator() {
     return null;
   }, [messages]);
 
+  // #4422 — most-recently-started pending background shell, projected so the
+  // idle-state surface can name it. Mirrors the dashboard's #4419 approach:
+  // when the turn ends but a shell is still parked in the background, the
+  // chip says "Waiting on background work · <command>" instead of vanishing.
+  // We fall back to the shellId when the command string is empty so the chip
+  // always has something concrete to show.
+  const pendingShell = useMemo<{ command: string; shellId: string } | null>(() => {
+    if (!pendingBackgroundShells || pendingBackgroundShells.length === 0) return null;
+    const latest = pendingBackgroundShells.reduce((acc, s) =>
+      s.startedAt > acc.startedAt ? s : acc,
+    );
+    return { command: latest.command, shellId: latest.shellId };
+  }, [pendingBackgroundShells]);
+
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (isIdle) return;
@@ -111,7 +134,39 @@ export function ActivityIndicator() {
     return () => clearInterval(id);
   }, [isIdle]);
 
-  if (isIdle) return null;
+  if (isIdle) {
+    // #4422 — when the turn ends but the agent backgrounded a Bash shell, the
+    // session is still effectively waiting on work. Surface that as a chip so
+    // the user can tell "idle and done" from "idle but parked on a long-
+    // running shell". Single-shell case: project the most-recently-started
+    // shell's command (falling back to its shellId when the command is
+    // empty). Multi-shell expand UI is deferred per #4418's body — for now
+    // the full command list rides on the chip's accessibilityLabel so screen-
+    // reader users still hear every entry. Pending shells are SECONDARY:
+    // during an active turn the live tool label wins (the busy branch below
+    // handles that).
+    if (pendingShell) {
+      const detail = pendingShell.command.length > 0 ? pendingShell.command : pendingShell.shellId;
+      const fullList = (pendingBackgroundShells ?? [])
+        .map((s) => (s.command.length > 0 ? s.command : s.shellId))
+        .join(', ');
+      return (
+        <View style={styles.container}>
+          <View style={[styles.dot, { backgroundColor: COLORS.accentGreen }]} />
+          <Text
+            style={[styles.label, { color: COLORS.accentGreen }]}
+            accessibilityRole="text"
+            accessibilityLabel={`Waiting on background work: ${fullList}`}
+            testID="activity-indicator-label"
+            numberOfLines={1}
+          >
+            Waiting on background work · {detail}
+          </Text>
+        </View>
+      );
+    }
+    return null;
+  }
 
   if (lastActivityAt == null) {
     return (
