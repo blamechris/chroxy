@@ -1611,11 +1611,29 @@ describe('CodexSession', () => {
   })
 
   describe('#3857 learn-loop — _maybeRatchetContextWindow()', () => {
-    // The codex provider registry is module-cached; reset before each test
-    // so the pollution from a previous ratchet doesn't bleed in.
+    // #4413: the ratchet now persists to disk via the codex-scoped cache
+    // file (`~/.chroxy/models-cache.codex.json`). Without an isolated
+    // CHROXY_CONFIG_DIR these tests would write to the operator's real
+    // chroxy state directory and contaminate it with the test cap value
+    // (see memory: feedback_test_state_contamination.md). Each test gets
+    // its own temp dir, and the registry cache is purged so the next
+    // `getRegistryForProvider('codex')` rebuilds against that dir.
+    let _ratchetTmpDir
+    let _ratchetOrigConfigDir
     beforeEach(() => {
+      _ratchetTmpDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-ratchet-block-'))
+      _ratchetOrigConfigDir = process.env.CHROXY_CONFIG_DIR
+      process.env.CHROXY_CONFIG_DIR = _ratchetTmpDir
       const r = getRegistryForProvider('codex')
       r.resetModels()
+    })
+    afterEach(() => {
+      if (_ratchetOrigConfigDir === undefined) {
+        delete process.env.CHROXY_CONFIG_DIR
+      } else {
+        process.env.CHROXY_CONFIG_DIR = _ratchetOrigConfigDir
+      }
+      try { rmSync(_ratchetTmpDir, { recursive: true, force: true }) } catch {}
     })
 
     it('no-op when input_tokens is at or below the registered window', () => {

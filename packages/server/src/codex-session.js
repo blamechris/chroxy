@@ -319,6 +319,14 @@ export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
   const changed = registry.updateContextWindow(modelId, bumped)
   if (!changed) return false
 
+  // #4413 — persist the bumped registry to the codex-scoped cache file
+  // (`~/.chroxy/models-cache.codex.json`) so a server restart doesn't lose
+  // the learned window. `saveCache()` is idempotent (snapshot-deduped) and
+  // logs a warn on disk failure rather than throwing, so the in-memory
+  // ratchet always succeeds even when the disk path is unwritable. The
+  // default Claude cache is unaffected — non-Claude providers use their
+  // own path via `getRegistryForProvider`'s `cachePath` hook.
+  registry.saveCache()
   // Mirror sdk-session.js:763 — broadcast the corrected registry so the
   // dashboard's `availableModels` (and therefore the footer meter) picks
   // up the new window without waiting for the next refresh.
