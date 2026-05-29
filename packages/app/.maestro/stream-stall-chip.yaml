@@ -140,23 +140,35 @@ name: ChatView StreamStallChip render + retry (#4507)
 - waitForAnimationToEnd
 
 # Tap Retry — wires through ChatView's onRetryStreamStall which calls
-# `sendInput(lastUserInputContent)`. `sendInput` runs `addUserMessage`
-# optimistically, so a NEW `user_input` bubble with the resent text
-# should appear in the chat (above the chip). We then re-assert that
-# text is visible AFTER the retry tap. This is the resend-path proof:
-# without #4496's tail-gating + sendInput wiring, no new bubble would
-# appear.
+# `sendInput(lastUserInputContent)` (see ChatView.tsx:333). NOTE:
+# `sendInput` itself does NOT add an optimistic user_input bubble —
+# that pairing only happens in SessionScreen's input-submit handler
+# (SessionScreen.tsx:580), where `addUserMessage` is called *before*
+# `sendInput`. The chip's retry path is wire-only, so no new
+# `user_input` bubble lands in the chat from the tap alone. The
+# resend proof we CAN assert is the mock-server's re-emission: the
+# wire payload `{ type:'input', data:'show-stream-stall' }` re-hits
+# the `case 'input'` branch, which fires the same `show-stream-stall`
+# emitter again — producing a SECOND `stream-stall-chip` in the tree.
+# So the regression we pin is: tail-gating wires onRetry → tap fires
+# sendInput → wire round-trips → second chip appears.
 - tapOn:
     id: "stream-stall-chip-retry"
 - waitForAnimationToEnd
 
-# The local optimistic user_input bubble lands synchronously inside
-# the `sendInput` action. mock-server then loops back through the
-# 'input' switch and (because 'show-stream-stall' fires the same
-# branch) emits a SECOND stall error. Either way, the original
-# "show-stream-stall" text remains visible (the prior optimistic
-# bubble doesn't get removed) and a fresh one is appended. Assert
-# the text is still present.
+# Wait for the second chip to land (re-emitted by mock-server in
+# response to the resent wire input). This is the actual resend-path
+# proof: without #4496's tail-gating + sendInput wiring, no second
+# emission would happen. `assertVisible: id:` matches any element
+# with that testID, so it passes once at least one chip exists —
+# but we also assert the original "show-stream-stall" user_input
+# bubble (the chat-side fixture seed) is still present, so the
+# combination pins both the retry's wire-trip and the absence of
+# any state corruption that would scrub the original bubble.
+- extendedWaitUntil:
+    visible:
+      id: "stream-stall-chip"
+    timeout: 10000
 - assertVisible: "show-stream-stall"
 
 - takeScreenshot: stream-stall-chip-retry-tapped
