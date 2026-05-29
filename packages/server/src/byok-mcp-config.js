@@ -14,17 +14,57 @@ export function defaultClaudeConfigPath() {
   return process.env.CHROXY_CLAUDE_CONFIG || join(homedir(), '.claude.json')
 }
 
-function coerceStringArray(value) {
-  if (!Array.isArray(value)) return []
-  return value.filter((item) => typeof item === 'string')
+/**
+ * Coerce an args array to strings only. Pushes one warning per dropped entry
+ * naming the server, the offending index (`args[<i>]`), and the value's type
+ * so a user who typoed a number-as-number gets a signal instead of a silent
+ * strip. Non-arrays drop the whole field with a single warning.
+ */
+function coerceStringArray(value, { warnings, serverName }) {
+  if (value == null) return []
+  if (!Array.isArray(value)) {
+    warnings.push(
+      `MCP server ${serverName}: ignoring args (expected array, got ${typeof value})`,
+    )
+    return []
+  }
+  const out = []
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i]
+    if (typeof item === 'string') {
+      out.push(item)
+    } else {
+      warnings.push(
+        `MCP server ${serverName}: dropping args[${i}] (expected string, got ${typeof item})`,
+      )
+    }
+  }
+  return out
 }
 
-function coerceEnv(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+/**
+ * Coerce an env object to string→string only. Pushes one warning per dropped
+ * key naming the server, the offending field (`env.<KEY>`), and the value's
+ * type. Non-objects drop the whole field with a single warning.
+ */
+function coerceEnv(value, { warnings, serverName }) {
+  if (value == null) return {}
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    warnings.push(
+      `MCP server ${serverName}: ignoring env (expected object, got ${Array.isArray(value) ? 'array' : typeof value})`,
+    )
+    return {}
+  }
   const env = {}
   for (const [key, raw] of Object.entries(value)) {
     if (typeof key !== 'string' || key.length === 0) continue
-    if (typeof raw === 'string') env[key] = raw
+    if (typeof raw === 'string') {
+      env[key] = raw
+    } else {
+      warnings.push(
+        `MCP server ${serverName}: dropping env.${key} (expected string, got ${typeof raw})`,
+      )
+    }
   }
   return env
 }
@@ -63,8 +103,8 @@ export function parseClaudeMcpConfig(raw) {
     servers.push({
       name,
       command: entry.command,
-      args: coerceStringArray(entry.args),
-      env: coerceEnv(entry.env),
+      args: coerceStringArray(entry.args, { warnings, serverName: name }),
+      env: coerceEnv(entry.env, { warnings, serverName: name }),
     })
   }
   return { servers, warnings }
