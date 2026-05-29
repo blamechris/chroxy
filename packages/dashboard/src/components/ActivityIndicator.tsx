@@ -267,6 +267,13 @@ export function ActivityIndicator() {
         : headlineShell.shellId
       const detail = truncatePendingShellCommand(rawDetail)
       const overflowCount = overflowShells.length
+      // #4428 — the popover lists the headline shell + every overflow shell,
+      // so the screen-reader announcement on the disclosure button must
+      // describe the TOTAL count (overflowCount + 1), not just the overflow.
+      // The previous "Show N additional…" wording understated the dialog by
+      // one and left assistive tech expecting fewer items than rendered.
+      const totalShellCount = overflowCount + 1
+      const popoverId = 'activity-indicator-popover'
       return (
         <div
           className="activity-indicator activity-indicator--green"
@@ -286,7 +293,8 @@ export function ActivityIndicator() {
               className="activity-indicator__disclosure"
               data-testid="activity-indicator-disclosure"
               aria-expanded={popoverOpen}
-              aria-label={`Show ${overflowCount} additional pending background shell${overflowCount === 1 ? '' : 's'}`}
+              aria-controls={popoverOpen ? popoverId : undefined}
+              aria-label={`Show all ${totalShellCount} pending background shells`}
               onClick={() => setPopoverOpen((v) => !v)}
             >
               <span data-testid="activity-indicator-more-badge">
@@ -296,6 +304,7 @@ export function ActivityIndicator() {
           )}
           {popoverOpen && overflowCount > 0 && (
             <div
+              id={popoverId}
               className="activity-indicator__popover"
               data-testid="activity-indicator-popover"
               role="dialog"

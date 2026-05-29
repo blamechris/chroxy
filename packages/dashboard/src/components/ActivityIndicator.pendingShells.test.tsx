@@ -340,6 +340,57 @@ describe('ActivityIndicator — pending-shell disclosure for multiple shells (#4
     expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
   })
 
+  it('announces the total shell count and wires aria-controls when the popover is open (#4428)', () => {
+    // The disclosure button's aria-label previously said "Show N additional
+    // pending background shells" where N = overflowShells.length. But when
+    // opened, the popover lists the headline shell + every overflow shell,
+    // so the announcement understated the dialog by one. Pin the new wording
+    // (total count) and the aria-controls relationship to the popover id.
+    const now = Date.now()
+    storeState = {
+      activeSessionId: 'sess-1',
+      serverResultTimeoutMs: 30 * 60 * 1000,
+      sessionStates: {
+        'sess-1': {
+          isIdle: true,
+          lastClientActivityAt: now - 2_000,
+          messages: [],
+          activeTools: [],
+          activeAgents: [],
+          pendingBackgroundShells: [
+            { shellId: 'old01', command: 'sleep 60', startedAt: now - 30_000 },
+            { shellId: 'mid02', command: 'tail -f /var/log/system.log', startedAt: now - 20_000 },
+            { shellId: 'new03', command: 'npm test', startedAt: now - 5_000 },
+          ],
+          inactivityWarning: null,
+        },
+      },
+    }
+    render(<ActivityIndicator />)
+    const toggle = screen.getByTestId('activity-indicator-disclosure')
+    // Closed state: aria-label uses total count (headline + overflow), and
+    // aria-controls is absent because nothing is exposed yet.
+    expect(toggle.getAttribute('aria-label')).toBe('Show all 3 pending background shells')
+    expect(toggle.getAttribute('aria-controls')).toBeNull()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(toggle)
+    const popover = screen.getByTestId('activity-indicator-popover')
+    // aria-controls now points at the popover's id so AT can follow the link.
+    const popoverId = popover.getAttribute('id')
+    expect(popoverId).toBeTruthy()
+    expect(toggle.getAttribute('aria-controls')).toBe(popoverId)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+
+    // Announcement count must match the number of <li> entries the dialog
+    // actually renders — this is the core "off-by-one" guard.
+    const items = popover.querySelectorAll('li')
+    const announced = toggle.getAttribute('aria-label') ?? ''
+    const match = /Show all (\d+) pending background shells/.exec(announced)
+    expect(match).not.toBeNull()
+    expect(Number(match![1])).toBe(items.length)
+  })
+
   it('does not render the disclosure button when only one shell is pending', () => {
     const now = Date.now()
     storeState = {
