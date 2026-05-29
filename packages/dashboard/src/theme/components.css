@@ -4160,6 +4160,15 @@
   .header-center select[data-kind="model"] { min-width: 120px; max-width: 160px; }
   .header-center select[data-kind="permission"] { min-width: 80px; max-width: 110px; }
   .header-center select[data-kind="thinking"] { min-width: 60px; max-width: 80px; }
+  /* #4464: match the model <select>'s narrow-viewport floors. Without
+     this rule the read-only badge keeps the 180–240px desktop floor and
+     overflows the header center column on phone widths. */
+  .header-center .chat-settings-readonly-badge {
+    min-width: 120px;
+    max-width: 160px;
+    font-size: var(--text-sm);
+    padding: 3px 6px;
+  }
   .header-center { gap: 4px; }
   .header-right { gap: 4px; }
   .status-bar { gap: 6px; padding: 4px 6px; }
