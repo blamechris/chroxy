@@ -6806,6 +6806,85 @@
 .activity-indicator--orange { color: var(--accent-orange-500); border-color: color-mix(in srgb, var(--accent-orange-500) 50%, transparent); }
 .activity-indicator--red    { color: var(--accent-red-500);    border-color: color-mix(in srgb, var(--accent-red-500) 55%, transparent); }
 
+/* #4421 — disclosure button + popover for the pending-background-shells list.
+   When more than one shell is parked we surface a "+N more" badge inside the
+   activity chip; clicking it opens a popover listing every shell with its
+   command + elapsed time. The chip is `position: relative` so the popover
+   can anchor to it via absolute positioning without escaping the InputBar
+   layout flow. */
+.activity-indicator { position: relative; }
+
+.activity-indicator__disclosure {
+  appearance: none;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: var(--text-2xs, 10px);
+  line-height: 1.4;
+  color: inherit;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-indicator__disclosure:hover,
+.activity-indicator__disclosure:focus-visible {
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  outline: none;
+}
+
+.activity-indicator__popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  max-width: min(420px, 90vw);
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--bg-elevated, rgba(20, 20, 20, 0.96));
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  color: var(--text-default, #e6e6e6);
+}
+
+.activity-indicator__popover-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-indicator__popover-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: var(--text-xs);
+}
+
+.activity-indicator__popover-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.activity-indicator__popover-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-indicator__popover-elapsed {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
 /* #3899 — CheckInChip: surfaces an inactivity_warning with a one-click
    prefab follow-up. Same chip shape as activity-indicator so the two
    stack naturally above the InputBar. Amber palette to signal "quiet,
