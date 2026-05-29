@@ -3254,14 +3254,15 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
   })
 })
 
-// #4509: SessionManager's three operator-facing inactivity timeouts
-// (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs) are clamped to
-// the shared MAX_SANE_DURATION_MS (24h) ceiling that the protocol schemas
-// apply via `.max(MAX_SANE_DURATION_MS)`. Mirrors the wire-side guard #4503
-// added to `ws-history.js sendPostAuthInfo`. A typoed CHROXY_* env var
-// (extra digit, accidental exponent) is the realistic source of an
-// over-ceiling value; without this guard the operator silently gets a >24h
-// internal inactivity timer instead of the BaseSession default.
+// #4509 + #4517: SessionManager's four operator-facing timeouts
+// (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs /
+// mcpToolCallTimeoutMs) are clamped to the shared MAX_SANE_DURATION_MS (24h)
+// ceiling that the protocol schemas apply via `.max(MAX_SANE_DURATION_MS)`.
+// Mirrors the wire-side guard #4503 added to `ws-history.js sendPostAuthInfo`.
+// A typoed CHROXY_* env var (extra digit, accidental exponent) is the
+// realistic source of an over-ceiling value; without this guard the operator
+// silently gets a >24h internal timer instead of the BaseSession / MCP
+// client default.
 describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', () => {
   const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
 
@@ -3273,6 +3274,10 @@ describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)',
     { configKey: 'resultTimeoutMs', internalField: '_resultTimeoutMs', displayName: 'resultTimeoutMs' },
     { configKey: 'hardTimeoutMs', internalField: '_hardTimeoutMs', displayName: 'hardTimeoutMs' },
     { configKey: 'streamStallTimeoutMs', internalField: '_streamStallTimeoutMs', displayName: 'streamStallTimeoutMs' },
+    // #4517: mcpToolCallTimeoutMs joined the ceiling-clamped family — same
+    // operator-typo class as the other three. The internal `_mcpToolCallTimeoutMs`
+    // slot follows the identical fall-back-to-null contract.
+    { configKey: 'mcpToolCallTimeoutMs', internalField: '_mcpToolCallTimeoutMs', displayName: 'mcpToolCallTimeoutMs' },
   ]
 
   afterEach(() => {

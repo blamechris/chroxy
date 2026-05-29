@@ -3369,5 +3369,34 @@ describe('ClaudeByokSession', () => {
         assert.equal(captured[0].timeoutMs, undefined, `bad input ${String(bad)} must fall back`)
       }
     })
+
+    it('clamps mcpToolCallTimeoutMs above MAX_SANE_DURATION_MS back to undefined (#4517)', async () => {
+      // #4517: a typoed CHROXY_MCP_TOOL_CALL_TIMEOUT_MS (extra digit,
+      // accidental exponent) must NOT arm a >24h MCP setTimeout. Mirrors
+      // the ceiling check the three sibling timeouts got via #4509 —
+      // byok-session uses `isOperatorTimeoutInRange` so the over-ceiling
+      // value falls back to the fleet/client default exactly like the
+      // bad-input cases above.
+      const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+      const { session, captured } = buildSessionWithMockFleet({
+        mcpToolCallTimeoutMs: MAX_SANE_DURATION_MS + 1,
+      })
+      await session._dispatchMcpTool('mcp__stub__echo', {})
+      assert.equal(captured[0].timeoutMs, undefined,
+        'over-ceiling input must fall back to fleet/client default')
+    })
+
+    it('accepts the exact MAX_SANE_DURATION_MS boundary (#4517)', async () => {
+      // The boundary is INCLUSIVE — clamping it would surprise operators who
+      // tuned the dial to exactly 24h (unlikely for a per-call MCP timeout,
+      // but consistency with the soft/hard inactivity timeouts matters).
+      const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+      const { session, captured } = buildSessionWithMockFleet({
+        mcpToolCallTimeoutMs: MAX_SANE_DURATION_MS,
+      })
+      await session._dispatchMcpTool('mcp__stub__echo', {})
+      assert.equal(captured[0].timeoutMs, MAX_SANE_DURATION_MS,
+        'exact boundary must pass through verbatim')
+    })
   })
 })

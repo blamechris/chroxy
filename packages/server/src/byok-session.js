@@ -20,6 +20,7 @@ import { homedir } from 'os'
 import { BaseSession } from './base-session.js'
 import { PermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 import {
   FALLBACK_MODELS,
   ALLOWED_MODEL_IDS,
@@ -271,8 +272,12 @@ export class ClaudeByokSession extends BaseSession {
     // non-finite / non-positive (NaN, Infinity, 0, -1, strings) falls back
     // to null because setTimeout coerces those to 0 ms and every MCP tool
     // would look broken.
+    // #4517: ceiling check via `isOperatorTimeoutInRange` (same as the three
+    // sibling timeouts in #4509) — defends per-session BYOK assignment
+    // against an over-24h value that would survive session-manager (e.g.
+    // an embedder constructing ClaudeByokSession directly with a typoed opt).
     this._mcpToolCallTimeoutMs =
-      Number.isFinite(opts.mcpToolCallTimeoutMs) && opts.mcpToolCallTimeoutMs > 0
+      isOperatorTimeoutInRange(opts.mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
         ? opts.mcpToolCallTimeoutMs
         : null
   }
