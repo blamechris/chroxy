@@ -18,6 +18,10 @@ import {
   SKILLS_PROMPT_HEADER,
 } from './skills-loader.js'
 import { SkillsTrustStore } from './skills-trust.js'
+import { isOperatorTimeoutInRange } from './duration.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('base-session')
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
@@ -285,8 +289,15 @@ export class BaseSession extends EventEmitter {
     // SessionManager(resultTimeoutMs:…) which itself reads
     // ~/.chroxy/config.json#resultTimeoutMs or
     // CHROXY_RESULT_TIMEOUT_MS.
+    //
+    // #4509: `isOperatorTimeoutInRange` mirrors the ceiling check #4503
+    // added to `ws-history.js sendPostAuthInfo`. BaseSession is the final
+    // destination — it arms the actual setTimeout against this value — so
+    // even when an over-ceiling number sneaks past SessionManager (e.g. a
+    // provider that hand-builds providerOpts) we still clamp it here so the
+    // inactivity-warning path can't effectively never fire.
     this._resultTimeoutMs =
-      Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
+      isOperatorTimeoutInRange(resultTimeoutMs, { name: 'resultTimeoutMs', log })
         ? resultTimeoutMs
         : DEFAULT_RESULT_TIMEOUT_MS
     // #3899: effective HARD-cap timeout in ms. Defaults to 2 hours.
@@ -294,14 +305,14 @@ export class BaseSession extends EventEmitter {
     // / CHROXY_HARD_TIMEOUT_MS. Operators wanting tight kill-on-stuck
     // semantics can drop this; the soft warning fires first regardless.
     this._hardTimeoutMs =
-      Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+      isOperatorTimeoutInRange(hardTimeoutMs, { name: 'hardTimeoutMs', log })
         ? hardTimeoutMs
         : DEFAULT_HARD_TIMEOUT_MS
     // #4467: stream-stall recovery timer. 0 disables the active recovery
-    // path (the soft warning + hard cap still apply). Non-finite or
-    // negative falls back to the default.
+    // path (the soft warning + hard cap still apply). Non-finite, negative,
+    // or above the 24h ceiling falls back to the default.
     this._streamStallTimeoutMs =
-      Number.isFinite(streamStallTimeoutMs) && streamStallTimeoutMs >= 0
+      isOperatorTimeoutInRange(streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
         ? streamStallTimeoutMs
         : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
