@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { MCPFleet, FLEET_KILL_GRACE_MS, parseMcpToolName } from '../src/byok-mcp-fleet.js'
+import { MCPFleet, FLEET_KILL_GRACE_MS, DEFAULT_FLEET_START_CAP_MS, parseMcpToolName } from '../src/byok-mcp-fleet.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -41,19 +41,89 @@ describe('MCPFleet', () => {
 
   it('excludes tools from dead servers', async () => {
     // alpha is healthy, broken always exits — broken should die after 3 attempts
-    // and contribute zero tools. fleet.start() awaits each client's first
-    // stable state, so by the time it returns alpha is READY and broken is
-    // DEAD.
+    // and contribute zero tools. Use a large startCapMs override (#4456) so
+    // fleet.start() waits the full restart budget — keeps this test asserting
+    // the "DEAD by start()" invariant without depending on the new wall-clock
+    // cap (which would return early and leave broken in RESTARTING).
     const fleet = new MCPFleet([
       cfg('alpha'),
       { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
-    ], { log: silentLog() })
+    ], { log: silentLog(), startCapMs: 60_000 })
     await fleet.start()
     assert.equal(fleet.clients[0].state, MCP_STATES.READY)
     assert.equal(fleet.clients[1].state, MCP_STATES.DEAD)
     const names = fleet.tools.map((t) => t.name)
     assert.deepEqual(names, ['mcp__alpha__echo'])
     await fleet.destroy()
+  })
+
+  describe('start() wall-clock cap (#4456)', () => {
+    it('exposes DEFAULT_FLEET_START_CAP_MS as a module export', () => {
+      assert.equal(typeof DEFAULT_FLEET_START_CAP_MS, 'number')
+      assert.ok(DEFAULT_FLEET_START_CAP_MS > 0)
+    })
+
+    it('returns within ~startCapMs even when one server is permanently broken', async () => {
+      // One healthy + one perpetually-failing server. Without the cap,
+      // start() would wait the full ~7s restart budget on the broken one.
+      // With a 300ms cap, we expect start() to return promptly — the broken
+      // server is still in STARTING/RESTARTING (not DEAD).
+      const fleet = new MCPFleet([
+        cfg('alpha'),
+        { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+      ], { log: silentLog(), startCapMs: 300 })
+      const t0 = Date.now()
+      await fleet.start()
+      const elapsed = Date.now() - t0
+      assert.ok(elapsed < 800, `start() took ${elapsed}ms, expected <800ms under 300ms cap`)
+      // alpha should have stabilized inside the cap (handshake ~50-200ms).
+      assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+      // broken should NOT be DEAD yet — the restart loop is still running
+      // in the background. State will be STARTING or RESTARTING.
+      assert.notEqual(fleet.clients[1].state, MCP_STATES.DEAD, 'cap fired before broken server exhausted its restart budget')
+      await fleet.destroy()
+    })
+
+    it('returns immediately on the happy path (no cap-induced latency)', async () => {
+      // All servers healthy — start() should resolve as soon as every
+      // handshake completes, well under the default cap.
+      const fleet = new MCPFleet([cfg('alpha'), cfg('beta')], { log: silentLog() })
+      const t0 = Date.now()
+      await fleet.start()
+      const elapsed = Date.now() - t0
+      // Generous bound — healthy handshakes typically complete in <300ms.
+      assert.ok(elapsed < 1200, `happy-path start() took ${elapsed}ms, expected <1200ms`)
+      assert.equal(fleet.clients[0].state, MCP_STATES.READY)
+      assert.equal(fleet.clients[1].state, MCP_STATES.READY)
+      await fleet.destroy()
+    })
+
+    it('uses DEFAULT_FLEET_START_CAP_MS when no override is supplied', async () => {
+      // The cap default itself bounds the wait — verify the broken-server
+      // worst case stays under the default + a generous margin.
+      const fleet = new MCPFleet([
+        cfg('alpha'),
+        { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+      ], { log: silentLog() })
+      const t0 = Date.now()
+      await fleet.start()
+      const elapsed = Date.now() - t0
+      assert.ok(
+        elapsed < DEFAULT_FLEET_START_CAP_MS + 500,
+        `start() took ${elapsed}ms, expected <${DEFAULT_FLEET_START_CAP_MS + 500}ms under default cap`,
+      )
+      await fleet.destroy()
+    })
+
+    it('bogus startCapMs (NaN, 0, negative) falls back to the default', async () => {
+      // Defensive guard — non-positive setTimeout values would otherwise
+      // coerce to 0 and break the cap entirely.
+      for (const bogus of [NaN, 0, -1, '500', null, undefined]) {
+        const fleet = new MCPFleet([cfg('alpha')], { log: silentLog(), startCapMs: bogus })
+        assert.equal(fleet._startCapMs, DEFAULT_FLEET_START_CAP_MS, `startCapMs=${String(bogus)} should fall back`)
+        await fleet.destroy()
+      }
+    })
   })
 
   it('destroy() returns within FLEET_KILL_GRACE_MS + safety margin even with hung children', async () => {
@@ -242,10 +312,13 @@ describe('MCPFleet', () => {
     })
 
     it('excludes anthropicTools from dead servers', async () => {
+      // Same DEAD-by-start invariant as the earlier "excludes tools from dead
+      // servers" test — bypass the #4456 wall-clock cap with a large override
+      // so the broken server has time to walk through its full restart budget.
       const fleet = new MCPFleet([
         cfg('alpha'),
         { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
-      ], { log: silentLog() })
+      ], { log: silentLog(), startCapMs: 60_000 })
       await fleet.start()
       const names = fleet.anthropicTools.map((t) => t.name)
       assert.deepEqual(names, ['mcp__alpha__echo'])

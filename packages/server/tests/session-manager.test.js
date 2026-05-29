@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
+import { assertForwardingPattern } from './helpers/provider-forwarding.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -3207,95 +3208,15 @@ describe('SessionManager cost-threshold soft warning (#4075)', () => {
 // providerOpts (rather than set to null) so each provider's BaseSession-level
 // default applies. The consumer side (byok-session / base-session) has direct
 // coverage for each knob; these tests close the forwarding-side gap (#4487).
+//
+// The `CapturingProvider` + `captureProviderOpts` + `assertForwardingPattern`
+// trio used here was extracted to `helpers/provider-forwarding.js` (#4511) so
+// future per-knob coverage can be added as one-liners.
 describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
-  // Each captured opts snapshot from a test provider constructor is appended
-  // to this array via the shared helper below.
-  let captured
-
-  // Bare-bones provider that records the providerOpts handed to its
-  // constructor. Mirrors the FailingProvider/TestProvider shapes used
-  // elsewhere in this file so registerProvider's validateProviderClass
-  // contract is satisfied.
-  class CapturingProvider extends EventEmitter {
-    constructor(opts) {
-      super()
-      captured.push(opts)
-      this.cwd = opts.cwd
-      this.model = opts.model || null
-      this.permissionMode = opts.permissionMode || 'approve'
-      this.isRunning = false
-      this.resumeSessionId = null
-    }
-    static get capabilities() { return {} }
-    start() {}
-    destroy() {}
-    interrupt() {}
-    sendMessage() {}
-    setModel() {}
-    setPermissionMode() {}
-  }
-
-  // Register the capturing provider once and reuse it across every assertion.
-  // The provider registry is process-global so re-registering under the same
-  // name is a no-op after the first import.
-  let providerRegistered = false
-  async function ensureProvider() {
-    if (providerRegistered) return
-    const { registerProvider } = await import('../src/providers.js')
-    registerProvider('test-timeout-capture', CapturingProvider)
-    providerRegistered = true
-  }
-
-  beforeEach(() => {
-    captured = []
-  })
-
-  /**
-   * Build a SessionManager with `configKey` set to `configValue`, drive
-   * createSession() through the capturing provider, and return the captured
-   * providerOpts so the caller can assert on a single key. Resets the
-   * shared `captured` buffer per call so back-to-back invocations within
-   * one test (set + null) read clean.
-   */
-  async function captureProviderOpts(configKey, configValue) {
-    await ensureProvider()
-    captured.length = 0
-    const mgr = new SessionManager({
-      skipPreflight: true,
-      maxSessions: 5,
-      stateFilePath: tmpStateFile(),
-      [configKey]: configValue,
-    })
-    mgr.createSession({ cwd: '/tmp', provider: 'test-timeout-capture' })
-    assert.equal(captured.length, 1, 'CapturingProvider should be instantiated exactly once per captureProviderOpts call')
-    return captured[0]
-  }
-
-  /**
-   * Shared helper: assert that `configKey` flows through as
-   * `providerOpts[providerOptsKey]` when configured to a positive value, and
-   * is OMITTED (key absent — not set to null/undefined) when configured to
-   * null. The 4 knobs use identical forwarding semantics, so this collapses
-   * the per-knob noise to a single line each.
-   */
-  async function assertForwardingPattern({ configKey, providerOptsKey, setValue }) {
-    const setOpts = await captureProviderOpts(configKey, setValue)
-    assert.equal(
-      setOpts[providerOptsKey],
-      setValue,
-      `${providerOptsKey} should be forwarded verbatim when ${configKey}=${setValue}`,
-    )
-
-    const nullOpts = await captureProviderOpts(configKey, null)
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(nullOpts, providerOptsKey),
-      false,
-      `${providerOptsKey} should be OMITTED from providerOpts when ${configKey} is null (got ${nullOpts[providerOptsKey]})`,
-    )
-  }
-
   it('forwards resultTimeoutMs when set; omits when null (#3749)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'resultTimeoutMs',
       providerOptsKey: 'resultTimeoutMs',
       setValue: 90_000,
@@ -3304,6 +3225,8 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
 
   it('forwards hardTimeoutMs when set; omits when null (#3899)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'hardTimeoutMs',
       providerOptsKey: 'hardTimeoutMs',
       setValue: 3_600_000,
@@ -3311,15 +3234,26 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
   })
 
   it('forwards streamStallTimeoutMs when set; omits when null (#4467)', async () => {
+    // `extraSetValues: [0]` covers the #4508 edge: streamStallTimeoutMs is the
+    // only one of the four knobs that gates on `>= 0` (vs `> 0` for the
+    // others) — operators can explicitly disable stream-stall recovery by
+    // passing 0, which must flow through providerOpts verbatim and not be
+    // dropped by a `!= null` regression (see session-manager.js:607). The
+    // other three knobs reject 0 per their `> 0` gate so they don't need it.
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'streamStallTimeoutMs',
       providerOptsKey: 'streamStallTimeoutMs',
       setValue: 120_000,
+      extraSetValues: [0],
     })
   })
 
   it('forwards mcpToolCallTimeoutMs when set; omits when null (#4482)', async () => {
     await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
       configKey: 'mcpToolCallTimeoutMs',
       providerOptsKey: 'mcpToolCallTimeoutMs',
       setValue: 45_000,
@@ -3327,14 +3261,15 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
   })
 })
 
-// #4509: SessionManager's three operator-facing inactivity timeouts
-// (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs) are clamped to
-// the shared MAX_SANE_DURATION_MS (24h) ceiling that the protocol schemas
-// apply via `.max(MAX_SANE_DURATION_MS)`. Mirrors the wire-side guard #4503
-// added to `ws-history.js sendPostAuthInfo`. A typoed CHROXY_* env var
-// (extra digit, accidental exponent) is the realistic source of an
-// over-ceiling value; without this guard the operator silently gets a >24h
-// internal inactivity timer instead of the BaseSession default.
+// #4509 + #4517: SessionManager's four operator-facing timeouts
+// (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs /
+// mcpToolCallTimeoutMs) are clamped to the shared MAX_SANE_DURATION_MS (24h)
+// ceiling that the protocol schemas apply via `.max(MAX_SANE_DURATION_MS)`.
+// Mirrors the wire-side guard #4503 added to `ws-history.js sendPostAuthInfo`.
+// A typoed CHROXY_* env var (extra digit, accidental exponent) is the
+// realistic source of an over-ceiling value; without this guard the operator
+// silently gets a >24h internal timer instead of the BaseSession / MCP
+// client default.
 describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', () => {
   const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
 
@@ -3346,6 +3281,10 @@ describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)',
     { configKey: 'resultTimeoutMs', internalField: '_resultTimeoutMs', displayName: 'resultTimeoutMs' },
     { configKey: 'hardTimeoutMs', internalField: '_hardTimeoutMs', displayName: 'hardTimeoutMs' },
     { configKey: 'streamStallTimeoutMs', internalField: '_streamStallTimeoutMs', displayName: 'streamStallTimeoutMs' },
+    // #4517: mcpToolCallTimeoutMs joined the ceiling-clamped family — same
+    // operator-typo class as the other three. The internal `_mcpToolCallTimeoutMs`
+    // slot follows the identical fall-back-to-null contract.
+    { configKey: 'mcpToolCallTimeoutMs', internalField: '_mcpToolCallTimeoutMs', displayName: 'mcpToolCallTimeoutMs' },
   ]
 
   afterEach(() => {

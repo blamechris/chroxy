@@ -179,7 +179,15 @@ export interface ShortcutRegistry {
   getBinding(id: string): string
   /** Get a single entry with its effective binding. Returns null if unknown. */
   get(id: string): ShortcutListEntry | null
-  /** Persist a new binding for a shortcut. Throws on scope conflict. */
+  /**
+   * Persist a new binding for a shortcut. Throws on scope conflict.
+   *
+   * Defers to `findConflict` for the collision check, so the same
+   * `enabled()`-aware semantics apply: if `id` itself is currently
+   * runtime-disabled, no conflict can be raised (its combo cannot
+   * fire), and conflicts against other disabled defs are likewise
+   * suppressed. The new binding is still persisted in either case.
+   */
   setBinding(id: string, binding: string): void
   /** Remove the override, restoring the default. */
   resetBinding(id: string): void
@@ -188,6 +196,13 @@ export interface ShortcutRegistry {
   /**
    * Return the shortcut id (if any) that would collide if `id` was
    * bound to `binding`. Null = no conflict.
+   *
+   * Defs whose `enabled()` predicate returns false are skipped during
+   * the scan — they cannot fire at runtime so they cannot collide.
+   * This applies symmetrically to the target (`id`) and to every
+   * other def in scope (#4431, #4442). Two mutually-exclusive
+   * environment gates (e.g. a Tauri-only and a browser-only binding)
+   * can therefore share a combo without a false-positive conflict.
    */
   findConflict(id: string, binding: string): ShortcutListEntry | null
   /**

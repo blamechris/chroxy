@@ -256,6 +256,38 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('#4449: mcpConfigPath is the canonical MCP-config opt; the dead claudeConfigPath alias is ignored', async () => {
+      // The pre-#4449 constructor honored either `opts.mcpConfigPath`
+      // OR `opts.claudeConfigPath` for historical reasons, but every
+      // caller — production and test — only ever set `mcpConfigPath`.
+      // After #4449 only `mcpConfigPath` is read. Passing the dead
+      // alias must not silently load a config, otherwise downstream
+      // callers could come to depend on it and re-create the
+      // two-names-for-one-thing surface.
+      //
+      // We write to a non-default filename (`mcp-custom.json`) so the
+      // default-path fallback (`$HOME/.claude.json` — which is
+      // `tmpHome/.claude.json` for this test thanks to the `HOME`
+      // override in beforeEach) doesn't accidentally satisfy the
+      // ignored alias path and mask the regression.
+      const configPath = join(tmpHome, 'mcp-custom.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          ghost: { command: 'node', args: ['server.js'], env: {} },
+        },
+      }))
+      // mcpConfigPath honored — the canonical path.
+      const honored = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      assert.equal(honored._mcpServerConfigs.length, 1)
+      assert.equal(honored._mcpServerConfigs[0].name, 'ghost')
+
+      // claudeConfigPath alone is ignored — falls back to the default
+      // location (which doesn't exist in this isolated tmpHome).
+      const ignored = new ClaudeByokSession({ cwd: '/tmp', claudeConfigPath: configPath })
+      assert.deepEqual(ignored._mcpServerConfigs, [],
+        'claudeConfigPath must not be read; mcpConfigPath is the only knob')
+    })
+
     it('#4077: lazy-spawns an MCPFleet for configured servers and reaches READY before emitting ready', async () => {
       preTrustStub()
       const configPath = join(tmpHome, '.claude.json')
@@ -379,6 +411,45 @@ describe('ClaudeByokSession', () => {
       const stored = JSON.parse(fs.readFileSync(process.env.CHROXY_MCP_TRUST_PATH, 'utf8'))
       assert.equal(stored.trustedTuples.length, 1)
       assert.equal(stored.trustedTuples[0].name, 'stub')
+      await session.destroy()
+    })
+
+    it('#4456: session-ready emits within the cap even when one MCP server is permanently broken', async () => {
+      preTrustStub()
+      // Pre-trust the broken server too so the trust prompt doesn't sit in
+      // the way — we're isolating the start-cap behavior, not the trust gate.
+      recordTrust(
+        { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+        process.env.CHROXY_MCP_TRUST_PATH,
+      )
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: {} },
+          broken: { command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+        },
+      }))
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: configPath,
+        mcpStartCapMs: 400,
+      })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      const t0 = Date.now()
+      let readyAt = null
+      session.on('ready', () => { readyAt = Date.now() })
+      await session.start()
+      const elapsed = (readyAt ?? Date.now()) - t0
+      // Under the cap the session emits ready promptly; without it, start()
+      // would block ~7s for the broken server's full restart budget.
+      assert.ok(elapsed < 1000, `session 'ready' fired at ${elapsed}ms, expected <1000ms under 400ms cap`)
+      assert.equal(session._mcpFleet.clients.find((c) => c.name === 'stub').state, MCP_STATES.READY)
+      // Broken still in mid-restart loop, not DEAD yet.
+      assert.notEqual(
+        session._mcpFleet.clients.find((c) => c.name === 'broken').state,
+        MCP_STATES.DEAD,
+        'cap should fire before broken server exhausts its restart budget',
+      )
       await session.destroy()
     })
 
@@ -3336,6 +3407,35 @@ describe('ClaudeByokSession', () => {
         await session._dispatchMcpTool('mcp__stub__echo', {})
         assert.equal(captured[0].timeoutMs, undefined, `bad input ${String(bad)} must fall back`)
       }
+    })
+
+    it('clamps mcpToolCallTimeoutMs above MAX_SANE_DURATION_MS back to undefined (#4517)', async () => {
+      // #4517: a typoed CHROXY_MCP_TOOL_CALL_TIMEOUT_MS (extra digit,
+      // accidental exponent) must NOT arm a >24h MCP setTimeout. Mirrors
+      // the ceiling check the three sibling timeouts got via #4509 —
+      // byok-session uses `isOperatorTimeoutInRange` so the over-ceiling
+      // value falls back to the fleet/client default exactly like the
+      // bad-input cases above.
+      const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+      const { session, captured } = buildSessionWithMockFleet({
+        mcpToolCallTimeoutMs: MAX_SANE_DURATION_MS + 1,
+      })
+      await session._dispatchMcpTool('mcp__stub__echo', {})
+      assert.equal(captured[0].timeoutMs, undefined,
+        'over-ceiling input must fall back to fleet/client default')
+    })
+
+    it('accepts the exact MAX_SANE_DURATION_MS boundary (#4517)', async () => {
+      // The boundary is INCLUSIVE — clamping it would surprise operators who
+      // tuned the dial to exactly 24h (unlikely for a per-call MCP timeout,
+      // but consistency with the soft/hard inactivity timeouts matters).
+      const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+      const { session, captured } = buildSessionWithMockFleet({
+        mcpToolCallTimeoutMs: MAX_SANE_DURATION_MS,
+      })
+      await session._dispatchMcpTool('mcp__stub__echo', {})
+      assert.equal(captured[0].timeoutMs, MAX_SANE_DURATION_MS,
+        'exact boundary must pass through verbatim')
     })
   })
 })

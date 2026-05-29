@@ -218,6 +218,12 @@ export class SessionManager extends EventEmitter {
     // byok-session, which threads it into MCPFleet.callTool. null = use
     // byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS (30s).
     mcpToolCallTimeoutMs,
+    // #4456: wall-clock cap on MCPFleet.start() (ms). Forwarded via
+    // providerOpts to byok-session, which threads it into the MCPFleet
+    // constructor. null = use byok-mcp-fleet's DEFAULT_FLEET_START_CAP_MS
+    // (1500ms). Bounds the worst-case session-start latency on a broken
+    // MCP config — see byok-mcp-fleet.MCPFleet.start() for the trade-off.
+    mcpStartCapMs,
 
     // State persistence
     stateFilePath,
@@ -286,9 +292,20 @@ export class SessionManager extends EventEmitter {
     // valid disable here — a 0-ms callTool timeout fires immediately. Only
     // positive finite values are accepted; null falls through to byok-mcp-
     // client's 30s default.
+    // #4517: ceiling check via `isOperatorTimeoutInRange` (same as the three
+    // sibling timeouts in #4509) — a typoed CHROXY_MCP_TOOL_CALL_TIMEOUT_MS
+    // (extra digit / accidental exponent) falls back to null and warns.
     this._mcpToolCallTimeoutMs =
-      Number.isFinite(mcpToolCallTimeoutMs) && mcpToolCallTimeoutMs > 0
+      isOperatorTimeoutInRange(mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
         ? mcpToolCallTimeoutMs
+        : null
+    // #4456: same defensive shape as mcpToolCallTimeoutMs — only positive
+    // finite values are forwarded; bogus values fall back to the fleet's
+    // default cap. 0 is rejected (a 0 ms cap would fire before any
+    // handshake could complete).
+    this._mcpStartCapMs =
+      Number.isFinite(mcpStartCapMs) && mcpStartCapMs > 0
+        ? mcpStartCapMs
         : null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
     // #4075: per-session crossing threshold. Stored as a runtime-mutable
@@ -606,6 +623,7 @@ export class SessionManager extends EventEmitter {
     if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs
     if (this._streamStallTimeoutMs != null) providerOpts.streamStallTimeoutMs = this._streamStallTimeoutMs
     if (this._mcpToolCallTimeoutMs != null) providerOpts.mcpToolCallTimeoutMs = this._mcpToolCallTimeoutMs
+    if (this._mcpStartCapMs != null) providerOpts.mcpStartCapMs = this._mcpStartCapMs
     // Skills size budgets — pass through if configured. BaseSession forwards
     // these to loadActiveSkillsLayered. (#3202)
     if (this._maxSkillBytes !== null) providerOpts.maxSkillBytes = this._maxSkillBytes
