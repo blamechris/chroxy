@@ -59,6 +59,9 @@ vi.mock('./components/StdinDisabledBanner', () => ({
 }))
 
 import { App } from './App'
+import { createShortcutRegistry } from './shortcuts/registry'
+import { DEFAULT_SHORTCUTS } from './shortcuts/defaults'
+import { __setSharedRegistryForTesting } from './shortcuts/useShortcutRegistry'
 
 // Mutable state override — tests can change this before rendering
 let stateOverrides: Record<string, unknown> = {}
@@ -148,6 +151,11 @@ vi.mock('zustand/react/shallow', () => ({
 beforeEach(() => {
   stateOverrides = {}
   capturedOnRestart = null
+  // #4432 — reset the shared shortcut registry so per-test rebinds
+  // don't bleed between cases. The registry persists overrides to
+  // localStorage; clearing the key keeps loadOverrides() returning {}.
+  try { localStorage.removeItem('chroxy_persist_shortcut_overrides_v1') } catch { /* jsdom always provides localStorage */ }
+  __setSharedRegistryForTesting(createShortcutRegistry(DEFAULT_SHORTCUTS))
 })
 
 afterEach(cleanup)
@@ -225,6 +233,62 @@ describe('App', () => {
     expect(screen.getByText('Ctrl+Shift+D')).toBeInTheDocument()
     expect(screen.queryByText('Cmd+K')).not.toBeInTheDocument()
     expect(screen.queryByText('Cmd+Enter')).not.toBeInTheDocument()
+  })
+
+  // #4432 — the cheat sheet's tab-switch row used to be derived from
+  // session.switch.1's binding alone, then string-replaced "1$" with
+  // "1-9". When the other eight bindings still pointed at their
+  // defaults, a rebind of just session.switch.1 to "Cmd+Q" produced a
+  // misleading "Ctrl+Q-9" / "Cmd+Q-9" row that didn't describe any
+  // real binding. The fix detects divergence and falls back to nine
+  // individual rows when the bindings aren't aligned.
+  describe('cheat sheet tab-switch divergence (#4432)', () => {
+    it('renders a single collapsed Ctrl+1-9 row when all nine bindings are at their defaults', () => {
+      render(<App />)
+      fireEvent.keyDown(window, { key: '?' })
+
+      // Default case: single collapsed row, no per-digit rows.
+      expect(screen.getByText('Ctrl+1-9')).toBeInTheDocument()
+      expect(screen.getByText('Switch to tab by number')).toBeInTheDocument()
+      // None of the individual per-digit labels or descriptions
+      // should appear — they're folded into the collapsed row.
+      expect(screen.queryByText('Ctrl+1')).not.toBeInTheDocument()
+      expect(screen.queryByText('Ctrl+2')).not.toBeInTheDocument()
+      expect(screen.queryByText('Ctrl+9')).not.toBeInTheDocument()
+      expect(screen.queryByText('Switch to tab 1')).not.toBeInTheDocument()
+      expect(screen.queryByText('Switch to tab 9')).not.toBeInTheDocument()
+    })
+
+    it('splits into nine individual rows when only session.switch.1 is rebound to Cmd+Q', () => {
+      // Install a fresh registry, then rebind session.switch.1 to
+      // something that diverges from the digit pattern. The other
+      // eight entries stay at their cmd+N defaults, so the cheat
+      // sheet must NOT collapse into a single misleading row.
+      const registry = createShortcutRegistry(DEFAULT_SHORTCUTS)
+      registry.setBinding('session.switch.1', 'cmd+q')
+      __setSharedRegistryForTesting(registry)
+
+      render(<App />)
+      fireEvent.keyDown(window, { key: '?' })
+
+      // No collapsed row — the misleading "Ctrl+Q-9" label must NOT
+      // appear, and neither should "Switch to tab by number".
+      expect(screen.queryByText('Ctrl+Q-9')).not.toBeInTheDocument()
+      expect(screen.queryByText('Switch to tab by number')).not.toBeInTheDocument()
+      // Also guard against the original buggy "Ctrl+1-9" label
+      // appearing alongside a rebound entry 1.
+      expect(screen.queryByText('Ctrl+1-9')).not.toBeInTheDocument()
+
+      // The nine entries each render with their own keys and
+      // description. Entry 1 reflects the rebind; 2..9 reflect the
+      // defaults.
+      expect(screen.getByText('Ctrl+Q')).toBeInTheDocument()
+      expect(screen.getByText('Switch to tab 1')).toBeInTheDocument()
+      for (let n = 2; n <= 9; n += 1) {
+        expect(screen.getByText(`Ctrl+${n}`)).toBeInTheDocument()
+        expect(screen.getByText(`Switch to tab ${n}`)).toBeInTheDocument()
+      }
+    })
   })
 
   it('does not open shortcut help when ? is typed in an input', () => {

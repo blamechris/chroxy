@@ -60,7 +60,7 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
-import { formatBindingForDisplay } from './shortcuts/registry'
+import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
 import { readClipboardImage } from './utils/clipboard-image'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
@@ -1551,22 +1551,66 @@ export function App() {
     // sheet without adding signal. Emit a single "Cmd+1-9" row whose
     // keys reflect the registry's current first-digit binding so a
     // rebind (e.g. moving them to Alt+1-9) is still visible.
-    const tabSwitch1 = shortcutRegistry.get('session.switch.1')
+    //
+    // #4432 — only collapse when all nine bindings share the same
+    // modifier set AND each `session.switch.N` has key `N`. If any
+    // entry diverges (e.g. user rebinds only session.switch.1 to
+    // Cmd+Q) the cheat sheet would otherwise show a misleading
+    // "Cmd+Q-9" label, so we fall back to nine individual rows.
+    const tabSwitchEntries = Array.from({ length: 9 }, (_, i) =>
+      shortcutRegistry.get(`session.switch.${i + 1}`),
+    )
+    const tabSwitchAligned = (() => {
+      const first = tabSwitchEntries[0]
+      if (!first) return false
+      const firstParsed = parseBinding(first.binding)
+      if (firstParsed.key !== '1') return false
+      for (let i = 0; i < tabSwitchEntries.length; i += 1) {
+        const entry = tabSwitchEntries[i]
+        if (!entry) return false
+        const parsed = parseBinding(entry.binding)
+        if (parsed.key !== String(i + 1)) return false
+        if (
+          parsed.meta !== firstParsed.meta ||
+          parsed.shift !== firstParsed.shift ||
+          parsed.alt !== firstParsed.alt
+        ) return false
+      }
+      return true
+    })()
+    const tabSwitch1 = tabSwitchEntries[0]
     const tabSwitchKeys = tabSwitch1
       ? formatBindingForDisplay(tabSwitch1.binding, isMacForCheatsheet).replace(/1$/, '1-9')
       : 'Cmd+1-9'
     const registryRows: ShortcutEntry[] = []
     for (const entry of shortcutRegistry.list()) {
-      // Skip the 2..9 tab-switch entries — collapsed into one row
-      // below. Keep session.switch.1 as the canonical source so its
-      // override drives the collapsed row's display string.
-      if (/^session\.switch\.[2-9]$/.test(entry.id)) continue
-      if (entry.id === 'session.switch.1') {
+      // When aligned: skip the 2..9 tab-switch entries — they're
+      // collapsed into one row driven by session.switch.1 below.
+      // When diverged: render all nine individually so each rebind is
+      // visible.
+      if (/^session\.switch\.[2-9]$/.test(entry.id)) {
+        if (tabSwitchAligned) continue
         registryRows.push({
-          keys: tabSwitchKeys,
-          description: 'Switch to tab by number',
+          keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
+          description: entry.description,
           section: CATEGORY_TO_SECTION[entry.category] || 'Global',
         })
+        continue
+      }
+      if (entry.id === 'session.switch.1') {
+        if (tabSwitchAligned) {
+          registryRows.push({
+            keys: tabSwitchKeys,
+            description: 'Switch to tab by number',
+            section: CATEGORY_TO_SECTION[entry.category] || 'Global',
+          })
+        } else {
+          registryRows.push({
+            keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
+            description: entry.description,
+            section: CATEGORY_TO_SECTION[entry.category] || 'Global',
+          })
+        }
         continue
       }
       registryRows.push({
