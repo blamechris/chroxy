@@ -256,6 +256,91 @@ describe('CliSession.interrupt', () => {
   })
 })
 
+describe('CliSession._handleChildClose (interrupt-recovery)', () => {
+  it('emits stream_end + result + error in order when interrupted mid-turn, so dashboard clears Stop button', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_42'
+    session._currentCtx = { hasStreamStarted: true }
+    session._sessionId = 'sess_abc'
+
+    const events = []
+    session.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+    session.on('result', (p) => events.push({ name: 'result', payload: p }))
+    session.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+    session._handleChildClose(130)
+
+    // Cleanup respawn timer scheduled by _handleChildClose
+    clearTimeout(session._respawnTimer)
+    session._respawnTimer = null
+
+    assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result', 'error'])
+    assert.equal(events[0].payload.messageId, 'msg_42')
+    // The `result` emit is the load-bearing change: event-normalizer fans it
+    // out to `agent_idle`, which is what the dashboard listens for to clear
+    // `streamingMessageId` / `isIdle`. Without it, Stop stays visible and
+    // "Thinking…" never goes away.
+    assert.equal(events[1].payload.sessionId, 'sess_abc')
+    assert.equal(events[1].payload.cost, null, 'cost: null skips session-manager cost accounting')
+    assert.equal(events[1].payload.usage, null)
+    assert.match(events[2].payload.message, /exited unexpectedly/)
+  })
+
+  it('does NOT emit result when not busy (no turn to terminate)', () => {
+    const session = createReadySession()
+    session._isBusy = false
+
+    const events = []
+    session.on('stream_end', () => events.push('stream_end'))
+    session.on('result', () => events.push('result'))
+    session.on('error', () => events.push('error'))
+
+    session._handleChildClose(0)
+    clearTimeout(session._respawnTimer)
+    session._respawnTimer = null
+
+    assert.deepEqual(events, ['error'], 'only the supervisor-restart error fires when no turn is in flight')
+  })
+
+  it('does NOT emit stream_end if the stream had not started yet (tool ran before any text)', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_x'
+    session._currentCtx = { hasStreamStarted: false }
+    session._sessionId = 'sess_x'
+
+    const events = []
+    session.on('stream_end', () => events.push('stream_end'))
+    session.on('result', () => events.push('result'))
+    session.on('error', () => events.push('error'))
+
+    session._handleChildClose(0)
+    clearTimeout(session._respawnTimer)
+    session._respawnTimer = null
+
+    // Still emits result — that's the key — so the dashboard's Stop clears
+    // even when the stream never started.
+    assert.deepEqual(events, ['result', 'error'])
+  })
+
+  it('skips all emits when _destroying (session being torn down — no respawn, no result)', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg_x'
+    session._destroying = true
+
+    const events = []
+    session.on('stream_end', () => events.push('stream_end'))
+    session.on('result', () => events.push('result'))
+    session.on('error', () => events.push('error'))
+
+    session._handleChildClose(0)
+
+    assert.deepEqual(events, [], 'destroy path is silent — caller owns the teardown UX')
+  })
+})
+
 describe('CliSession.destroy', () => {
   it('sets destroying flag and nulls child', () => {
     const session = createReadySession()

@@ -308,26 +308,7 @@ export class CliSession extends BaseSession {
       this._scheduleRespawn()
     })
 
-    child.on('close', (code) => {
-      this._cleanupReadlines()
-      this._processReady = false
-      this._child = null
-
-      if (this._destroying) return
-      if (this._respawning) return
-
-      // Safety net: if we were mid-message, close the stream
-      if (this._isBusy && this._currentMessageId) {
-        if (this._currentCtx?.hasStreamStarted) {
-          this.emit('stream_end', { messageId: this._currentMessageId })
-        }
-        this._clearMessageState()
-      }
-
-      log.info(`Process exited (code ${code}), scheduling respawn`)
-      this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
-      this._scheduleRespawn()
-    })
+    child.on('close', (code) => this._handleChildClose(code))
 
     // stdin is writable immediately — process is ready for NDJSON messages.
     // system.init arrives with the first response, not at startup.
@@ -1067,6 +1048,33 @@ export class CliSession extends BaseSession {
     } catch (err) {
       log.error(`stdin.write failed (respondToQuestion): ${err.message}`)
     }
+  }
+
+  // `result` emit is load-bearing: event-normalizer fans it to `agent_idle`,
+  // which clears the dashboard's streamingMessageId/isIdle. Without it, an
+  // interrupted CLI turn leaves Stop stuck visible and "Thinking…" permanent.
+  // Mirrors TUI #4010 (claude-tui-session.js:1328). cost:null skips billing.
+  _handleChildClose(code) {
+    this._cleanupReadlines()
+    this._processReady = false
+    this._child = null
+
+    if (this._destroying) return
+    if (this._respawning) return
+
+    if (this._isBusy && this._currentMessageId) {
+      const messageId = this._currentMessageId
+      const sessionId = this._sessionId
+      if (this._currentCtx?.hasStreamStarted) {
+        this.emit('stream_end', { messageId })
+      }
+      this._clearMessageState()
+      this.emit('result', { cost: null, duration: 0, usage: null, sessionId })
+    }
+
+    log.info(`Process exited (code ${code}), scheduling respawn`)
+    this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
+    this._scheduleRespawn()
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
