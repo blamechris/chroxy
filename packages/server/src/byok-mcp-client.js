@@ -192,10 +192,28 @@ export class MCPClient extends EventEmitter {
         this._log.warn(`MCP server ${this.name}: non-JSON line: ${line.slice(0, 80)}`)
         continue
       }
-      if (msg.id != null && this._pending.has(msg.id)) {
+      if (msg.id == null) {
+        // Notification from the server (per JSON-RPC spec: `id` is required
+        // on responses, absent on notifications). Ignored silently — they
+        // are a normal part of the protocol (e.g. `notifications/cancelled`,
+        // server-initiated progress events) and would only add log noise.
+        continue
+      }
+      if (this._pending.has(msg.id)) {
         const settle = this._pending.get(msg.id)
         if (msg.error) settle(new Error(msg.error.message || 'MCP RPC error'))
         else settle(null, msg.result)
+      } else {
+        // #4455: orphan response — server emitted a response with an id we
+        // never sent (or one we already settled). Could be a buggy server
+        // emitting a stale id after restart, a state-machine bug on the
+        // server side, or a duplicate. Not necessarily an error (don't
+        // warn); but without a log we'd have no audit trail when debugging
+        // "why doesn't my MCP tool respond". Capture the unmatched id and
+        // a small shape marker so future investigation has something to
+        // grep for.
+        const shape = msg.error ? 'error' : 'result'
+        this._log.debug(`MCP server ${this.name}: orphan JSON-RPC response id=${msg.id} shape=${shape}`)
       }
     }
   }
