@@ -372,7 +372,11 @@ export class ClaudeByokSession extends BaseSession {
               model: this.model || 'claude-opus-4-7',
               max_tokens: DEFAULT_MAX_TOKENS,
               ...(systemPrompt ? { system: systemPrompt } : {}),
-              tools: BUILTIN_TOOLS,
+              // #4078: merge BUILTIN_TOOLS with live MCP tools at turn time.
+              // fleet.anthropicTools filters DEAD servers, so a crashed-then-
+              // restart-exhausted MCP server cleanly disappears from the next
+              // turn without anything to invalidate.
+              tools: this._buildTools(),
               messages: this._history,
             },
             { signal: this._abortController.signal },
@@ -1013,6 +1017,18 @@ export class ClaudeByokSession extends BaseSession {
     if (!super.setPermissionMode(mode)) return
     // PR 1 has no permission gating, so this is purely persisted state
     // for PR 2 to consume.
+  }
+
+  // #4078: assemble the per-turn tools array. BUILTIN_TOOLS first
+  // (Read/Write/Edit/Bash/Glob/Grep) then any live MCP tools surfaced by
+  // the fleet, namespaced as mcp__<server>__<tool>. Re-evaluated every
+  // turn rather than cached because the cost is trivial and the fleet's
+  // READY-state filter is the source of truth for which servers are
+  // contributing right now.
+  _buildTools() {
+    if (!this._mcpFleet) return BUILTIN_TOOLS
+    const mcp = this._mcpFleet.anthropicTools
+    return mcp.length === 0 ? BUILTIN_TOOLS : [...BUILTIN_TOOLS, ...mcp]
   }
 
   async destroy() {

@@ -250,6 +250,65 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('#4078: messages.stream receives BUILTIN_TOOLS + MCP tools merged for the turn', async () => {
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: { MCP_STUB_TOOLS: JSON.stringify([
+            { name: 'one', description: 'first', inputSchema: { type: 'object' } },
+            { name: 'two', description: 'second', inputSchema: { type: 'object' } },
+          ]) } },
+        },
+      }))
+      const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      let capturedTools = null
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            capturedTools = tools
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('hello')
+      assert.ok(capturedTools, 'tools must be captured from stream call')
+      const builtinCount = capturedTools.filter((t) => !t.name.startsWith('mcp__')).length
+      const mcpTools = capturedTools.filter((t) => t.name.startsWith('mcp__'))
+      assert.ok(builtinCount >= 1, `expected at least 1 builtin tool, got ${builtinCount}`)
+      assert.deepEqual(mcpTools.map((t) => t.name).sort(), ['mcp__stub__one', 'mcp__stub__two'])
+      for (const mcp of mcpTools) {
+        assert.ok(mcp.input_schema, 'MCP tool must carry input_schema (renamed from inputSchema)')
+        assert.equal(mcp.inputSchema, undefined, 'inputSchema rename complete')
+        assert.equal(mcp._mcpServer, undefined, 'internal markers stripped before API')
+      }
+      await session.destroy()
+    })
+
+    it('#4078: messages.stream receives only BUILTIN_TOOLS when no MCP servers configured', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      let capturedTools = null
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            capturedTools = tools
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('hello')
+      assert.ok(capturedTools)
+      assert.ok(capturedTools.every((t) => !t.name.startsWith('mcp__')), 'no MCP tools when fleet is null')
+      await session.destroy()
+    })
+
     it('#4077: destroy() kills MCP children and clears the fleet reference', async () => {
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({
