@@ -16,8 +16,9 @@ import { FormattedResponse } from '../MarkdownRenderer';
 import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permissionStyles } from '../PermissionDetail';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
+import { StreamStallChip } from '../StreamStallChip';
 
-export function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress }: {
+export function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
   message: ChatMessage;
   onSelectOption?: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
   isSelected: boolean;
@@ -26,6 +27,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   onPress: () => void;
   onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => void;
   onImagePress?: (uri: string) => void;
+  /**
+   * #4496: retry handler for stream-stall error chips. ChatView wires
+   * this only when the stall IS the tail message (mirrors the dashboard's
+   * `isTail` gate) — historical replayed stalls receive `undefined` so
+   * the chip renders text only without a misleading Retry affordance.
+   */
+  onRetryStreamStall?: () => void;
 }) {
   const longPressedRef = useRef(false);
   const [isExpired, setIsExpired] = useState(() =>
@@ -105,6 +113,23 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
         isSelecting={isSelecting}
         onToggleSelection={onPress}
         onOpenDetail={onOpenDetail}
+      />
+    );
+  }
+
+  // #4496: distinct chip for stream-stall errors (server PR #4475 emits
+  // `error{code: 'stream_stall'}` after the configured inactivity window).
+  // Generic red bubble reads as "broken"; this affordance signals
+  // "recoverable, just retry". `onRetryStreamStall` is only wired by
+  // ChatView when this stall is the tail message — historical replayed
+  // stalls render the chip text with the raw error reachable on
+  // long-press, but no retry button (resending an ancient user_input
+  // from a long-finished turn would be misleading).
+  if (isError && message.code === 'stream_stall') {
+    return (
+      <StreamStallChip
+        errorText={message.content?.trim() || ''}
+        onRetry={onRetryStreamStall}
       />
     );
   }
