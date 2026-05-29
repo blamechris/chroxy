@@ -12,10 +12,29 @@
  */
 
 import { MCPClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
-import { loadTrustStore, recordTrust, isTrusted } from './byok-mcp-trust.js'
+import {
+  loadTrustStore,
+  recordTrust,
+  isTrusted,
+  withTrustStoreLock,
+  defaultTrustStorePath,
+} from './byok-mcp-trust.js'
 import { MCP_PREFIX, parseMcpToolName } from './mcp-tools.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
+
+// #4456: wall-clock cap on fleet.start() to bound the worst-case session-
+// start latency on a misconfigured MCP server. The fleet awaits each
+// client's first stable state (READY or DEAD); with the post-#4453 1/2/4s
+// restart backoff a single broken server adds up to ~7s to session-start.
+// At the cap, clients still in STARTING/RESTARTING contribute zero tools
+// to the first turn but remain alive and will surface on subsequent turns
+// (the fleet re-queries .tools per turn, so a late-arriving client lands
+// naturally). 1500 ms is enough for a fast happy path (the common case
+// completes in ~50–200 ms) without making the user feel the bad-config
+// tax. Operators can override via the `startCapMs` constructor opt.
+export const DEFAULT_FLEET_START_CAP_MS = 1500
+
 // #4451: re-export under the legacy name from this module so existing
 // callers (byok-session, tests) keep working. Canonical source is
 // mcp-tools.js to prevent silent parser drift.
@@ -40,20 +59,45 @@ export class MCPFleet {
     // (session passes its _permissions in) is wired in byok-session.
     const permissionManager = opts.permissionManager || null
     const trustStorePath = opts.trustStorePath  // tests override; undefined falls through to default
+    // #4460: resolve the path eagerly so the per-path async mutex below
+    // can key on a stable value (withTrustStoreLock uses the path as the
+    // map key). Without this, undefined paths would all share a single
+    // chain — fine for the real default case but bug-magnet if any test
+    // ever called the constructor without setting trustStorePath.
+    const resolvedTrustPath = trustStorePath || defaultTrustStorePath()
+    // #4456: per-fleet wall-clock cap on start(). Same defensive guard
+    // pattern as resultTimeoutMs in byok-session: non-finite / non-positive
+    // values fall back to the module default. Setting opts.startCapMs to
+    // Infinity (legacy behavior — wait for full convergence) requires
+    // explicitly opting in below.
+    this._startCapMs =
+      Number.isFinite(opts.startCapMs) && opts.startCapMs > 0
+        ? opts.startCapMs
+        : DEFAULT_FLEET_START_CAP_MS
     this._clients = configs.map((cfg) => {
       const clientOpts = { ...opts }
       if (permissionManager) {
         clientOpts.trustGate = async () => {
-          const store = loadTrustStore(trustStorePath, { log: opts.log })
-          if (isTrusted(store, cfg)) return true
-          const allowed = await permissionManager.requestMcpTrust({
-            name: cfg.name,
-            command: cfg.command,
-            args: cfg.args,
-            envKeys: Object.keys(cfg.env || {}).sort(),
+          // #4460: serialise the load→prompt→recordTrust sequence across
+          // all fleet clients that share this trust-store path. Without
+          // the lock, two concurrent gates can both observe an empty
+          // store, both prompt, both call recordTrust — and the last
+          // writer's snapshot (read at step 1, missing the other's
+          // entry) clobbers the first allow. The lock also surfaces
+          // prompts one at a time, which the dashboard / mobile UI
+          // already assumes (one modal at a time).
+          return withTrustStoreLock(resolvedTrustPath, async () => {
+            const store = loadTrustStore(resolvedTrustPath, { log: opts.log })
+            if (isTrusted(store, cfg)) return true
+            const allowed = await permissionManager.requestMcpTrust({
+              name: cfg.name,
+              command: cfg.command,
+              args: cfg.args,
+              envKeys: Object.keys(cfg.env || {}).sort(),
+            })
+            if (allowed) recordTrust(cfg, resolvedTrustPath)
+            return allowed
           })
-          if (allowed) recordTrust(cfg, trustStorePath)
-          return allowed
         }
       }
       return new MCPClient(cfg, clientOpts)
@@ -62,8 +106,46 @@ export class MCPFleet {
 
   get clients() { return this._clients }
 
+  /**
+   * Spawn every client and resolve when either (a) every client has reached
+   * a stable state (READY or DEAD), or (b) the wall-clock cap fires —
+   * whichever is first (#4456).
+   *
+   * Trade-off: a session with one broken MCP server (e.g. command-not-found
+   * from a deleted binary) used to wait the FULL ~7s restart budget on
+   * session start. With the cap, the user gets a ready session in ≤
+   * `startCapMs` ms even on broken configs; clients still in STARTING /
+   * RESTARTING at the cap contribute zero tools to the first turn but get
+   * picked up automatically on the next turn (byok-session re-queries
+   * `fleet.tools` per turn). A transiently-flaky server that would have
+   * recovered on attempt 2 also loses its first-turn contribution under
+   * the cap — that's the cost of bounding the worst case.
+   *
+   * The per-client `start()` promises are *not* dropped at the cap — they
+   * continue running in the background and update `client.state` as they
+   * settle. We just stop *awaiting* them so the caller can move on.
+   */
   async start() {
-    await Promise.all(this._clients.map((c) => c.start().catch(() => {})))
+    const startPromises = this._clients.map((c) => c.start().catch(() => {}))
+    if (!Number.isFinite(this._startCapMs) || this._startCapMs <= 0) {
+      // Defensive — should be unreachable given the constructor guard, but
+      // an explicit Infinity opt-in would land here and we just wait.
+      await Promise.all(startPromises)
+      return
+    }
+    let capTimer = null
+    const capPromise = new Promise((resolve) => {
+      capTimer = setTimeout(resolve, this._startCapMs)
+      // Don't keep the event loop alive solely for this timer — if every
+      // client settles before the cap, the timer's still pending and would
+      // otherwise hold the process open.
+      if (typeof capTimer.unref === 'function') capTimer.unref()
+    })
+    try {
+      await Promise.race([Promise.all(startPromises), capPromise])
+    } finally {
+      if (capTimer) clearTimeout(capTimer)
+    }
   }
 
   get tools() {

@@ -485,6 +485,43 @@ describe('ActivityIndicator — popover dismiss paths (#4427)', () => {
     expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
   })
 
+  it('restores focus to the disclosure button when Escape dismisses the popover (#4445)', () => {
+    // WAI-ARIA APG: a disclosure-triggered dialog dismissed via Escape
+    // should return focus to the invoker so keyboard users don't get
+    // parked on document.body and lose their place in the tab order.
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    const disclosure = screen.getByTestId('activity-indicator-disclosure')
+    fireEvent.click(disclosure)
+    expect(screen.getByTestId('activity-indicator-popover')).toBeTruthy()
+    // Move focus into the popover to simulate a keyboard user who has
+    // tabbed into the dialog. The Escape dismiss must yank focus back
+    // to the disclosure regardless of which element currently holds it.
+    const popover = screen.getByTestId('activity-indicator-popover')
+    ;(popover as HTMLElement).focus()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
+    expect(document.activeElement).toBe(disclosure)
+  })
+
+  it('does NOT restore focus to the disclosure button on outside-click dismiss (#4445)', () => {
+    // Outside-click dismiss intentionally leaves focus where the user
+    // clicked — stealing it back would fight their pointer intent. Only
+    // the keyboard-only Escape path restores focus per APG guidance.
+    seedTwoPendingShells()
+    render(<ActivityIndicator />)
+    const disclosure = screen.getByTestId('activity-indicator-disclosure')
+    fireEvent.click(disclosure)
+    expect(screen.getByTestId('activity-indicator-popover')).toBeTruthy()
+    // Move focus elsewhere first so we can assert focus is NOT pulled
+    // back to the disclosure after the outside-click dismiss.
+    document.body.focus()
+    expect(document.activeElement).not.toBe(disclosure)
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByTestId('activity-indicator-popover')).toBeNull()
+    expect(document.activeElement).not.toBe(disclosure)
+  })
+
   it('ignores non-Escape keys', () => {
     // Regression guard: the keydown listener must filter by `event.key` so
     // typing in another input doesn't dismiss the popover.

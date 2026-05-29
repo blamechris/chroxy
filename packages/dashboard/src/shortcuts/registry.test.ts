@@ -198,6 +198,30 @@ describe('createShortcutRegistry', () => {
       registry.setBinding('browser.close', 'Cmd+T')
       expect(registry.getBinding('browser.close')).toBe('cmd+t')
     })
+
+    it('skips conflict when both defs are permanently disabled (#4442)', () => {
+      // Pins the outer-guard short-circuit in findConflict —
+      // `if (target.enabled && !target.enabled()) return null` — that
+      // the existing #4431 test cannot reach because its boolean toggle
+      // always leaves exactly one side live. Two permanently disabled
+      // defs sharing a combo must report no conflict from either side
+      // and must allow setBinding to succeed for either.
+      const dead: ShortcutDef[] = [
+        { id: 'never.a', defaultBinding: 'Cmd+W', description: 'Never A', category: 'session', scope: 'global', enabled: () => false },
+        { id: 'never.b', defaultBinding: 'Cmd+W', description: 'Never B', category: 'session', scope: 'global', enabled: () => false },
+      ]
+      const registry = createShortcutRegistry(dead)
+      // Both directions return null — outer guard short-circuits before
+      // the loop even when both sides share the combo.
+      expect(registry.findConflict('never.a', 'Cmd+W')).toBeNull()
+      expect(registry.findConflict('never.b', 'Cmd+W')).toBeNull()
+      // setBinding must agree with findConflict — rebinding either side
+      // to a fresh shared combo succeeds because both are disabled.
+      expect(() => registry.setBinding('never.a', 'Cmd+Shift+X')).not.toThrow()
+      expect(registry.getBinding('never.a')).toBe('cmd+shift+x')
+      expect(() => registry.setBinding('never.b', 'Cmd+Shift+X')).not.toThrow()
+      expect(registry.getBinding('never.b')).toBe('cmd+shift+x')
+    })
   })
 
   it('notifies subscribers when a binding changes', () => {
