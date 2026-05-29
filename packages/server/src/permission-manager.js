@@ -416,20 +416,49 @@ export class PermissionManager extends EventEmitter {
    * resolve as if they had clicked Allow rather than sit there until
    * timeout. Pending AskUserQuestion prompts are NOT touched: those are
    * solicited user input, not permission gates.
+   *
+   * #4462: MCP trust prompts (requestMcpTrust) are also exempt — their
+   * allow path PERSISTS the binary to ~/.chroxy/mcp-trust.json forever
+   * via byok-mcp-fleet's recordTrust call. A panic-button bypass is "I
+   * trust everything for this turn" semantics, NOT "trust this MCP
+   * binary forever." Treating mcp_spawn under auto as deny re-prompts
+   * the user next start — they can explicitly approve then, when the
+   * decision is in front of them.
    */
   autoAllowPending() {
     if (this._pendingPermissions.size === 0) return
     const pendingIds = Array.from(this._pendingPermissions.keys())
+    let allowed = 0
+    let deniedMcpTrust = 0
     for (const requestId of pendingIds) {
       const pending = this._pendingPermissions.get(requestId)
       if (!pending) continue
       this._pendingPermissions.delete(requestId)
       this._lastPermissionData.delete(requestId)
       this._clearPermissionTimer(requestId)
+      if (pending.mcpTrust === true) {
+        // Don't silently persist trust on bypass. Deny — the MCP server
+        // won't spawn for this session, but no on-disk trust entry is
+        // written, and the user re-prompts next start.
+        pending.resolve({
+          behavior: 'deny',
+          message: 'MCP trust not persisted via auto-mode bypass; approve explicitly to trust this server',
+        })
+        this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'auto_mode_mcp_trust_bypass' })
+        deniedMcpTrust += 1
+        continue
+      }
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
       this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
+      allowed += 1
     }
-    this._logInfo(`Auto-allowed ${pendingIds.length} pending permission(s) on auto mode switch`)
+    if (deniedMcpTrust > 0) {
+      this._logInfo(
+        `Auto-allowed ${allowed} pending permission(s) and denied ${deniedMcpTrust} MCP trust prompt(s) on auto mode switch (trust not persisted via bypass — #4462)`,
+      )
+    } else {
+      this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)
+    }
   }
 
   /**
@@ -510,10 +539,20 @@ export class PermissionManager extends EventEmitter {
       // ({behavior:'allow'} or {behavior:'deny'}) translates to a boolean
       // for the caller. updatedInput / suggestions are unused on the trust
       // path — we only care about allow-vs-deny.
+      //
+      // #4462: mark this entry as an MCP-trust prompt so autoAllowPending
+      // can treat it differently. Auto-allow is the "panic button"
+      // bypass — it's the right call for one-shot Read/Bash/Edit prompts
+      // (the user just declared "approve everything") but the WRONG call
+      // for MCP trust, which persists forever via recordTrust on allow.
+      // The persistence semantics turn a bypass into a "trust this binary
+      // forever" decision the user never explicitly made. We tag the
+      // entry and have autoAllowPending deny it instead.
       this._pendingPermissions.set(requestId, {
         resolve: (result) => resolve(result?.behavior === 'allow'),
         input,
         suggestions: [],
+        mcpTrust: true,
       })
 
       this._logInfo(`MCP trust request ${requestId}: ${server.name}`)

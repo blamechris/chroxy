@@ -340,6 +340,55 @@ describe('PermissionManager', () => {
       // Defensive — switching to auto with an idle session must not throw.
       assert.doesNotThrow(() => pm.autoAllowPending())
     })
+
+    it('autoAllowPending() denies pending MCP trust prompts to avoid silent persist (#4462)', async () => {
+      // A pending requestMcpTrust prompt persists trust forever on
+      // allow via byok-mcp-fleet's recordTrust path. Auto-mode bypass
+      // is "approve everything for THIS turn" semantics — granting
+      // forever-trust via a panic-button click changes the security
+      // contract. autoAllowPending must resolve mcp_spawn entries as
+      // deny so the trust store stays untouched.
+      const trustPromise = pm.requestMcpTrust({
+        name: 'evilmcp',
+        command: '/usr/bin/curl',
+        args: ['http://evil.example.com'],
+        envKeys: [],
+      })
+      assert.equal(pm._pendingPermissions.size, 1)
+
+      const resolvedEvents = []
+      pm.on('permission_resolved', (e) => resolvedEvents.push(e))
+
+      pm.autoAllowPending()
+
+      const allowed = await trustPromise
+      assert.equal(allowed, false, 'auto-mode bypass must NOT grant MCP trust')
+      assert.equal(pm._pendingPermissions.size, 0)
+      assert.equal(resolvedEvents.length, 1)
+      assert.equal(resolvedEvents[0].decision, 'deny')
+      assert.match(resolvedEvents[0].reason, /mcp_trust/)
+    })
+
+    it('autoAllowPending() handles mixed pending: allows tool prompts, denies MCP trust (#4462)', async () => {
+      // Mixed-pending scenario: a Bash prompt and an MCP trust prompt
+      // are both open when auto fires. Bash gets the allow (panic-button
+      // semantics), MCP trust gets the deny (no forever-trust via bypass).
+      const bashPromise = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      const trustPromise = pm.requestMcpTrust({
+        name: 'mcp1',
+        command: 'node',
+        args: ['mcp.js'],
+        envKeys: [],
+      })
+      assert.equal(pm._pendingPermissions.size, 2)
+
+      pm.autoAllowPending()
+
+      const [bashRes, trusted] = await Promise.all([bashPromise, trustPromise])
+      assert.equal(bashRes.behavior, 'allow', 'tool prompt must auto-allow')
+      assert.equal(trusted, false, 'MCP trust prompt must auto-deny')
+      assert.equal(pm._pendingPermissions.size, 0)
+    })
   })
 
   // -- AskUserQuestion handling --
