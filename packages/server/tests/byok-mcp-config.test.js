@@ -31,7 +31,10 @@ describe('byok-mcp-config', () => {
         },
       },
     })
-    assert.deepEqual(parsed.warnings, [])
+    assert.equal(parsed.warnings.length, 1)
+    assert.match(parsed.warnings[0], /filesystem/)
+    assert.match(parsed.warnings[0], /env\.COUNT/)
+    assert.match(parsed.warnings[0], /number/)
     assert.deepEqual(parsed.servers, [
       {
         name: 'filesystem',
@@ -40,6 +43,27 @@ describe('byok-mcp-config', () => {
         env: { API_TOKEN: 'secret' },
       },
     ])
+  })
+
+  it('warns on non-string args entries naming the index and type', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: {
+        github: {
+          command: 'node',
+          args: ['server.js', 42, null, '--flag'],
+        },
+      },
+    })
+    assert.deepEqual(parsed.servers, [
+      { name: 'github', command: 'node', args: ['server.js', '--flag'], env: {} },
+    ])
+    assert.equal(parsed.warnings.length, 2)
+    assert.match(parsed.warnings[0], /github/)
+    assert.match(parsed.warnings[0], /args\[1\]/)
+    assert.match(parsed.warnings[0], /number/)
+    assert.match(parsed.warnings[1], /github/)
+    assert.match(parsed.warnings[1], /args\[2\]/)
+    assert.match(parsed.warnings[1], /object/)
   })
 
   it('parses multiple servers and skips malformed entries with warnings', () => {
