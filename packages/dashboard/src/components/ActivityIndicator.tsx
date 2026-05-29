@@ -21,10 +21,31 @@
  * payload (#3760), falling back to BaseSession.DEFAULT_RESULT_TIMEOUT_MS
  * (30 min) when connected to an older server that doesn't broadcast it.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
+
+/**
+ * #4420 — Tail-ellipsis truncation for the pending-shell command label. User-
+ * controlled shell commands can be arbitrarily long (`npm test -- --coverage
+ * --reporter=json --bail …`). Without a cap they wrap or stretch the chip,
+ * breaking the pill shape and pushing siblings around on narrow viewports.
+ *
+ * Strategy: tail-ellipsis (preserve the start). The command's prefix is what
+ * identifies it ("npm test", "docker run", "pytest"). The trailing flags are
+ * still reachable via the chip's `title` attribute (hover tooltip), so the
+ * truncation isn't lossy. 40 chars matches the chip's comfortable single-line
+ * width at the dashboard's xs font size without forcing a max-width that
+ * fights the inline-flex layout.
+ */
+export const PENDING_SHELL_COMMAND_MAX_LEN = 40
+
+export function truncatePendingShellCommand(cmd: string): string {
+  if (cmd.length <= PENDING_SHELL_COMMAND_MAX_LEN) return cmd
+  // -1 to leave room for the single ellipsis char.
+  return cmd.slice(0, PENDING_SHELL_COMMAND_MAX_LEN - 1) + '…'
+}
 
 /**
  * #4319 — Walk a session's `messages[]` backwards looking for the most-recent
@@ -137,8 +158,7 @@ export function ActivityIndicator() {
     serverName: inFlightServerName,
     agentDescription,
     agentStartedAt,
-    pendingShellCommand,
-    pendingShellId,
+    pendingShells,
   } = useConnectionStore(
     useShallow((s) => {
       const id = s.activeSessionId
@@ -160,29 +180,53 @@ export function ActivityIndicator() {
       const mostRecentAgent = activeAgents && activeAgents.length > 0
         ? activeAgents[activeAgents.length - 1]!
         : null
-      // #4418 — surface the most-recently-started pending background shell so
-      // the chip can say "Waiting on background work" when the turn ends but
-      // the session is still parked on a backgrounded Bash command. We project
-      // only the visible primitives (command + shellId) so `useShallow` bails
-      // out on no-op `pendingBackgroundShells[]` reference swaps (e.g. when
-      // another session's `background_work_changed` re-seeds the slot).
-      const pendingShells = ss?.pendingBackgroundShells
-      const mostRecentShell = pendingShells && pendingShells.length > 0
-        ? pendingShells.reduce((latest, s) =>
-            s.startedAt > latest.startedAt ? s : latest,
-          )
-        : null
+      // #4418 / #4421 — surface the full pending-background-shell list so the
+      // chip can show the most-recently-started one as the headline AND offer
+      // a click-to-expand popover with every shell when there's more than one.
+      // We pass the array reference straight through — `useShallow` does an
+      // identity check on the projection object's top-level keys, so a no-op
+      // `background_work_changed` from another session won't re-render this
+      // component (the store keeps the array reference stable when nothing
+      // changes). The render-side `useMemo` below projects the array down to
+      // the headline / overflow primitives.
       return {
         tool: inFlight?.tool ?? null,
         startedAt: inFlight?.startedAt ?? null,
         serverName: inFlight?.serverName ?? null,
         agentDescription: mostRecentAgent?.description ?? null,
         agentStartedAt: mostRecentAgent?.startedAt ?? null,
-        pendingShellCommand: mostRecentShell?.command ?? null,
-        pendingShellId: mostRecentShell?.shellId ?? null,
+        pendingShells: ss?.pendingBackgroundShells ?? null,
       }
     }),
   )
+
+  // #4421 — split the pending shells into "headline" (most-recently-started,
+  // shown inline on the chip) and "overflow" (everything else, shown in the
+  // click-to-expand popover). Memoised against the array reference so we don't
+  // re-sort on every clock tick.
+  const { headlineShell, overflowShells } = useMemo(() => {
+    if (!pendingShells || pendingShells.length === 0) {
+      return { headlineShell: null, overflowShells: [] as NonNullable<typeof pendingShells> }
+    }
+    // Most-recently-started wins the headline slot — matches #4418's behaviour.
+    let headline = pendingShells[0]!
+    for (let i = 1; i < pendingShells.length; i++) {
+      if (pendingShells[i]!.startedAt > headline.startedAt) headline = pendingShells[i]!
+    }
+    const overflow = pendingShells.filter((s) => s !== headline)
+    // Sort overflow by most-recent first so the popover reads top-down newest→oldest.
+    overflow.sort((a, b) => b.startedAt - a.startedAt)
+    return { headlineShell: headline, overflowShells: overflow }
+  }, [pendingShells])
+
+  // #4421 — popover open/closed state. Click the disclosure button to toggle.
+  // Defaulting to closed keeps the chip's resting footprint small; the user
+  // opts into the full list only when they care about the overflow.
+  const [popoverOpen, setPopoverOpen] = useState(false)
+  // Auto-close the popover when the overflow goes away (e.g. shells finish).
+  useEffect(() => {
+    if (overflowShells.length === 0 && popoverOpen) setPopoverOpen(false)
+  }, [overflowShells.length, popoverOpen])
   const referenceTimeoutMs = useConnectionStore(
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   )
@@ -202,20 +246,32 @@ export function ActivityIndicator() {
     // #4418 — when the turn ends but the agent backgrounded a Bash shell, the
     // session is still effectively waiting on work. Surface that as a chip so
     // the user can tell "idle and done" from "idle but parked on a long-
-    // running shell". We project the most-recently-started shell's command
-    // (falling back to its shellId when the command string is empty) — the
-    // full list is a deferred stretch goal per #4418's body. The chip uses
-    // the same neutral green styling as the connect-race fallback rather
-    // than the elapsed-driven color escalation; pending shells aren't a
-    // timeout candidate the way an agent turn is.
-    if (pendingShellCommand != null || pendingShellId != null) {
-      const detail = (pendingShellCommand && pendingShellCommand.length > 0)
-        ? pendingShellCommand
-        : pendingShellId!
+    // running shell". The most-recently-started shell wins the headline slot
+    // (falling back to its shellId when the command string is empty). The
+    // chip uses the same neutral green styling as the connect-race fallback
+    // rather than the elapsed-driven color escalation; pending shells aren't
+    // a timeout candidate the way an agent turn is.
+    //
+    // #4420 — the command is user-controlled and unbounded, so the inline
+    // headline gets a tail-ellipsis cap to keep the pill shape intact on
+    // narrow viewports. The full command is still reachable via the chip's
+    // `title` attribute (hover tooltip).
+    //
+    // #4421 — when there's more than one pending shell, a "+N more" badge +
+    // disclosure button reveal a popover listing every pending shell with
+    // its full command and elapsed time. The disclosure is a real <button>
+    // so it's keyboard-navigable (Enter/Space toggle), not hover-only.
+    if (headlineShell) {
+      const rawDetail = headlineShell.command && headlineShell.command.length > 0
+        ? headlineShell.command
+        : headlineShell.shellId
+      const detail = truncatePendingShellCommand(rawDetail)
+      const overflowCount = overflowShells.length
       return (
         <div
           className="activity-indicator activity-indicator--green"
           aria-label="Waiting on background work"
+          title={rawDetail}
         >
           <span className="activity-indicator__dot" aria-hidden="true" />
           <span
@@ -224,6 +280,49 @@ export function ActivityIndicator() {
           >
             Waiting on background work · {detail}
           </span>
+          {overflowCount > 0 && (
+            <button
+              type="button"
+              className="activity-indicator__disclosure"
+              data-testid="activity-indicator-disclosure"
+              aria-expanded={popoverOpen}
+              aria-label={`Show ${overflowCount} additional pending background shell${overflowCount === 1 ? '' : 's'}`}
+              onClick={() => setPopoverOpen((v) => !v)}
+            >
+              <span data-testid="activity-indicator-more-badge">
+                +{overflowCount} more
+              </span>
+            </button>
+          )}
+          {popoverOpen && overflowCount > 0 && (
+            <div
+              className="activity-indicator__popover"
+              data-testid="activity-indicator-popover"
+              role="dialog"
+              aria-label="Pending background shells"
+            >
+              <ul className="activity-indicator__popover-list">
+                {[headlineShell, ...overflowShells].map((shell) => {
+                  const cmd = shell.command && shell.command.length > 0
+                    ? shell.command
+                    : shell.shellId
+                  const elapsed = formatDuration(Math.max(0, now - shell.startedAt))
+                  return (
+                    <li
+                      key={shell.shellId}
+                      className="activity-indicator__popover-item"
+                      data-testid={`activity-indicator-popover-item-${shell.shellId}`}
+                    >
+                      <code className="activity-indicator__popover-command" title={cmd}>
+                        {cmd}
+                      </code>
+                      <span className="activity-indicator__popover-elapsed">{elapsed}</span>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
         </div>
       )
     }
