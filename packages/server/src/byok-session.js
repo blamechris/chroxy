@@ -33,6 +33,7 @@ import { translateSdkEvent } from './byok-event-translator.js'
 import { BUILTIN_TOOLS } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
 import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
+import { MCPFleet } from './byok-mcp-fleet.js'
 
 const log = createLogger('byok-session')
 
@@ -240,6 +241,9 @@ export class ClaudeByokSession extends BaseSession {
     }
     this._mcpServerConfigs = mcpConfig.servers
     this.mcpServers = Object.freeze(mcpConfig.servers.map(toMcpServerMetadata))
+    // #4077: MCPFleet is lazy — created in start() only if servers exist.
+    // Held here so destroy() can tear down even if start() never ran.
+    this._mcpFleet = null
   }
 
   async start() {
@@ -256,6 +260,16 @@ export class ClaudeByokSession extends BaseSession {
       // catches Bearer / sk-ant patterns as a defense in depth.
       log.info(`BYOK session ready — key source=${this._apiKeySource} key=${maskApiKey(resolved.key)} model=${this.model || 'default'}`)
       this._client = new Anthropic({ apiKey: resolved.key })
+    }
+
+    // #4077: spawn MCP children lazily on first start(). Errors during
+    // handshake are non-fatal — the dead client just contributes zero
+    // tools, identical to a server missing from config. We deliberately
+    // wait for fleet.start() so this.mcpServers + tools list are stable
+    // by the time we emit 'ready'.
+    if (this._mcpServerConfigs.length > 0 && this._mcpFleet === null) {
+      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, { log })
+      await this._mcpFleet.start()
     }
 
     this._processReady = true
@@ -1031,6 +1045,16 @@ export class ClaudeByokSession extends BaseSession {
     this._streamingIndexToToolUseId.clear()
     this._pendingPermissionToolUseIds.clear()
     this._client = null
+    // #4077: tear down MCP children with SIGTERM → SIGKILL grace.
+    // Awaits up to FLEET_KILL_GRACE_MS (2s) + 500ms safety margin so a
+    // hung child cannot stall destroy() indefinitely.
+    if (this._mcpFleet) {
+      const fleet = this._mcpFleet
+      this._mcpFleet = null
+      try { await fleet.destroy() } catch (err) {
+        log.warn(`MCP fleet teardown failed: ${err?.message || err}`)
+      }
+    }
     this.removeAllListeners()
   }
 }
