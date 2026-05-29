@@ -3290,5 +3290,48 @@ describe('dashboard message-handler dispatch', () => {
       const ss = (store.getState() as any).sessionStates.s1
       expect(ss.inactivityWarning).toBeNull()
     })
+
+    // Regression for the agent-review critical finding (#4491): `result`
+    // events are recorded in the per-session history ring buffer
+    // (session-message-history.js) and replayed via PROXIED_EVENTS
+    // (session-manager.js). The `case 'result'` handler also clears
+    // activeTools — without a replay gate on THAT clear, every tab switch
+    // on a session with at least one completed prior turn fires a replayed
+    // result mid-replay, wiping the activeTools that history_replay_start
+    // had intentionally preserved. Tested explicitly: a replayed result
+    // must NOT touch activeTools, but a live result still must (#4308
+    // turn-boundary sweep stays intact for the legitimate "missed
+    // tool_result" case after a server crash / dropped broadcast).
+    it('replayed result events do NOT clear activeTools (regression #4491)', () => {
+      const startedAt = 100
+      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep' }, startedAt }
+      seedSession({ activeTools: [inFlightTool] })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      // result fires during the replay window — pre-fix this wiped activeTools.
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].toolUseId).toBe('tu-1')
+      expect(ss.activeTools[0].startedAt).toBe(startedAt)
+    })
+
+    it('live result events still clear activeTools (#4308 turn-boundary sweep preserved)', () => {
+      // After history_replay_end clears the flag, a live result must still
+      // sweep stale in-flight tools — that was the original #4308 behaviour
+      // for missed tool_results from server crashes / dropped broadcasts.
+      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep' }, startedAt: 100 }
+      seedSession({ activeTools: [inFlightTool] })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+    })
   })
 })

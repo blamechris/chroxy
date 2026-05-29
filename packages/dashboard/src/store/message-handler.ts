@@ -2456,11 +2456,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // activeTools are a missed tool_result (server crash, dropped
           // broadcast) and must be dropped so the activity indicator can't
           // get stuck on a phantom "Running X". Mirror in agent_idle.
+          //
+          // #4466 — but ONLY for live result events. `result` events are
+          // recorded in the server's per-session history ring buffer
+          // (session-message-history.js) and replayed on switch_session via
+          // PROXIED_EVENTS (session-manager.js). Without this gate, every
+          // tab switch on a session that's completed at least one prior
+          // turn fires a replayed `result` that wipes the activeTools the
+          // history_replay_start guard is trying to preserve — the
+          // replayed in-flight tool_start then re-adds the entry with a
+          // fresh Date.now() startedAt, restoring the exact "Running X · 1s"
+          // clock-reset symptom #4466 set out to fix.
           const patch: Partial<SessionState> = {
             ...resultPatch,
             messages: [...ss.messages],
           };
-          if (ss.activeTools.length > 0) patch.activeTools = [];
+          if (ss.activeTools.length > 0 && !_receivingHistoryReplay) patch.activeTools = [];
           return patch;
         });
       } else {
