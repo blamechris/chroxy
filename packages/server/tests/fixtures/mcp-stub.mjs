@@ -16,7 +16,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   try { msg = JSON.parse(line) } catch { return }
   if (msg.id == null) return
   if (msg.method === 'initialize') {
-    reply(msg.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
+    // #4452: optionally echo the client-supplied initialize params back via
+    // stderr so tests can assert what the client actually sent on the wire.
+    if (process.env.MCP_STUB_ECHO_INITIALIZE === '1') {
+      process.stderr.write(`MCP_STUB_INITIALIZE_PARAMS=${JSON.stringify(msg.params)}\n`)
+    }
+    // #4452: allow the stub to advertise a different protocolVersion than
+    // the client requested, so tests can exercise the negotiation-warn branch.
+    const serverProtocolVersion = process.env.MCP_STUB_PROTOCOL_VERSION || '2024-11-05'
+    reply(msg.id, { protocolVersion: serverProtocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
   } else if (msg.method === 'tools/list') {
     reply(msg.id, { tools })
   } else if (msg.method === 'tools/call') {

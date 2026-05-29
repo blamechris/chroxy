@@ -2,7 +2,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { MCPClient, MCP_STATES } from '../src/byok-mcp-client.js'
+import { spawn } from 'node:child_process'
+import { MCPClient, MCP_STATES, MCP_PROTOCOL_VERSION, MCP_CLIENT_VERSION } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const STUB = join(__dirname, 'fixtures', 'mcp-stub.mjs')
@@ -45,6 +46,73 @@ describe('MCPClient', () => {
       assert.equal(client.state, MCP_STATES.READY)
       assert.equal(client.tools.length, 1)
       assert.equal(client.tools[0].name, 'echo')
+      await client.destroy()
+    })
+
+    it('exposes MCP_PROTOCOL_VERSION + MCP_CLIENT_VERSION as module constants (#4452)', () => {
+      assert.equal(typeof MCP_PROTOCOL_VERSION, 'string')
+      assert.match(MCP_PROTOCOL_VERSION, /^\d{4}-\d{2}-\d{2}$/, 'protocol version must be an MCP spec date')
+      assert.equal(typeof MCP_CLIENT_VERSION, 'string')
+      assert.notEqual(MCP_CLIENT_VERSION, '1', 'clientInfo.version must derive from package.json, not the legacy "1" placeholder')
+      assert.match(MCP_CLIENT_VERSION, /^\d+\.\d+\.\d+/, 'clientInfo.version must be semver from package.json')
+    })
+
+    it('sends MCP_PROTOCOL_VERSION + MCP_CLIENT_VERSION on the initialize wire (#4452)', async () => {
+      // Spawn the stub directly + drive one initialize round-trip via raw
+      // stdin/stdout JSON-RPC so we can assert on the wire shape via the
+      // stderr-echoed params. Bypassing MCPClient lets us isolate the
+      // initialize message before tools/list noise.
+      const child = spawn(process.execPath, [STUB], {
+        env: { ...process.env, MCP_STUB_ECHO_INITIALIZE: '1' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      let stderr = ''
+      child.stderr.on('data', (c) => { stderr += c.toString() })
+      child.stdout.on('data', () => {})
+      child.stdin.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'chroxy-byok', version: MCP_CLIENT_VERSION },
+        },
+      }) + '\n')
+      await new Promise((r) => setTimeout(r, 200))
+      child.kill('SIGKILL')
+      const match = stderr.match(/MCP_STUB_INITIALIZE_PARAMS=(.+)/)
+      assert.ok(match, `expected echoed initialize params on stderr, got: ${JSON.stringify(stderr)}`)
+      const params = JSON.parse(match[1])
+      assert.equal(params.protocolVersion, MCP_PROTOCOL_VERSION)
+      assert.equal(params.clientInfo.name, 'chroxy-byok')
+      assert.equal(params.clientInfo.version, MCP_CLIENT_VERSION)
+    })
+
+    it('warns when the server replies with a different protocolVersion (#4452)', async () => {
+      const warns = []
+      const log = { info: () => {}, warn: (m) => warns.push(m), debug: () => {}, error: () => {} }
+      const client = new MCPClient(
+        stubConfig({ env: { MCP_STUB_PROTOCOL_VERSION: '2099-01-01' } }),
+        { log },
+      )
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      const protocolWarn = warns.find((m) => /protocolVersion/i.test(m))
+      assert.ok(protocolWarn, `expected a protocolVersion mismatch warn, got: ${JSON.stringify(warns)}`)
+      assert.match(protocolWarn, /2099-01-01/)
+      assert.match(protocolWarn, new RegExp(MCP_PROTOCOL_VERSION))
+      await client.destroy()
+    })
+
+    it('does NOT warn when the server reports the matching protocolVersion (#4452)', async () => {
+      const warns = []
+      const log = { info: () => {}, warn: (m) => warns.push(m), debug: () => {}, error: () => {} }
+      const client = new MCPClient(stubConfig(), { log })
+      await client.start()
+      await waitForState(client, MCP_STATES.READY)
+      const protocolWarn = warns.find((m) => /protocolVersion/i.test(m))
+      assert.equal(protocolWarn, undefined, `unexpected protocolVersion warn: ${protocolWarn}`)
       await client.destroy()
     })
 
