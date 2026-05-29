@@ -12,7 +12,13 @@
  */
 
 import { MCPClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
-import { loadTrustStore, recordTrust, isTrusted } from './byok-mcp-trust.js'
+import {
+  loadTrustStore,
+  recordTrust,
+  isTrusted,
+  withTrustStoreLock,
+  defaultTrustStorePath,
+} from './byok-mcp-trust.js'
 import { MCP_PREFIX, parseMcpToolName } from './mcp-tools.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
@@ -40,20 +46,36 @@ export class MCPFleet {
     // (session passes its _permissions in) is wired in byok-session.
     const permissionManager = opts.permissionManager || null
     const trustStorePath = opts.trustStorePath  // tests override; undefined falls through to default
+    // #4460: resolve the path eagerly so the per-path async mutex below
+    // can key on a stable value (withTrustStoreLock uses the path as the
+    // map key). Without this, undefined paths would all share a single
+    // chain — fine for the real default case but bug-magnet if any test
+    // ever called the constructor without setting trustStorePath.
+    const resolvedTrustPath = trustStorePath || defaultTrustStorePath()
     this._clients = configs.map((cfg) => {
       const clientOpts = { ...opts }
       if (permissionManager) {
         clientOpts.trustGate = async () => {
-          const store = loadTrustStore(trustStorePath, { log: opts.log })
-          if (isTrusted(store, cfg)) return true
-          const allowed = await permissionManager.requestMcpTrust({
-            name: cfg.name,
-            command: cfg.command,
-            args: cfg.args,
-            envKeys: Object.keys(cfg.env || {}).sort(),
+          // #4460: serialise the load→prompt→recordTrust sequence across
+          // all fleet clients that share this trust-store path. Without
+          // the lock, two concurrent gates can both observe an empty
+          // store, both prompt, both call recordTrust — and the last
+          // writer's snapshot (read at step 1, missing the other's
+          // entry) clobbers the first allow. The lock also surfaces
+          // prompts one at a time, which the dashboard / mobile UI
+          // already assumes (one modal at a time).
+          return withTrustStoreLock(resolvedTrustPath, async () => {
+            const store = loadTrustStore(resolvedTrustPath, { log: opts.log })
+            if (isTrusted(store, cfg)) return true
+            const allowed = await permissionManager.requestMcpTrust({
+              name: cfg.name,
+              command: cfg.command,
+              args: cfg.args,
+              envKeys: Object.keys(cfg.env || {}).sort(),
+            })
+            if (allowed) recordTrust(cfg, resolvedTrustPath)
+            return allowed
           })
-          if (allowed) recordTrust(cfg, trustStorePath)
-          return allowed
         }
       }
       return new MCPClient(cfg, clientOpts)
