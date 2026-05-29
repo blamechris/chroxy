@@ -382,6 +382,45 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('#4456: session-ready emits within the cap even when one MCP server is permanently broken', async () => {
+      preTrustStub()
+      // Pre-trust the broken server too so the trust prompt doesn't sit in
+      // the way — we're isolating the start-cap behavior, not the trust gate.
+      recordTrust(
+        { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+        process.env.CHROXY_MCP_TRUST_PATH,
+      )
+      const configPath = join(tmpHome, '.claude.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          stub: { command: process.execPath, args: [MCP_STUB], env: {} },
+          broken: { command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
+        },
+      }))
+      const session = new ClaudeByokSession({
+        cwd: '/tmp',
+        mcpConfigPath: configPath,
+        mcpStartCapMs: 400,
+      })
+      session._client = { messages: { stream: () => fakeStream([]) } }
+      const t0 = Date.now()
+      let readyAt = null
+      session.on('ready', () => { readyAt = Date.now() })
+      await session.start()
+      const elapsed = (readyAt ?? Date.now()) - t0
+      // Under the cap the session emits ready promptly; without it, start()
+      // would block ~7s for the broken server's full restart budget.
+      assert.ok(elapsed < 1000, `session 'ready' fired at ${elapsed}ms, expected <1000ms under 400ms cap`)
+      assert.equal(session._mcpFleet.clients.find((c) => c.name === 'stub').state, MCP_STATES.READY)
+      // Broken still in mid-restart loop, not DEAD yet.
+      assert.notEqual(
+        session._mcpFleet.clients.find((c) => c.name === 'broken').state,
+        MCP_STATES.DEAD,
+        'cap should fire before broken server exhausts its restart budget',
+      )
+      await session.destroy()
+    })
+
     it('#4077: destroy() kills MCP children and clears the fleet reference', async () => {
       preTrustStub()
       const configPath = join(tmpHome, '.claude.json')
