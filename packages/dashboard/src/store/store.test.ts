@@ -1483,6 +1483,198 @@ describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
   });
 });
 
+// #4465: when the user answers a TUI AskUserQuestion, claude TUI may or may
+// not emit PostToolUse for it (v0.9.12 — empirical: the prompt resolves but
+// the hook never fires for some question shapes). Without server-side
+// tool_result the dashboard's activeTools entry sits forever, so the footer
+// pill keeps ticking `Running AskUserQuestion · Nm Ns` indefinitely.
+//
+// Fix: when the user answers via the QuestionPrompt UI, optimistically drop
+// the matching activeTools entry. If the server later does fire tool_result,
+// sharedToolResult is idempotent on missing entries. If it doesn't (#4465's
+// stall case), the pill clears anyway.
+describe('sendUserQuestionResponse clears in-flight tool slot (#4465)', () => {
+  it('drops the matching activeTools entry when called with toolUseId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-1', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+            // Sibling in-flight tool that must NOT be cleared.
+            { toolUseId: 'tu-bash-1', tool: 'Bash', input: { command: 'ls' }, startedAt: 150 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'tu-ask-1');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools.map(t => t.toolUseId)).toEqual(['tu-bash-1']);
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('is a no-op on activeTools when called without toolUseId (free-text fallback)', async () => {
+    // Some legacy callsites send the answer without a toolUseId (free-text
+    // question prompts where the dashboard can't pair to a specific tool).
+    // Those must NOT clear any in-flight tool — the server stays
+    // authoritative.
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-1', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('A');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools).toHaveLength(1)
+    expect(ss.activeTools[0]!.toolUseId).toBe('tu-ask-1')
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  // Regression for agent-review critical finding (#4499): the
+  // ActivityIndicator messages-walk fallback re-surfaces the AskUserQuestion
+  // tool_use the moment activeTools empties. Optimistically clearing
+  // activeTools alone is insufficient — we must ALSO patch the tool_use
+  // ChatMessage in messages[] so findInFlightToolUse no longer treats it
+  // as in-flight.
+  it('patches the tool_use ChatMessage in messages[] so the walk fallback no longer surfaces it (#4499)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { findInFlightToolUse } = await import('../components/ActivityIndicator');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-walk', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+          // tool_use ChatMessage pushed by handleToolStart — same id as the
+          // toolUseId per claude-tui-session.js:1115. toolResult undefined
+          // because PostToolUse never fired (the #4465 scenario).
+          messages: [
+            { id: 'tu-ask-walk', type: 'tool_use', tool: 'AskUserQuestion', content: '', timestamp: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    // Sanity: before the answer, the walk fallback finds the in-flight tool.
+    const before = findInFlightToolUse(
+      useConnectionStore.getState().sessionStates.s1!.messages,
+    );
+    expect(before).not.toBeNull();
+    expect(before!.tool).toBe('AskUserQuestion');
+
+    useConnectionStore.getState().sendUserQuestionResponse('A', 'tu-ask-walk');
+
+    const after = useConnectionStore.getState().sessionStates.s1!;
+    expect(after.activeTools).toEqual([]);
+    // The walk fallback no longer surfaces the AskUserQuestion because the
+    // tool_use now carries a synthetic toolResult.
+    const post = findInFlightToolUse(after.messages);
+    expect(post).toBeNull();
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('leaves an already-resolved tool_use intact (no double-patch)', async () => {
+    // Defense: if the server's tool_result already landed for the AskUserQuestion
+    // and patched toolResult on the message, the answer-send must NOT overwrite
+    // the real result with our sentinel.
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [],
+          messages: [
+            { id: 'tu-already-resolved', type: 'tool_use', tool: 'AskUserQuestion', content: '', toolResult: 'server answer', timestamp: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('A', 'tu-already-resolved');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    const m = ss.messages.find(x => x.id === 'tu-already-resolved');
+    expect(m?.toolResult).toBe('server answer');
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('a subsequent server-emitted tool_result for the same toolUseId is a no-op (idempotent)', async () => {
+    // After the optimistic clear, if claude TUI does eventually emit
+    // PostToolUse, the resulting tool_result hits sharedToolResult which
+    // looks up by toolUseId and finds nothing — no double-clear, no
+    // re-append. Verifies the cross-PR contract isn't broken.
+    const { useConnectionStore } = await import('./connection');
+    const { handleMessage } = await import('./message-handler');
+
+    const mockSocket = { readyState: 1, send: () => {} };
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-2', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('B', 'tu-ask-2');
+    // Late tool_result arrives.
+    handleMessage(
+      { type: 'tool_result', toolUseId: 'tu-ask-2', result: 'B', sessionId: 's1' },
+      { url: 'wss://t' } as any,
+    );
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools).toEqual([]);
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // PTY dead code removal (#1759)
 // ---------------------------------------------------------------------------
