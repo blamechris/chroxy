@@ -578,9 +578,15 @@ export function createModelsRegistry(hooks = {}) {
         const variantFullId = `${m.fullId}${ONE_M_SUFFIX}`
         if (seenFullIds.has(variantFullId)) continue
         const variantId = `${m.id}${ONE_M_SUFFIX}`
+        // Consult the provider's metadata hook first so non-Claude registries
+        // that eventually ship a >=1M model get their authoritative label
+        // instead of the humanizeModelId mangling (#4441 follow-up to #4438).
+        // Currently unreachable for codex/gemini (no 1M models today) but
+        // keeps the synthesis path consistent with the five other call sites.
+        const providerMeta = getModelMetadataFn ? getModelMetadataFn(variantFullId) : null
         variants.push({
           id: variantId,
-          label: humanizeModelId(variantId),
+          label: providerMeta?.label || humanizeModelId(variantId),
           fullId: variantFullId,
           contextWindow: 1_000_000,
         })

@@ -256,6 +256,38 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('#4449: mcpConfigPath is the canonical MCP-config opt; the dead claudeConfigPath alias is ignored', async () => {
+      // The pre-#4449 constructor honored either `opts.mcpConfigPath`
+      // OR `opts.claudeConfigPath` for historical reasons, but every
+      // caller — production and test — only ever set `mcpConfigPath`.
+      // After #4449 only `mcpConfigPath` is read. Passing the dead
+      // alias must not silently load a config, otherwise downstream
+      // callers could come to depend on it and re-create the
+      // two-names-for-one-thing surface.
+      //
+      // We write to a non-default filename (`mcp-custom.json`) so the
+      // default-path fallback (`$HOME/.claude.json` — which is
+      // `tmpHome/.claude.json` for this test thanks to the `HOME`
+      // override in beforeEach) doesn't accidentally satisfy the
+      // ignored alias path and mask the regression.
+      const configPath = join(tmpHome, 'mcp-custom.json')
+      writeFileSync(configPath, JSON.stringify({
+        mcpServers: {
+          ghost: { command: 'node', args: ['server.js'], env: {} },
+        },
+      }))
+      // mcpConfigPath honored — the canonical path.
+      const honored = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+      assert.equal(honored._mcpServerConfigs.length, 1)
+      assert.equal(honored._mcpServerConfigs[0].name, 'ghost')
+
+      // claudeConfigPath alone is ignored — falls back to the default
+      // location (which doesn't exist in this isolated tmpHome).
+      const ignored = new ClaudeByokSession({ cwd: '/tmp', claudeConfigPath: configPath })
+      assert.deepEqual(ignored._mcpServerConfigs, [],
+        'claudeConfigPath must not be read; mcpConfigPath is the only knob')
+    })
+
     it('#4077: lazy-spawns an MCPFleet for configured servers and reaches READY before emitting ready', async () => {
       preTrustStub()
       const configPath = join(tmpHome, '.claude.json')

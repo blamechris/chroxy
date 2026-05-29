@@ -134,6 +134,41 @@ describe('createModelsRegistry(providerHooks)', () => {
     assert.equal(converted[0].fullId, 'gpt-5')
   })
 
+  it('1M variant synthesis consults provider getModelMetadata().label (#4441)', () => {
+    // Forward-compat: if a non-Claude provider ever ships a >=1M-context
+    // model, the variant-synthesis branch in updateModels() must defer to
+    // the provider's metadata label instead of humanizeModelId — same
+    // rule that #4438 applied to the cache-load + fallback-merge paths.
+    const r = createModelsRegistry({
+      fallbackModels: [],
+      getModelMetadata: (id) => {
+        if (id === 'mega-model-9') return { id: 'mega-model-9', label: 'Mega Model 9', fullId: 'mega-model-9', contextWindow: 1_000_000 }
+        if (id === 'mega-model-9[1m]') return { id: 'mega-model-9[1m]', label: 'Mega Model 9 (1M)', fullId: 'mega-model-9[1m]', contextWindow: 1_000_000 }
+        return { id, label: id, fullId: id, contextWindow: 1_000_000 }
+      },
+    })
+    const converted = r.updateModels([
+      { value: 'mega-model-9', displayName: 'Mega Model 9', description: '' },
+    ])
+    const variant = converted.find(m => m.fullId === 'mega-model-9[1m]')
+    assert.ok(variant, 'synthesized 1M variant must be present')
+    assert.equal(variant.label, 'Mega Model 9 (1M)',
+      `expected provider-supplied 'Mega Model 9 (1M)' label, got '${variant.label}' — humanizeModelId would have produced 'Mega Model 9[1m]'`)
+  })
+
+  it('1M variant synthesis still uses humanizeModelId when provider metadata returns no label (Claude path)', () => {
+    // Default Claude registry has no getModelMetadata().label override for
+    // synthesized [1m] variants (the hook returns id/contextWindow only),
+    // so humanizeModelId remains the source of truth — unchanged behaviour.
+    const r = createModelsRegistry()
+    const converted = r.updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    const variant = converted.find(m => m.fullId === 'claude-opus-4-7[1m]')
+    assert.ok(variant, 'synthesized 1M variant must be present')
+    assert.equal(variant.label, 'Opus 4.7 (1M)', 'Claude path label unchanged')
+  })
+
   it('backward compat: no args => Claude-style defaults (FALLBACK_MODELS, claude- stripping)', () => {
     const r = createModelsRegistry()
     const ids = r.getModels().map(m => m.id).sort()
