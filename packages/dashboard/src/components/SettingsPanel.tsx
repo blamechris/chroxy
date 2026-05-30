@@ -528,23 +528,26 @@ function KnownDevicesList(props: {
                   )}
                   {/* #4587: optional platform + last-seen metadata. Both
                       hidden when absent (pre-#4587 server snapshot) so the
-                      row degrades to the original token-only render. */}
-                  {entry.platform && (
+                      row degrades to the original token-only render.
+                      Ternary (not `&&`) so a stray 0 in lastSeenAt — or
+                      empty-string platform that bypassed the sanitizer —
+                      can never render as a raw literal text node. */}
+                  {entry.platform ? (
                     <span
                       className="notification-prefs-device-meta"
                       data-testid={`notification-prefs-device-platform-${key}`}
                     >
                       {' · '}{formatPlatform(entry.platform)}
                     </span>
-                  )}
-                  {entry.lastSeenAt && (
+                  ) : null}
+                  {entry.lastSeenAt ? (
                     <span
                       className="notification-prefs-device-meta"
                       data-testid={`notification-prefs-device-last-seen-${key}`}
                     >
                       {' · Last seen '}{formatRelativeTime(entry.lastSeenAt)}
                     </span>
-                  )}
+                  ) : null}
                 </span>
                 <button
                   type="button"
