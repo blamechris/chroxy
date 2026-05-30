@@ -515,6 +515,13 @@ function KnownDevicesList(props: {
           {sorted.map(key => {
             const isCurrent = key === currentDeviceKey
             const entry = devices[key]
+            // Index access on Record<string, T> returns `T | undefined`
+            // under noUncheckedIndexedAccess. `key` came from
+            // Object.keys(devices) so `entry` is always present in
+            // practice, but the type narrowing keeps strict TS happy
+            // and guards against a race where `devices` mutates
+            // between the keys() snapshot and the render.
+            if (!entry) return null
             return (
               <li
                 key={key}
