@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.17] - 2026-05-30
+
+Waves 5 + 6 of the from-review marathon — 6 follow-ups polishing what v0.9.16 shipped. Per-device notification overrides become operator-friendly: server now stamps `lastSeenAt` + `platform` on each entry (#4587), the UI renders "iOS · Last seen 15 min ago" next to the truncated token, and clearing your own row prompts before wiping local mutes (#4588). Mobile a11y catches up to the dashboard's `role="alert"` semantic on both Android (live-region prop, #4581) and iOS (`AccessibilityInfo.announceForAccessibility`, #4595). Plus a shared-helper refactor (#4591) and a copy unification (#4585) cleaning up the marathon's wake.
+
+### Added
+
+- **Per-device notification metadata (#4587 / #4590):** server stamps `lastSeenAt` (epoch ms) and `platform` (from `client.deviceInfo`) on every per-device notification-prefs entry it touches. `register_push_token` bumps `lastSeenAt` on existing entries without creating empty ones. Protocol's `NotificationDeviceEntrySchema` gets two optional fields; older clients/servers unaffected. Dashboard + mobile `KnownDevicesList` render `{Platform} · Last seen {rel}` next to the truncated token when fields are present; missing fields render exactly as before. Operators with multiple orphan tokens can now tell which one is which.
+- **iOS VoiceOver announce for quiet-hours conflict banner (#4595 / #4597):** mobile `QuietHoursEditor` now calls `AccessibilityInfo.announceForAccessibility` on `pendingSnapshot` mount, gated on `Platform.OS === 'ios'` so Android (which already gets the announcement via the `accessibilityLiveRegion="polite"` prop from #4581) doesn't double-speak. Closes the iOS gap left by #4594 — `accessibilityLiveRegion` is Android-only, iOS needs an explicit announce call.
+- **Android TalkBack roles on quiet-hours conflict banner (#4581 / #4594):** banner View carries `accessibilityLiveRegion="polite"` so TalkBack announces the divergence the moment it mounts; both action buttons carry `accessibilityRole="button"` + `accessibilityLabel` echoing the visible text. Closes the a11y gap reported on the #4570 fix.
+
+### Fixed
+
+- **Confirm before clearing current-device notification override (#4588 / #4592):** dashboard `window.confirm` and mobile `Alert.alert` now prompt when the user clicks Clear on the row tagged `(this device)`. Orphan rows skip the prompt — the whole point of the orphan list is fast cleanup. Catches the misclick that would silently wipe the operator's own mutes / quiet-hours overrides.
+- **Unify mobile "not supported" notification copy (#4585 / #4593):** mobile `SettingsScreen` previously showed a long upgrade explanation in the Categories section and a terser `Requires chroxy v0.9.14 or newer.` in the Quiet-hours section — visible to any user testing against a pre-#4541 server. Both sites now share a single `NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE` constant. Dashboard already colocated both under one capability-gated hint, so no change there.
+
+### Internal
+
+- **Extract `formatRelativeTime` + `formatPlatform` to `@chroxy/store-core` (#4591 / #4596):** the two helpers shipped duplicated in dashboard `SettingsPanel` and mobile `SettingsScreen` as part of #4587. Moved to a new `packages/store-core/src/device-format.ts` with 11 vitest cases covering all branches (minutes / hours / days / months / years / clock-skew fall-through). Both consumers now import from `@chroxy/store-core` — no new dependency on either side, since the package already ships to both. 24 lines deduplicated; mobile static-source tests pivoted to import + regression-guard.
+
 ## [0.9.16] - 2026-05-30
 
 Wave 4 of the from-review marathon — 13 follow-ups polishing what v0.9.13–0.9.15 shipped. Notification preferences round out with optimistic toggles (#4558), WS-closed error surfacing (#4559), capability gating for pre-v0.9.14 servers (#4560), quiet-hours editor draft preservation (#4570), and per-device override cleanup (#4564). Quiet-hours validation and perf hardened (#4566, #4567, #4568). K8s `workspacePVC` finally gets an operator-facing config surface (#4556). Plus a refactor (#4569), accessibility (#4562), styling (#4563), test coverage (#4555), and v0.9.15 SidebarTokenView coverage extension (#4546 — which actually shipped in v0.9.15, but the polish chain continues here).
