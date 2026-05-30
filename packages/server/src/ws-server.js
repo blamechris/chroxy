@@ -360,6 +360,7 @@ function _isSecureRequest(req) {
  *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
  *   { type: 'provider_list', providers }                — available providers
  *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)
+ *   { type: 'notification_prefs', requestId?, prefs: { categories, devices, quietHours } } — current notification preferences snapshot (#4541/#4542); echoed back on `notification_prefs_get` and broadcast after every `notification_prefs_set`
  *   { type: 'skills_list', skills }                     — active skills (name, description, activation, active per entry)
  *   { type: 'skill_changed', skillName, sessionId, oldHashPrefix, newHashPrefix, mode } — skill content-hash mismatch (#3234, transient)
  *   { type: 'skill_activated', sessionId, skillName }   — manual skill toggled on at runtime (#3209)

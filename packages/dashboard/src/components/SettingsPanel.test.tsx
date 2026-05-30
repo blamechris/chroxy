@@ -67,6 +67,12 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     refreshByokCredentialsStatus: vi.fn(),
     setByokCredentials: vi.fn(),
     clearByokCredentials: vi.fn(),
+    // #4542: per-category notification toggles. `notificationPrefs` mirrors
+    // the latest snapshot received over the WS connection (null until the
+    // first `notification_prefs` arrives).
+    notificationPrefs: null,
+    refreshNotificationPrefs: vi.fn(),
+    setNotificationPrefsCategory: vi.fn(),
     ...extra,
   }
 }
@@ -645,6 +651,108 @@ describe('SettingsPanel', () => {
       const input = screen.getByTestId('byok-key-input')
       expect(input.getAttribute('type')).toBe('password')
       expect(input.getAttribute('autocomplete')).toBe('off')
+    })
+  })
+
+  describe('Notification preferences — per-category toggles (#4542)', () => {
+    // The full RATE_LIMITS-derived category set from packages/server/src/push.js.
+    // Kept verbatim so a server-side rename is caught by these tests.
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+    }
+    const defaultPrefs = { categories, devices: {}, quietHours: null }
+
+    it('renders the Notifications section when prefs are loaded', () => {
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-section')).toBeInTheDocument()
+    })
+
+    it('renders the section even before the first snapshot lands (loading state)', () => {
+      setMockState({ notificationPrefs: null })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Section is always present so users see the loading hint instead of
+      // wondering whether the feature exists.
+      expect(screen.getByTestId('notification-prefs-section')).toBeInTheDocument()
+      expect(screen.getByTestId('notification-prefs-loading')).toBeInTheDocument()
+    })
+
+    it('renders one toggle per known server category', () => {
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // The set MUST cover everything in RATE_LIMITS (push.js). If the server
+      // adds a new category, this test fails so the UI can label it.
+      for (const cat of Object.keys(categories)) {
+        expect(screen.getByTestId(`notification-prefs-toggle-${cat}`)).toBeInTheDocument()
+      }
+    })
+
+    it('reflects a category disabled state as an unchecked checkbox', () => {
+      setMockState({
+        notificationPrefs: {
+          categories: { ...categories, result: false },
+          devices: {},
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const resultToggle = screen.getByTestId('notification-prefs-toggle-result') as HTMLInputElement
+      const permToggle = screen.getByTestId('notification-prefs-toggle-permission') as HTMLInputElement
+      expect(resultToggle.checked).toBe(false)
+      expect(permToggle.checked).toBe(true)
+    })
+
+    it('calls setNotificationPrefsCategory(cat, next) when a toggle is clicked', () => {
+      const setNotificationPrefsCategory = vi.fn()
+      setMockState({ notificationPrefs: defaultPrefs, setNotificationPrefsCategory })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-toggle-result'))
+      // Toggling an enabled category sends `false`.
+      expect(setNotificationPrefsCategory).toHaveBeenCalledWith('result', false)
+    })
+
+    it('emits true when toggling a disabled category back on', () => {
+      const setNotificationPrefsCategory = vi.fn()
+      setMockState({
+        notificationPrefs: {
+          categories: { ...categories, inactivity_warning: false },
+          devices: {},
+          quietHours: null,
+        },
+        setNotificationPrefsCategory,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-toggle-inactivity_warning'))
+      expect(setNotificationPrefsCategory).toHaveBeenCalledWith('inactivity_warning', true)
+    })
+
+    it('calls refreshNotificationPrefs when the panel opens', () => {
+      const refreshNotificationPrefs = vi.fn()
+      setMockState({ refreshNotificationPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshNotificationPrefs).toHaveBeenCalled()
+    })
+
+    it('renders only categories present in the snapshot — unknown server keys are surfaced too', () => {
+      // The wire schema is permissive (z.record(string, boolean)) — if a
+      // future server adds a category the UI doesn't know about, render it
+      // with the raw key so the user can still toggle it. Better than
+      // silently hiding a notification source.
+      setMockState({
+        notificationPrefs: {
+          categories: { ...categories, future_category: true },
+          devices: {},
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-toggle-future_category')).toBeInTheDocument()
     })
   })
 })

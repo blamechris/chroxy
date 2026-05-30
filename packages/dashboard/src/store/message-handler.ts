@@ -96,7 +96,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -2914,6 +2914,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           masked: payload.masked,
           reason: payload.reason,
           fileExists: payload.fileExists,
+        },
+      });
+      break;
+    }
+
+    case 'notification_prefs': {
+      // #4542: notification-prefs snapshot. Emitted in response to
+      // `notification_prefs_get` and broadcast after every
+      // `notification_prefs_set`. The wire schema is permissive
+      // (z.record(string, boolean) for categories) — adding a category
+      // server-side does not require a client rebuild.
+      const parsed = ServerNotificationPrefsSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('notification_prefs: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const prefs = parsed.data.prefs;
+      set({
+        notificationPrefs: {
+          categories: prefs.categories,
+          devices: prefs.devices,
+          quietHours: prefs.quietHours,
         },
       });
       break;

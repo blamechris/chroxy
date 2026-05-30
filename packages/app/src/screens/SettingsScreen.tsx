@@ -35,6 +35,33 @@ const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 // returning a new [] on every render (which causes infinite re-render loops).
 const EMPTY_RULES: PermissionRule[] = [];
 
+/**
+ * #4542: friendly labels for per-category notification toggles. Keys MUST
+ * match the server-side `ALL_CATEGORIES` enum from notification-prefs.js
+ * (mirrors RATE_LIMITS in push.js). Unknown keys fall back to the raw key
+ * so a future server-side category is never silently hidden.
+ */
+const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: string }> = {
+  permission: { label: 'Permission requests', hint: 'Tool-use prompts awaiting allow / deny.' },
+  result: { label: 'Task completion', hint: 'Sent when a Claude turn finishes unattended.' },
+  activity_update: { label: 'Activity updates', hint: 'Foreground task progress when you are away.' },
+  activity_waiting: { label: 'Waiting for input', hint: 'Claude paused on a question or prompt.' },
+  activity_error: { label: 'Session errors', hint: 'Crashes, tunnel drops, fatal session failures.' },
+  inactivity_warning: { label: 'Inactivity warnings', hint: 'Heads-up before a long-idle session is paused.' },
+  live_activity: { label: 'Live Activity (iOS)', hint: 'iOS Dynamic Island / lock-screen updates.' },
+};
+
+/** Render order for known categories. Unknown keys append in snapshot order. */
+const NOTIFICATION_CATEGORY_ORDER = [
+  'permission',
+  'activity_waiting',
+  'activity_error',
+  'activity_update',
+  'inactivity_warning',
+  'result',
+  'live_activity',
+];
+
 const SPEECH_LANGUAGES = [
   { tag: 'en-US', label: 'English (US)' },
   { tag: 'en-GB', label: 'English (UK)' },
@@ -115,6 +142,26 @@ export function SettingsScreen() {
   const dismissSessionNotification = useConnectionStore((s) => s.dismissSessionNotification);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const totalActiveNotifications = sessionNotifications.length + serverErrors.length;
+
+  // #4542: per-category notification preferences. Snapshot arrives via the
+  // WS `notification_prefs` message; we request it on mount and toggle a
+  // single category at a time via `notification_prefs_set` (server shallow-
+  // merges so untouched categories are preserved).
+  const notificationPrefs = useConnectionStore((s) => s.notificationPrefs);
+  const refreshNotificationPrefs = useConnectionStore((s) => s.refreshNotificationPrefs);
+  const setNotificationPrefsCategory = useConnectionStore((s) => s.setNotificationPrefsCategory);
+
+  useEffect(() => {
+    refreshNotificationPrefs();
+  }, [refreshNotificationPrefs]);
+
+  const orderedNotificationCategories = useMemo(() => {
+    if (!notificationPrefs) return [];
+    const cats = notificationPrefs.categories;
+    const known = NOTIFICATION_CATEGORY_ORDER.filter((k) => k in cats);
+    const unknown = Object.keys(cats).filter((k) => !NOTIFICATION_CATEGORY_ORDER.includes(k));
+    return [...known, ...unknown];
+  }, [notificationPrefs]);
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
@@ -370,6 +417,44 @@ export function SettingsScreen() {
           <Text style={styles.rowLabel}>Activity History</Text>
           <Text style={styles.rowValue}>View all</Text>
         </TouchableOpacity>
+      </View>
+
+      {/* NOTIFICATIONS — Categories (#4542) */}
+      <Text style={styles.sectionHeader}>NOTIFICATION CATEGORIES</Text>
+      <View style={styles.section} testID="notification-prefs-section">
+        {notificationPrefs == null ? (
+          <View style={styles.row}>
+            <Text style={styles.rowHint} testID="notification-prefs-loading">
+              Loading preferences&hellip;
+            </Text>
+          </View>
+        ) : (
+          orderedNotificationCategories.map((cat, idx) => {
+            const meta = NOTIFICATION_CATEGORY_LABELS[cat];
+            const label = meta?.label ?? cat;
+            const hint = meta?.hint;
+            const checked = notificationPrefs.categories[cat] !== false;
+            return (
+              <React.Fragment key={cat}>
+                {idx > 0 && <View style={styles.separator} />}
+                <View style={styles.row}>
+                  <View style={{ flex: 1, paddingRight: 12 }}>
+                    <Text style={styles.rowLabel}>{label}</Text>
+                    {hint && (
+                      <Text style={[styles.rowHint, { marginTop: 2 }]}>{hint}</Text>
+                    )}
+                  </View>
+                  <Switch
+                    value={checked}
+                    onValueChange={(value) => setNotificationPrefsCategory(cat, value)}
+                    trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
+                    testID={`notification-prefs-toggle-${cat}`}
+                  />
+                </View>
+              </React.Fragment>
+            );
+          })
+        )}
       </View>
 
       {/* PORTABILITY */}

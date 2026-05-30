@@ -284,6 +284,15 @@ export interface ServerNotificationData {
   restartingSince: number | null;
   // Session timeout warning (from server session_warning event)
   timeoutWarning: { sessionId: string; sessionName: string; remainingMs: number; receivedAt: number } | null;
+  // #4542: per-category notification preferences. Mirrors the latest
+  // `notification_prefs` snapshot received from the server. `null` until
+  // the first snapshot arrives. Server is the single source of truth —
+  // ~/.chroxy/notification-prefs.json on the host.
+  notificationPrefs: {
+    categories: Record<string, boolean>;
+    devices: Record<string, { categories?: Record<string, boolean> }>;
+    quietHours: { start: string; end: string } | null;
+  } | null;
 }
 
 /**
@@ -478,6 +487,12 @@ export interface ServerNotificationActions {
   dismissServerError: (id: string) => void;
   dismissSessionNotification: (id: string) => void;
   dismissTimeoutWarning: () => void;
+  // #4542: notification-prefs round-trip. `refresh` sends
+  // `notification_prefs_get`; `setCategory` sends `notification_prefs_set`
+  // with a single-category patch (server shallow-merges so other toggles
+  // are preserved).
+  refreshNotificationPrefs: () => void;
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
 }
 
 /**

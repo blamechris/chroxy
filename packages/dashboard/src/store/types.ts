@@ -786,6 +786,24 @@ export interface ConnectionState {
   setByokCredentials: (anthropicApiKey: string) => void;
   clearByokCredentials: () => void;
 
+  // #4542: per-category notification preferences. Mirrors the server
+  // snapshot received over WS (`notification_prefs`). `null` until the
+  // first snapshot lands. Categories is open-ended (server-side keys
+  // come from RATE_LIMITS in push.js — adding a new category there does
+  // not require a protocol bump).
+  notificationPrefs: {
+    categories: Record<string, boolean>;
+    devices: Record<string, { categories?: Record<string, boolean> }>;
+    quietHours: { start: string; end: string } | null;
+  } | null;
+  refreshNotificationPrefs: () => void;
+  /**
+   * Patch a single category's enabled flag. Sends a `notification_prefs_set`
+   * with a minimal shallow-merge patch (server merges over the existing
+   * categories map, so other toggles are preserved).
+   */
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
+
   // Multi-server registry actions
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
   removeServer: (serverId: string) => void;
