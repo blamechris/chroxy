@@ -3402,6 +3402,27 @@ export function handleToolStart(
     }
   }
 
+  // #4607 — honour the wire `timestamp` field when present (number). The
+  // server's history ring buffer stamps `timestamp: Date.now()` at append
+  // time (session-message-history.js:208-216) and forwards it on every
+  // replay. Pre-#4607 we always overwrote with `Date.now()`, which:
+  //   1) made the rebuilt `chatMessage.timestamp` jump to the replay moment,
+  //      so any UI that reads `tool_use.timestamp` (e.g.
+  //      ActivityIndicator.findInFlightToolUse fallback) sees a fresh time
+  //      instead of when the tool actually started.
+  //   2) made the rebuilt `ActiveTool.startedAt` jump to the replay moment
+  //      whenever `activeTools` was empty at history_replay_start time
+  //      (toolUseId-dedup in applyToActiveTools only preserves the original
+  //      `startedAt` when an entry with the same id already exists). The
+  //      "Running <tool> · Ns" pill restarted at ~1s on tab-switch for any
+  //      session whose activeTools had been swept by a prior handleAgentIdle
+  //      / live `result` / etc.
+  // The fallback to `Date.now()` covers live (non-replay) tool_start
+  // broadcasts, which never carry `msg.timestamp` on the wire.
+  const wireTimestamp =
+    typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp)
+      ? msg.timestamp
+      : Date.now()
   const chatMessage: ChatMessage = {
     id: toolId,
     type: 'tool_use',
@@ -3409,7 +3430,7 @@ export function handleToolStart(
     tool,
     toolUseId,
     serverName,
-    timestamp: Date.now(),
+    timestamp: wireTimestamp,
   }
 
   // #4308 — build the ActiveTool entry. Skip when `toolUseId` is missing
