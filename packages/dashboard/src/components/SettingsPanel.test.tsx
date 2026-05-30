@@ -885,6 +885,30 @@ describe('SettingsPanel', () => {
       // contract holds without any synthetic interaction.
       expect(setNotificationPrefsDevice).not.toHaveBeenCalled()
     })
+
+    it('does not wrap the per-device input inside a <label> element (#4562)', () => {
+      // Regression for #4562: the per-device row originally used a wrapping
+      // <label> that shared its <li> ancestor with the global category's
+      // <label>. Two labels in the same row confuses screen readers and can
+      // bubble click events to the wrong input. Hoisted: the per-device input
+      // sits alongside an explicit <label htmlFor={deviceToggleId}> sibling
+      // inside a plain <div>, with no <label> ancestor at all.
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const deviceToggle = screen.getByTestId('notification-prefs-device-toggle-result')
+      // No ancestor <label> for the per-device input.
+      expect(deviceToggle.closest('label')).toBeNull()
+      // The per-device row wrapper is a <div>, not a <label>.
+      const row = screen.getByTestId('notification-prefs-device-row-result')
+      expect(row.tagName).toBe('DIV')
+      // And the explicit "Mute on this device" label still associates via htmlFor
+      // so clicking the text toggles only the device input (scoped to the
+      // `result` row — every category renders its own copy of the text).
+      const muteLabel = row.querySelector('label')
+      expect(muteLabel).not.toBeNull()
+      expect(muteLabel!.getAttribute('for')).toBe('notification-prefs-device-result')
+      expect(muteLabel!.textContent).toBe('Mute on this device')
+    })
   })
 
   describe('Notification preferences — quiet-hours editor (#4544)', () => {

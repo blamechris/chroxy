@@ -105,7 +105,11 @@ export const CATEGORY_DEFAULTS = Object.freeze(
 export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(['permission', 'activity_error'])
 
 const _ALL_CATEGORIES_SET = new Set(ALL_CATEGORIES)
-const _HHMM_RE = /^\d{2}:\d{2}$/
+// Two-digit zero-padded HH:MM with HH in 00-23 and MM in 00-59 (#4566).
+// The narrower regex replaces the older `/^\d{2}:\d{2}$/`, which accepted
+// out-of-range values like `25:99` and let a hand-edited typo land in the
+// in-memory prefs before fail-opening at gate-eval time.
+const _HHMM_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
 export function defaultNotificationPrefsPath() {
   return process.env.CHROXY_NOTIFICATION_PREFS_PATH || join(homedir(), '.chroxy', 'notification-prefs.json')
@@ -155,7 +159,7 @@ function sanitizeCategoryMap(raw) {
  * of muting on this device, `{ start, end, timezone }` = device-specific
  * window.
  */
-function sanitizeDevices(raw) {
+function sanitizeDevices(raw, { log } = {}) {
   if (!raw || typeof raw !== 'object') return {}
   const out = {}
   for (const [token, entry] of Object.entries(raw)) {
@@ -167,6 +171,14 @@ function sanitizeDevices(raw) {
     // "fall back to global". hasOwnProperty distinguishes absent from null.
     if (Object.prototype.hasOwnProperty.call(entry, 'quietHours')) {
       cleaned.quietHours = sanitizeQuietHours(entry.quietHours)
+      // #4566: surface a typo on a per-device window — the original block
+      // existed on disk but failed range/shape validation, so the device
+      // silently inherits "no muting" (null). Warn so the operator notices
+      // rather than discovering it the next time a notification fires
+      // outside their expected window.
+      if (cleaned.quietHours === null && entry.quietHours !== null) {
+        log?.warn?.(`notification-prefs: device ${token} quietHours rejected (invalid shape or out-of-range HH:MM)`)
+      }
     }
     if (Object.prototype.hasOwnProperty.call(entry, 'bypassCategories')) {
       const bypass = sanitizeBypassList(entry.bypassCategories)
@@ -178,12 +190,19 @@ function sanitizeDevices(raw) {
 }
 
 /**
- * Sanitize the quiet-hours window (#4544).
+ * Sanitize the quiet-hours window (#4544, tightened #4566).
  *
  * Requires `start`, `end`, AND `timezone` to all be present and well-formed
  * — a window without a timezone cannot be evaluated at the gate (see
  * `isInQuietHoursIn`'s fail-open behaviour), so we refuse to load a
  * half-shape that would silently mis-mute later.
+ *
+ * `start`/`end` must match the two-digit zero-padded `HH:MM` form with
+ * `HH` in 00-23 and `MM` in 00-59 (#4566). The previous regex
+ * (`/^\d{2}:\d{2}$/`) accepted out-of-range values like `25:99`, which
+ * survived the loader and silently fail-opened at gate-eval time; the
+ * stricter pattern in `_HHMM_RE` rejects those at load. Returning `null`
+ * here triggers a `log.warn` in `loadPrefs` so the typo surfaces.
  *
  * The IANA timezone is validated by constructing a `DateTimeFormat` with
  * the requested zone — Node throws `RangeError` for unknown zones, which
@@ -247,10 +266,24 @@ export function loadPrefs(filePath = defaultNotificationPrefsPath(), { log } = {
       const cleaned = sanitizeBypassList(raw.bypassCategories)
       bypass = cleaned ?? [...DEFAULT_BYPASS_CATEGORIES]
     }
+    const cleanedQuietHours = sanitizeQuietHours(raw?.quietHours)
+    // #4566: warn when the on-disk file carried a quietHours block but it
+    // failed validation. The pre-#4566 behaviour silently dropped the bad
+    // window and the operator believed quiet-hours were active. We skip
+    // the warn for `null` (explicit "no quiet hours") and for "key absent"
+    // — only a present, non-null, rejected block deserves the signal.
+    const rawQuietHours = raw?.quietHours
+    if (
+      cleanedQuietHours === null &&
+      rawQuietHours !== null &&
+      rawQuietHours !== undefined
+    ) {
+      log?.warn?.(`notification-prefs ${filePath} quietHours rejected (invalid shape or out-of-range HH:MM)`)
+    }
     return {
       categories: { ...base.categories, ...sanitizeCategoryMap(raw?.categories) },
-      devices: sanitizeDevices(raw?.devices),
-      quietHours: sanitizeQuietHours(raw?.quietHours),
+      devices: sanitizeDevices(raw?.devices, { log }),
+      quietHours: cleanedQuietHours,
       bypassCategories: bypass,
     }
   } catch (err) {
