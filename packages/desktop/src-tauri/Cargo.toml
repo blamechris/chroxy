@@ -1,6 +1,6 @@
 [package]
 name = "chroxy-desktop"
-version = "0.9.16"
+version = "0.9.17"
 edition = "2021"
 description = "Chroxy desktop tray app"
 
