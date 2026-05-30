@@ -58,6 +58,15 @@
  *   Honoured only by K8sBackend — Docker and other backends silently ignore this field.
  *   When absent, K8sBackend omits the field from the Pod spec and the K8s cluster default applies
  *   (typically `IfNotPresent` for tagged images, `Always` for `latest`).
+ * @param {Object} [opts.workspacePVC] - PersistentVolumeClaim-based workspace strategy for
+ *   multi-node K8s clusters where `hostPath` cannot reach the operator's source tree (#3385).
+ *   Honoured only by K8sBackend — Docker and other backends silently ignore this field.
+ *   Mutually exclusive with `opts.cwd` on K8sBackend (passing both throws so the operator picks
+ *   exactly one strategy — see `K8sBackend.validateWorkspacePVC`).
+ * @param {string}  opts.workspacePVC.claimName   - Name of a pre-provisioned PVC in the
+ *   target namespace. Required when `workspacePVC` is set; must be a non-empty string.
+ * @param {string}  [opts.workspacePVC.mountPath] - Pod-side mount path (default: `/workspace`).
+ * @param {boolean} [opts.workspacePVC.readOnly]  - Mount the PVC read-only (default: false).
  * @returns {Promise<{ containerId: string, containerCliPath: string }>}
  *   containerId — the full container ID string returned by the runtime
  *   containerCliPath — absolute path inside the container where the CLI binary was installed
