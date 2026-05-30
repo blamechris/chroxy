@@ -90,6 +90,17 @@ const CLAUDE = resolveBinary('claude', [
   join(homedir(), '.npm-global/bin/claude'),
 ])
 
+// #4604 — watchdog window for the AskUserQuestion answer round-trip.
+// respondToQuestion() writes ONE keystroke (the chosen option's digit)
+// and assumes claude TUI emits PostToolUse shortly after. Multi-question
+// AskUserQuestion forms violate that assumption: claude TUI renders a
+// per-question form that needs additional keystrokes + a Submit, and
+// PostToolUse never fires. Without this watchdog the session wedges at
+// _isBusy=true forever (the 8m+ symptom in #4604). On expiry we clear
+// _isBusy + _pendingUserAnswer and emit ASK_USER_QUESTION_STALL so the
+// dashboard can prompt the user to retry. Root cause is fixed in Chunk B.
+const ASK_USER_QUESTION_WATCHDOG_MS = 30 * 1000
+
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the
 // PTY would render "Is this a project you trust?" and wait for Enter.
@@ -329,6 +340,11 @@ export class ClaudeTuiSession extends BaseSession {
     // on PostToolUse (claude resolved the prompt some other way), or
     // on session destroy.
     this._pendingUserAnswer = null
+    // #4604: watchdog timer armed in respondToQuestion(). If PostToolUse
+    // never arrives after we write the answer (multi-question form wedge),
+    // _onAskUserQuestionStall clears busy state + emits an error so the
+    // session is recoverable. Cleared on PostToolUse + destroy().
+    this._askUserQuestionWatchdog = null
   }
 
   // Tail length to keep + length to include in error diagnostics.
@@ -1147,6 +1163,14 @@ export class ClaudeTuiSession extends BaseSession {
           ? questions[0].options
           : []
         this._pendingUserAnswer = { toolUseId, options }
+        // #4604: surface the AskUserQuestion shape in chroxy.log so the
+        // multi-question wedge condition is greppable. The bug was
+        // diagnosed via /tmp/.../pre-*.json spelunking — never again.
+        const questionCount = questions.length
+        log.info(`AskUserQuestion pending: tool=${toolUseId} questions=${questionCount} options.q1=${options.length}`)
+        if (questionCount > 1) {
+          log.warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
+        }
         this.emit('user_question', { toolUseId, questions })
       }
       return
@@ -1159,6 +1183,13 @@ export class ClaudeTuiSession extends BaseSession {
     // user_question_response doesn't write into a stale context.
     if (toolName === 'AskUserQuestion' && this._pendingUserAnswer) {
       this._pendingUserAnswer = null
+    }
+    // #4604: PostToolUse means claude accepted the answer (single-question
+    // happy path). Cancel the stall watchdog so it doesn't fire a spurious
+    // ASK_USER_QUESTION_STALL error 30s later.
+    if (toolName === 'AskUserQuestion' && this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
     }
 
     // PostToolUse — extract a string-ish result for the dashboard.
@@ -1238,6 +1269,14 @@ export class ClaudeTuiSession extends BaseSession {
     // clicked the QuestionPrompt right as the hard timeout fired) would
     // attempt a PTY write that no longer matches a live turn.
     this._pendingUserAnswer = null
+    // #4604: same symmetry for the stall watchdog. The guard in
+    // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
+    // currently no-op the late fire (both are falsy here), but leaving
+    // the setTimeout handle live wastes a callback invocation 30s later.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
   }
 
   /**
@@ -1321,6 +1360,11 @@ export class ClaudeTuiSession extends BaseSession {
     // after we've already fired Ctrl-C and emitted error/result has
     // nowhere meaningful to go.
     this._pendingUserAnswer = null
+    // #4604: same symmetry for the stall watchdog — see _finishTurnError.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
     this.emit('error', { message: `Response timed out after ${friendly}` })
     // #4010: emit result so the dashboard receives agent_idle and clears
     // the Stop button. stream_end on its own only clears streamingMessageId.
@@ -1386,6 +1430,14 @@ export class ClaudeTuiSession extends BaseSession {
     // #4278: also drop any pending AskUserQuestion so a subsequent
     // user_question_response can't write into a torn-down context.
     this._pendingUserAnswer = null
+    // #4604: cancel the stall watchdog too. interrupt() does NOT clear
+    // _isBusy directly (Ctrl-C surfaces async via _finishTurn*), so without
+    // this the watchdog could fire ~30s later and emit a spurious
+    // ASK_USER_QUESTION_STALL for a session the user already interrupted.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
   }
 
   /**
@@ -1407,6 +1459,11 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {object} [_answersMap] — reserved; unused in TUI mode
    */
   respondToQuestion(text, _answersMap) {
+    // #4604: capture toolUseId BEFORE clearing _pendingUserAnswer so the
+    // observability log + watchdog arm have something to correlate on
+    // when the response fails or stalls.
+    const prevToolUseId = this._pendingUserAnswer?.toolUseId || null
+    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} text.length=${(text || '').length} answersMap.keys=${_answersMap ? Object.keys(_answersMap).length : 0} options=${this._pendingUserAnswer?.options?.length || 0}`)
     if (!this._pendingUserAnswer) return
     if (typeof text !== 'string' || text.length === 0) return
     const { options } = this._pendingUserAnswer
@@ -1441,7 +1498,44 @@ export class ClaudeTuiSession extends BaseSession {
     // but the caller (handleUserQuestionResponse) is sync. Errors here
     // are non-fatal; worst case the user re-sends the answer.
     this._writePtyTextThrottled(writeText).catch((err) => {
-      log.warn(`respondToQuestion PTY write failed: ${err.message}`)
+      log.warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+    })
+    // #4604: arm a stall watchdog. If claude TUI never emits PostToolUse
+    // for this AskUserQuestion (multi-question form wedge), the watchdog
+    // clears _isBusy + _pendingUserAnswer and emits ASK_USER_QUESTION_STALL
+    // so the dashboard prompts the user to retry. Cancelled on PostToolUse
+    // (happy path) and on destroy().
+    const armedToolUseId = prevToolUseId
+    if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
+    this._askUserQuestionWatchdog = setTimeout(() => {
+      this._askUserQuestionWatchdog = null
+      this._onAskUserQuestionStall(armedToolUseId)
+    }, ASK_USER_QUESTION_WATCHDOG_MS)
+  }
+
+  /**
+   * Watchdog handler for an AskUserQuestion answer that claude TUI never
+   * acknowledged via PostToolUse (#4604). Multi-question forms render a
+   * per-question form needing more than the single digit chroxy writes,
+   * leaving _isBusy=true forever. We force-clear the busy state and
+   * surface a structured error so the dashboard can render a retry prompt.
+   *
+   * No-ops on destroyed sessions and on sessions where PostToolUse
+   * already arrived (would have cleared _pendingUserAnswer + busy state
+   * in the normal flow before the watchdog timer fired).
+   */
+  _onAskUserQuestionStall(toolUseId) {
+    if (this._destroying) return
+    if (!this._pendingUserAnswer && !this._isBusy) return
+
+    log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Clearing busy state so the session is recoverable.`)
+
+    this._pendingUserAnswer = null
+    this._isBusy = false
+    this.emit('error', {
+      code: 'ASK_USER_QUESTION_STALL',
+      message: 'The agent\'s question response could not be delivered — likely a multi-question form. Please retry from your last message.',
+      toolUseId,
     })
   }
 
@@ -1455,6 +1549,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._pendingUserAnswer = null
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    // #4604: cancel the AskUserQuestion stall watchdog so it can't fire
+    // a stale ASK_USER_QUESTION_STALL event into a torn-down listener.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
     if (this._term) {
       try { this._term.kill('SIGTERM') } catch { /* already dead */ }
       this._term = null
