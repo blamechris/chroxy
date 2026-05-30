@@ -79,10 +79,14 @@ describe('notification-prefs', () => {
     })
 
     it('parses a well-formed file and merges over defaults', () => {
+      // #4544 tightened the quiet-hours shape to require a timezone — a
+      // window without one is dropped on load. The legacy two-field
+      // shape (start/end only) is exercised separately below to lock in
+      // that defensive behaviour.
       const onDisk = {
         categories: { result: false },
         devices: { 'ExponentPushToken[abc]': { categories: { permission: false } } },
-        quietHours: { start: '22:00', end: '07:00' },
+        quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
       }
       writeFileSync(prefsPath, JSON.stringify(onDisk))
       const prefs = loadPrefs(prefsPath)
@@ -111,10 +115,11 @@ describe('notification-prefs', () => {
     })
 
     it('round-trips through loadPrefs', () => {
+      // #4544: timezone is required for the window to survive the loader.
       const written = {
         categories: { result: false, permission: true },
         devices: { 'tok-1': { categories: { result: true } } },
-        quietHours: { start: '23:00', end: '06:00' },
+        quietHours: { start: '23:00', end: '06:00', timezone: 'America/Los_Angeles' },
       }
       savePrefs(written, prefsPath)
       const reread = loadPrefs(prefsPath)

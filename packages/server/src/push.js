@@ -23,6 +23,7 @@ import {
   defaultPrefs as defaultNotificationPrefs,
   isCategoryEnabledIn,
   isInQuietHoursIn,
+  shouldBypassQuietHours,
 } from './notification-prefs.js'
 
 const log = createLogger('push')
@@ -180,12 +181,20 @@ export class PushManager {
 
   /**
    * Patch preferences. Shallow-merge at the top level (`categories`,
-   * `devices`, `quietHours`); the categories map itself is shallow-merged
-   * so an inbound patch that only mentions `result` does not wipe the
-   * `permission` toggle the user set earlier. Persists to disk when a
-   * `prefsPath` was configured at construction time.
+   * `devices`, `quietHours`, `bypassCategories`); the categories map
+   * itself is shallow-merged so an inbound patch that only mentions
+   * `result` does not wipe the `permission` toggle the user set earlier.
+   * Per-device entries are field-merged so the caller can patch one
+   * device's quiet-hours window without wiping its category overrides.
+   * Persists to disk when a `prefsPath` was configured at construction
+   * time.
    *
-   * @param {object} patch - Partial prefs ({ categories?, devices?, quietHours? })
+   * #4544: `quietHours` now carries an IANA `timezone`; `bypassCategories`
+   * is a list of category names that fire even during quiet hours
+   * (defaults to permission + activity_error). Both fields accept the
+   * same per-device override shape as the existing `categories` map.
+   *
+   * @param {object} patch - Partial prefs ({ categories?, devices?, quietHours?, bypassCategories? })
    */
   setPrefs(patch) {
     if (!patch || typeof patch !== 'object') return this.getPrefs()
@@ -193,6 +202,9 @@ export class PushManager {
       categories: { ...this._prefs.categories },
       devices: { ...this._prefs.devices },
       quietHours: this._prefs.quietHours,
+      bypassCategories: Array.isArray(this._prefs.bypassCategories)
+        ? [...this._prefs.bypassCategories]
+        : [],
     }
     if (patch.categories && typeof patch.categories === 'object') {
       // Shallow-merge into the existing categories map so unmentioned
@@ -202,25 +214,64 @@ export class PushManager {
       }
     }
     if (patch.devices && typeof patch.devices === 'object') {
-      // Per-device: replace the inner categories block wholesale per
-      // device key — the caller owns its device entry. A device key
-      // not mentioned in the patch survives.
+      // Per-device: shallow-merge the inner fields per device key. The
+      // caller may patch one field (e.g. just `quietHours`) without
+      // wiping the rest (e.g. an existing `categories` mute). A device
+      // key not mentioned in the patch survives.
       for (const [token, entry] of Object.entries(patch.devices)) {
+        if (entry === null) {
+          // Explicit null deletes the entry.
+          delete next.devices[token]
+          continue
+        }
         if (!entry || typeof entry !== 'object') continue
         const existing = next.devices[token] || { categories: {} }
-        const mergedCategories = { ...(existing.categories || {}) }
+        const merged = { ...existing }
         if (entry.categories && typeof entry.categories === 'object') {
+          const mergedCategories = { ...(existing.categories || {}) }
           for (const [k, v] of Object.entries(entry.categories)) {
             if (typeof v === 'boolean') mergedCategories[k] = v
           }
+          merged.categories = mergedCategories
+        } else {
+          merged.categories = existing.categories || {}
         }
-        next.devices[token] = { categories: mergedCategories }
+        // Tri-state: present `quietHours` key (including null) is honoured;
+        // absent key leaves the existing value alone. Matches the loader
+        // semantics — `null` means "this device opts out of muting" while
+        // `undefined` means "inherit global".
+        if (Object.prototype.hasOwnProperty.call(entry, 'quietHours')) {
+          merged.quietHours = entry.quietHours
+        }
+        // Same tri-state for bypassCategories. An explicit `null` resets
+        // the device to inheriting the global list; an array (including
+        // empty) records an override.
+        if (Object.prototype.hasOwnProperty.call(entry, 'bypassCategories')) {
+          if (entry.bypassCategories === null) {
+            delete merged.bypassCategories
+          } else if (Array.isArray(entry.bypassCategories)) {
+            merged.bypassCategories = entry.bypassCategories.filter((c) => typeof c === 'string' && c.length > 0)
+          }
+        }
+        next.devices[token] = merged
       }
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'quietHours')) {
       // Allow explicit null to clear the window; the loader sanitises
       // shape on re-read so we don't need to validate here.
       next.quietHours = patch.quietHours || null
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'bypassCategories')) {
+      // Replace the bypass list wholesale. An empty array is a legitimate
+      // value (user says "nothing bypasses, not even errors") so we
+      // intentionally do NOT default-fill here — that distinction is
+      // preserved by `resolveBypassCategories` on the read path.
+      if (Array.isArray(patch.bypassCategories)) {
+        next.bypassCategories = patch.bypassCategories.filter((c) => typeof c === 'string' && c.length > 0)
+      } else if (patch.bypassCategories === null) {
+        // Explicit null restores defaults.
+        next.bypassCategories = [...defaultNotificationPrefs().bypassCategories]
+      }
     }
     this._prefs = next
     if (this._prefsPath) {
@@ -248,13 +299,25 @@ export class PushManager {
   }
 
   /**
-   * Stub for the deferred quiet-hours enforcement (#4544). Returns false
-   * today — the foundation only persists the configured window so a
-   * future UI iteration can read it back. The signature is published so
-   * push.js can wire the gate without a follow-up API churn.
+   * Resolve "is `now` inside this device's quiet-hours window?" (#4544).
+   *
+   * Honours per-device override precedence and timezone-aware boundary
+   * math (including midnight wrap + DST). See `notification-prefs.js`
+   * `isInQuietHoursIn` for the full evaluation rules and fail-open
+   * defensive cases.
    */
   isInQuietHours(now = Date.now(), pushToken = null) {
     return isInQuietHoursIn(this._prefs, now, pushToken)
+  }
+
+  /**
+   * Resolve "does this category bypass quiet hours for this device?"
+   * (#4544). Operator-blocking categories (`permission`,
+   * `activity_error`) bypass by default; users can extend or override
+   * this list globally and per-device.
+   */
+  shouldBypassQuietHours(category, pushToken = null) {
+    return shouldBypassQuietHours(this._prefs, category, pushToken)
   }
 
   /**
@@ -435,7 +498,10 @@ export class PushManager {
   async send(category, title, body, data = {}, categoryId = undefined) {
     if (this.tokens.size === 0) return true
 
-    // Rate limit check
+    // Rate limit check — the FIRST line of defence. Stays in place
+    // ahead of the #4542 per-category mute and the #4544 quiet-hours
+    // gate so a single shared throttle still applies regardless of
+    // per-device prefs. See RATE_LIMITS history comments above.
     const limit = RATE_LIMITS[category] ?? 30_000
     const lastSent = this._lastSent.get(category) || 0
     if (Date.now() - lastSent < limit) {
@@ -443,7 +509,25 @@ export class PushManager {
     }
     this._lastSent.set(category, Date.now())
 
-    const messages = [...this.tokens].map((token) => ({
+    // #4542 per-category mute + #4544 quiet-hours gate, evaluated PER
+    // TOKEN so a desktop and a phone with different prefs both get the
+    // right behaviour from a single send() call. The quiet-hours gate
+    // is conditional: a category in the device's bypass list (default
+    // permission + activity_error) still fires even at 3am.
+    const now = Date.now()
+    const eligibleTokens = []
+    for (const token of this.tokens) {
+      if (!this.isCategoryEnabled(category, token)) continue
+      if (this.isInQuietHours(now, token) && !this.shouldBypassQuietHours(category, token)) continue
+      eligibleTokens.push(token)
+    }
+    if (eligibleTokens.length === 0) {
+      // Every token filtered — no Expo POST. Returning `true` matches the
+      // existing "nothing to send is not a failure" contract.
+      return true
+    }
+
+    const messages = eligibleTokens.map((token) => ({
       to: token,
       sound: 'default',
       title,

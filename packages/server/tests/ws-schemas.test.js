@@ -685,11 +685,52 @@ describe('NotificationPrefsSetSchema (#4541)', () => {
   })
 
   it('accepts a quietHours patch', () => {
+    // #4544 tightened the window shape — `timezone` is now required
+    // when a window is present (an unconfigured zone can't be evaluated
+    // by the gate, so refuse the half-shape at the schema boundary).
     const result = NotificationPrefsSetSchema.safeParse({
       type: 'notification_prefs_set',
-      prefs: { quietHours: { start: '22:00', end: '07:00' } },
+      prefs: { quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' } },
     })
     assert.ok(result.success)
+  })
+
+  it('rejects a quietHours patch missing timezone (#4544)', () => {
+    // The pre-#4544 two-field shape is now refused — the gate can't
+    // evaluate a window without an IANA zone and the loader would drop
+    // it anyway, so the wire schema rejects it up front.
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: { start: '22:00', end: '07:00' } },
+    }).success)
+  })
+
+  it('accepts a bypassCategories patch (#4544)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { bypassCategories: ['permission', 'activity_error'] },
+    }).success)
+  })
+
+  it('accepts an empty bypassCategories patch (silence everything, even errors)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { bypassCategories: [] },
+    }).success)
+  })
+
+  it('accepts per-device quietHours + bypassCategories (#4544)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: {
+        devices: {
+          'ExponentPushToken[abc]': {
+            quietHours: { start: '23:00', end: '06:00', timezone: 'America/Los_Angeles' },
+            bypassCategories: ['permission'],
+          },
+        },
+      },
+    }).success)
   })
 
   it('accepts null quietHours to clear the window', () => {
@@ -745,17 +786,34 @@ describe('NotificationPrefsSetSchema (#4541)', () => {
 
 describe('ServerNotificationPrefsSchema (#4541)', () => {
   it('accepts a fully populated snapshot', () => {
+    // #4544: timezone is required on the wire — see NotificationPrefsSetSchema
+    // companion test for the rationale (gate can't evaluate without it).
     const result = ServerNotificationPrefsSchema.safeParse({
       type: 'notification_prefs',
       requestId: 'r1',
       prefs: {
         categories: { result: true, permission: false },
         devices: { 'token-a': { categories: { result: false } } },
-        quietHours: { start: '22:00', end: '07:00' },
+        quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        bypassCategories: ['permission', 'activity_error'],
       },
     })
     assert.ok(result.success)
     assert.equal(result.data.prefs.categories.permission, false)
+  })
+
+  it('accepts a snapshot that omits bypassCategories (#4544 — older server compat)', () => {
+    // Older servers (pre-#4544) don't emit the field at all — clients
+    // should fall back to documented defaults. The schema must accept
+    // the absence to stay backward-compatible.
+    assert.ok(ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      prefs: {
+        categories: { result: true },
+        devices: {},
+        quietHours: null,
+      },
+    }).success)
   })
 
   it('accepts a snapshot with null quietHours and empty devices', () => {

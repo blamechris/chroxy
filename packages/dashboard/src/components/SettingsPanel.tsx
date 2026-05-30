@@ -74,11 +74,236 @@ const NOTIFICATION_CATEGORY_ORDER = [
   'live_activity',
 ]
 
+/**
+ * #4544: documented defaults for the quiet-hours bypass list. Mirrors
+ * `DEFAULT_BYPASS_CATEGORIES` from packages/server/src/notification-prefs.js.
+ * Used when a snapshot omits the field (older server, fresh install) so
+ * the UI shows the right initial checkboxes.
+ */
+const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error']
+
+/**
+ * #4544: timezone picker options. The full IANA database is hundreds of
+ * entries; we surface a curated short list plus a "browser default" sentinel
+ * so the user can pick the most common cases without scrolling. The actual
+ * wire value is the IANA name (e.g. `America/Los_Angeles`).
+ *
+ * `Intl.supportedValuesOf('timeZone')` returns the full set on modern
+ * browsers — listed here in case a future iteration switches to a
+ * searchable combobox.
+ */
+function getQuietHoursTimezoneOptions(): { value: string; label: string }[] {
+  const browser = (() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
+  })()
+  const curated = [
+    'UTC',
+    'America/Los_Angeles',
+    'America/Denver',
+    'America/Chicago',
+    'America/New_York',
+    'America/Sao_Paulo',
+    'Europe/London',
+    'Europe/Berlin',
+    'Europe/Paris',
+    'Europe/Moscow',
+    'Asia/Dubai',
+    'Asia/Kolkata',
+    'Asia/Shanghai',
+    'Asia/Tokyo',
+    'Asia/Singapore',
+    'Australia/Sydney',
+    'Pacific/Auckland',
+  ]
+  const set = new Set(curated)
+  if (browser && !set.has(browser)) curated.unshift(browser)
+  return curated.map((tz) => ({
+    value: tz,
+    label: tz === browser ? `${tz} (this device)` : tz,
+  }))
+}
+
 export interface SettingsPanelProps {
   isOpen: boolean
   onClose: () => void
   showConsoleTab?: boolean
   onToggleConsoleTab?: (show: boolean) => void
+}
+
+/**
+ * #4544: quiet-hours editor — start/end/timezone + per-category bypass list.
+ *
+ * Owns its own form state so partial edits (e.g. typing into start before
+ * committing) don't round-trip every keystroke through the WS. On `Save` we
+ * fire `onWindowChange` once; on `Disable` we send `null`. The bypass
+ * checkboxes patch immediately because they're individual booleans that
+ * don't benefit from a Save buffer.
+ */
+function QuietHoursEditor(props: {
+  window: { start: string; end: string; timezone: string } | null
+  categories: Record<string, boolean>
+  bypassCategories: string[]
+  onWindowChange: (w: { start: string; end: string; timezone: string } | null) => void
+  onBypassChange: (categories: string[]) => void
+}) {
+  const { window: win, categories, bypassCategories, onWindowChange, onBypassChange } = props
+  const tzOptions = useMemo(() => getQuietHoursTimezoneOptions(), [])
+  const browserTz = useMemo(() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
+  }, [])
+
+  // Draft state. Seeded from the snapshot so reopening the panel after a
+  // remote change reflects the broadcast snapshot, not stale edits.
+  const [enabled, setEnabled] = useState<boolean>(win != null)
+  const [start, setStart] = useState<string>(win?.start ?? '22:00')
+  const [end, setEnd] = useState<string>(win?.end ?? '07:00')
+  const [timezone, setTimezone] = useState<string>(win?.timezone ?? browserTz)
+
+  // Re-sync draft when the snapshot changes (e.g. another client saved a
+  // window or the user just hit Save and the broadcast came back). The
+  // dependency array intentionally captures the inner fields; comparing
+  // object identity wouldn't help since the message-handler always builds
+  // a fresh object.
+  useEffect(() => {
+    setEnabled(win != null)
+    if (win) {
+      setStart(win.start)
+      setEnd(win.end)
+      setTimezone(win.timezone)
+    }
+  }, [win])
+
+  const handleToggleEnable = useCallback((next: boolean) => {
+    setEnabled(next)
+    if (!next) {
+      // Sending null on disable wipes the persisted window so the server
+      // gate short-circuits. Draft fields stay in form state so the user
+      // can re-enable without re-typing.
+      onWindowChange(null)
+    } else if (win == null) {
+      // First-time enable: persist the current draft (defaults
+      // 22:00-07:00 in browser TZ) so the user sees something
+      // immediately rather than an empty muted toggle.
+      onWindowChange({ start, end, timezone })
+    }
+  }, [win, start, end, timezone, onWindowChange])
+
+  const handleSaveWindow = useCallback(() => {
+    onWindowChange({ start, end, timezone })
+  }, [start, end, timezone, onWindowChange])
+
+  const handleToggleBypass = useCallback((cat: string, next: boolean) => {
+    const set = new Set(bypassCategories)
+    if (next) set.add(cat)
+    else set.delete(cat)
+    onBypassChange([...set])
+  }, [bypassCategories, onBypassChange])
+
+  // Surface every known + currently-bypassing category — the user can
+  // re-enable a bypass even if it's not in the active categories map.
+  const bypassCandidates = useMemo(() => {
+    const known = NOTIFICATION_CATEGORY_ORDER.filter((k) => k in categories || bypassCategories.includes(k))
+    const extras = bypassCategories.filter((k) => !NOTIFICATION_CATEGORY_ORDER.includes(k) && !(k in categories))
+    return [...known, ...extras]
+  }, [categories, bypassCategories])
+
+  return (
+    <div className="quiet-hours-editor" data-testid="quiet-hours-editor">
+      <div className="settings-field settings-field-checkbox">
+        <label htmlFor="quiet-hours-enabled">
+          <input
+            id="quiet-hours-enabled"
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => handleToggleEnable(e.target.checked)}
+            data-testid="quiet-hours-enabled-toggle"
+          />
+          Quiet hours
+        </label>
+        <p className="settings-hint">
+          Mute pushes during a fixed window each day. Operator-blocking
+          categories (permission prompts, session errors) still fire by
+          default — uncheck them below to silence them too.
+        </p>
+      </div>
+      {enabled && (
+        <>
+          <div className="settings-field">
+            <label htmlFor="quiet-hours-start">From</label>
+            <input
+              id="quiet-hours-start"
+              type="time"
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+              data-testid="quiet-hours-start-input"
+            />
+          </div>
+          <div className="settings-field">
+            <label htmlFor="quiet-hours-end">To</label>
+            <input
+              id="quiet-hours-end"
+              type="time"
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+              data-testid="quiet-hours-end-input"
+            />
+          </div>
+          <div className="settings-field">
+            <label htmlFor="quiet-hours-timezone">Timezone</label>
+            <select
+              id="quiet-hours-timezone"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              data-testid="quiet-hours-timezone-select"
+            >
+              {tzOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="settings-field">
+            <button
+              type="button"
+              onClick={handleSaveWindow}
+              data-testid="quiet-hours-save-button"
+              disabled={start === (win?.start ?? '') && end === (win?.end ?? '') && timezone === (win?.timezone ?? '')}
+            >
+              Save quiet hours
+            </button>
+          </div>
+          <fieldset className="quiet-hours-bypass" data-testid="quiet-hours-bypass-fieldset">
+            <legend>Bypass during quiet hours</legend>
+            <p className="settings-hint">
+              Categories checked here still fire even at 3am. Uncheck to
+              silence them.
+            </p>
+            <ul className="notification-prefs-list">
+              {bypassCandidates.map((cat) => {
+                const meta = NOTIFICATION_CATEGORY_LABELS[cat]
+                const label = meta?.label ?? cat
+                const checked = bypassCategories.includes(cat)
+                const toggleId = `quiet-hours-bypass-${cat}`
+                return (
+                  <li key={cat} className="settings-field settings-field-checkbox">
+                    <label htmlFor={toggleId}>
+                      <input
+                        id={toggleId}
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => handleToggleBypass(cat, e.target.checked)}
+                        data-testid={`quiet-hours-bypass-toggle-${cat}`}
+                      />
+                      {label}
+                    </label>
+                  </li>
+                )
+              })}
+            </ul>
+          </fieldset>
+        </>
+      )}
+    </div>
+  )
 }
 
 /** Preview swatches for a theme */
@@ -149,6 +374,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // ship a `devices[""]` / `devices[null]` patch.
   const currentDeviceKey = useConnectionStore(s => s.currentDeviceKey)
   const setNotificationPrefsDevice = useConnectionStore(s => s.setNotificationPrefsDevice)
+  // #4544: quiet-hours editor actions. The window is global (per-device
+  // overrides are a future iteration owned by #4543); `bypassCategories`
+  // is the list of categories that fire even during quiet hours.
+  const setNotificationPrefsQuietHours = useConnectionStore(s => s.setNotificationPrefsQuietHours)
+  const setNotificationPrefsBypassCategories = useConnectionStore(s => s.setNotificationPrefsBypassCategories)
   const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
   // #3805: same capability gate pattern as promptEvaluator — only
   // render the toggle when the active session reports the boolean
@@ -619,74 +849,89 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 Loading preferences&hellip;
               </p>
             ) : (
-              (() => {
-                const cats = notificationPrefs.categories
-                const knownKeys = NOTIFICATION_CATEGORY_ORDER.filter(k => k in cats)
-                const unknownKeys = Object.keys(cats).filter(k => !NOTIFICATION_CATEGORY_ORDER.includes(k))
-                const ordered = [...knownKeys, ...unknownKeys]
-                // #4543: look up THIS device's override map once per render
-                // so each row can determine its per-device state without
-                // re-reading the snapshot.
-                const deviceCategories = currentDeviceKey
-                  ? notificationPrefs.devices?.[currentDeviceKey]?.categories ?? {}
-                  : {}
-                return (
-                  <ul className="notification-prefs-list">
-                    {ordered.map(cat => {
-                      const meta = NOTIFICATION_CATEGORY_LABELS[cat]
-                      const label = meta?.label ?? cat
-                      const hint = meta?.hint
-                      const checked = cats[cat] !== false
-                      const toggleId = `notification-prefs-${cat}`
-                      // #4543: per-device override resolution.
-                      //   - explicit `false` → muted on this device.
-                      //   - explicit `true`  → unmuted on this device
-                      //                        (overrides a `false` global).
-                      //   - missing entry    → falls through to global default;
-                      //                        UI shows the row as NOT muted
-                      //                        (mute checkbox unchecked).
-                      // Toggling sends the inverse boolean so a checked
-                      // "mute" checkbox === `enabled: false` on the wire.
-                      const deviceOverride = deviceCategories[cat]
-                      const mutedOnThisDevice = deviceOverride === false
-                      const deviceToggleId = `notification-prefs-device-${cat}`
-                      return (
-                        <li key={cat} className="settings-field settings-field-checkbox">
-                          <label htmlFor={toggleId}>
-                            <input
-                              id={toggleId}
-                              type="checkbox"
-                              checked={checked}
-                              onChange={(e) => setNotificationPrefsCategory(cat, e.target.checked)}
-                              data-testid={`notification-prefs-toggle-${cat}`}
-                            />
-                            {label}
-                          </label>
-                          {hint && <p className="settings-hint">{hint}</p>}
-                          {currentDeviceKey && (
-                            <label
-                              htmlFor={deviceToggleId}
-                              className="notification-prefs-device-row"
-                              data-testid={`notification-prefs-device-row-${cat}`}
-                            >
+              <>
+                {(() => {
+                  const cats = notificationPrefs.categories
+                  const knownKeys = NOTIFICATION_CATEGORY_ORDER.filter(k => k in cats)
+                  const unknownKeys = Object.keys(cats).filter(k => !NOTIFICATION_CATEGORY_ORDER.includes(k))
+                  const ordered = [...knownKeys, ...unknownKeys]
+                  // #4543: look up THIS device's override map once per render
+                  // so each row can determine its per-device state without
+                  // re-reading the snapshot.
+                  const deviceCategories = currentDeviceKey
+                    ? notificationPrefs.devices?.[currentDeviceKey]?.categories ?? {}
+                    : {}
+                  return (
+                    <ul className="notification-prefs-list">
+                      {ordered.map(cat => {
+                        const meta = NOTIFICATION_CATEGORY_LABELS[cat]
+                        const label = meta?.label ?? cat
+                        const hint = meta?.hint
+                        const checked = cats[cat] !== false
+                        const toggleId = `notification-prefs-${cat}`
+                        // #4543: per-device override resolution.
+                        //   - explicit `false` → muted on this device.
+                        //   - explicit `true`  → unmuted on this device
+                        //                        (overrides a `false` global).
+                        //   - missing entry    → falls through to global default;
+                        //                        UI shows the row as NOT muted
+                        //                        (mute checkbox unchecked).
+                        // Toggling sends the inverse boolean so a checked
+                        // "mute" checkbox === `enabled: false` on the wire.
+                        const deviceOverride = deviceCategories[cat]
+                        const mutedOnThisDevice = deviceOverride === false
+                        const deviceToggleId = `notification-prefs-device-${cat}`
+                        return (
+                          <li key={cat} className="settings-field settings-field-checkbox">
+                            <label htmlFor={toggleId}>
                               <input
-                                id={deviceToggleId}
+                                id={toggleId}
                                 type="checkbox"
-                                checked={mutedOnThisDevice}
-                                onChange={(e) =>
-                                  setNotificationPrefsDevice(currentDeviceKey, cat, !e.target.checked)
-                                }
-                                data-testid={`notification-prefs-device-toggle-${cat}`}
+                                checked={checked}
+                                onChange={(e) => setNotificationPrefsCategory(cat, e.target.checked)}
+                                data-testid={`notification-prefs-toggle-${cat}`}
                               />
-                              <span>Mute on this device</span>
+                              {label}
                             </label>
-                          )}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )
-              })()
+                            {hint && <p className="settings-hint">{hint}</p>}
+                            {currentDeviceKey && (
+                              <label
+                                htmlFor={deviceToggleId}
+                                className="notification-prefs-device-row"
+                                data-testid={`notification-prefs-device-row-${cat}`}
+                              >
+                                <input
+                                  id={deviceToggleId}
+                                  type="checkbox"
+                                  checked={mutedOnThisDevice}
+                                  onChange={(e) =>
+                                    setNotificationPrefsDevice(currentDeviceKey, cat, !e.target.checked)
+                                  }
+                                  data-testid={`notification-prefs-device-toggle-${cat}`}
+                                />
+                                <span>Mute on this device</span>
+                              </label>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )
+                })()}
+
+                {/* #4544: quiet-hours editor. The window is global (per-device
+                    overrides are owned by a future iteration). Toggling the
+                    enabled checkbox seeds a sensible default (22:00-07:00 in
+                    the browser timezone) so the user doesn't see an empty
+                    form; clearing it sends `null` to wipe persistence. */}
+                <QuietHoursEditor
+                  window={notificationPrefs.quietHours}
+                  categories={notificationPrefs.categories}
+                  bypassCategories={notificationPrefs.bypassCategories ?? DEFAULT_BYPASS_CATEGORIES}
+                  onWindowChange={setNotificationPrefsQuietHours}
+                  onBypassChange={setNotificationPrefsBypassCategories}
+                />
+              </>
             )}
           </section>
 

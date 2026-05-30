@@ -552,6 +552,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #4544: global quiet-hours window patch. `null` clears the window;
+  // a full window object (start/end/timezone) sets it. The server
+  // shallow-merges at the top level, so other fields (categories,
+  // bypassCategories, devices) are preserved.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { quietHours: window },
+      });
+    }
+  },
+
+  // #4544: global bypass-category list. The wire sends the full list as a
+  // replacement (not a delta), so an empty array maps to "nothing
+  // bypasses, not even errors". UI callers should always send the desired
+  // final list — toggling one bypass on/off means re-sending the resulting
+  // array.
+  setNotificationPrefsBypassCategories: (categories: string[]) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { bypassCategories: categories },
+      });
+    }
+  },
+
   getActiveSessionState: () => {
     const { activeSessionId, sessionStates } = get();
     if (activeSessionId && sessionStates[activeSessionId]) {

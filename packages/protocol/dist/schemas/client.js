@@ -260,17 +260,50 @@ export const RegisterPushTokenSchema = z.object({
 // keys at the storage boundary — see notification-prefs.js.
 /** Inner shape of a global / per-device category toggle map. */
 const NotificationCategoryMapSchema = z.record(z.string().min(1).max(64), z.boolean());
-/** Quiet-hours window. `null` clears the window; otherwise both times are HH:MM. */
+/**
+ * Quiet-hours window (#4541 shape, extended in #4544).
+ *
+ * `null` clears the window; otherwise `start`/`end` are HH:MM and
+ * `timezone` is an IANA zone string (e.g. `America/Los_Angeles`).
+ *
+ * The timezone is REQUIRED at the wire layer because the server-side
+ * enforcer (`isInQuietHoursIn` in `notification-prefs.js`) refuses to
+ * evaluate a window without one — a half-shape would silently fail-open
+ * every notification, which is the worst possible failure mode for a
+ * notification system. Clients should always pick a sensible default
+ * (e.g. `Intl.DateTimeFormat().resolvedOptions().timeZone`).
+ *
+ * 64 chars is a generous ceiling for IANA zones — `America/Argentina/ComodRivadavia`
+ * is the longest registered name at 33 chars.
+ */
 const NotificationQuietHoursSchema = z.union([
     z.null(),
     z.object({
         start: z.string().regex(/^\d{2}:\d{2}$/),
         end: z.string().regex(/^\d{2}:\d{2}$/),
+        timezone: z.string().min(1).max(64),
     }),
 ]);
-/** Per-device override entry. Today only `categories` is configurable. */
+/**
+ * Per-category bypass list (#4544). Categories named here fire even
+ * during quiet hours. Defaults to `permission` + `activity_error` so
+ * operator-blocking events don't get muted; the user can extend or
+ * shrink the list (empty array = "nothing bypasses, not even errors").
+ */
+const NotificationBypassListSchema = z.array(z.string().min(1).max(64)).max(64);
+/**
+ * Per-device override entry (#4544 extended).
+ *
+ * Per-device fields REPLACE the corresponding global value entirely:
+ *   - `quietHours: null` opts the device out of muting even if global is set.
+ *   - `bypassCategories: []` opts the device out of all bypasses even if
+ *     global lists them.
+ * See `notification-prefs.js` for the precedence rationale.
+ */
 const NotificationDeviceEntrySchema = z.object({
     categories: NotificationCategoryMapSchema.optional(),
+    quietHours: NotificationQuietHoursSchema.optional(),
+    bypassCategories: NotificationBypassListSchema.optional(),
 }).passthrough();
 /**
  * Patch shape accepted by `notification_prefs_set`. Every top-level field
@@ -287,6 +320,7 @@ export const NotificationPrefsPatchSchema = z.object({
         .refine((obj) => Object.keys(obj).length <= 1000, { message: 'Too many device entries (max 1000)' })
         .optional(),
     quietHours: NotificationQuietHoursSchema.optional(),
+    bypassCategories: NotificationBypassListSchema.optional(),
 });
 /**
  * Request the current notification preferences. Server replies with a

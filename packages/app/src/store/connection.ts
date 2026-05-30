@@ -446,6 +446,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #4544: global quiet-hours window patch. `null` clears; a window
+  // object (with `timezone`) sets it. Server shallow-merges at the top
+  // level so other fields (categories, bypassCategories, devices) survive.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { quietHours: window },
+      });
+    }
+  },
+
+  // #4544: global bypass-category list. Sent as a replacement (not a
+  // delta) — empty array maps to "nothing bypasses, not even errors".
+  setNotificationPrefsBypassCategories: (categories: string[]) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { bypassCategories: categories },
+      });
+    }
+  },
+
   setFollowMode: (enabled: boolean) => {
     useMultiClientStore.getState().setFollowMode(enabled);
     set({ followMode: enabled });

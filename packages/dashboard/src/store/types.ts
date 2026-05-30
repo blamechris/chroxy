@@ -791,10 +791,22 @@ export interface ConnectionState {
   // first snapshot lands. Categories is open-ended (server-side keys
   // come from RATE_LIMITS in push.js — adding a new category there does
   // not require a protocol bump).
+  //
+  // #4544 extends the shape with `timezone` on the quiet-hours window,
+  // a globally-applied `bypassCategories` list (defaults to
+  // permission + activity_error — categories that fire even at 3am), and
+  // optional per-device overrides for quietHours / bypassCategories.
+  // Per-device REPLACES the global value entirely (see notification-prefs.js
+  // for the precedence rationale).
   notificationPrefs: {
     categories: Record<string, boolean>;
-    devices: Record<string, { categories?: Record<string, boolean> }>;
-    quietHours: { start: string; end: string } | null;
+    devices: Record<string, {
+      categories?: Record<string, boolean>;
+      quietHours?: { start: string; end: string; timezone: string } | null;
+      bypassCategories?: string[];
+    }>;
+    quietHours: { start: string; end: string; timezone: string } | null;
+    bypassCategories?: string[];
   } | null;
   refreshNotificationPrefs: () => void;
   /**
@@ -824,6 +836,18 @@ export interface ConnectionState {
    * UI — the broadcast snapshot is the source of truth.
    */
   setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => void;
+  /**
+   * #4544: patch the global quiet-hours window. `null` clears the window;
+   * a window object (with `timezone`) sets it. The server broadcasts the
+   * merged snapshot so all clients update in lockstep.
+   */
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => void;
+  /**
+   * #4544: patch the global bypass-category list. Sends the full list
+   * (replacement, not delta) so an empty array maps to "nothing bypasses,
+   * not even errors".
+   */
+  setNotificationPrefsBypassCategories: (categories: string[]) => void;
 
   // Multi-server registry actions
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
