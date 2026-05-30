@@ -25,6 +25,55 @@ import {
 const AUTO_PERMISSION_CONFIRM_MESSAGE =
   'Auto-permission mode disables all per-tool prompts for non-paired clients. Continue?'
 
+/**
+ * #4542: friendly labels + ordering for the per-category notification
+ * toggles. Keys MUST match the server-side `ALL_CATEGORIES` enum from
+ * packages/server/src/notification-prefs.js (mirrors RATE_LIMITS in
+ * push.js). Unknown keys from the snapshot fall back to the raw key name
+ * so a future server-side category isn't silently hidden.
+ */
+const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: string }> = {
+  permission: {
+    label: 'Permission requests',
+    hint: 'Tool-use prompts that need an allow / deny decision.',
+  },
+  result: {
+    label: 'Task completion',
+    hint: 'Sent when a Claude turn finishes and no one is watching.',
+  },
+  activity_update: {
+    label: 'Activity updates',
+    hint: 'Foreground task progress while you are away.',
+  },
+  activity_waiting: {
+    label: 'Waiting for input',
+    hint: 'Claude asked a question or is paused on a prompt.',
+  },
+  activity_error: {
+    label: 'Session errors',
+    hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
+  },
+  inactivity_warning: {
+    label: 'Inactivity warnings',
+    hint: 'Heads-up before a long-idle session is auto-paused.',
+  },
+  live_activity: {
+    label: 'Live Activity (iOS)',
+    hint: 'iOS Dynamic Island / lock-screen Live Activity updates.',
+  },
+}
+
+/** Render order for known categories. Unknown keys append at the end in snapshot order. */
+const NOTIFICATION_CATEGORY_ORDER = [
+  'permission',
+  'activity_waiting',
+  'activity_error',
+  'activity_update',
+  'inactivity_warning',
+  'result',
+  'live_activity',
+]
+
 export interface SettingsPanelProps {
   isOpen: boolean
   onClose: () => void
@@ -86,6 +135,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const refreshByokCredentialsStatus = useConnectionStore(s => s.refreshByokCredentialsStatus)
   const setByokCredentials = useConnectionStore(s => s.setByokCredentials)
   const clearByokCredentials = useConnectionStore(s => s.clearByokCredentials)
+  // #4542: per-category notification preferences. Snapshot arrives via the
+  // WS `notification_prefs` message; the panel sends `notification_prefs_get`
+  // on open and `notification_prefs_set` on every toggle. Server broadcasts
+  // the merged snapshot so other clients stay in lockstep.
+  const notificationPrefs = useConnectionStore(s => s.notificationPrefs)
+  const refreshNotificationPrefs = useConnectionStore(s => s.refreshNotificationPrefs)
+  const setNotificationPrefsCategory = useConnectionStore(s => s.setNotificationPrefsCategory)
   const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
   // #3805: same capability gate pattern as promptEvaluator — only
   // render the toggle when the active session reports the boolean
@@ -138,6 +194,15 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     if (!isOpen) return
     refreshByokCredentialsStatus()
   }, [isOpen, refreshByokCredentialsStatus])
+
+  // #4542: Pull the latest notification prefs on open. Out-of-band changes
+  // (other dashboard / mobile client setting a category) are pushed via the
+  // server's broadcast after every `notification_prefs_set`, so once
+  // connected we stay in sync without polling.
+  useEffect(() => {
+    if (!isOpen) return
+    refreshNotificationPrefs()
+  }, [isOpen, refreshNotificationPrefs])
 
   const handleSaveByokKey = useCallback(() => {
     setByokError(null)
@@ -517,6 +582,62 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 </button>
               )}
             </div>
+          </section>
+
+          {/* #4542: per-category notification opt-in/out. Snapshot lands via
+              `notification_prefs`; toggling a checkbox patches one category
+              via `notification_prefs_set` and the server re-broadcasts so
+              other clients stay in lockstep. The section renders even
+              before the first snapshot lands so the user knows the feature
+              exists (with a loading hint). */}
+          <section className="settings-section" data-testid="notification-prefs-section">
+            <h3>Notifications</h3>
+            <p className="settings-hint">
+              Choose which push categories reach your devices. Server-side rate
+              limits still apply as a defensive floor — these toggles can only
+              mute further, never amplify.
+            </p>
+            {notificationPrefs == null ? (
+              <p
+                className="settings-hint"
+                data-testid="notification-prefs-loading"
+              >
+                Loading preferences&hellip;
+              </p>
+            ) : (
+              (() => {
+                const cats = notificationPrefs.categories
+                const knownKeys = NOTIFICATION_CATEGORY_ORDER.filter(k => k in cats)
+                const unknownKeys = Object.keys(cats).filter(k => !NOTIFICATION_CATEGORY_ORDER.includes(k))
+                const ordered = [...knownKeys, ...unknownKeys]
+                return (
+                  <ul className="notification-prefs-list">
+                    {ordered.map(cat => {
+                      const meta = NOTIFICATION_CATEGORY_LABELS[cat]
+                      const label = meta?.label ?? cat
+                      const hint = meta?.hint
+                      const checked = cats[cat] !== false
+                      const toggleId = `notification-prefs-${cat}`
+                      return (
+                        <li key={cat} className="settings-field settings-field-checkbox">
+                          <label htmlFor={toggleId}>
+                            <input
+                              id={toggleId}
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => setNotificationPrefsCategory(cat, e.target.checked)}
+                              data-testid={`notification-prefs-toggle-${cat}`}
+                            />
+                            {label}
+                          </label>
+                          {hint && <p className="settings-hint">{hint}</p>}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )
+              })()
+            )}
           </section>
 
           {onToggleConsoleTab && (

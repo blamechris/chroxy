@@ -1,0 +1,138 @@
+/**
+ * SettingsScreen — per-category notification preferences UI tests (#4542)
+ *
+ * Mirrors the existing SettingsScreenSessionRules pattern (#2434): static
+ * source analysis is the dominant mobile-app test style for screens that
+ * compose Zustand selectors + RN primitives.
+ */
+import * as fs from 'fs';
+import * as path from 'path';
+
+const settingsSource = fs.readFileSync(
+  path.resolve(__dirname, '../../screens/SettingsScreen.tsx'),
+  'utf-8',
+);
+
+const typesSource = fs.readFileSync(
+  path.resolve(__dirname, '../../store/types.ts'),
+  'utf-8',
+);
+
+const connectionSource = fs.readFileSync(
+  path.resolve(__dirname, '../../store/connection.ts'),
+  'utf-8',
+);
+
+const messageHandlerSource = fs.readFileSync(
+  path.resolve(__dirname, '../../store/message-handler.ts'),
+  'utf-8',
+);
+
+describe('SettingsScreen — Notification categories section (#4542)', () => {
+  it('renders a NOTIFICATION CATEGORIES section header', () => {
+    expect(settingsSource).toMatch(/NOTIFICATION CATEGORIES/);
+  });
+
+  it('reads notificationPrefs from the connection store', () => {
+    expect(settingsSource).toMatch(/notificationPrefs\s*=\s*useConnectionStore/);
+  });
+
+  it('selects refreshNotificationPrefs from the store', () => {
+    expect(settingsSource).toMatch(/refreshNotificationPrefs\s*=\s*useConnectionStore/);
+  });
+
+  it('selects setNotificationPrefsCategory from the store', () => {
+    expect(settingsSource).toMatch(/setNotificationPrefsCategory\s*=\s*useConnectionStore/);
+  });
+
+  it('calls refreshNotificationPrefs on mount via useEffect', () => {
+    // The useEffect body must invoke refreshNotificationPrefs(); the
+    // dependency array must include the action so React doesn't warn.
+    expect(settingsSource).toMatch(/useEffect\([\s\S]{0,200}refreshNotificationPrefs\(\)/);
+  });
+
+  it('shows a loading hint until the first snapshot lands', () => {
+    expect(settingsSource).toMatch(/notification-prefs-loading/);
+    expect(settingsSource).toMatch(/Loading preferences/);
+  });
+
+  it('labels every category from the server-side RATE_LIMITS enum', () => {
+    // These labels MUST exist so the mobile-side stays in sync with
+    // packages/server/src/notification-prefs.js ALL_CATEGORIES.
+    expect(settingsSource).toMatch(/permission:.*Permission requests/);
+    expect(settingsSource).toMatch(/result:.*Task completion/);
+    expect(settingsSource).toMatch(/activity_update:.*Activity updates/);
+    expect(settingsSource).toMatch(/activity_waiting:.*Waiting for input/);
+    expect(settingsSource).toMatch(/activity_error:.*Session errors/);
+    expect(settingsSource).toMatch(/inactivity_warning:.*Inactivity warnings/);
+    expect(settingsSource).toMatch(/live_activity:.*Live Activity/);
+  });
+
+  it('passes the toggled value through Switch.onValueChange to setNotificationPrefsCategory', () => {
+    // The Switch component MUST forward the new boolean — not the
+    // category name — as the second arg.
+    expect(settingsSource).toMatch(/onValueChange=\{\(value\) => setNotificationPrefsCategory\(cat, value\)\}/);
+  });
+
+  it('emits a testID per category toggle for E2E + a11y discovery', () => {
+    expect(settingsSource).toMatch(/testID=\{`notification-prefs-toggle-\$\{cat\}`\}/);
+  });
+
+  it('orders categories deterministically so the UI does not jitter on every snapshot', () => {
+    expect(settingsSource).toMatch(/NOTIFICATION_CATEGORY_ORDER/);
+  });
+});
+
+describe('ConnectionState — notification prefs surface (#4542)', () => {
+  it('declares notificationPrefs in ServerNotificationData', () => {
+    expect(typesSource).toMatch(/notificationPrefs:\s*\{[\s\S]{0,400}categories:\s*Record<string,\s*boolean>/);
+  });
+
+  it('declares refreshNotificationPrefs in ServerNotificationActions', () => {
+    expect(typesSource).toMatch(/refreshNotificationPrefs:\s*\(\)\s*=>\s*void/);
+  });
+
+  it('declares setNotificationPrefsCategory with (category, enabled) signature', () => {
+    expect(typesSource).toMatch(/setNotificationPrefsCategory:\s*\(category:\s*string,\s*enabled:\s*boolean\)\s*=>\s*void/);
+  });
+});
+
+describe('connection.ts — notification prefs actions (#4542)', () => {
+  it('initializes notificationPrefs to null', () => {
+    expect(connectionSource).toMatch(/notificationPrefs:\s*null/);
+  });
+
+  it('clears notificationPrefs on disconnect so the next connect refetches', () => {
+    // Two assignments: initial + the disconnect/reset block. If the reset
+    // ever drops, a stale snapshot would survive across reconnects to a
+    // different host.
+    const matches = connectionSource.match(/notificationPrefs:\s*null/g);
+    expect(matches?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it('refreshNotificationPrefs sends notification_prefs_get over the socket', () => {
+    expect(connectionSource).toMatch(/refreshNotificationPrefs[\s\S]{0,300}notification_prefs_get/);
+  });
+
+  it('setNotificationPrefsCategory sends a single-category notification_prefs_set patch', () => {
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsCategory[\s\S]{0,400}notification_prefs_set[\s\S]{0,200}\[category\]:\s*enabled/,
+    );
+  });
+});
+
+describe('message-handler.ts — notification_prefs WS message (#4542)', () => {
+  it('imports ServerNotificationPrefsSchema from @chroxy/protocol/schemas', () => {
+    expect(messageHandlerSource).toMatch(/import\s*\{\s*ServerNotificationPrefsSchema\s*\}\s*from\s*'@chroxy\/protocol\/schemas'/);
+  });
+
+  it('handles the notification_prefs case and stores the parsed snapshot', () => {
+    expect(messageHandlerSource).toMatch(/case 'notification_prefs'[\s\S]{0,800}ServerNotificationPrefsSchema\.safeParse[\s\S]{0,300}notificationPrefs:/);
+  });
+
+  it('logs and skips when the payload fails schema validation', () => {
+    expect(messageHandlerSource).toMatch(
+      /case 'notification_prefs'[\s\S]{0,600}!parsed\.success[\s\S]{0,200}console\.warn\(\s*'notification_prefs:/,
+    );
+  });
+});

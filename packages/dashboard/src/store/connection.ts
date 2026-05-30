@@ -336,6 +336,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // mirrors the resolved status (set/missing) + a masked preview. Updates
   // arrive via byok_credentials_status WS messages.
   byokCredentialsStatus: null,
+  // #4542: per-category notification prefs. Server-of-truth lives in
+  // ~/.chroxy/notification-prefs.json; the dashboard mirrors the latest
+  // `notification_prefs` snapshot. The Settings panel sends
+  // `notification_prefs_get` on open and `notification_prefs_set` on each
+  // toggle — the server broadcasts the merged snapshot so other dashboards
+  // / mobile clients stay in lockstep.
+  notificationPrefs: null,
   connectionError: null,
   connectionRetryCount: 0,
   serverStartupLogs: null,
@@ -473,6 +480,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'byok_clear_credentials' });
+    }
+  },
+
+  // #4542: notification-prefs round-trip. Requests the current snapshot
+  // (on Settings panel open) or patches a single category. The server
+  // shallow-merges over the categories map, so a single-key patch never
+  // wipes the others.
+  refreshNotificationPrefs: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'notification_prefs_get' });
+    }
+  },
+
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { categories: { [category]: enabled } },
+      });
     }
   },
 

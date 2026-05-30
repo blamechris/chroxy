@@ -321,6 +321,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   restartingSince: null,
   pendingPermissionConfirm: null,
   timeoutWarning: null,
+  // #4542: per-category notification prefs snapshot. Populated by the
+  // `notification_prefs` WS message; null until the first snapshot arrives.
+  notificationPrefs: null,
   slashCommands: [],
   customAgents: [],
   checkpoints: [],
@@ -391,6 +394,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   dismissTimeoutWarning: () => {
     set({ timeoutWarning: null });
+  },
+
+  // #4542: notification-prefs round-trip. Mirrors the dashboard's pattern —
+  // `refresh` sends `notification_prefs_get`; `setCategory` sends a single
+  // shallow-merge patch via `notification_prefs_set`. The server broadcasts
+  // the merged snapshot so other clients (dashboard + mobile) stay in sync
+  // without polling.
+  refreshNotificationPrefs: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'notification_prefs_get' });
+    }
+  },
+
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { categories: { [category]: enabled } },
+      });
+    }
   },
 
   setFollowMode: (enabled: boolean) => {
@@ -794,6 +819,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       restartingSince: null,
       pendingPermissionConfirm: null,
       timeoutWarning: null,
+      // #4542: clear the cached prefs snapshot on disconnect so the next
+      // connect refetches from the actual server (snapshots are host-specific).
+      notificationPrefs: null,
       slashCommands: [],
       customAgents: [],
       checkpoints: [],

@@ -26,7 +26,8 @@
     ],
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/src/$1",
-      "^@chroxy/protocol$": "<rootDir>/../protocol/dist/index.js"
+      "^@chroxy/protocol$": "<rootDir>/../protocol/dist/index.js",
+      "^@chroxy/protocol/schemas$": "<rootDir>/../protocol/dist/schemas/index.js"
     },
     "collectCoverageFrom": [
       "src/**/*.{ts,tsx}",
