@@ -1081,7 +1081,7 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       fireEvent.click(screen.getByTestId('notification-prefs-device-clear-test-device-key'))
       expect(confirmSpy).toHaveBeenCalledOnce()
-      expect(confirmSpy.mock.calls[0][0]).toMatch(/fall back to global defaults/i)
+      expect(confirmSpy.mock.calls[0]![0]).toMatch(/fall back to global defaults/i)
       expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('test-device-key')
       confirmSpy.mockRestore()
     })
