@@ -938,6 +938,173 @@ describe('K8sBackend.createEnvironment() — workspace mount (#3316)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — PVC workspace strategy (#3385)
+//
+// The hostPath workspace mount only works on single-node clusters where the
+// scheduled Node shares the host filesystem. Multi-node operators need a
+// PVC-backed workspace; opts.workspacePVC = { claimName, mountPath?, readOnly? }
+// translates to a persistentVolumeClaim volume + matching volumeMount.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — PVC workspace strategy (#3385)', () => {
+  it('mounts opts.workspacePVC as a persistentVolumeClaim volume named "workspace"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-test',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-workspace-pvc' },
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const mounts = body.spec.containers[0].volumeMounts
+
+    assert.ok(Array.isArray(volumes), 'spec.volumes must be an array')
+    const wsVol = volumes.find(v => v.name === 'workspace')
+    assert.ok(wsVol, 'must have a volume named "workspace"')
+    assert.ok(wsVol.persistentVolumeClaim, 'workspace volume must use persistentVolumeClaim')
+    assert.equal(wsVol.persistentVolumeClaim.claimName, 'my-workspace-pvc')
+    assert.equal(wsVol.hostPath, undefined, 'PVC workspace must NOT also set hostPath')
+
+    assert.ok(Array.isArray(mounts), 'container.volumeMounts must be an array')
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount, 'volumeMounts must include the workspace volume')
+    assert.equal(wsMount.mountPath, '/workspace', 'default mountPath must be /workspace')
+  })
+
+  it('honours opts.workspacePVC.mountPath when provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-custom-path',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc', mountPath: '/srv/workspace' },
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount)
+    assert.equal(wsMount.mountPath, '/srv/workspace')
+  })
+
+  it('sets readOnly on the volumeMount when opts.workspacePVC.readOnly is true', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-ro',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc', readOnly: true },
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount)
+    assert.equal(wsMount.readOnly, true)
+  })
+
+  it('does not set readOnly on the volumeMount by default', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-rw',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc' },
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount)
+    assert.equal(wsMount.readOnly, undefined)
+  })
+
+  it('throws when both opts.cwd and opts.workspacePVC are set (mutually exclusive)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-and-cwd',
+        image: 'agent:latest',
+        cwd: '/home/user/proj',
+        workspacePVC: { claimName: 'my-pvc' },
+      }),
+      /workspacePVC.*cwd|cwd.*workspacePVC/i,
+      'should reject when both workspace strategies are provided',
+    )
+
+    assert.equal(api.calls.create.length, 0, 'Pod must NOT be created when validation fails')
+    assert.equal(api.calls.createSecret.length, 0, 'Secret must NOT be created when validation fails')
+  })
+
+  it('throws when opts.workspacePVC is provided without claimName', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-no-claim',
+        image: 'agent:latest',
+        workspacePVC: {},
+      }),
+      /claimName/i,
+    )
+
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
+  })
+
+  it('throws when opts.workspacePVC.claimName is an empty string', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-empty-claim',
+        image: 'agent:latest',
+        workspacePVC: { claimName: '' },
+      }),
+      /claimName/i,
+    )
+  })
+
+  it('throws when opts.workspacePVC.claimName is not a string', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-bad-claim',
+        image: 'agent:latest',
+        workspacePVC: { claimName: 42 },
+      }),
+      /claimName/i,
+    )
+  })
+
+  it('combines a PVC workspace with extra opts.mounts (hostPath entries still work)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-plus-extras',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc' },
+      mounts: ['/host/certs:/certs:ro'],
+    })
+
+    const volumes = api.calls.create[0].body.spec.volumes
+    assert.ok(volumes.find(v => v.name === 'workspace' && v.persistentVolumeClaim?.claimName === 'my-pvc'))
+    assert.ok(volumes.find(v => v.name === 'extra-vol-0' && v.hostPath?.path === '/host/certs'))
+    assert.equal(volumes.length, 2)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — resource limits (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
