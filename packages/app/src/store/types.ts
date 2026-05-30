@@ -306,6 +306,14 @@ export interface ServerNotificationData {
     quietHours: { start: string; end: string; timezone: string } | null;
     bypassCategories?: string[];
   } | null;
+  // #4543: registered Expo push token for THIS device. Used as the key
+  // into `notificationPrefs.devices` so the SettingsScreen can patch a
+  // per-device override that survives across reconnects. Set once by
+  // `registerPushToken` in message-handler.ts after a successful
+  // `register_push_token` ack, cleared on disconnect so a fresh connect
+  // cycle re-fetches. Null when the device has no push capability (e.g.
+  // simulator) — the per-device UI hides itself in that case.
+  pushToken: string | null;
 }
 
 /**
@@ -506,6 +514,14 @@ export interface ServerNotificationActions {
   // are preserved).
   refreshNotificationPrefs: () => void;
   setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
+  // #4543: patch a per-device category override. Sends a single
+  // `notification_prefs_set` with `{ devices: { [deviceKey]: { categories:
+  // { [category]: enabled } } } }`. Server shallow-merges so other device
+  // entries — and other categories under THIS device — survive. `enabled =
+  // false` mutes the category on this device only; `true` is the
+  // explicit-unmute path that overrides a `false` global default. No-op
+  // when deviceKey is empty or the socket is closed.
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => void;
   // #4544: patch the global quiet-hours window. `null` clears the window;
   // a window object (with `timezone`) sets it. Server broadcasts the
   // merged snapshot so all clients update in lockstep.

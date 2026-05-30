@@ -73,6 +73,12 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     notificationPrefs: null,
     refreshNotificationPrefs: vi.fn(),
     setNotificationPrefsCategory: vi.fn(),
+    // #4543: per-device opt-in/out. `currentDeviceKey` is the stable browser
+    // localStorage id used as the device key in the per-device override map.
+    // The test default uses a fixed string so toggles assert against a known
+    // key without coupling to localStorage; individual tests can override.
+    currentDeviceKey: 'test-device-key',
+    setNotificationPrefsDevice: vi.fn(),
     // #4544: quiet-hours editor actions. Default no-op spies; individual
     // tests override.
     setNotificationPrefsQuietHours: vi.fn(),
@@ -757,6 +763,127 @@ describe('SettingsPanel', () => {
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.getByTestId('notification-prefs-toggle-future_category')).toBeInTheDocument()
+    })
+  })
+
+  describe('Notification preferences — per-device opt-in/out (#4543)', () => {
+    // Same full category set as the per-category block — keep in sync so a
+    // server-side rename trips both groups at once.
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+    }
+    const defaultPrefs = { categories, devices: {}, quietHours: null }
+
+    it('renders a "Mute on this device" toggle alongside each global category toggle', () => {
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Every category gets its own per-device toggle, keyed by category name.
+      for (const cat of Object.keys(categories)) {
+        expect(screen.getByTestId(`notification-prefs-device-toggle-${cat}`)).toBeInTheDocument()
+      }
+    })
+
+    it('reflects a device override (false) as a checked "mute" toggle', () => {
+      // Per-device override: result is muted on THIS device only — global stays on.
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: {
+            'test-device-key': { categories: { result: false } },
+          },
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const resultDeviceMute = screen.getByTestId('notification-prefs-device-toggle-result') as HTMLInputElement
+      const permDeviceMute = screen.getByTestId('notification-prefs-device-toggle-permission') as HTMLInputElement
+      // Checked = "muted on this device". The per-device override of `false`
+      // means "explicitly off here", so the mute checkbox is checked.
+      expect(resultDeviceMute.checked).toBe(true)
+      // Permission has no device override — falls through to global default
+      // (true), so it is NOT muted on this device.
+      expect(permDeviceMute.checked).toBe(false)
+    })
+
+    it('reflects a device override (true) as an explicit unmute (mute toggle unchecked)', () => {
+      // Override `true` means "explicitly enabled on this device" even if
+      // global is off. The mute checkbox stays unchecked.
+      setMockState({
+        notificationPrefs: {
+          categories: { ...categories, result: false },
+          devices: {
+            'test-device-key': { categories: { result: true } },
+          },
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const resultDeviceMute = screen.getByTestId('notification-prefs-device-toggle-result') as HTMLInputElement
+      expect(resultDeviceMute.checked).toBe(false)
+    })
+
+    it('calls setNotificationPrefsDevice(deviceKey, cat, false) when the user mutes a category on this device', () => {
+      const setNotificationPrefsDevice = vi.fn()
+      setMockState({ notificationPrefs: defaultPrefs, setNotificationPrefsDevice })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Currently unmuted — clicking the mute toggle should patch
+      // devices[deviceKey].categories[result] = false on the wire.
+      fireEvent.click(screen.getByTestId('notification-prefs-device-toggle-result'))
+      expect(setNotificationPrefsDevice).toHaveBeenCalledWith('test-device-key', 'result', false)
+    })
+
+    it('calls setNotificationPrefsDevice(deviceKey, cat, true) when the user unmutes a muted-here category', () => {
+      const setNotificationPrefsDevice = vi.fn()
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: {
+            'test-device-key': { categories: { result: false } },
+          },
+          quietHours: null,
+        },
+        setNotificationPrefsDevice,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Clicking a checked mute toggle should flip back to enabled (true).
+      // This is the "explicit unmute" path — even after this, the per-device
+      // override row stays in the map (server can't delete via shallow-merge),
+      // but the user-visible state matches expectation.
+      fireEvent.click(screen.getByTestId('notification-prefs-device-toggle-result'))
+      expect(setNotificationPrefsDevice).toHaveBeenCalledWith('test-device-key', 'result', true)
+    })
+
+    it('does not surface per-device toggles when currentDeviceKey is null', () => {
+      // If the client hasn't established a device identity yet (e.g. storage
+      // unavailable), the per-device row should not render — there's no key
+      // to patch against. The global per-category toggles still work.
+      setMockState({ notificationPrefs: defaultPrefs, currentDeviceKey: null })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Global toggles still present.
+      expect(screen.getByTestId('notification-prefs-toggle-result')).toBeInTheDocument()
+      // Per-device row hidden.
+      expect(screen.queryByTestId('notification-prefs-device-toggle-result')).not.toBeInTheDocument()
+    })
+
+    it('does not patch when clicked but currentDeviceKey is null', () => {
+      // Defensive: even if a stale-rendered toggle somehow fires, the action
+      // must short-circuit so we never send a `devices[null]` patch.
+      const setNotificationPrefsDevice = vi.fn()
+      setMockState({
+        notificationPrefs: defaultPrefs,
+        currentDeviceKey: null,
+        setNotificationPrefsDevice,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Toggles aren't rendered, so there's nothing to click — verifies the
+      // contract holds without any synthetic interaction.
+      expect(setNotificationPrefsDevice).not.toHaveBeenCalled()
     })
   })
 

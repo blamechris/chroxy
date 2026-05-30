@@ -287,6 +287,27 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
   };
 }
 
+/**
+ * #4543: stable per-device key used as the `notification_prefs.devices` map
+ * key for THIS browser tab. Wraps `getDeviceId()` so the per-device UI can
+ * read the key safely without panicking when storage is broken (private mode
+ * + cookies disabled etc.). Returns `null` only when minting failed entirely
+ * — UI gates on null to suppress a `devices[null]` patch. In practice we
+ * always have a key (in-memory cache mints one even when localStorage write
+ * fails), so null is a defensive belt-and-braces branch rather than a hot
+ * path.
+ *
+ * Exported for tests so spec mocks can pin the key without poking localStorage.
+ */
+export function getCurrentDeviceKey(): string | null {
+  try {
+    const id = getDeviceId();
+    return id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 // Set server scope before store init so loadPersistedState reads scoped keys
 const _initialServerId = loadPersistedActiveServer();
 if (_initialServerId) setServerScope(_initialServerId);
@@ -343,6 +364,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // toggle — the server broadcasts the merged snapshot so other dashboards
   // / mobile clients stay in lockstep.
   notificationPrefs: null,
+  // #4543: stable per-device key for THIS browser tab. Resolved once at
+  // store init from the same localStorage id used in auth's `deviceInfo`,
+  // so the dashboard always addresses the same `devices` map entry across
+  // reconnects, tab refreshes, and process restarts.
+  currentDeviceKey: getCurrentDeviceKey(),
   connectionError: null,
   connectionRetryCount: 0,
   serverStartupLogs: null,
@@ -500,6 +526,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       wsSend(socket, {
         type: 'notification_prefs_set',
         prefs: { categories: { [category]: enabled } },
+      });
+    }
+  },
+
+  // #4543: patch a per-device category override. The server's
+  // setPrefs (push.js) shallow-merges the inner categories map per device
+  // key, so a single-category patch leaves other categories under THIS
+  // device — and every OTHER device's entry — untouched. Defensive guards:
+  // - empty deviceKey → no-op (we never want a `devices[""]` entry).
+  // - socket closed → no-op (the snapshot is the source of truth; we don't
+  //   queue, matching `setNotificationPrefsCategory`).
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => {
+    if (!deviceKey) return;
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: {
+          devices: {
+            [deviceKey]: { categories: { [category]: enabled } },
+          },
+        },
       });
     }
   },

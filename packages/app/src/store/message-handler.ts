@@ -836,6 +836,12 @@ async function registerPushToken(socket: WebSocket): Promise<void> {
     const token = await registerForPushNotifications();
     if (token && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'register_push_token', token });
+      // #4543: mirror the resolved token into the store so the
+      // SettingsScreen can address THIS device's entry in the
+      // `notification_prefs.devices` map. Without this mirror the
+      // per-device toggle row would never know which key to patch and
+      // would have to render disabled forever.
+      getStore().setState({ pushToken: token });
       console.log('[push] Registered push token with server');
     }
   } catch (err) {

@@ -816,6 +816,27 @@ export interface ConnectionState {
    */
   setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
   /**
+   * #4543: stable per-device key used to address THIS client in the
+   * `notification_prefs.devices` map. Sourced once at store init from
+   * localStorage (`chroxy_device_id` — the same id sent in `deviceInfo` on
+   * auth). `null` only when storage was completely unavailable AND we never
+   * minted a key — in practice a long-lived browser tab always has one, but
+   * UI code MUST tolerate null so a missing key can't ship a `devices[null]`
+   * patch.
+   */
+  currentDeviceKey: string | null;
+  /**
+   * #4543: patch a per-device category override. Sends a single
+   * `notification_prefs_set` with `{ devices: { [deviceKey]: { categories:
+   * { [category]: enabled } } } }`. Server shallow-merges so other device
+   * entries — and other categories under THIS device — survive untouched.
+   * `enabled = false` mutes the category on this device only; `true` is the
+   * explicit-unmute path (overrides a `false` global default). No-op when
+   * the socket is closed; the action does not surface errors back to the
+   * UI — the broadcast snapshot is the source of truth.
+   */
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => void;
+  /**
    * #4544: patch the global quiet-hours window. `null` clears the window;
    * a window object (with `timezone`) sets it. The server broadcasts the
    * merged snapshot so all clients update in lockstep.
