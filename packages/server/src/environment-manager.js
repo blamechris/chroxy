@@ -40,7 +40,7 @@ export class EnvironmentManager extends EventEmitter {
   /**
    * @param {Object}  [opts]
    * @param {string}  [opts.statePath] - On-disk path for environments.json
-   * @param {Function} [opts.\_execFile] - Injected execFile (testing seam)
+   * @param {Function} [opts._execFile] - Injected execFile (testing seam)
    * @param {Object}  [opts.backend]   - Pluggable backend (defaults to DockerBackend)
    * @param {Object}  [opts.workspacePVCDefault] - #4556: operator-configured
    *   PVC workspace strategy applied to every `create()` call that doesn't pass
@@ -68,7 +68,7 @@ export class EnvironmentManager extends EventEmitter {
     // #4556: configured PVC workspace default (operator surface). When set,
     // every create() that doesn't pass workspacePVC falls back to this value.
     // null when no `environments.k8s.workspace` block is configured.
-    this._workspacePVCDefault = workspacePVCDefault || null
+    this._workspacePVCDefault = workspacePVCDefault ?? null
   }
 
   /**
@@ -152,7 +152,7 @@ export class EnvironmentManager extends EventEmitter {
     // configured default (when the operator has set `environments.k8s.workspace`
     // in chroxy config). Resolved here so the backend always sees the final
     // effective value and the manager remains the single wiring point.
-    const effectiveWorkspacePVC = workspacePVC !== undefined ? workspacePVC : this._workspacePVCDefault || undefined
+    const effectiveWorkspacePVC = workspacePVC !== undefined ? workspacePVC : (this._workspacePVCDefault ?? undefined)
 
     const { containerId, containerCliPath } = await this._backend.createEnvironment({
       envId: id,

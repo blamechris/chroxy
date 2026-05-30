@@ -412,7 +412,10 @@ export async function startCliServer(config) {
     if (workspacePVCDefault) {
       const mountPath = workspacePVCDefault.mountPath || '/workspace'
       const readOnlyTag = workspacePVCDefault.readOnly ? ' (readOnly)' : ''
-      log.info(`EnvironmentManager: K8s workspace PVC configured (claim: ${workspacePVCDefault.claimName}, mount: ${mountPath})${readOnlyTag}`)
+      // Make the K8s-only scope explicit so an operator who set this block
+      // against a Docker deployment doesn't assume the PVC is being mounted —
+      // Docker / other backends silently ignore the field at runtime.
+      log.info(`EnvironmentManager: K8s workspace PVC configured (claim: ${workspacePVCDefault.claimName}, mount: ${mountPath})${readOnlyTag} — active only on K8sBackend; ignored by Docker and other backends`)
     }
     environmentManager = new EnvironmentManager({ workspacePVCDefault })
     await logEnvironmentManagerReconnectResult(environmentManager, log)
