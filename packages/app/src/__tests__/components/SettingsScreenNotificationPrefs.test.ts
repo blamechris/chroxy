@@ -180,10 +180,14 @@ describe('SettingsScreen — Quiet hours editor section (#4544)', () => {
     expect(settingsSource).toMatch(/Invalid time[\s\S]{0,100}HH:MM/);
   });
 
-  it('declares a sensible curated timezone list', () => {
-    expect(settingsSource).toMatch(/QUIET_HOURS_TIMEZONE_CHOICES/);
-    expect(settingsSource).toMatch(/America\/Los_Angeles/);
-    expect(settingsSource).toMatch(/Europe\/London/);
+  it('consumes the shared curated timezone list from @chroxy/store-core (#4569)', () => {
+    // The list itself lives in store-core (see store-core/src/timezones.ts);
+    // SettingsScreen must import the shared helper rather than redeclare a
+    // duplicate array. Verify both the import and the call-site.
+    expect(settingsSource).toMatch(/import\s+\{\s*buildQuietHoursTimezoneList\s*\}\s+from\s+['"]@chroxy\/store-core['"]/);
+    expect(settingsSource).toMatch(/buildQuietHoursTimezoneList\(/);
+    // The duplicate local constant from PR #4565 must be gone.
+    expect(settingsSource).not.toMatch(/const\s+QUIET_HOURS_TIMEZONE_CHOICES\s*=/);
   });
 
   it('falls back to DEFAULT_BYPASS_CATEGORIES when the snapshot omits the list', () => {
