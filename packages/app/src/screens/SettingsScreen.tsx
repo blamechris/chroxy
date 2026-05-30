@@ -245,10 +245,31 @@ export function SettingsScreen() {
 
   // #4564: per-row "Clear" handler. Same WS-closed banner contract as the
   // other notification-prefs setters so a botched clear isn't silent.
+  //
+  // #4588: clearing the row matching `pushToken` (the operator's own
+  // device) silently wipes whatever per-category mutes / quiet-hours
+  // overrides they had set up; the next push will fire under global
+  // defaults with no other warning. Prompt with a destructive Clear
+  // button only for that row — orphan rows (key !== pushToken) flow
+  // straight through so the orphan-cleanup affordance stays one-tap.
   const handleClearDevice = useCallback((deviceKey: string) => {
-    const sent = deleteNotificationPrefsDevice(deviceKey);
-    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
-  }, [deleteNotificationPrefsDevice]);
+    const dispatch = () => {
+      const sent = deleteNotificationPrefsDevice(deviceKey);
+      setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+    };
+    if (deviceKey === pushToken) {
+      Alert.alert(
+        'Clear this device?',
+        'Notifications on this device will fall back to global defaults.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Clear', style: 'destructive', onPress: dispatch },
+        ],
+      );
+      return;
+    }
+    dispatch();
+  }, [deleteNotificationPrefsDevice, pushToken]);
 
   const handleSetQuietHours = useCallback((win: { start: string; end: string; timezone: string } | null) => {
     const sent = setNotificationPrefsQuietHours(win);

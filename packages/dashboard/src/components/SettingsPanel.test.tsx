@@ -1063,6 +1063,71 @@ describe('SettingsPanel', () => {
       expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('orphan-device-key')
     })
 
+    it('prompts before clearing when the row matches currentDeviceKey (#4588)', () => {
+      // The (this device) row silently wipes the operator's own mutes /
+      // quiet-hours overrides if cleared by accident — the prompt is a
+      // second cue after the (this device) tag.
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { 'test-device-key': { categories: { result: false } } },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+        currentDeviceKey: 'test-device-key',
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-test-device-key'))
+      expect(confirmSpy).toHaveBeenCalledOnce()
+      expect(confirmSpy.mock.calls[0][0]).toMatch(/fall back to global defaults/i)
+      expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('test-device-key')
+      confirmSpy.mockRestore()
+    })
+
+    it('does NOT dispatch the delete when the current-device confirm is dismissed (#4588)', () => {
+      // Cancel path — the dispatch must NOT fire. This is the whole point
+      // of the prompt: a misclick on your own row should be recoverable.
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { 'test-device-key': { categories: { result: false } } },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+        currentDeviceKey: 'test-device-key',
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-test-device-key'))
+      expect(confirmSpy).toHaveBeenCalledOnce()
+      expect(deleteNotificationPrefsDevice).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+
+    it('skips the confirm prompt for orphan rows (#4588)', () => {
+      // Orphan-row clears stay one-click — the whole point of the orphan
+      // list is fast cleanup. Only the current-device row gates the dispatch.
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { 'orphan-device-key': { categories: { result: false } } },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+        currentDeviceKey: 'test-device-key',
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-orphan-device-key'))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('orphan-device-key')
+      confirmSpy.mockRestore()
+    })
+
     it('does not render the list when the server lacks the notificationPrefs capability', () => {
       // The capability gate (#4560) replaces the body of the Notifications
       // section with an upgrade hint. The device list shares that gate so
