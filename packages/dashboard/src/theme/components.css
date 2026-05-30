@@ -4911,6 +4911,32 @@
   margin-bottom: 0;
 }
 
+/* #4563: per-device "Mute on this device" row inside each notification
+   category <li>. The row is logically subordinate to the global per-category
+   toggle (which lives on the same <li>), so it needs visible hierarchy:
+   indent to the right of the parent checkbox, plus muted color/smaller font
+   so users don't read it as a sibling toggle. Mirrors the mobile-app
+   `deviceOverrideRow` (paddingLeft: 32) for cross-surface parity. */
+.notification-prefs-device-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding-left: 24px;
+}
+
+.notification-prefs-device-row input[type='checkbox'] {
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+  margin: 0;
+}
+
+.notification-prefs-device-row label {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
 /* #3404 audit F1: per-provider auth/billing status panel */
 .settings-hint {
   margin: 0 0 12px;

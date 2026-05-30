@@ -32,6 +32,7 @@ import {
   resolveBypassCategories,
   shouldBypassQuietHours,
   DEFAULT_BYPASS_CATEGORIES,
+  _resetDateTimeFormatCacheForTests,
 } from '../src/notification-prefs.js'
 
 let tmpDir
@@ -666,6 +667,140 @@ describe('savePrefs — round-trip extended schema (#4544)', () => {
     assert.deepEqual([...reread.bypassCategories].sort(), ['activity_error', 'permission'])
     assert.equal(reread.devices['phone-1'].quietHours.timezone, 'America/Los_Angeles')
     assert.deepEqual(reread.devices['phone-1'].bypassCategories, ['permission'])
+  })
+})
+
+describe('isInQuietHoursIn — Intl.DateTimeFormat memoization (#4568)', () => {
+  // The gate runs once per registered push token per `PushManager.send()` call.
+  // Constructing a fresh `Intl.DateTimeFormat` instance for every call wastes
+  // a few KB of locale data on each hit; the set of timezones in real prefs is
+  // tiny (one global + at most one per device) and stable across the process
+  // lifetime, so a module-local Map is the right shape. These tests pin both
+  // the "construct exactly once per timezone" contract and the "still produces
+  // correct results across calls" invariant so a future refactor of the cache
+  // (e.g. swapping in LRU eviction) cannot silently break either.
+  let OriginalDTF
+  let constructionCalls
+
+  beforeEach(() => {
+    // Reset the module-level formatter cache so each test starts from a
+    // known state — earlier suites (DST, midnight-wrap) populated the cache
+    // for common timezones via the real `Intl.DateTimeFormat`, which would
+    // otherwise mask the contract this suite is pinning.
+    _resetDateTimeFormatCacheForTests()
+    OriginalDTF = Intl.DateTimeFormat
+    constructionCalls = []
+    function SpyDTF(...args) {
+      // Record the timezone arg so a regression that keys the cache wrong
+      // (e.g. on locale instead of timezone) shows up as duplicate entries.
+      constructionCalls.push(args?.[1]?.timeZone ?? null)
+      return new OriginalDTF(...args)
+    }
+    // Preserve static methods (supportedLocalesOf etc.) so any caller that
+    // touches them keeps working during the test window.
+    Object.setPrototypeOf(SpyDTF, OriginalDTF)
+    Intl.DateTimeFormat = SpyDTF
+  })
+
+  afterEach(() => {
+    Intl.DateTimeFormat = OriginalDTF
+    // Clear again so any subsequent suite that doesn't expect the spy's
+    // residue in the cache (none today, but defensive) starts clean.
+    _resetDateTimeFormatCacheForTests()
+  })
+
+  it('constructs Intl.DateTimeFormat once per timezone across repeated calls', async () => {
+    // Re-import the module after the spy is installed so the module-level
+    // cache is populated against the spied constructor. (The cache itself
+    // lives across calls within the test process; what we're asserting is
+    // that within one timezone, repeated gate evaluations never re-allocate.)
+    const { isInQuietHoursIn } = await import('../src/notification-prefs.js')
+    const prefs = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    // First call may also construct one extra DTF inside the test's
+    // `dateInZone` helper — count only constructions targeting the gate's
+    // timezone to isolate the contract.
+    isInQuietHoursIn(prefs, Date.now(), 'tok')
+    isInQuietHoursIn(prefs, Date.now() + 1000, 'tok')
+    isInQuietHoursIn(prefs, Date.now() + 2000, 'tok')
+    const laConstructions = constructionCalls.filter((tz) => tz === 'America/Los_Angeles')
+    assert.equal(
+      laConstructions.length,
+      1,
+      `expected 1 construction for America/Los_Angeles across 3 gate calls, got ${laConstructions.length}`,
+    )
+  })
+
+  it('constructs a separate Intl.DateTimeFormat for each distinct timezone', async () => {
+    const { isInQuietHoursIn } = await import('../src/notification-prefs.js')
+    const tokyo = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '22:00', end: '07:00', timezone: 'Asia/Tokyo' },
+    }
+    const london = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '22:00', end: '07:00', timezone: 'Europe/London' },
+    }
+    isInQuietHoursIn(tokyo, Date.now(), 'tok-tokyo')
+    isInQuietHoursIn(london, Date.now(), 'tok-london')
+    isInQuietHoursIn(tokyo, Date.now() + 1000, 'tok-tokyo')
+    isInQuietHoursIn(london, Date.now() + 1000, 'tok-london')
+    const tokyoConstructions = constructionCalls.filter((tz) => tz === 'Asia/Tokyo')
+    const londonConstructions = constructionCalls.filter((tz) => tz === 'Europe/London')
+    assert.equal(tokyoConstructions.length, 1, 'Tokyo formatter constructed exactly once')
+    assert.equal(londonConstructions.length, 1, 'London formatter constructed exactly once')
+  })
+
+  it('does NOT cache failed constructions (unrecognised IANA zone)', async () => {
+    // A RangeError from `new Intl.DateTimeFormat(..., { timeZone: <bad> })`
+    // must NOT populate the cache with a sentinel — otherwise a later fix
+    // (e.g. a prefs reload that swaps in a valid zone with the same key)
+    // would never re-attempt construction. The simplest contract is "only
+    // cache successful formatters"; the gate still fail-opens on any error,
+    // and the cache stays correct across hot reloads.
+    const { isInQuietHoursIn } = await import('../src/notification-prefs.js')
+    const prefs = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '22:00', end: '07:00', timezone: 'Not/Real_Zone_4568' },
+    }
+    assert.equal(isInQuietHoursIn(prefs, Date.now(), 'tok'), false, 'fail-open on bad zone')
+    assert.equal(isInQuietHoursIn(prefs, Date.now(), 'tok'), false, 'still fail-open on bad zone')
+    // Both calls SHOULD attempt construction since neither succeeded — pin
+    // this so a future refactor that caches null/undefined breaks the test.
+    const badZoneAttempts = constructionCalls.filter((tz) => tz === 'Not/Real_Zone_4568')
+    assert.equal(
+      badZoneAttempts.length,
+      2,
+      'unsuccessful constructions must NOT be cached — both calls should re-attempt',
+    )
+  })
+
+  it('still produces correct wall-clock results across repeated calls', async () => {
+    // Behavioural regression: confirm the cache returns equivalent results to
+    // a fresh formatter. We re-test the spring-forward DST case from the
+    // existing `isInQuietHoursIn — DST transitions` suite to make sure the
+    // memoized formatter doesn't capture stale offsets across calls.
+    const { isInQuietHoursIn } = await import('../src/notification-prefs.js')
+    const prefs = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    // 04:00 PDT on spring-forward Sunday 2026 — inside the window.
+    const insideWindow = dateInZone('America/Los_Angeles', 2026, 3, 8, 4, 0)
+    // 08:00 PDT same day — outside the window.
+    const outsideWindow = dateInZone('America/Los_Angeles', 2026, 3, 8, 8, 0)
+    // Call the gate enough times that any cache miss would be obvious.
+    for (let i = 0; i < 5; i++) {
+      assert.equal(isInQuietHoursIn(prefs, insideWindow.getTime(), 'tok'), true)
+      assert.equal(isInQuietHoursIn(prefs, outsideWindow.getTime(), 'tok'), false)
+    }
   })
 })
 
