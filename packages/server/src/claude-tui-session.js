@@ -1269,6 +1269,14 @@ export class ClaudeTuiSession extends BaseSession {
     // clicked the QuestionPrompt right as the hard timeout fired) would
     // attempt a PTY write that no longer matches a live turn.
     this._pendingUserAnswer = null
+    // #4604: same symmetry for the stall watchdog. The guard in
+    // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
+    // currently no-op the late fire (both are falsy here), but leaving
+    // the setTimeout handle live wastes a callback invocation 30s later.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
   }
 
   /**
@@ -1352,6 +1360,11 @@ export class ClaudeTuiSession extends BaseSession {
     // after we've already fired Ctrl-C and emitted error/result has
     // nowhere meaningful to go.
     this._pendingUserAnswer = null
+    // #4604: same symmetry for the stall watchdog — see _finishTurnError.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
     this.emit('error', { message: `Response timed out after ${friendly}` })
     // #4010: emit result so the dashboard receives agent_idle and clears
     // the Stop button. stream_end on its own only clears streamingMessageId.
@@ -1417,6 +1430,14 @@ export class ClaudeTuiSession extends BaseSession {
     // #4278: also drop any pending AskUserQuestion so a subsequent
     // user_question_response can't write into a torn-down context.
     this._pendingUserAnswer = null
+    // #4604: cancel the stall watchdog too. interrupt() does NOT clear
+    // _isBusy directly (Ctrl-C surfaces async via _finishTurn*), so without
+    // this the watchdog could fire ~30s later and emit a spurious
+    // ASK_USER_QUESTION_STALL for a session the user already interrupted.
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
   }
 
   /**

@@ -2569,6 +2569,40 @@ describe('ClaudeTuiSession', () => {
         mock.timers.reset()
       }
     })
+
+    it('watchdog is cleared on interrupt() so a user-interrupted answer does not fire ASK_USER_QUESTION_STALL', () => {
+      // #4604 review follow-up: interrupt() does NOT clear _isBusy directly
+      // (Ctrl-C resolves via _finishTurn* async). Without clearing the
+      // watchdog in interrupt(), the guard in _onAskUserQuestionStall
+      // (_pendingUserAnswer=null + _isBusy=true → does not bail) would
+      // emit a spurious ASK_USER_QUESTION_STALL ~30s after the user
+      // already interrupted the session.
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        session._activeTurn = { uuid: 'test', synthSeq: 0, aborted: false, startedAt: Date.now() }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_interrupt',
+          options: [{ label: 'a' }],
+        }
+
+        session.respondToQuestion('a')
+        // User interrupts before claude TUI emits PostToolUse.
+        session.interrupt()
+
+        // Push well past the watchdog window — interrupt() must have
+        // cancelled the watchdog so no spurious stall error fires.
+        mock.timers.tick(60_000)
+        assert.equal(errors.length, 0, 'interrupt() must cancel the watchdog — no late stall error')
+      } finally {
+        mock.timers.reset()
+      }
+    })
   })
 
   // #4044: per-session option that spawns claude TUI with the literal
