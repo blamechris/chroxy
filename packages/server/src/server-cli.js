@@ -669,6 +669,9 @@ export async function startCliServer(config) {
   // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager({
     storagePath: join(homedir(), '.chroxy', 'push-tokens.json'),
+    // #4541: notification preferences persistence. Co-located in
+    // ~/.chroxy alongside push-tokens.json so cleanup is one step.
+    prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
   })
 
   const configFile = join(homedir(), '.chroxy', 'config.json')

@@ -701,6 +701,37 @@ export const ServerPushTokenErrorSchema = z.object({
     type: z.literal('push_token_error'),
     message: z.string(),
 });
+// #4541: notification preferences snapshot. Emitted by
+// `handleNotificationPrefsGet` and again after every `notification_prefs_set`.
+// Mirrors the on-disk shape (~/.chroxy/notification-prefs.json) without the
+// header — the wire payload IS the prefs object.
+//
+// `categories` is an open-ended map keyed by RATE_LIMITS category names from
+// `push.js`. The server-side loader sanitises unknown keys at the storage
+// boundary, so the wire shape stays permissive — adding a new push category
+// in `push.js` does not require a protocol bump.
+//
+// `requestId` is echoed on the response to the originating client; the
+// broadcast variant emitted after a set carries no requestId so all
+// connected clients update in lockstep.
+const NotificationPrefsCategoriesSchema = z.record(z.string().min(1).max(64), z.boolean());
+const NotificationPrefsDevicesSchema = z.record(z.string().min(1).max(512), z.object({ categories: NotificationPrefsCategoriesSchema.optional() }).passthrough());
+const NotificationPrefsQuietHoursSchema = z.union([
+    z.null(),
+    z.object({
+        start: z.string().regex(/^\d{2}:\d{2}$/),
+        end: z.string().regex(/^\d{2}:\d{2}$/),
+    }),
+]);
+export const ServerNotificationPrefsSchema = z.object({
+    type: z.literal('notification_prefs'),
+    requestId: z.string().nullable().optional(),
+    prefs: z.object({
+        categories: NotificationPrefsCategoriesSchema,
+        devices: NotificationPrefsDevicesSchema,
+        quietHours: NotificationPrefsQuietHoursSchema,
+    }).passthrough(),
+}).passthrough();
 export const ServerShutdownSchema = z.object({
     type: z.literal('server_shutdown'),
     // 'crash' is emitted from uncaughtException/unhandledRejection handlers in

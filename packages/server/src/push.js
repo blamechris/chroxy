@@ -17,6 +17,13 @@ import { dirname } from 'node:path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
+import {
+  loadPrefs as loadNotificationPrefs,
+  savePrefs as saveNotificationPrefs,
+  defaultPrefs as defaultNotificationPrefs,
+  isCategoryEnabledIn,
+  isInQuietHoursIn,
+} from './notification-prefs.js'
 
 const log = createLogger('push')
 
@@ -95,8 +102,16 @@ const RATE_LIMITS = {
 export { fetchWithRetry, FETCH_TIMEOUT_MS, MAX_RETRIES, BACKOFF_BASE_MS }
 
 export class PushManager {
-  constructor({ storagePath } = {}) {
+  constructor({ storagePath, prefsPath } = {}) {
     this._storagePath = storagePath || null
+    // #4541: notification-prefs path. Optional — when omitted PushManager
+    // operates entirely in-memory (callers like one-off tests don't need
+    // to write to disk). When set, getPrefs / setPrefs round-trip
+    // ~/.chroxy/notification-prefs.json with atomic temp+rename writes.
+    this._prefsPath = prefsPath || null
+    this._prefs = this._prefsPath
+      ? loadNotificationPrefs(this._prefsPath, { log })
+      : defaultNotificationPrefs()
     this.tokens = new Set()
     this._liveActivityTokens = new Set()
     this._lastSent = new Map() // category -> timestamp
@@ -148,6 +163,98 @@ export class PushManager {
     } catch (err) {
       log.error(`Failed to persist tokens: ${err.message}`)
     }
+  }
+
+  /**
+   * Return the current notification preferences (#4541). Returns a deep
+   * clone so callers can read freely without aliasing internal state.
+   * Categories not yet declared on disk fall through to documented
+   * defaults via the loadPrefs merge.
+   */
+  getPrefs() {
+    // Structured clone preserves nested categories / devices objects so
+    // callers patching the returned object can't accidentally mutate
+    // this._prefs.
+    return JSON.parse(JSON.stringify(this._prefs))
+  }
+
+  /**
+   * Patch preferences. Shallow-merge at the top level (`categories`,
+   * `devices`, `quietHours`); the categories map itself is shallow-merged
+   * so an inbound patch that only mentions `result` does not wipe the
+   * `permission` toggle the user set earlier. Persists to disk when a
+   * `prefsPath` was configured at construction time.
+   *
+   * @param {object} patch - Partial prefs ({ categories?, devices?, quietHours? })
+   */
+  setPrefs(patch) {
+    if (!patch || typeof patch !== 'object') return this.getPrefs()
+    const next = {
+      categories: { ...this._prefs.categories },
+      devices: { ...this._prefs.devices },
+      quietHours: this._prefs.quietHours,
+    }
+    if (patch.categories && typeof patch.categories === 'object') {
+      // Shallow-merge into the existing categories map so unmentioned
+      // toggles survive (per-category UI sends one category at a time).
+      for (const [k, v] of Object.entries(patch.categories)) {
+        if (typeof v === 'boolean') next.categories[k] = v
+      }
+    }
+    if (patch.devices && typeof patch.devices === 'object') {
+      // Per-device: replace the inner categories block wholesale per
+      // device key — the caller owns its device entry. A device key
+      // not mentioned in the patch survives.
+      for (const [token, entry] of Object.entries(patch.devices)) {
+        if (!entry || typeof entry !== 'object') continue
+        const existing = next.devices[token] || { categories: {} }
+        const mergedCategories = { ...(existing.categories || {}) }
+        if (entry.categories && typeof entry.categories === 'object') {
+          for (const [k, v] of Object.entries(entry.categories)) {
+            if (typeof v === 'boolean') mergedCategories[k] = v
+          }
+        }
+        next.devices[token] = { categories: mergedCategories }
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'quietHours')) {
+      // Allow explicit null to clear the window; the loader sanitises
+      // shape on re-read so we don't need to validate here.
+      next.quietHours = patch.quietHours || null
+    }
+    this._prefs = next
+    if (this._prefsPath) {
+      try {
+        saveNotificationPrefs(this._prefs, this._prefsPath)
+      } catch (err) {
+        log.error(`Failed to persist notification prefs: ${err?.message || err}`)
+        // Re-throw so the WS handler can surface a CREDENTIALS_WRITE_FAILED-
+        // style error rather than silently lying about persistence.
+        throw err
+      }
+    }
+    return this.getPrefs()
+  }
+
+  /**
+   * Resolve "should category X fire for this device?" — composes the
+   * global default and any per-device override. See `notification-prefs.js`
+   * for the precedence rules. The defensive RATE_LIMITS gate in send()
+   * still applies on top of this check, so user prefs can only mute
+   * further than the server's rate limits already permit.
+   */
+  isCategoryEnabled(category, pushToken = null) {
+    return isCategoryEnabledIn(this._prefs, category, pushToken)
+  }
+
+  /**
+   * Stub for the deferred quiet-hours enforcement (#4544). Returns false
+   * today — the foundation only persists the configured window so a
+   * future UI iteration can read it back. The signature is published so
+   * push.js can wire the gate without a follow-up API churn.
+   */
+  isInQuietHours(now = Date.now(), pushToken = null) {
+    return isInQuietHoursIn(this._prefs, now, pushToken)
   }
 
   /**

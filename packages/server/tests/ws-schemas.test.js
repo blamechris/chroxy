@@ -15,6 +15,9 @@ import {
   DestroySessionSchema,
   RenameSessionSchema,
   RegisterPushTokenSchema,
+  NotificationPrefsGetSchema,
+  NotificationPrefsSetSchema,
+  ServerNotificationPrefsSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,
   BrowseFilesSchema,
@@ -636,6 +639,142 @@ describe('server web task schemas', () => {
     assert.equal(result.data.tasks.length, 1)
     assert.ok(ServerWebTaskListSchema.safeParse({ type: 'web_task_list', tasks: [] }).success)
     assert.ok(!ServerWebTaskListSchema.safeParse({ type: 'web_task_list' }).success)
+  })
+})
+
+// ============================================================
+// Notification preferences (#4541)
+// ============================================================
+
+describe('NotificationPrefsGetSchema (#4541)', () => {
+  it('accepts minimal get message', () => {
+    assert.ok(NotificationPrefsGetSchema.safeParse({ type: 'notification_prefs_get' }).success)
+  })
+
+  it('accepts get with requestId', () => {
+    const result = NotificationPrefsGetSchema.safeParse({ type: 'notification_prefs_get', requestId: 'r1' })
+    assert.ok(result.success)
+    assert.equal(result.data.requestId, 'r1')
+  })
+
+  it('rejects wrong type literal', () => {
+    assert.ok(!NotificationPrefsGetSchema.safeParse({ type: 'notification_prefs_fetch' }).success)
+  })
+
+  it('routes through ClientMessageSchema', () => {
+    assert.ok(ClientMessageSchema.safeParse({ type: 'notification_prefs_get' }).success)
+  })
+})
+
+describe('NotificationPrefsSetSchema (#4541)', () => {
+  it('accepts a category-only patch', () => {
+    const result = NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { categories: { result: false } },
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.prefs.categories.result, false)
+  })
+
+  it('accepts a per-device patch', () => {
+    const result = NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices: { 'ExponentPushToken[abc]': { categories: { result: false } } } },
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts a quietHours patch', () => {
+    const result = NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: { start: '22:00', end: '07:00' } },
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts null quietHours to clear the window', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: null },
+    }).success)
+  })
+
+  it('rejects malformed quietHours times', () => {
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: { start: '10pm', end: '07:00' } },
+    }).success)
+  })
+
+  it('rejects missing prefs object', () => {
+    assert.ok(!NotificationPrefsSetSchema.safeParse({ type: 'notification_prefs_set' }).success)
+  })
+
+  it('rejects non-boolean category value', () => {
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { categories: { result: 'no' } },
+    }).success)
+  })
+
+  it('rejects more than 1000 device entries (DoS guard)', () => {
+    const devices = {}
+    for (let i = 0; i <= 1000; i++) devices[`token-${i}`] = { categories: {} }
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices },
+    }).success)
+  })
+
+  it('accepts up to 1000 device entries', () => {
+    const devices = {}
+    for (let i = 0; i < 1000; i++) devices[`token-${i}`] = { categories: {} }
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices },
+    }).success)
+  })
+
+  it('routes through ClientMessageSchema', () => {
+    assert.ok(ClientMessageSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { categories: { result: false } },
+    }).success)
+  })
+})
+
+describe('ServerNotificationPrefsSchema (#4541)', () => {
+  it('accepts a fully populated snapshot', () => {
+    const result = ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      requestId: 'r1',
+      prefs: {
+        categories: { result: true, permission: false },
+        devices: { 'token-a': { categories: { result: false } } },
+        quietHours: { start: '22:00', end: '07:00' },
+      },
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.prefs.categories.permission, false)
+  })
+
+  it('accepts a snapshot with null quietHours and empty devices', () => {
+    assert.ok(ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      prefs: { categories: { result: true }, devices: {}, quietHours: null },
+    }).success)
+  })
+
+  it('rejects missing prefs', () => {
+    assert.ok(!ServerNotificationPrefsSchema.safeParse({ type: 'notification_prefs' }).success)
+  })
+
+  it('accepts requestId as null (broadcast variant after set)', () => {
+    assert.ok(ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      requestId: null,
+      prefs: { categories: {}, devices: {}, quietHours: null },
+    }).success)
   })
 })
 
