@@ -875,8 +875,17 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                             </label>
                             {hint && <p className="settings-hint">{hint}</p>}
                             {currentDeviceKey && (
-                              <label
-                                htmlFor={deviceToggleId}
+                              // #4562: per-device row uses a <div> wrapper +
+                              // explicit `htmlFor` <label> sibling rather than
+                              // a wrapping <label>. The parent category row
+                              // already lives inside its own <label> on the
+                              // same <li>, and screen readers / click bubbling
+                              // get confused when two label elements share an
+                              // ancestor `<li>` — hoisting the per-device
+                              // label out of a wrapper element keeps the input
+                              // and its text label as flat siblings with a
+                              // single explicit association.
+                              <div
                                 className="notification-prefs-device-row"
                                 data-testid={`notification-prefs-device-row-${cat}`}
                               >
@@ -889,8 +898,8 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                                   }
                                   data-testid={`notification-prefs-device-toggle-${cat}`}
                                 />
-                                <span>Mute on this device</span>
-                              </label>
+                                <label htmlFor={deviceToggleId}>Mute on this device</label>
+                              </div>
                             )}
                           </li>
                         )
