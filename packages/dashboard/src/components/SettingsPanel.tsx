@@ -27,6 +27,17 @@ const AUTO_PERMISSION_CONFIRM_MESSAGE =
   'Auto-permission mode disables all per-tool prompts for non-paired clients. Continue?'
 
 /**
+ * #4588: confirmation copy for clearing the current device's per-device
+ * overrides. Only fires when the user clicks Clear on the row tagged
+ * `(this device)` — orphan-row clears stay one-click because the whole
+ * point of the orphan list is fast cleanup. A misclick on your own row,
+ * though, silently wipes whatever mutes / quiet-hours overrides you set
+ * up; the prompt is the second cue (after the `(this device)` tag).
+ */
+const CURRENT_DEVICE_CLEAR_CONFIRM_MESSAGE =
+  'Clear your per-device overrides? Notifications on this device will fall back to global defaults.'
+
+/**
  * #4542: friendly labels + ordering for the per-category notification
  * toggles. Keys MUST match the server-side `ALL_CATEGORIES` enum from
  * packages/server/src/notification-prefs.js (mirrors RATE_LIMITS in
@@ -812,11 +823,22 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // #4564: clear an entire per-device entry. Same WS-closed banner contract
   // as the rest of the notification-prefs handlers — a closed-socket clear
   // would silently fail and the orphan would stay on disk.
+  //
+  // #4588: clearing the row tagged `(this device)` silently wipes the
+  // operator's own mute/quiet-hours overrides — surface a confirm prompt
+  // for that case only. Orphan-row clears stay one-click; the whole point
+  // of the orphan list is fast cleanup.
   const handleClearNotificationDevice = useCallback((deviceKey: string) => {
+    if (deviceKey === currentDeviceKey) {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm(CURRENT_DEVICE_CLEAR_CONFIRM_MESSAGE)
+        : true
+      if (!ok) return
+    }
     const sent = deleteNotificationPrefsDevice(deviceKey)
     if (sent) setNotifWsClosedError(null)
     else setNotifWsClosedError(WS_CLOSED_MESSAGE)
-  }, [deleteNotificationPrefsDevice])
+  }, [deleteNotificationPrefsDevice, currentDeviceKey])
 
   const handleSetNotificationQuietHours = useCallback((window: { start: string; end: string; timezone: string } | null) => {
     const sent = setNotificationPrefsQuietHours(window)
