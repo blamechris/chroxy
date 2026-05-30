@@ -29,6 +29,7 @@ import {
   setBiometricEnabled,
   authenticate,
 } from '../hooks/useBiometricLock';
+import { buildQuietHoursTimezoneList } from '@chroxy/store-core';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
@@ -70,32 +71,6 @@ const NOTIFICATION_CATEGORY_ORDER = [
  * the UI shows the right initial checkboxes.
  */
 const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error'];
-
-/**
- * #4544: curated timezone short-list. Same set as the dashboard's
- * `getQuietHoursTimezoneOptions` so mobile + desktop pickers agree on
- * the most-likely picks. The device's resolved zone is prepended so the
- * user can pick "this device" without scrolling.
- */
-const QUIET_HOURS_TIMEZONE_CHOICES = [
-  'UTC',
-  'America/Los_Angeles',
-  'America/Denver',
-  'America/Chicago',
-  'America/New_York',
-  'America/Sao_Paulo',
-  'Europe/London',
-  'Europe/Berlin',
-  'Europe/Paris',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Shanghai',
-  'Asia/Tokyo',
-  'Asia/Singapore',
-  'Australia/Sydney',
-  'Pacific/Auckland',
-];
 
 /**
  * #4544: HH:MM validation predicate. Mirrors the server-side regex in
@@ -791,11 +766,7 @@ function QuietHoursEditor(props: {
   const browserTz = useMemo(() => {
     try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return 'UTC'; }
   }, []);
-  const tzOptions = useMemo(() => {
-    const list = [...QUIET_HOURS_TIMEZONE_CHOICES];
-    if (browserTz && !list.includes(browserTz)) list.unshift(browserTz);
-    return list;
-  }, [browserTz]);
+  const tzOptions = useMemo(() => buildQuietHoursTimezoneList(browserTz), [browserTz]);
 
   const [enabled, setEnabled] = useState<boolean>(win != null);
   const [start, setStart] = useState<string>(win?.start ?? '22:00');
