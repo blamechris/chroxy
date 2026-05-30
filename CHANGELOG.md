@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] - 2026-05-29
+
+Wave 1 of the from-review marathon: 20 follow-ups across BYOK MCP (config, client, trust), dashboard ActivityIndicator polish, session-manager test helpers, and a timeout-ceiling consolidation. Theme is "harden the BYOK surface": the MCP trust store now serialises concurrent writes (#4526), uses JSON-encoded tuple keys that resist collision and tamper (#4529), denies bypass-mode auto-trust (#4531), and cleans up `.tmp` leakage on rename failure (#4534). The MCP client gets exponential restart backoff (#4530), a tunable handshake timeout (#4533), debug-level orphan-response logging (#4536), and a wall-clock fast-fail on broken MCP configs (#4537). Plus dashboard a11y/i18n polish (#4523, #4525) and the `mcpToolCallTimeoutMs` ceiling (#4538) closing the v0.9.12 #4517 follow-up.
+
+### Added
+
+- **Exponential restart backoff in byok-mcp-client (#4453 / #4530):** restart delays now ramp 1s → 2s → 4s (was fixed 1s/1s/1s), giving wedged dependencies — port conflicts, transient FS hiccups — time to recover before DEAD. Also fixed an off-by-one in the attempt-cap (`>=` → `>`) so the third attempt actually runs.
+- **Per-instance handshake timeout in byok-mcp-client (#4454 / #4533):** new `opts.handshakeTimeoutMs` (and per-config `handshakeTimeoutMs`) overrides `DEFAULT_HANDSHAKE_TIMEOUT_MS` so slow MCP servers can have wider timeouts and tests can have tighter ones. Defensive guard against non-finite / non-positive values falls back to the default.
+- **MCP wall-clock fast-fail (#4456 / #4537):** `MCPFleet.start()` now caps total wait at `DEFAULT_FLEET_START_CAP_MS` (1500ms) so a single broken MCP config can't hang session startup indefinitely. Operators can opt in to legacy convergence behaviour via `opts.startCapMs = Infinity`.
+
+### Fixed
+
+- **Trust-store serialization (#4460 / #4526):** two MCPFleet clients started in parallel could both pass through their trustGate (load → prompt → recordTrust) interleaved, with the last write clobbering the first. Added `withTrustStoreLock(filePath, critical)` — a per-path async mutex — and serialised the whole gate sequence inside it. Prompts now surface one at a time; concurrent recordTrust calls all persist.
+- **Trust-store tuple key hardened against collision + tamper (#4461 / #4529):** replaced the NUL-byte separator with `JSON.stringify([name, command, arg0])` so values containing spaces, NUL, quotes, or brackets cannot collide. `loadTrustStore()` now recomputes each entry's canonical key from its stored components and drops any entry whose stored key doesn't match — catches "hand-edit command, keep stored key intact" tamper attempts.
+- **Bypass-mode no longer silently persists MCP trust (#4462 / #4531):** `autoAllowPending()` now tags pending entries with `mcpTrust: true` and denies them explicitly with the reason "MCP trust not persisted via auto-mode bypass" — prevents auto-mode from quietly accumulating trust entries the user never approved.
+- **Trust-store cleans up `.tmp` on renameSync failure (#4463 / #4534):** when `renameSync` threw (cross-device link, FS quota, ACL) the temp file was left behind in `~/.chroxy/`. Wrap in try/catch that `unlinkSync`-es the temp on failure and re-throws the original error.
+- **MCP config-file 10MB read cap (#4447 / #4524):** `byok-mcp-config.js` now caps the JSON read at 10MB so a malformed or hostile config can't exhaust memory. Over-cap reads warn and fall back to empty config.
+- **MCP config coerces and warns on non-string values (#4448 / #4528):** non-string values for `command`/`args` items now warn and are dropped instead of producing a broken MCPClient config.
+- **Unified `mcpConfigPath` opt naming (#4449 / #4532):** `byok-session.js` now uses `opts.mcpConfigPath` consistently; the unused `claudeConfigPath` alias was dropped.
+- **MCP client logs orphan JSON-RPC responses at debug (#4455 / #4536):** unsolicited responses (id the client never sent) now log at debug level instead of warn, since they're benign noise from buggy MCP servers. Notifications (id == null) are silently dropped.
+- **`mcpToolCallTimeoutMs` clamped to MAX_SANE_DURATION_MS (#4517 / #4538):** the operator-facing knob now respects the 24h ceiling enforced for other timeout fields (extends v0.9.12's #4516 to the three byok-session sites + config validation).
+- **1M-variant model label uses providerMeta (#4441 / #4518):** `humanizeModelId` now applies provider-supplied labels to the 1M variants instead of dropping back to the raw model ID.
+- **ActivityIndicator popover focus-restore (#4445 / #4525):** Escape now restores focus to the disclosure trigger instead of dropping focus to the document body. Follow-up [#4539](https://github.com/blamechris/chroxy/issues/4539) tracks the SidebarTokenView parallel.
+
+### Changed
+
+- **`useId()` for ActivityIndicator popover id (#4444 / #4523):** replaced the manual `useRef(`indicator-${Math.random()}`)` hack with React 19's `useId()` so popover ids are stable across re-renders and SSR-safe.
+- **Shared session-manager forwarding test helper (#4511 / #4519):** extracted `CapturingProvider` + `assertForwardingPattern` from session-manager tests into `packages/server/tests/helpers/provider-forwarding.js` so future timeout-forwarding tests don't duplicate the harness. Includes follow-up #4522 covering the `streamStallTimeoutMs=0` edge case.
+
+### Internal
+
+- **Dashboard registry conflict-scan coverage (#4442 / #4520):** added the both-defs-disabled case to `findConflict` tests.
+- **Dashboard registry interface doc (#4443 / #4521):** documented enabled-aware conflict semantics on the registry interface JSDoc.
+- **byok-mcp-client constants parameterized (#4452 / #4527):** `MCP_PROTOCOL_VERSION` and `MCP_CLIENT_VERSION` are now exported module constants — `MCP_CLIENT_VERSION` derives from `package.json` instead of the legacy `'1'` placeholder, so MCP server logs see a real chroxy version.
+
 ## [0.9.12] - 2026-05-28
 
 Small follow-up sweep closing seven leftovers from the v0.9.10–v0.9.11 marathons. Theme is "finish what we started": the keyboard-shortcut registry now owns every dashboard binding (the tail #4412 deferred from v0.9.10's #3852), the context-window learn-loop now persists and runs on both Codex and Gemini (the two #4413/#4414 follow-ups from v0.9.10's #3857), and the pending-background-shells feature lights up the mobile app + handles overflow and multi-shell expansion (the three #4420/#4421/#4422 follow-ups from v0.9.11's #4307). No new user-facing features — every change is making an existing v0.9.x feature work the way it was advertised.
