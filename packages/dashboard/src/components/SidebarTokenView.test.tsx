@@ -342,6 +342,26 @@ describe('SidebarTokenView (#4303 v0)', () => {
         expect(trigger.getAttribute('aria-expanded')).toBe('false')
       })
 
+      it('restores focus to the disclosure button when Escape dismisses the popover (#4539)', () => {
+        // WAI-ARIA APG: a disclosure-triggered popover dismissed via Escape
+        // should return focus to the invoker so keyboard users don't get
+        // parked on document.body and lose their place in the tab order.
+        // Mirrors PR #4525 which fixed the same omission for ActivityIndicator.
+        render(<SidebarTokenView sessions={sessions} />)
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+        // Move focus into the popover to simulate a keyboard user who has
+        // tabbed into the disclosure content. The Escape dismiss must yank
+        // focus back to the trigger regardless of which element currently
+        // holds it.
+        const popover = screen.getByTestId('sidebar-token-view-cost-info-popover')
+        ;(popover as HTMLElement).focus()
+        fireEvent.keyDown(document, { key: 'Escape' })
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+        expect(document.activeElement).toBe(trigger)
+      })
+
       it('dismisses the popover when clicking outside', () => {
         render(
           <div>
@@ -356,6 +376,30 @@ describe('SidebarTokenView (#4303 v0)', () => {
         // mousedown is the typical click-outside trigger (fires before focus).
         fireEvent.mouseDown(screen.getByTestId('outside-button'))
         expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+      })
+
+      it('does NOT restore focus to the disclosure button on outside-click dismiss (#4539)', () => {
+        // Outside-click dismiss intentionally leaves focus where the user
+        // clicked — stealing it back would fight their pointer intent. Only
+        // the keyboard-only Escape path restores focus per APG guidance.
+        // Mirrors PR #4525 which made the same deliberate distinction for
+        // ActivityIndicator.
+        render(
+          <div>
+            <SidebarTokenView sessions={sessions} />
+            <button type="button" data-testid="outside-button">outside</button>
+          </div>,
+        )
+        const trigger = screen.getByTestId('sidebar-token-view-cost-info')
+        fireEvent.click(trigger)
+        expect(screen.getByTestId('sidebar-token-view-cost-info-popover')).toBeInTheDocument()
+        // Move focus elsewhere first so we can assert focus is NOT pulled
+        // back to the disclosure after the outside-click dismiss.
+        document.body.focus()
+        expect(document.activeElement).not.toBe(trigger)
+        fireEvent.mouseDown(document.body)
+        expect(screen.queryByTestId('sidebar-token-view-cost-info-popover')).toBeNull()
+        expect(document.activeElement).not.toBe(trigger)
       })
 
       it('does not dismiss when clicking inside the popover', () => {
