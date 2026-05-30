@@ -102,15 +102,22 @@ describe('connection.ts — per-device action wiring (#4543)', () => {
   });
 
   it('setNotificationPrefsDevice sends a single-device notification_prefs_set patch', () => {
+    // Window widened to 1500 chars in #4558 to accommodate the optimistic
+    // local-state patch (~500 chars of nested `set({...})` mirroring the
+    // server's shallow-merge) that now sits between the function declaration
+    // and the `wsSend` call.
     expect(connectionSource).toMatch(
-      /setNotificationPrefsDevice[\s\S]{0,400}notification_prefs_set[\s\S]{0,300}devices:\s*\{[\s\S]{0,200}\[deviceKey\]:[\s\S]{0,200}categories:[\s\S]{0,80}\[category\]:\s*enabled/,
+      /setNotificationPrefsDevice[\s\S]{0,1500}notification_prefs_set[\s\S]{0,300}devices:\s*\{[\s\S]{0,200}\[deviceKey\]:[\s\S]{0,200}categories:[\s\S]{0,80}\[category\]:\s*enabled/,
     );
   });
 
   it('short-circuits the per-device action when deviceKey is empty', () => {
     // Defensive: even if the UI rail ever drops, the action MUST refuse to
     // ship a `devices[""]` patch which would pollute the map indefinitely.
-    expect(connectionSource).toMatch(/setNotificationPrefsDevice[\s\S]{0,300}if\s*\(!deviceKey\)\s*return/);
+    // Window widened in #4558 — the `if (!deviceKey) return` lives before
+    // the optimistic patch + wire-send, but downstream changes may push it
+    // further into the body.
+    expect(connectionSource).toMatch(/setNotificationPrefsDevice[\s\S]{0,500}if\s*\(!deviceKey\)\s*return/);
   });
 });
 

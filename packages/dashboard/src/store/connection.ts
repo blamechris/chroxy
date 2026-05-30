@@ -520,9 +520,34 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #4558: optimistic update. The user's toggle has to feel instant — on
+  // a slow cellular → Cloudflare tunnel round-trip the prior server-of-truth
+  // behaviour left the checkbox stationary for hundreds of milliseconds
+  // until the broadcast landed. We patch `notificationPrefs` locally
+  // BEFORE sending the WS message, then rely on the eventual
+  // `notification_prefs` broadcast to reconcile — server wins, see the
+  // handler in message-handler.ts case 'notification_prefs'.
+  //
+  // Edge cases:
+  //   - notificationPrefs == null  → don't mint a synthetic snapshot. The
+  //     UI gates on null and renders the loading hint, so the action only
+  //     fires from a checkbox bound to a real snapshot. Still ship the WS
+  //     message so the server's reply seeds the snapshot.
+  //   - socket closed              → no optimistic patch either. Same
+  //     server-of-truth contract as before — without a server to confirm,
+  //     a local-only flip would never reconcile and would drift on the
+  //     next reconnect snapshot.
   setNotificationPrefsCategory: (category: string, enabled: boolean) => {
-    const { socket } = get();
+    const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      if (notificationPrefs) {
+        set({
+          notificationPrefs: {
+            ...notificationPrefs,
+            categories: { ...notificationPrefs.categories, [category]: enabled },
+          },
+        });
+      }
       wsSend(socket, {
         type: 'notification_prefs_set',
         prefs: { categories: { [category]: enabled } },
@@ -537,10 +562,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // - empty deviceKey → no-op (we never want a `devices[""]` entry).
   // - socket closed → no-op (the snapshot is the source of truth; we don't
   //   queue, matching `setNotificationPrefsCategory`).
+  //
+  // #4558: optimistic update — same rationale as setNotificationPrefsCategory.
+  // The per-device row's mute checkbox flips immediately; the server's
+  // broadcast reconciles. We mirror the server's shallow-merge semantics
+  // in the local patch so other devices and other categories under THIS
+  // device survive.
   setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => {
     if (!deviceKey) return;
-    const { socket } = get();
+    const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      if (notificationPrefs) {
+        const existingDevice = notificationPrefs.devices[deviceKey] ?? {};
+        const existingCats = existingDevice.categories ?? {};
+        set({
+          notificationPrefs: {
+            ...notificationPrefs,
+            devices: {
+              ...notificationPrefs.devices,
+              [deviceKey]: {
+                ...existingDevice,
+                categories: { ...existingCats, [category]: enabled },
+              },
+            },
+          },
+        });
+      }
       wsSend(socket, {
         type: 'notification_prefs_set',
         prefs: {
@@ -556,9 +603,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // a full window object (start/end/timezone) sets it. The server
   // shallow-merges at the top level, so other fields (categories,
   // bypassCategories, devices) are preserved.
+  //
+  // #4558: optimistic update — local `quietHours` flips before the
+  // broadcast lands so the editor's Save button doesn't visibly lag
+  // behind the click.
   setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => {
-    const { socket } = get();
+    const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      if (notificationPrefs) {
+        set({
+          notificationPrefs: { ...notificationPrefs, quietHours: window },
+        });
+      }
       wsSend(socket, {
         type: 'notification_prefs_set',
         prefs: { quietHours: window },
@@ -571,9 +627,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // bypasses, not even errors". UI callers should always send the desired
   // final list — toggling one bypass on/off means re-sending the resulting
   // array.
+  //
+  // #4558: optimistic update — local `bypassCategories` flips before the
+  // broadcast lands so the bypass checkboxes feel snappy.
   setNotificationPrefsBypassCategories: (categories: string[]) => {
-    const { socket } = get();
+    const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      if (notificationPrefs) {
+        set({
+          notificationPrefs: { ...notificationPrefs, bypassCategories: categories },
+        });
+      }
       wsSend(socket, {
         type: 'notification_prefs_set',
         prefs: { bypassCategories: categories },
