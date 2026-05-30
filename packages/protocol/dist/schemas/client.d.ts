@@ -286,6 +286,8 @@ export declare const NotificationPrefsPatchSchema: z.ZodObject<{
             timezone: z.ZodString;
         }, z.core.$strip>]>>;
         bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        lastSeenAt: z.ZodOptional<z.ZodNumber>;
+        platform: z.ZodOptional<z.ZodString>;
     }, z.core.$loose>, z.ZodNull]>>>;
     quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
         start: z.ZodString;
@@ -320,6 +322,8 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
                 timezone: z.ZodString;
             }, z.core.$strip>]>>;
             bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            lastSeenAt: z.ZodOptional<z.ZodNumber>;
+            platform: z.ZodOptional<z.ZodString>;
         }, z.core.$loose>, z.ZodNull]>>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
@@ -674,6 +678,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 timezone: z.ZodString;
             }, z.core.$strip>]>>;
             bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            lastSeenAt: z.ZodOptional<z.ZodNumber>;
+            platform: z.ZodOptional<z.ZodString>;
         }, z.core.$loose>, z.ZodNull]>>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
