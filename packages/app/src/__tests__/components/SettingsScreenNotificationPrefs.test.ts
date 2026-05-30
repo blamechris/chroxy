@@ -479,6 +479,29 @@ describe('SettingsScreen — notification-prefs capability gate (#4560)', () => 
     expect(settingsSource).toMatch(/testID="quiet-hours-not-supported"/);
   });
 
+  it('uses one shared copy constant for both not-supported hints (#4585)', () => {
+    // Pre-#4585 the categories section showed the long upgrade explanation
+    // and the quiet-hours section showed a terser "Requires chroxy
+    // v0.9.14 or newer." — visible to any user testing on a pre-#4541
+    // server, and the disparity made it unclear whether quiet hours needed
+    // a different upgrade path. The constant declaration AND its use at
+    // both render sites must all be present.
+    expect(settingsSource).toMatch(/const NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE\s*=/);
+    expect(settingsSource).toMatch(
+      /testID="notification-prefs-not-supported"[\s\S]{0,200}\{NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE\}/,
+    );
+    expect(settingsSource).toMatch(
+      /testID="quiet-hours-not-supported"[\s\S]{0,200}\{NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE\}/,
+    );
+  });
+
+  it('drops the terse "Requires chroxy v0.9.14 or newer." copy (#4585)', () => {
+    // Regression guard: if a future refactor reintroduces the terser
+    // string, the two not-supported sections will diverge again. Asserting
+    // the literal string is GONE locks the unification in.
+    expect(settingsSource).not.toMatch(/Requires chroxy v0\.9\.14 or newer\./);
+  });
+
   it('declares serverCapabilities on the lifecycle store with a fail-closed default', () => {
     // Empty `{}` is the fail-closed default: an absent flag reads as
     // `false`, so feature-gated UI hides itself rather than silently
