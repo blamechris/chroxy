@@ -221,6 +221,15 @@ export type {
   ProviderDisplayInfo,
 } from './provider-labels'
 
+// #4569: curated IANA timezone short-list for the notification
+// quiet-hours editor. Single source of truth shared by the dashboard's
+// SettingsPanel and the mobile SettingsScreen so the two pickers can't
+// drift apart when one is extended.
+export {
+  QUIET_HOURS_TIMEZONE_CHOICES,
+  buildQuietHoursTimezoneList,
+} from './timezones'
+
 export type {
   SessionPatch,
   PermissionMode,
