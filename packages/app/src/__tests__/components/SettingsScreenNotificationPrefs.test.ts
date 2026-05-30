@@ -115,8 +115,11 @@ describe('connection.ts — notification prefs actions (#4542)', () => {
   });
 
   it('setNotificationPrefsCategory sends a single-category notification_prefs_set patch', () => {
+    // Window widened to 1200 chars in #4558 to accommodate the optimistic
+    // local-state patch (~350 chars of `set({...})` + comment) that now
+    // sits between the function declaration and the `wsSend` call.
     expect(connectionSource).toMatch(
-      /setNotificationPrefsCategory[\s\S]{0,400}notification_prefs_set[\s\S]{0,200}\[category\]:\s*enabled/,
+      /setNotificationPrefsCategory[\s\S]{0,1200}notification_prefs_set[\s\S]{0,200}\[category\]:\s*enabled/,
     );
   });
 });
