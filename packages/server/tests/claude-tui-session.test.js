@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
@@ -2381,6 +2381,193 @@ describe('ClaudeTuiSession', () => {
       session._hardTimeoutMs = 1000
       session._handleHardTimeout()
       assert.equal(session._pendingUserAnswer, null, 'hard timeout clears pending answer')
+    })
+  })
+
+  // #4604 — observability + watchdog around AskUserQuestion. The root
+  // cause (claude TUI multi-question forms render a per-question form
+  // that needs more than one keystroke) is fixed in a separate refactor
+  // (Chunk B). These tests pin the defensive layers:
+  //   - A WARN log fires when a PreToolUse arrives with >1 question so
+  //     the wedge condition is visible in chroxy.log.
+  //   - A 30s watchdog clears the busy state + emits ASK_USER_QUESTION_STALL
+  //     when claude TUI never emits PostToolUse after chroxy writes the
+  //     answer (i.e. the keystroke didn't satisfy the form).
+  //   - The watchdog is cancelled on PostToolUse arrival (happy path) and
+  //     on destroy() (clean teardown).
+  describe('AskUserQuestion stall watchdog (#4604)', () => {
+    let warnLines
+    let infoLines
+    let logSpy
+
+    beforeEach(() => {
+      warnLines = []
+      infoLines = []
+      logSpy = (entry) => {
+        if (entry.component !== 'claude-tui-session') return
+        if (entry.level === 'warn') warnLines.push(entry.message)
+        if (entry.level === 'info') infoLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+    })
+
+    afterEach(() => {
+      if (logSpy) removeLogListener(logSpy)
+      logSpy = null
+      warnLines = null
+      infoLines = null
+    })
+
+    it('PreToolUse with >1 question fires a multi-question warn (#4604 chunk A)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { uuid: 'test', synthSeq: 0 }
+
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'x' }, { label: 'y' }] },
+        { question: 'Q3?', options: [{ label: 'p' }] },
+        { question: 'Q4?', options: [{ label: 'q' }] },
+      ]
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_aq_multi',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions },
+      }, 'msg-aq-multi')
+
+      const multiWarn = warnLines.find((m) => /multi-question forms are not yet supported/.test(m))
+      assert.ok(multiWarn, `expected multi-question warn, got warnLines=${JSON.stringify(warnLines)}`)
+      assert.match(multiWarn, /4 questions/, 'warn includes the question count')
+      assert.match(multiWarn, /#4604/, 'warn references the tracking issue')
+
+      const pendingInfo = infoLines.find((m) => /AskUserQuestion pending/.test(m))
+      assert.ok(pendingInfo, 'PreToolUse also fires an info log with the toolUseId + counts')
+      assert.match(pendingInfo, /questions=4/)
+    })
+
+    it('does NOT fire the multi-question warn for a single-question prompt (happy path)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { uuid: 'test', synthSeq: 0 }
+
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_aq_single',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q1?', options: [{ label: 'a' }] }] },
+      }, 'msg-aq-single')
+
+      const multiWarn = warnLines.find((m) => /multi-question forms are not yet supported/.test(m))
+      assert.equal(multiWarn, undefined, 'single-question must not trigger the multi-question warn')
+    })
+
+    it('watchdog fires after 30s when PostToolUse never arrives — clears busy + emits ASK_USER_QUESTION_STALL', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_stall',
+          options: [{ label: 'a' }, { label: 'b' }],
+        }
+
+        session.respondToQuestion('a')
+        // respondToQuestion clears _pendingUserAnswer synchronously at the
+        // top — simulate the stuck-form condition by reinstating it (this
+        // is what would happen if PostToolUse never arrived: chroxy wrote
+        // one digit but claude TUI is sitting on question 2).
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_stall',
+          options: [{ label: 'a' }, { label: 'b' }],
+        }
+
+        // Just under the watchdog window — nothing should fire yet.
+        mock.timers.tick(29_000)
+        assert.equal(errors.length, 0, 'no error before the 30s watchdog window')
+        assert.equal(session._isBusy, true, 'still busy before fire')
+
+        // Cross the threshold.
+        mock.timers.tick(2_000)
+
+        assert.equal(errors.length, 1, 'exactly one error after the watchdog fires')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_STALL', 'error carries the structured code')
+        assert.equal(errors[0].toolUseId, 'toolu_aq_stall', 'error carries the toolUseId we armed with')
+        assert.match(errors[0].message, /retry/i, 'message tells the user to retry')
+
+        assert.equal(session._isBusy, false, 'busy cleared so the session is recoverable')
+        assert.equal(session._pendingUserAnswer, null, 'pending answer slot cleared')
+
+        const stallWarn = warnLines.find((m) => /AskUserQuestion stall/.test(m))
+        assert.ok(stallWarn, 'watchdog fire also logs a warn for triage')
+        assert.match(stallWarn, /toolu_aq_stall/, 'warn includes toolUseId')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    it('watchdog does NOT fire when PostToolUse arrives in time (happy path)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_ok',
+          options: [{ label: 'a' }, { label: 'b' }],
+        }
+
+        session.respondToQuestion('a')
+
+        // Halfway through the watchdog window — claude TUI emits PostToolUse.
+        mock.timers.tick(15_000)
+        assert.equal(errors.length, 0, 'no error before PostToolUse')
+
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_aq_ok',
+          tool_name: 'AskUserQuestion',
+          tool_response: { selectedLabel: 'a' },
+        }, 'msg-aq-ok')
+
+        // Push well past the original 30s window — watchdog must have been
+        // cleared by PostToolUse, so no late fire.
+        mock.timers.tick(60_000)
+        assert.equal(errors.length, 0, 'watchdog cancelled by PostToolUse, no late stall error')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    it('watchdog is cleared on destroy() (clean teardown)', async () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_destroy',
+          options: [{ label: 'a' }],
+        }
+
+        session.respondToQuestion('a')
+
+        // Tear down before the watchdog fires.
+        await session.destroy()
+        session = null  // afterEach should not double-destroy
+
+        // Push well past the watchdog window.
+        mock.timers.tick(60_000)
+        assert.equal(errors.length, 0, 'destroy() must cancel the watchdog — no late stall error')
+      } finally {
+        mock.timers.reset()
+      }
     })
   })
 

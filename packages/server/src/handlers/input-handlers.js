@@ -538,6 +538,11 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
 
   const entry = ctx.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
+    // #4604: log the incoming response shape so a multi-question form
+    // wedge is correlatable from chroxy.log alone (toolUseId + map-key
+    // count distinguishes the SDK's per-question form from the TUI's
+    // single-answer string).
+    log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0}`)
     entry.session.respondToQuestion(msg.answer, msg.answers)
   }
 }
