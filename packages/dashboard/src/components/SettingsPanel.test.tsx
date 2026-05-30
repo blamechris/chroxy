@@ -1075,6 +1075,91 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.queryByTestId('notification-prefs-devices-list')).toBeNull()
     })
+
+    // #4587: per-device metadata (lastSeenAt + platform). The dashboard
+    // surfaces these as a muted "{platform} · Last seen {relative}" suffix
+    // next to the truncated token so operators can tell orphan entries
+    // apart. Both fields are optional — pre-#4587 servers omit them and
+    // the row renders exactly as before.
+    describe('lastSeen + platform metadata (#4587)', () => {
+      it('renders a platform badge when entry.platform is set', () => {
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-ios': { categories: { result: false }, platform: 'ios' },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const badge = screen.getByTestId('notification-prefs-device-platform-tok-ios')
+        // Friendly label rewrite — `ios` -> `iOS` — so the row reads
+        // correctly for non-technical operators.
+        expect(badge.textContent).toMatch(/iOS/)
+      })
+
+      it('renders a last-seen badge when entry.lastSeenAt is set', () => {
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-seen': {
+                categories: { result: false },
+                // 1 minute ago — should render as "1 min ago"
+                lastSeenAt: Date.now() - 60_000,
+              },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const badge = screen.getByTestId('notification-prefs-device-last-seen-tok-seen')
+        // Match the minute-granularity render. Allow `1 min` or `2 min`
+        // depending on which side of the floor we land on.
+        expect(badge.textContent).toMatch(/Last seen \d+ min ago/)
+      })
+
+      it('renders both meta spans when both fields are set', () => {
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-both': {
+                categories: { result: false },
+                platform: 'android',
+                lastSeenAt: Date.now() - 3_600_000, // 1 hr ago
+              },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.getByTestId('notification-prefs-device-platform-tok-both').textContent).toMatch(/Android/)
+        expect(screen.getByTestId('notification-prefs-device-last-seen-tok-both').textContent).toMatch(/hr ago/)
+      })
+
+      it('omits both meta spans when fields are absent (pre-#4587 server)', () => {
+        // Graceful fallback — a snapshot from an older server still
+        // renders, just without the new affordances. The truncated token
+        // and Clear button are still present.
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-legacy': { categories: { result: false } },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.queryByTestId('notification-prefs-device-platform-tok-legacy')).toBeNull()
+        expect(screen.queryByTestId('notification-prefs-device-last-seen-tok-legacy')).toBeNull()
+        // Sanity — the row itself still renders.
+        expect(screen.getByTestId('notification-prefs-device-entry-tok-legacy')).toBeInTheDocument()
+        expect(screen.getByTestId('notification-prefs-device-clear-tok-legacy')).toBeInTheDocument()
+      })
+    })
   })
 
   describe('Notification preferences — quiet-hours editor (#4544)', () => {
