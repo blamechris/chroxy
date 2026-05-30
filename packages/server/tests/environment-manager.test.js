@@ -327,6 +327,92 @@ describe('EnvironmentManager.create() — workspacePVC passthrough (#4548)', () 
   })
 })
 
+/**
+ * #4556 — chroxy-config surface for K8sBackend's workspacePVC strategy.
+ *
+ * #4548 plumbed `opts.workspacePVC` through the manager but left no operator-
+ * facing way to configure it: callers (dashboard, session-create flow, CLI) never
+ * pass the option, so the seam was dead. The config block lets operators set the
+ * PVC strategy once per backend; EnvironmentManager wires the configured default
+ * into every `create()` call. An explicit `opts.workspacePVC` from the caller
+ * still wins (per-call override path for any future dashboard/CLI surface).
+ *
+ * The shape validation still lives in K8sBackend.validateWorkspacePVC (and in
+ * `validateConfig` at config-load time). The manager only does the wiring.
+ */
+describe('EnvironmentManager.create() — workspacePVCDefault from config (#4556)', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function createRecordingBackend() {
+    const calls = []
+    return {
+      calls,
+      async createEnvironment(opts) {
+        calls.push(opts)
+        return {
+          containerId: 'stub-container-id',
+          containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+        }
+      },
+    }
+  }
+
+  it('applies workspacePVCDefault when caller omits workspacePVC', async () => {
+    const backend = createRecordingBackend()
+    const workspacePVCDefault = { claimName: 'configured-pvc', mountPath: '/workspace', readOnly: false }
+    const manager = new EnvironmentManager({ statePath, backend, workspacePVCDefault })
+
+    // Caller omits workspacePVC — manager should fill it from the configured default.
+    await manager.create({ name: 'cfg-env', cwd: '/tmp' })
+
+    assert.equal(backend.calls.length, 1)
+    assert.deepEqual(
+      backend.calls[0].workspacePVC,
+      workspacePVCDefault,
+      'manager must forward the configured default verbatim when caller omits the option'
+    )
+  })
+
+  it('caller-supplied workspacePVC wins over workspacePVCDefault', async () => {
+    const backend = createRecordingBackend()
+    const workspacePVCDefault = { claimName: 'cluster-default-pvc' }
+    const manager = new EnvironmentManager({ statePath, backend, workspacePVCDefault })
+
+    const callerPVC = { claimName: 'per-call-override-pvc', mountPath: '/override', readOnly: true }
+    await manager.create({ name: 'override-env', cwd: '/tmp', workspacePVC: callerPVC })
+
+    assert.equal(backend.calls.length, 1)
+    assert.deepEqual(
+      backend.calls[0].workspacePVC,
+      callerPVC,
+      'explicit opts.workspacePVC must override the configured default (per-call surface wins)'
+    )
+  })
+
+  it('omits workspacePVC entirely when neither config nor caller supplies it', async () => {
+    const backend = createRecordingBackend()
+    const manager = new EnvironmentManager({ statePath, backend })
+
+    await manager.create({ name: 'no-config-no-caller', cwd: '/tmp' })
+
+    assert.equal(backend.calls.length, 1)
+    assert.equal(
+      backend.calls[0].workspacePVC,
+      undefined,
+      'workspacePVC must be undefined when no config default and no caller value'
+    )
+  })
+})
+
 describe('EnvironmentManager.destroy()', () => {
   let tmpDir, statePath
 

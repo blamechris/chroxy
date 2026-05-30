@@ -268,6 +268,52 @@ The `provider` key picks which AI CLI backs a session by default:
 
 Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
 
+### Kubernetes workspace PVC (`environments.k8s.workspace`)
+
+When the K8s environment backend is active on a **multi-node** cluster, the
+default `hostPath` workspace mount only works for Pods scheduled on the node
+that owns the host directory — on every other node the Pod silently mounts an
+empty `DirectoryOrCreate` and the workload sees no workspace. To make the
+workspace cluster-wide, K8sBackend supports mounting a pre-provisioned
+`PersistentVolumeClaim` instead (`#3385` / `#4547`).
+
+The PVC strategy is **operator-side configuration**: the claim, mount path, and
+read-only flag are cluster-ops concerns that don't vary per project, per
+session, or per user. Set the block once in `~/.chroxy/config.json` and every
+environment created on the K8s backend picks it up automatically (`#4556`).
+
+```json
+{
+  "environments": {
+    "enabled": true,
+    "k8s": {
+      "workspace": {
+        "claimName": "chroxy-workspace-pvc",
+        "mountPath": "/workspace",
+        "readOnly": false
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `claimName` | string | yes | — | Name of a pre-provisioned PVC in the target namespace. Must be a non-empty string. |
+| `mountPath` | string | no | `/workspace` | Pod-side mount path. |
+| `readOnly` | boolean | no | `false` | Mount the PVC read-only. |
+
+The block shape is validated at config-load time — a typo (missing `claimName`,
+wrong type) surfaces at startup, not at the first environment-creation call.
+Docker and other non-K8s backends silently ignore the block, so it's safe to
+leave in config when switching backends.
+
+Per-create callers (a future dashboard or CLI flag) can pass an explicit
+`workspacePVC` opt to override the configured default for a single environment;
+the per-call value always wins. With no caller override and no config block,
+the manager omits the field entirely and the K8s backend falls back to the
+`hostPath` strategy (single-node clusters).
+
 ## Examples
 
 ### Using Config File Only
