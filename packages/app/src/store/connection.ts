@@ -502,6 +502,42 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #4564: drop a per-device entry entirely by sending the null sentinel
+  // (`devices: { [deviceKey]: null }`). The server's setPrefs interprets
+  // null as "remove this token from the persisted devices map" — the only
+  // way to drain orphan entries left behind when an Expo push token
+  // refreshes, the app is reinstalled, or a browser device id is cleared.
+  //
+  // Mirrors setNotificationPrefsDevice's guards:
+  // - empty deviceKey → no-op (never ship `devices[""]`).
+  // - socket closed   → no-op AND no local mutation (an optimistic delete
+  //   on a closed socket would never reconcile, leaving the UI lying).
+  //
+  // Optimistic local update: drop the key from the snapshot immediately
+  // so the Settings list row disappears without waiting for the broadcast.
+  deleteNotificationPrefsDevice: (deviceKey: string): boolean => {
+    if (!deviceKey) return false;
+    const { socket, notificationPrefs } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      if (notificationPrefs) {
+        const { [deviceKey]: _removed, ...rest } = notificationPrefs.devices;
+        void _removed;
+        set({
+          notificationPrefs: {
+            ...notificationPrefs,
+            devices: rest,
+          },
+        });
+      }
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { devices: { [deviceKey]: null } },
+      });
+      return true;
+    }
+    return false;
+  },
+
   // #4544: global quiet-hours window patch. `null` clears; a window
   // object (with `timezone`) sets it. Server shallow-merges at the top
   // level so other fields (categories, bypassCategories, devices) survive.

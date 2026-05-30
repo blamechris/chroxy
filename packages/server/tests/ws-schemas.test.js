@@ -776,6 +776,29 @@ describe('NotificationPrefsSetSchema (#4541)', () => {
     }).success)
   })
 
+  // #4564: per-device entries accept `null` as a delete sentinel so the UI
+  // can drain orphan tokens left behind by Expo refresh, app reinstall, or
+  // browser-storage wipe. The server-side `setPrefs` interprets the sentinel
+  // and removes the matching device key from the persisted map.
+  it('accepts a null device entry to signal deletion (#4564)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices: { 'ExponentPushToken[old]': null } },
+    }).success)
+  })
+
+  it('accepts a mixed add + delete devices patch (#4564)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: {
+        devices: {
+          'old-tok': null,
+          'new-tok': { categories: { result: false } },
+        },
+      },
+    }).success)
+  })
+
   it('routes through ClientMessageSchema', () => {
     assert.ok(ClientMessageSchema.safeParse({
       type: 'notification_prefs_set',

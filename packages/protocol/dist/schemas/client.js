@@ -313,10 +313,17 @@ const NotificationDeviceEntrySchema = z.object({
  * The device map is bounded at 1000 entries to keep a malicious client
  * from bloating the on-disk file; in practice users have at most a
  * handful of devices.
+ *
+ * #4564: per-device entries also accept `null` as a sentinel meaning
+ * "delete this device entry". The "Clear" buttons in Settings emit
+ * `devices: { [token]: null }` to drain orphan entries left behind by
+ * push-token refresh, app reinstall, or browser-storage wipe. Server-side
+ * `setPrefs` interprets the null sentinel and removes the key from the
+ * persisted devices map.
  */
 export const NotificationPrefsPatchSchema = z.object({
     categories: NotificationCategoryMapSchema.optional(),
-    devices: z.record(z.string().min(1).max(512), NotificationDeviceEntrySchema)
+    devices: z.record(z.string().min(1).max(512), z.union([NotificationDeviceEntrySchema, z.null()]))
         .refine((obj) => Object.keys(obj).length <= 1000, { message: 'Too many device entries (max 1000)' })
         .optional(),
     quietHours: NotificationQuietHoursSchema.optional(),

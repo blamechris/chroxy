@@ -190,6 +190,10 @@ export function SettingsScreen() {
   // that state so we never ship a `devices[null]` patch.
   const pushToken = useConnectionStore((s) => s.pushToken);
   const setNotificationPrefsDevice = useConnectionStore((s) => s.setNotificationPrefsDevice);
+  // #4564: drop an entire per-device entry — the per-row "Clear" button in
+  // the known-devices list calls this to drain orphans from the prefs
+  // file (token refresh / app reinstall / browser-id wipe).
+  const deleteNotificationPrefsDevice = useConnectionStore((s) => s.deleteNotificationPrefsDevice);
   // #4544: quiet-hours editor actions. The window is global; per-device
   // overrides are owned by a future iteration. `bypassCategories` is the
   // list of categories that fire even during quiet hours.
@@ -238,6 +242,13 @@ export function SettingsScreen() {
     const sent = setNotificationPrefsDevice(deviceKey, cat, value);
     setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
   }, [setNotificationPrefsDevice]);
+
+  // #4564: per-row "Clear" handler. Same WS-closed banner contract as the
+  // other notification-prefs setters so a botched clear isn't silent.
+  const handleClearDevice = useCallback((deviceKey: string) => {
+    const sent = deleteNotificationPrefsDevice(deviceKey);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [deleteNotificationPrefsDevice]);
 
   const handleSetQuietHours = useCallback((win: { start: string; end: string; timezone: string } | null) => {
     const sent = setNotificationPrefsQuietHours(win);
@@ -631,6 +642,23 @@ export function SettingsScreen() {
           />
         )}
       </View>
+
+      {/* NOTIFICATIONS — Known devices (#4564). Renders even when empty
+          so users find the affordance once orphans accumulate. Gated on
+          the notificationPrefs capability + a loaded snapshot, mirroring
+          the categories/quiet-hours sections. */}
+      {notificationPrefsSupported && notificationPrefs != null && (
+        <>
+          <Text style={styles.sectionHeader}>PER-DEVICE OVERRIDES</Text>
+          <View style={styles.section}>
+            <KnownDevicesList
+              devices={notificationPrefs.devices}
+              currentDeviceKey={pushToken}
+              onClear={handleClearDevice}
+            />
+          </View>
+        </>
+      )}
 
       {/* PORTABILITY */}
       {conversationId != null && (
@@ -1141,6 +1169,92 @@ function QuietHoursEditor(props: {
   );
 }
 
+/**
+ * #4564: token label truncation. Expo push tokens look like
+ * `ExponentPushToken[~40-base64-chars]` — too wide for a list row. Trim
+ * to a stable first-N prefix plus an ellipsis so the operator can match
+ * the row to a clear action without exposing the full token.
+ */
+function truncateDeviceLabel(key: string): string {
+  const MAX = 24;
+  if (key.length <= MAX) return key;
+  return `${key.slice(0, MAX)}…`;
+}
+
+/**
+ * #4564: list of per-device override entries with a "Clear" button per
+ * row. The map can accumulate orphans when Expo refreshes the push token
+ * or the app is reinstalled — without this list the only way to drain
+ * them is hand-editing `~/.chroxy/notification-prefs.json`. The list
+ * always renders (even when empty) so users find the affordance.
+ */
+function KnownDevicesList(props: {
+  devices: Record<string, {
+    categories?: Record<string, boolean>;
+    quietHours?: { start: string; end: string; timezone: string } | null;
+    bypassCategories?: string[];
+  }>;
+  currentDeviceKey: string | null;
+  onClear: (deviceKey: string) => void;
+}) {
+  const { devices, currentDeviceKey, onClear } = props;
+  // Stable order: current device first, then lexicographic.
+  const keys = Object.keys(devices);
+  const sorted = keys.slice().sort((a, b) => {
+    if (a === currentDeviceKey) return -1;
+    if (b === currentDeviceKey) return 1;
+    return a.localeCompare(b);
+  });
+
+  if (sorted.length === 0) {
+    return (
+      <View style={styles.row} testID="notification-prefs-devices-empty">
+        <Text style={styles.rowHint}>
+          No per-device overrides yet. Mute a category on this device above to
+          create one.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View testID="notification-prefs-devices-list">
+      {sorted.map((key, idx) => {
+        const isCurrent = key === currentDeviceKey;
+        return (
+          <React.Fragment key={key}>
+            {idx > 0 && <View style={styles.separator} />}
+            <View
+              style={styles.row}
+              testID={`notification-prefs-device-entry-${key}`}
+            >
+              <View style={styles.deviceLabelGroup}>
+                <Text
+                  style={styles.deviceLabelText}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
+                  {truncateDeviceLabel(key)}
+                </Text>
+                {isCurrent && (
+                  <Text style={styles.deviceSelfTag}> (this device)</Text>
+                )}
+              </View>
+              <TouchableOpacity
+                onPress={() => onClear(key)}
+                testID={`notification-prefs-device-clear-${key}`}
+                style={styles.deviceClearButton}
+              >
+                <Text style={styles.deviceClearText}>Clear</Text>
+              </TouchableOpacity>
+            </View>
+          </React.Fragment>
+        );
+      })}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1238,6 +1352,37 @@ const styles = StyleSheet.create({
   actionText: {
     color: COLORS.accentBlue,
     fontSize: 15,
+  },
+  // #4564: known-devices list styles. The label group flexes so a long
+  // truncated token still leaves the Clear button room; the self-tag
+  // borrows the accent blue used elsewhere for "this device" markers
+  // (LAN scan, etc.) so cross-screen styling stays consistent.
+  deviceLabelGroup: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginRight: 12,
+  },
+  deviceLabelText: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontFamily: 'Courier',
+    flexShrink: 1,
+  },
+  deviceSelfTag: {
+    color: COLORS.accentBlue,
+    fontSize: 12,
+  },
+  deviceClearButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: COLORS.backgroundCard,
+  },
+  deviceClearText: {
+    color: COLORS.accentRed,
+    fontSize: 13,
+    fontWeight: '600',
   },
   versionRow: {
     flexDirection: 'row',

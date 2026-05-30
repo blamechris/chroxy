@@ -531,6 +531,18 @@ export interface ServerNotificationActions {
   // #4559: returns `true` when sent, `false` for both no-op branches
   // (empty deviceKey OR closed socket).
   setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => boolean;
+  // #4564: drop an entire per-device override entry. Sends
+  // `notification_prefs_set` with `{ devices: { [deviceKey]: null } }`, the
+  // server interprets the null sentinel as "remove this token from the
+  // persisted devices map". Used by the per-row "Clear" button in the
+  // known-devices section to drain orphans left when an Expo push token
+  // refreshes, an app is reinstalled, or a browser tab loses its
+  // localStorage device id — without this surface the on-disk file
+  // accumulates dead entries forever.
+  //
+  // Returns `true` when the WS message was sent, `false` for both no-op
+  // branches (empty deviceKey OR closed socket).
+  deleteNotificationPrefsDevice: (deviceKey: string) => boolean;
   // #4544: patch the global quiet-hours window. `null` clears the window;
   // a window object (with `timezone`) sets it. Server broadcasts the
   // merged snapshot so all clients update in lockstep.

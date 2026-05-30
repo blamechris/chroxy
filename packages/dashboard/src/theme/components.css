@@ -4937,6 +4937,79 @@
   cursor: pointer;
 }
 
+/* #4564: known-devices list (drain-orphans surface). A subordinate
+   fieldset under the per-category toggles — borrows the same compact
+   font as `.notification-prefs-device-row` so the two read as part of
+   one section. The list itself is flat (no indent) because each row is
+   already a top-level device, not a child of another control. */
+.notification-prefs-devices {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+
+.notification-prefs-devices legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notification-prefs-devices-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notification-prefs-device-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--bg-input);
+}
+
+.notification-prefs-device-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notification-prefs-device-label code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.notification-prefs-device-self-tag {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--accent-blue);
+}
+
+.notification-prefs-device-clear {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.notification-prefs-device-clear:hover {
+  background: var(--bg-hover, var(--bg-input));
+  border-color: var(--accent-blue);
+}
+
 /* #3404 audit F1: per-provider auth/billing status panel */
 .settings-hint {
   margin: 0 0 12px;

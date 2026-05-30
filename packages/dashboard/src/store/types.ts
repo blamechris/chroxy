@@ -855,6 +855,20 @@ export interface ConnectionState {
    */
   setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => boolean;
   /**
+   * #4564: drop a per-device override entry entirely. Sends
+   * `notification_prefs_set` with `{ devices: { [deviceKey]: null } }`,
+   * which the server interprets as "remove this device from the persisted
+   * map". Used by the "Clear" buttons in the Notifications settings list
+   * to drain orphan entries left behind by push-token refresh, app
+   * reinstall, or browser-storage wipe.
+   *
+   * Returns `true` when the WS message was sent, `false` when the socket
+   * was closed OR the deviceKey was empty (both yield a no-op so we never
+   * ship a `devices[""]` / `devices[null]` patch). UI surfaces an inline
+   * error on `false` so a botched clear isn't silent.
+   */
+  deleteNotificationPrefsDevice: (deviceKey: string) => boolean;
+  /**
    * #4544: patch the global quiet-hours window. `null` clears the window;
    * a window object (with `timezone`) sets it. The server broadcasts the
    * merged snapshot so all clients update in lockstep.

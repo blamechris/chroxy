@@ -85,6 +85,8 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     // key without coupling to localStorage; individual tests can override.
     currentDeviceKey: 'test-device-key',
     setNotificationPrefsDevice: vi.fn().mockReturnValue(true),
+    // #4564: per-device delete (the "Clear" buttons in the device list).
+    deleteNotificationPrefsDevice: vi.fn().mockReturnValue(true),
     // #4544: quiet-hours editor actions. Default no-op spies; individual
     // tests override.
     setNotificationPrefsQuietHours: vi.fn().mockReturnValue(true),
@@ -934,6 +936,144 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const row = screen.getByTestId('notification-prefs-device-row-result')
       expect(row.classList.contains('notification-prefs-device-row')).toBe(true)
+    })
+  })
+
+  // #4564: per-device-list orphan-clearing UI. The per-device map can
+  // accumulate dead entries when Expo refreshes a push token, an app is
+  // reinstalled, or a browser tab loses its `chroxy_device_id`. The list
+  // surface lets the user drain those orphans one at a time without
+  // hand-editing the prefs file. The list always renders when prefs are
+  // loaded — even when empty — so the operator knows the surface exists.
+  describe('Notification preferences — known-devices list (#4564)', () => {
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+    }
+
+    it('renders an empty-state hint when no per-device entries exist', () => {
+      // No `devices` keys at all — the list should still render the header
+      // (so users find the affordance for next time) plus a quiet hint.
+      setMockState({
+        notificationPrefs: { categories, devices: {}, quietHours: null },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-devices-list')).toBeInTheDocument()
+      expect(screen.getByTestId('notification-prefs-devices-empty')).toBeInTheDocument()
+    })
+
+    it('renders one row per device entry', () => {
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: {
+            'test-device-key': { categories: { result: false } },
+            'other-device-key': { categories: { result: false } },
+            'ExponentPushToken[orphan-12345]': { categories: { permission: false } },
+          },
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-device-entry-test-device-key')).toBeInTheDocument()
+      expect(screen.getByTestId('notification-prefs-device-entry-other-device-key')).toBeInTheDocument()
+      expect(
+        screen.getByTestId('notification-prefs-device-entry-ExponentPushToken[orphan-12345]'),
+      ).toBeInTheDocument()
+    })
+
+    it('tags the row matching currentDeviceKey as "this device"', () => {
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: {
+            'test-device-key': { categories: { result: false } },
+            'other-device-key': { categories: { result: false } },
+          },
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const thisDeviceRow = screen.getByTestId('notification-prefs-device-entry-test-device-key')
+      // The current-device row carries an explicit marker the user can see
+      // before clicking Clear (a missed click on the wrong row reads as a
+      // surprise self-mute on the device they're currently using).
+      expect(thisDeviceRow.textContent).toMatch(/this device/i)
+      // Sibling row does NOT carry the marker.
+      const otherRow = screen.getByTestId('notification-prefs-device-entry-other-device-key')
+      expect(otherRow.textContent).not.toMatch(/this device/i)
+    })
+
+    it('shows a truncated token label so long Expo tokens stay readable', () => {
+      // The full Expo token is `ExponentPushToken[~40 base64 chars]` — too
+      // long to read in a settings row. The label trims to a stable
+      // first-N prefix so the user can still match it against a per-row
+      // action and so visually-similar tokens stay distinguishable.
+      const longToken = 'ExponentPushToken[abcdefghijklmnopqrstuvwxyz0123456789]'
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { [longToken]: { categories: { result: false } } },
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const row = screen.getByTestId(`notification-prefs-device-entry-${longToken}`)
+      // The truncated label appears AND the full token does not (otherwise
+      // truncation isn't actually happening).
+      expect(row.textContent).not.toContain(longToken)
+      expect(row.textContent?.includes('…') || row.textContent?.includes('...')).toBe(true)
+    })
+
+    it('renders a Clear button per row', () => {
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: {
+            'test-device-key': { categories: { result: false } },
+            'other-device-key': { categories: { result: false } },
+          },
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-device-clear-test-device-key')).toBeInTheDocument()
+      expect(screen.getByTestId('notification-prefs-device-clear-other-device-key')).toBeInTheDocument()
+    })
+
+    it('calls deleteNotificationPrefsDevice(deviceKey) when Clear is clicked', () => {
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: {
+            'orphan-device-key': { categories: { result: false } },
+          },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-orphan-device-key'))
+      expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('orphan-device-key')
+    })
+
+    it('does not render the list when the server lacks the notificationPrefs capability', () => {
+      // The capability gate (#4560) replaces the body of the Notifications
+      // section with an upgrade hint. The device list shares that gate so
+      // we never render Clear buttons against a pre-#4541 server that
+      // would silently ignore the `notification_prefs_set` patch.
+      setMockState({
+        notificationPrefs: null,
+        serverCapabilities: {},
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('notification-prefs-devices-list')).toBeNull()
     })
   })
 

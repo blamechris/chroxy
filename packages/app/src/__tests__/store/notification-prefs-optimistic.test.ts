@@ -180,4 +180,72 @@ describe('#4558 — notification-prefs optimistic update (mobile)', () => {
     expect(sent).toHaveLength(0);
     expect(useConnectionStore.getState().notificationPrefs!.devices).toEqual({});
   });
+
+  // #4564: per-device delete via the null sentinel. Mirrors the
+  // dashboard-side optimistic suite — drop the key locally, ship a null
+  // patch on the wire, server confirms via broadcast.
+  it('deleteNotificationPrefsDevice drops the entry locally and ships a null sentinel patch', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({
+      socket,
+      notificationPrefs: {
+        categories: { ...baseCats },
+        devices: {
+          'dev-a': { categories: { result: false } },
+          'dev-b': { categories: { result: false } },
+        },
+        quietHours: null,
+      },
+    });
+
+    const result = useConnectionStore.getState().deleteNotificationPrefsDevice('dev-a');
+
+    expect(result).toBe(true);
+    const after = useConnectionStore.getState().notificationPrefs!;
+    expect(after.devices['dev-a']).toBeUndefined();
+    // Sibling entries survive the targeted delete.
+    expect(after.devices['dev-b']).toBeDefined();
+    expect(sent[0]).toEqual({
+      type: 'notification_prefs_set',
+      prefs: { devices: { 'dev-a': null } },
+    });
+  });
+
+  it('deleteNotificationPrefsDevice is a no-op when deviceKey is empty', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({
+      socket,
+      notificationPrefs: {
+        categories: { ...baseCats },
+        devices: { 'dev-a': { categories: { result: false } } },
+        quietHours: null,
+      },
+    });
+
+    const result = useConnectionStore.getState().deleteNotificationPrefsDevice('');
+
+    expect(result).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useConnectionStore.getState().notificationPrefs!.devices['dev-a']).toBeDefined();
+  });
+
+  it('deleteNotificationPrefsDevice returns false on a closed socket without mutating state', () => {
+    // The optimistic delete would never reconcile on a closed socket, so
+    // the action MUST refuse to flip local state on the closed-socket
+    // branch — otherwise a reconnect snapshot would resurrect the entry
+    // and the UI would have lied to the user.
+    useConnectionStore.setState({
+      socket: null,
+      notificationPrefs: {
+        categories: { ...baseCats },
+        devices: { 'dev-a': { categories: { result: false } } },
+        quietHours: null,
+      },
+    });
+
+    const result = useConnectionStore.getState().deleteNotificationPrefsDevice('dev-a');
+
+    expect(result).toBe(false);
+    expect(useConnectionStore.getState().notificationPrefs!.devices['dev-a']).toBeDefined();
+  });
 });
