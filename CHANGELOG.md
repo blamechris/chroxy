@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.14] - 2026-05-29
+
+Wave 2 of the from-review marathon — three follow-ups plus the foundation slice of the v0.9.13 #4349 user-notification-settings decomposition. The K8sBackend gains a multi-node-cluster path via a PVC workspace strategy (#3385), the dashboard's SidebarTokenView popover gains the same Escape focus-restore #4525 added to ActivityIndicator (#4539), and `PushManager` grows a user-prefs surface backed by `~/.chroxy/notification-prefs.json` + `notification_prefs_get/set` WS messages (#4541) — the substrate that the per-category UI (#4542), per-device UI (#4543), and quiet-hours (#4544) sub-issues will consume in a future marathon.
+
+### Added
+
+- **K8sBackend PVC workspace strategy (#3385 / #4547):** `opts.workspacePVC = { claimName, mountPath? }` translates to a `persistentVolumeClaim` volume + `volumeMount` in the Pod spec, giving multi-node-cluster operators a working alternative to the single-node-only `hostPath` workspace. Passing both `cwd` (hostPath) and `workspacePVC` throws early — operators pick one strategy. Existing `hostPath` path is unchanged. Follow-up [#4548](https://github.com/blamechris/chroxy/issues/4548) tracks plumbing `workspacePVC` through EnvironmentManager so high-level callers can reach it without bypassing the manager.
+- **Notification preferences foundation (#4541 / #4549):** `~/.chroxy/notification-prefs.json` (mode 0600, atomic temp+rename writes) holds global per-category defaults + per-device override map keyed by Expo push token. `PushManager` grows `getPrefs()`, `setPrefs(patch)`, `isCategoryEnabled(category, pushToken)`, and `isInQuietHours(now, pushToken)` (stub — quiet-hours logic ships with #4544). WS protocol adds `notification_prefs_get` / `notification_prefs_set` messages with Zod schemas in `@chroxy/protocol`. Server-side `RATE_LIMITS` remain as the defensive lower bound — user prefs can mute but never enable more spam.
+
+### Fixed
+
+- **SidebarTokenView popover focus restore on Escape (#4539 / #4545):** Escape dismiss now calls `triggerRef.current?.focus()` so keyboard users return to the disclosure trigger instead of being parked on `document.body` (WAI-ARIA APG). Outside-click path deliberately does NOT restore focus — preserves pointer intent. Mirrors v0.9.13's #4525 ActivityIndicator fix. Follow-up [#4546](https://github.com/blamechris/chroxy/issues/4546) tracks a TUI-untracked-trigger regression test variant.
+
+### Internal
+
+- **#4349 decomposed:** the multi-package user-notification-settings parent closed in favour of four sub-issues — #4541 (foundation, landed here), #4542 (per-category UI), #4543 (per-device UI), #4544 (quiet hours).
+
 ## [0.9.13] - 2026-05-29
 
 Wave 1 of the from-review marathon: 20 follow-ups across BYOK MCP (config, client, trust), dashboard ActivityIndicator polish, session-manager test helpers, and a timeout-ceiling consolidation. Theme is "harden the BYOK surface": the MCP trust store now serialises concurrent writes (#4526), uses JSON-encoded tuple keys that resist collision and tamper (#4529), denies bypass-mode auto-trust (#4531), and cleans up `.tmp` leakage on rename failure (#4534). The MCP client gets exponential restart backoff (#4530), a tunable handshake timeout (#4533), debug-level orphan-response logging (#4536), and a wall-clock fast-fail on broken MCP configs (#4537). Plus dashboard a11y/i18n polish (#4523, #4525) and the `mcpToolCallTimeoutMs` ceiling (#4538) closing the v0.9.12 #4517 follow-up.
