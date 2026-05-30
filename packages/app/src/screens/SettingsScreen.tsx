@@ -103,6 +103,13 @@ const SPEECH_LANGUAGES = [
   { tag: 'ar-SA', label: 'Arabic' },
 ];
 
+// #4559: shared inline-error copy for notification-prefs writes that fired
+// while the WS was closed. Pre-#4559 the action silently no-op'd and the
+// Switch revert looked like a misfire. The mobile copy mirrors the
+// dashboard's banner so users see the same instruction on both clients.
+const WS_CLOSED_MESSAGE =
+  'Settings save failed — server disconnected. Reconnect and try again.';
+
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -110,6 +117,10 @@ export function SettingsScreen() {
   const [showLangPicker, setShowLangPicker] = useState(false);
   const [biometricAvail, setBiometricAvail] = useState(false);
   const [biometricOn, setBiometricOn] = useState(false);
+  // #4559: surfaces "server disconnected" when a notification-prefs Switch
+  // tap fires while the WS is closed. Cleared on a subsequent successful
+  // write (post-reconnect) so a stale banner can't persist after recovery.
+  const [notifWsClosedError, setNotifWsClosedError] = useState<string | null>(null);
 
   useEffect(() => {
     getSpeechLang()
@@ -186,8 +197,38 @@ export function SettingsScreen() {
   const setNotificationPrefsBypassCategories = useConnectionStore((s) => s.setNotificationPrefsBypassCategories);
 
   useEffect(() => {
+    // #4559: ignore the boolean return on initial refresh — a closed
+    // socket on mount is the common case (mobile re-opens the app while
+    // the tunnel is still recovering). The inline banner only fires for
+    // user-initiated writes; the snapshot will arrive once the connection
+    // settles.
     refreshNotificationPrefs();
   }, [refreshNotificationPrefs]);
+
+  // #4559: thin wrappers around the four notification-prefs setters. Each
+  // delegates to the store action (which returns `true` when sent, `false`
+  // when the WS is closed) and updates the inline banner accordingly.
+  // Sharing the wrappers keeps the success → clear / failure → set
+  // behaviour uniform so we can't forget to clear on a later success.
+  const handleSetCategory = useCallback((cat: string, value: boolean) => {
+    const sent = setNotificationPrefsCategory(cat, value);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsCategory]);
+
+  const handleSetDevice = useCallback((deviceKey: string, cat: string, value: boolean) => {
+    const sent = setNotificationPrefsDevice(deviceKey, cat, value);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsDevice]);
+
+  const handleSetQuietHours = useCallback((win: { start: string; end: string; timezone: string } | null) => {
+    const sent = setNotificationPrefsQuietHours(win);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsQuietHours]);
+
+  const handleSetBypassCategories = useCallback((cats: string[]) => {
+    const sent = setNotificationPrefsBypassCategories(cats);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsBypassCategories]);
 
   const orderedNotificationCategories = useMemo(() => {
     if (!notificationPrefs) return [];
@@ -455,6 +496,21 @@ export function SettingsScreen() {
 
       {/* NOTIFICATIONS — Categories (#4542) + per-device opt-in/out (#4543) */}
       <Text style={styles.sectionHeader}>NOTIFICATION CATEGORIES</Text>
+      {/* #4559: inline "server disconnected" warning. Surfaces when any
+          notification-prefs Switch tap fires while the WS is closed so the
+          revert is no longer a silent no-op. accessibilityRole='alert' so
+          VoiceOver / TalkBack announce the failure rather than letting the
+          Switch revert pass without explanation. */}
+      {notifWsClosedError && (
+        <View style={styles.wsClosedBanner} testID="notification-prefs-ws-closed-error">
+          <Text
+            style={styles.wsClosedBannerText}
+            accessibilityRole="alert"
+          >
+            {notifWsClosedError}
+          </Text>
+        </View>
+      )}
       <View style={styles.section} testID="notification-prefs-section">
         {notificationPrefs == null ? (
           <View style={styles.row}>
@@ -492,7 +548,7 @@ export function SettingsScreen() {
                   </View>
                   <Switch
                     value={checked}
-                    onValueChange={(value) => setNotificationPrefsCategory(cat, value)}
+                    onValueChange={(value) => handleSetCategory(cat, value)}
                     trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
                     testID={`notification-prefs-toggle-${cat}`}
                   />
@@ -507,7 +563,7 @@ export function SettingsScreen() {
                     </View>
                     <Switch
                       value={mutedOnThisDevice}
-                      onValueChange={(value) => setNotificationPrefsDevice(pushToken, cat, !value)}
+                      onValueChange={(value) => handleSetDevice(pushToken, cat, !value)}
                       trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
                       testID={`notification-prefs-device-toggle-${cat}`}
                     />
@@ -531,8 +587,8 @@ export function SettingsScreen() {
             window={notificationPrefs.quietHours}
             categories={notificationPrefs.categories}
             bypassCategories={notificationPrefs.bypassCategories ?? DEFAULT_BYPASS_CATEGORIES}
-            onWindowChange={setNotificationPrefsQuietHours}
-            onBypassChange={setNotificationPrefsBypassCategories}
+            onWindowChange={handleSetQuietHours}
+            onBypassChange={handleSetBypassCategories}
           />
         )}
       </View>
@@ -1119,6 +1175,26 @@ const styles = StyleSheet.create({
   destructiveText: {
     color: COLORS.accentRed,
     fontSize: 15,
+  },
+  // #4559: inline banner shown above the NOTIFICATION CATEGORIES section
+  // when a notification-prefs Switch tap fires while the WS is closed.
+  // Matches the section header indent (marginHorizontal: 16) so the
+  // banner aligns with the section it describes; tinted with the
+  // destructive red used by Clear actions so the failure tone reads
+  // immediately.
+  wsClosedBanner: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundCard,
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.accentRed,
+  },
+  wsClosedBannerText: {
+    color: COLORS.accentRed,
+    fontSize: 13,
   },
   actionText: {
     color: COLORS.accentBlue,

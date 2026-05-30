@@ -407,11 +407,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // shallow-merge patch via `notification_prefs_set`. The server broadcasts
   // the merged snapshot so other clients (dashboard + mobile) stay in sync
   // without polling.
-  refreshNotificationPrefs: () => {
+  // #4559: action returns `true` when the WS message was sent, `false`
+  // when the socket was closed (no-op). SettingsScreen surfaces an inline
+  // error on `false` so the user knows their change did not reach the
+  // server — pre-#4559 the silent-drop made the Switch look unresponsive.
+  refreshNotificationPrefs: (): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'notification_prefs_get' });
+      return true;
     }
+    return false;
   },
 
   // #4558: optimistic update. The Switch should flip the moment the user
@@ -429,7 +435,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   //   - socket closed              → no optimistic patch either. A
   //     local-only flip would never reconcile and would drift on the next
   //     reconnect snapshot.
-  setNotificationPrefsCategory: (category: string, enabled: boolean) => {
+  // #4559: returns `true` when sent, `false` when the WS is closed.
+  setNotificationPrefsCategory: (category: string, enabled: boolean): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -444,7 +451,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         type: 'notification_prefs_set',
         prefs: { categories: { [category]: enabled } },
       });
+      return true;
     }
+    return false;
   },
 
   // #4543: patch a per-device category override. Server's setPrefs
@@ -458,8 +467,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #4558: optimistic update — the per-device mute Switch flips before the
   // broadcast lands. Mirrors the server's shallow-merge so other devices
   // and other categories under THIS device survive.
-  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => {
-    if (!deviceKey) return;
+  // #4559: returns `true` when sent, `false` for both no-op branches
+  // (empty deviceKey OR closed socket).
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean): boolean => {
+    if (!deviceKey) return false;
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -486,7 +497,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           },
         },
       });
+      return true;
     }
+    return false;
   },
 
   // #4544: global quiet-hours window patch. `null` clears; a window
@@ -495,7 +508,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   //
   // #4558: optimistic update — local `quietHours` flips before the
   // broadcast lands so the editor's Save button doesn't visibly lag.
-  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => {
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -507,7 +521,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         type: 'notification_prefs_set',
         prefs: { quietHours: window },
       });
+      return true;
     }
+    return false;
   },
 
   // #4544: global bypass-category list. Sent as a replacement (not a
@@ -515,7 +531,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   //
   // #4558: optimistic update — local `bypassCategories` flips before the
   // broadcast lands so the bypass Switch row feels snappy.
-  setNotificationPrefsBypassCategories: (categories: string[]) => {
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsBypassCategories: (categories: string[]): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -527,7 +544,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         type: 'notification_prefs_set',
         prefs: { bypassCategories: categories },
       });
+      return true;
     }
+    return false;
   },
 
   setFollowMode: (enabled: boolean) => {

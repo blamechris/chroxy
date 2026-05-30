@@ -488,36 +488,54 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #4052: BYOK credentials actions. The full key is never stored in the
   // store — only the masked preview from the server's reply. We never
   // round-trip the raw value back to the UI.
-  refreshByokCredentialsStatus: () => {
+  //
+  // #4559: each action returns a boolean indicating whether the WS message
+  // actually went on the wire. `false` means the socket was closed and the
+  // change was silently dropped before this PR — SettingsPanel now surfaces
+  // an inline error so the user knows to retry after reconnect.
+  refreshByokCredentialsStatus: (): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'byok_get_credentials_status' });
+      return true;
     }
+    return false;
   },
 
-  setByokCredentials: (anthropicApiKey: string) => {
+  setByokCredentials: (anthropicApiKey: string): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'byok_set_credentials', anthropicApiKey });
+      return true;
     }
+    return false;
   },
 
-  clearByokCredentials: () => {
+  clearByokCredentials: (): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'byok_clear_credentials' });
+      return true;
     }
+    return false;
   },
 
   // #4542: notification-prefs round-trip. Requests the current snapshot
   // (on Settings panel open) or patches a single category. The server
   // shallow-merges over the categories map, so a single-key patch never
   // wipes the others.
-  refreshNotificationPrefs: () => {
+  //
+  // #4559: returns `true` when the WS message was sent, `false` when the
+  // socket was closed (no-op). Callers MUST surface an inline error on
+  // `false` — pre-#4559, a closed socket silently dropped the patch and
+  // the user had no idea why the checkbox refused to stay flipped.
+  refreshNotificationPrefs: (): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'notification_prefs_get' });
+      return true;
     }
+    return false;
   },
 
   // #4558: optimistic update. The user's toggle has to feel instant — on
@@ -536,8 +554,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   //   - socket closed              → no optimistic patch either. Same
   //     server-of-truth contract as before — without a server to confirm,
   //     a local-only flip would never reconcile and would drift on the
-  //     next reconnect snapshot.
-  setNotificationPrefsCategory: (category: string, enabled: boolean) => {
+  //     next reconnect snapshot. Return `false` so SettingsPanel can
+  //     surface an inline error (#4559).
+  setNotificationPrefsCategory: (category: string, enabled: boolean): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -552,7 +571,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         type: 'notification_prefs_set',
         prefs: { categories: { [category]: enabled } },
       });
+      return true;
     }
+    return false;
   },
 
   // #4543: patch a per-device category override. The server's
@@ -568,8 +589,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // broadcast reconciles. We mirror the server's shallow-merge semantics
   // in the local patch so other devices and other categories under THIS
   // device survive.
-  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => {
-    if (!deviceKey) return;
+  //
+  // #4559: returns `true` when sent, `false` for both no-op branches
+  // (empty deviceKey OR closed socket). UI surfaces an inline error on
+  // `false` for the closed-socket case (the empty-deviceKey branch only
+  // fires from defensive paths that already gate on currentDeviceKey).
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean): boolean => {
+    if (!deviceKey) return false;
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -596,7 +622,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           },
         },
       });
+      return true;
     }
+    return false;
   },
 
   // #4544: global quiet-hours window patch. `null` clears the window;
@@ -607,7 +635,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #4558: optimistic update — local `quietHours` flips before the
   // broadcast lands so the editor's Save button doesn't visibly lag
   // behind the click.
-  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => {
+  //
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -619,7 +649,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         type: 'notification_prefs_set',
         prefs: { quietHours: window },
       });
+      return true;
     }
+    return false;
   },
 
   // #4544: global bypass-category list. The wire sends the full list as a
@@ -630,7 +662,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   //
   // #4558: optimistic update — local `bypassCategories` flips before the
   // broadcast lands so the bypass checkboxes feel snappy.
-  setNotificationPrefsBypassCategories: (categories: string[]) => {
+  //
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsBypassCategories: (categories: string[]): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       if (notificationPrefs) {
@@ -642,7 +676,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         type: 'notification_prefs_set',
         prefs: { bypassCategories: categories },
       });
+      return true;
     }
+    return false;
   },
 
   getActiveSessionState: () => {

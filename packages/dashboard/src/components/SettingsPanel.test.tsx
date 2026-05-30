@@ -63,26 +63,32 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     setChroxyContextHint: vi.fn(),
     // #4052: BYOK credentials defaults — refresh is a no-op spy by
     // default; individual tests override status / actions as needed.
+    //
+    // #4559: each action returns `true` by default (mirrors the
+    // store's "WS open → patch sent" path) so existing assertions that
+    // rely on success-side effects (e.g. input clearing after Save) keep
+    // passing. Tests covering the WS-closed branch override with
+    // `vi.fn().mockReturnValue(false)`.
     byokCredentialsStatus: null,
-    refreshByokCredentialsStatus: vi.fn(),
-    setByokCredentials: vi.fn(),
-    clearByokCredentials: vi.fn(),
+    refreshByokCredentialsStatus: vi.fn().mockReturnValue(true),
+    setByokCredentials: vi.fn().mockReturnValue(true),
+    clearByokCredentials: vi.fn().mockReturnValue(true),
     // #4542: per-category notification toggles. `notificationPrefs` mirrors
     // the latest snapshot received over the WS connection (null until the
     // first `notification_prefs` arrives).
     notificationPrefs: null,
-    refreshNotificationPrefs: vi.fn(),
-    setNotificationPrefsCategory: vi.fn(),
+    refreshNotificationPrefs: vi.fn().mockReturnValue(true),
+    setNotificationPrefsCategory: vi.fn().mockReturnValue(true),
     // #4543: per-device opt-in/out. `currentDeviceKey` is the stable browser
     // localStorage id used as the device key in the per-device override map.
     // The test default uses a fixed string so toggles assert against a known
     // key without coupling to localStorage; individual tests can override.
     currentDeviceKey: 'test-device-key',
-    setNotificationPrefsDevice: vi.fn(),
+    setNotificationPrefsDevice: vi.fn().mockReturnValue(true),
     // #4544: quiet-hours editor actions. Default no-op spies; individual
     // tests override.
-    setNotificationPrefsQuietHours: vi.fn(),
-    setNotificationPrefsBypassCategories: vi.fn(),
+    setNotificationPrefsQuietHours: vi.fn().mockReturnValue(true),
+    setNotificationPrefsBypassCategories: vi.fn().mockReturnValue(true),
     ...extra,
   }
 }
@@ -615,7 +621,10 @@ describe('SettingsPanel', () => {
     })
 
     it('calls setByokCredentials with the trimmed key and clears the input on Save', () => {
-      const setByokCredentials = vi.fn()
+      // #4559: the input only clears on a successful send — mirror the
+      // OPEN-socket store path by returning `true`. The failure path is
+      // covered separately in the WS-closed describe block.
+      const setByokCredentials = vi.fn().mockReturnValue(true)
       setMockState({ setByokCredentials })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const input = screen.getByTestId('byok-key-input') as HTMLInputElement
@@ -1238,6 +1247,226 @@ describe('SettingsPanel', () => {
         rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
         const startAfter = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
         expect(startAfter.value).toBe('00:00')
+      })
+    })
+  })
+
+  // #4559: fail-loud inline error when a notification-prefs / BYOK write
+  // fires while the WS is closed. Pre-#4559 these actions silently no-op'd
+  // (the action read `socket.readyState !== OPEN` and returned without
+  // sending), so the user saw a switch refuse to stay flipped with no
+  // feedback. The store actions now return a boolean; SettingsPanel
+  // surfaces a banner per section when the action reports `false`.
+  describe('Fail-loud inline error on WS-closed write (#4559)', () => {
+    // Same RATE_LIMITS-derived category set used elsewhere in the file —
+    // kept inline so a server-side rename trips here too.
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+    }
+    const defaultPrefs = { categories, devices: {}, quietHours: null }
+
+    describe('Notification prefs', () => {
+      it('renders no error banner on initial render (WS open path)', () => {
+        // Defensive: ensure the banner only appears after a failed write,
+        // never on first paint.
+        setMockState({ notificationPrefs: defaultPrefs })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.queryByTestId('notification-prefs-ws-closed-error')).toBeNull()
+      })
+
+      it('surfaces an inline error and still calls the action when a category toggle fires while WS is closed', () => {
+        // Action returns false to mimic the closed-socket path. The
+        // toggle handler still calls the action (the store decides
+        // whether to send) but the banner makes the failure visible
+        // instead of leaving the user staring at a reverted checkbox.
+        const setNotificationPrefsCategory = vi.fn().mockReturnValue(false)
+        setMockState({
+          notificationPrefs: defaultPrefs,
+          setNotificationPrefsCategory,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('notification-prefs-toggle-result'))
+        // The action ran — the store is responsible for the no-op gate.
+        expect(setNotificationPrefsCategory).toHaveBeenCalledWith('result', false)
+        // Banner is visible and tagged role=alert so a screen reader
+        // announces the failure.
+        const banner = screen.getByTestId('notification-prefs-ws-closed-error')
+        expect(banner).toBeInTheDocument()
+        expect(banner).toHaveAttribute('role', 'alert')
+        // Copy mentions the recovery path so the user knows what to do.
+        expect(banner.textContent).toMatch(/server disconnected/i)
+        expect(banner.textContent).toMatch(/Reconnect/i)
+      })
+
+      it('does NOT render the WS-closed banner when the toggle succeeds', () => {
+        // Sanity: the success path leaves no banner behind. Pre-#4559
+        // there was no banner at all; this test guards against a future
+        // refactor leaving a stale "sent" toast on screen.
+        const setNotificationPrefsCategory = vi.fn().mockReturnValue(true)
+        setMockState({
+          notificationPrefs: defaultPrefs,
+          setNotificationPrefsCategory,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('notification-prefs-toggle-result'))
+        expect(setNotificationPrefsCategory).toHaveBeenCalledWith('result', false)
+        expect(screen.queryByTestId('notification-prefs-ws-closed-error')).toBeNull()
+      })
+
+      it('clears the banner after a subsequent successful toggle', () => {
+        // First toggle fails (WS closed → banner appears). Then the
+        // user reconnects, toggles again, and the banner clears.
+        // Modeling the action returning false then true mirrors the
+        // ConnectionPhase transition without needing to drive the
+        // socket itself.
+        const setNotificationPrefsCategory = vi
+          .fn<(cat: string, enabled: boolean) => boolean>()
+          .mockReturnValueOnce(false)
+          .mockReturnValueOnce(true)
+        setMockState({
+          notificationPrefs: defaultPrefs,
+          setNotificationPrefsCategory,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('notification-prefs-toggle-result'))
+        expect(screen.getByTestId('notification-prefs-ws-closed-error')).toBeInTheDocument()
+        fireEvent.click(screen.getByTestId('notification-prefs-toggle-result'))
+        expect(screen.queryByTestId('notification-prefs-ws-closed-error')).toBeNull()
+      })
+
+      it('surfaces the banner when a per-device mute toggle fires while WS is closed', () => {
+        // Per-device mute toggle shares the banner with the global
+        // category toggle — both flow through the same section.
+        const setNotificationPrefsDevice = vi.fn().mockReturnValue(false)
+        setMockState({
+          notificationPrefs: defaultPrefs,
+          setNotificationPrefsDevice,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('notification-prefs-device-toggle-result'))
+        expect(setNotificationPrefsDevice).toHaveBeenCalledWith('test-device-key', 'result', false)
+        expect(screen.getByTestId('notification-prefs-ws-closed-error')).toBeInTheDocument()
+      })
+
+      it('surfaces the banner when the quiet-hours Save fires while WS is closed', () => {
+        // Quiet-hours editor uses the same banner because it sits inside
+        // the Notifications section.
+        const setNotificationPrefsQuietHours = vi.fn().mockReturnValue(false)
+        setMockState({
+          notificationPrefs: {
+            ...defaultPrefs,
+            quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+          },
+          setNotificationPrefsQuietHours,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('quiet-hours-start-input'), { target: { value: '23:30' } })
+        fireEvent.click(screen.getByTestId('quiet-hours-save-button'))
+        expect(setNotificationPrefsQuietHours).toHaveBeenCalled()
+        expect(screen.getByTestId('notification-prefs-ws-closed-error')).toBeInTheDocument()
+      })
+
+      it('surfaces the banner when a bypass-category toggle fires while WS is closed', () => {
+        // Bypass-category toggles share the same banner. The user just
+        // unchecks one of the documented defaults to trigger the action.
+        const setNotificationPrefsBypassCategories = vi.fn().mockReturnValue(false)
+        setMockState({
+          notificationPrefs: {
+            ...defaultPrefs,
+            quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+            bypassCategories: ['permission', 'activity_error'],
+          },
+          setNotificationPrefsBypassCategories,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('quiet-hours-bypass-toggle-activity_error'))
+        expect(setNotificationPrefsBypassCategories).toHaveBeenCalled()
+        expect(screen.getByTestId('notification-prefs-ws-closed-error')).toBeInTheDocument()
+      })
+    })
+
+    describe('BYOK credentials', () => {
+      it('surfaces an inline error and preserves the input when Save fires while WS is closed', () => {
+        // Pre-#4559 the input was cleared regardless of whether the
+        // write actually went out — the user would re-type the key
+        // after reconnecting. Now the input survives the failed save
+        // so retry is a single click after the reconnect lands.
+        const setByokCredentials = vi.fn().mockReturnValue(false)
+        setMockState({ setByokCredentials })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('byok-key-input') as HTMLInputElement
+        fireEvent.change(input, { target: { value: 'sk-ant-from-user' } })
+        fireEvent.click(screen.getByTestId('byok-save-button'))
+        expect(setByokCredentials).toHaveBeenCalledWith('sk-ant-from-user')
+        // Banner visible + role=alert.
+        const banner = screen.getByTestId('byok-ws-closed-error')
+        expect(banner).toBeInTheDocument()
+        expect(banner).toHaveAttribute('role', 'alert')
+        // Input preserved on failure — user retries with one click.
+        expect(input.value).toBe('sk-ant-from-user')
+      })
+
+      it('does NOT render the BYOK WS-closed banner when Save succeeds', () => {
+        // Sanity: the success path clears the input and leaves no banner.
+        const setByokCredentials = vi.fn().mockReturnValue(true)
+        setMockState({ setByokCredentials })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('byok-key-input') as HTMLInputElement
+        fireEvent.change(input, { target: { value: 'sk-ant-from-user' } })
+        fireEvent.click(screen.getByTestId('byok-save-button'))
+        expect(setByokCredentials).toHaveBeenCalledWith('sk-ant-from-user')
+        expect(screen.queryByTestId('byok-ws-closed-error')).toBeNull()
+        // Input still clears on success.
+        expect(input.value).toBe('')
+      })
+
+      it('surfaces an inline error when Remove fires while WS is closed', () => {
+        const clearByokCredentials = vi.fn().mockReturnValue(false)
+        setMockState({
+          byokCredentialsStatus: {
+            status: 'set', source: 'file', masked: 'sk-ant-api03...[95 chars redacted]',
+            fileExists: true,
+          },
+          clearByokCredentials,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('byok-clear-button'))
+        expect(clearByokCredentials).toHaveBeenCalled()
+        expect(screen.getByTestId('byok-ws-closed-error')).toBeInTheDocument()
+      })
+
+      it('does not surface the notif banner when only BYOK fails (sections are independent)', () => {
+        // Defensive: each section owns its own banner so a stale BYOK
+        // error doesn't bleed into the Notifications section.
+        const setByokCredentials = vi.fn().mockReturnValue(false)
+        setMockState({ setByokCredentials, notificationPrefs: defaultPrefs })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('byok-key-input'), { target: { value: 'sk-ant-from-user' } })
+        fireEvent.click(screen.getByTestId('byok-save-button'))
+        expect(screen.getByTestId('byok-ws-closed-error')).toBeInTheDocument()
+        expect(screen.queryByTestId('notification-prefs-ws-closed-error')).toBeNull()
+      })
+
+      it('clears the BYOK banner after a subsequent successful Save', () => {
+        const setByokCredentials = vi
+          .fn<(key: string) => boolean>()
+          .mockReturnValueOnce(false)
+          .mockReturnValueOnce(true)
+        setMockState({ setByokCredentials })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('byok-key-input') as HTMLInputElement
+        fireEvent.change(input, { target: { value: 'sk-ant-from-user' } })
+        fireEvent.click(screen.getByTestId('byok-save-button'))
+        expect(screen.getByTestId('byok-ws-closed-error')).toBeInTheDocument()
+        // Reconnect lands; user retries — banner clears.
+        fireEvent.click(screen.getByTestId('byok-save-button'))
+        expect(screen.queryByTestId('byok-ws-closed-error')).toBeNull()
       })
     })
   })

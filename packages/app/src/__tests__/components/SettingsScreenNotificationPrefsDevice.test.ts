@@ -59,9 +59,16 @@ describe('SettingsScreen — per-device opt-in/out section (#4543)', () => {
     // The per-device Switch onValueChange MUST invert the boolean because
     // the user-facing affordance is "mute" (true = muted) while the wire
     // patch carries `enabled` (true = on). Without the negation a tap-to-mute
-    // would actually un-mute the category.
+    // would actually un-mute the category. #4559 routed the call through
+    // a thin handler wrapper (`handleSetDevice`) so the WS-closed boolean
+    // return can drive the inline error banner — the handler still
+    // forwards `(pushToken, cat, !value)` to `setNotificationPrefsDevice`
+    // so the wire payload is unchanged.
     expect(settingsSource).toMatch(
-      /onValueChange=\{\(value\) => setNotificationPrefsDevice\(pushToken, cat, !value\)\}/,
+      /onValueChange=\{\(value\) => handleSetDevice\(pushToken, cat, !value\)\}/,
+    );
+    expect(settingsSource).toMatch(
+      /handleSetDevice\s*=\s*useCallback[\s\S]{0,300}setNotificationPrefsDevice\(deviceKey, cat, value\)/,
     );
   });
 
@@ -82,8 +89,10 @@ describe('ConnectionState — per-device push token surface (#4543)', () => {
   });
 
   it('declares setNotificationPrefsDevice with (deviceKey, category, enabled) signature', () => {
+    // #4559: returns boolean (true = sent, false = WS-closed/empty-key
+    // no-op) so SettingsScreen can surface an inline error.
     expect(typesSource).toMatch(
-      /setNotificationPrefsDevice:\s*\(deviceKey:\s*string,\s*category:\s*string,\s*enabled:\s*boolean\)\s*=>\s*void/,
+      /setNotificationPrefsDevice:\s*\(deviceKey:\s*string,\s*category:\s*string,\s*enabled:\s*boolean\)\s*=>\s*boolean/,
     );
   });
 });
