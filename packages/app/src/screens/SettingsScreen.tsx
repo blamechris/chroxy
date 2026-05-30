@@ -110,6 +110,17 @@ const SPEECH_LANGUAGES = [
 const WS_CLOSED_MESSAGE =
   'Settings save failed — server disconnected. Reconnect and try again.';
 
+// #4585: shared copy for the capability-gated "not supported" hint. Both the
+// Categories and Quiet-hours sections render this when the server lacks the
+// `notificationPrefs` capability. Previously the quiet-hours section showed
+// a terser one-liner that made it ambiguous whether quiet hours needed a
+// different upgrade than the rest of notifications — the dashboard avoids
+// this by colocating both controls under a single capability-gated hint,
+// but the mobile layout keeps them as separate sections so the fix is to
+// echo the same long copy in both.
+const NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE =
+  'Your server does not support notification preferences. Upgrade to chroxy v0.9.14 or newer to manage per-category opt-in, per-device mutes, and quiet hours from here.';
+
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -570,7 +581,7 @@ export function SettingsScreen() {
           // section sat on "Loading preferences…" forever.
           <View style={styles.row}>
             <Text style={styles.rowHint} testID="notification-prefs-not-supported">
-              Your server does not support notification preferences. Upgrade to chroxy v0.9.14 or newer to manage per-category opt-in, per-device mutes, and quiet hours from here.
+              {NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE}
             </Text>
           </View>
         ) : notificationPrefs == null ? (
@@ -646,7 +657,7 @@ export function SettingsScreen() {
           // editor would put it in a permanent loading state.
           <View style={styles.row}>
             <Text style={styles.rowHint} testID="quiet-hours-not-supported">
-              Requires chroxy v0.9.14 or newer.
+              {NOTIFICATION_PREFS_UNSUPPORTED_MESSAGE}
             </Text>
           </View>
         ) : notificationPrefs == null ? (
