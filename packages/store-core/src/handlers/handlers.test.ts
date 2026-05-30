@@ -5401,6 +5401,68 @@ describe('handleToolStart', () => {
       expect(out.activeTool).toBeNull()
     })
 
+    // #4607 — the server's history ring buffer stamps `timestamp: Date.now()`
+    // at append time and forwards it on every replay
+    // (session-message-history.js:208-216). When the dashboard rebuilds the
+    // tool_use ChatMessage during history_replay (e.g. because fullHistory
+    // wiped the messages array so the cached-id dedup misses), it must
+    // honour that wire timestamp instead of stamping a new Date.now(). Both
+    // `chatMessage.timestamp` AND the derived `activeTool.startedAt` must
+    // carry it through, otherwise the "Running <tool> · Ns" pill restarts
+    // at ~1s on tab-switch for any session whose activeTools was previously
+    // empty (toolUseId-dedup in applyToActiveTools only protects the case
+    // where the same id is already tracked).
+    it('honours wire `timestamp` field on the tool_start payload (#4607)', () => {
+      const wireTimestamp = 1_700_000_000_000
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          timestamp: wireTimestamp,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.chatMessage!.timestamp).toBe(wireTimestamp)
+      expect(out.activeTool!.startedAt).toBe(wireTimestamp)
+    })
+
+    it('falls back to Date.now() when wire `timestamp` is missing (live tool_start, #4607)', () => {
+      const before = Date.now()
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const after = Date.now()
+      expect(out.chatMessage!.timestamp).toBeGreaterThanOrEqual(before)
+      expect(out.chatMessage!.timestamp).toBeLessThanOrEqual(after)
+      expect(out.activeTool!.startedAt).toBe(out.chatMessage!.timestamp)
+    })
+
+    it('ignores non-finite wire `timestamp` and falls back to Date.now() (#4607)', () => {
+      // Defensive: a malformed wire payload (NaN, Infinity, string-coerced)
+      // must not poison the elapsed-time clock with NaN-driven arithmetic.
+      const before = Date.now()
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          timestamp: Number.NaN,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      const after = Date.now()
+      expect(out.chatMessage!.timestamp).toBeGreaterThanOrEqual(before)
+      expect(out.chatMessage!.timestamp).toBeLessThanOrEqual(after)
+    })
+
     it('applyToActiveTools pushes the new entry onto the array', () => {
       const out = handleToolStart(
         { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },

@@ -3333,6 +3333,124 @@ describe('dashboard message-handler dispatch', () => {
       const ss = (store.getState() as any).sessionStates.s1
       expect(ss.activeTools).toEqual([])
     })
+
+    // #4607 — full tab-switch flow: server's `replayHistory()` always sends
+    // `fullHistory: true`, which the dashboard treats as "clear messages
+    // before applying replayed events" (ws-history.js:372, message-handler
+    // case 'history_replay_start'). With messages wiped, the dedup check
+    // inside `sharedToolStart` (`cachedMessages.some(m => m.id === toolId)`)
+    // can no longer find the prior tool_use bubble, so it falls through and
+    // builds a fresh chatMessage with `timestamp: Date.now()` PLUS a fresh
+    // ActiveTool whose `startedAt` is also Date.now(). The toolUseId-dedup
+    // inside `applyToActiveTools` preserves the original ActiveTool entry
+    // (so the structured `activeTools` slot keeps its original startedAt) —
+    // BUT the new tool_use bubble pushed onto `messages` carries the fresh
+    // timestamp. The ActivityIndicator's `findInFlightToolUse` fallback
+    // would read THAT timestamp if `activeTools` were ever empty (e.g. a
+    // server that didn't broadcast tool_start, or pre-bootstrap), so any
+    // future regression that empties `activeTools` mid-replay would silently
+    // reset the timer to ~0s. Pin both invariants in one place.
+    it('full tab-switch (history_replay_start fullHistory:true + replayed tool_start) preserves startedAt (#4607)', () => {
+      const originalStartedAt = 100
+      const originalToolMsg = {
+        id: 'tool-1',
+        type: 'tool_use' as const,
+        content: '{"command":"sleep 999"}',
+        tool: 'Bash',
+        toolUseId: 'tu-1',
+        timestamp: originalStartedAt,
+      }
+      const inFlightTool = {
+        toolUseId: 'tu-1',
+        tool: 'Bash',
+        input: { command: 'sleep 999' },
+        startedAt: originalStartedAt,
+      }
+      seedSession({
+        activeTools: [inFlightTool],
+        messages: [originalToolMsg as any],
+      })
+      // Step 1: tab switch → server sends history_replay_start with
+      // fullHistory:true. The dashboard clears the messages array — this
+      // is what makes the cached-message dedup miss on the replayed
+      // tool_start that follows.
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+        ctx() as any,
+      )
+      // After history_replay_start: messages is [] but activeTools must still
+      // hold the original entry with its original startedAt.
+      let ss = (store.getState() as any).sessionStates.s1
+      expect(ss.messages).toEqual([])
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].startedAt).toBe(originalStartedAt)
+      // Step 2: server replays the original tool_start (same messageId and
+      // toolUseId). Pre-fix path would have rebuilt the activeTools entry
+      // with startedAt: Date.now(); the toolUseId dedup in
+      // applyToActiveTools is what saves us, but the test pins it.
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { command: 'sleep 999' },
+          sessionId: 's1',
+        },
+        ctx() as any,
+      )
+      ss = (store.getState() as any).sessionStates.s1
+      // Critical invariant: activeTools entry's startedAt is preserved.
+      // This is what the ActivityIndicator reads for "Running Bash · Ns".
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].toolUseId).toBe('tu-1')
+      expect(ss.activeTools[0].startedAt).toBe(originalStartedAt)
+      // Step 3: history_replay_end — flag clears, normal operation resumes.
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools[0].startedAt).toBe(originalStartedAt)
+    })
+
+    // #4607 — fallback-path coverage. ActivityIndicator prefers `activeTools`
+    // but falls back to `findInFlightToolUse(messages)` when activeTools is
+    // empty. That fallback reads `m.timestamp` from the tool_use ChatMessage.
+    // After a replayed tool_start the messages array contains a freshly
+    // pushed tool_use bubble with `timestamp: Date.now()` — so if the
+    // fallback ever fires post-replay the timer would jump to ~0s. Pin that
+    // the replayed bubble carries the ORIGINAL server-side timestamp when
+    // the server includes one in the tool_start payload (history entries
+    // do — session-message-history.js:208-216 stamps `timestamp: Date.now()`
+    // at append time and forwards it on replay). Without this, the
+    // "Running X · 1s" symptom resurfaces the moment activeTools is empty
+    // for any reason (handleAgentIdle, future refactor, missing toolUseId).
+    it('replayed tool_use bubble inherits the wire timestamp, not Date.now() (#4607)', () => {
+      const wireTimestamp = 200
+      seedSession({ activeTools: [] })
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+        ctx() as any,
+      )
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { command: 'sleep 999' },
+          sessionId: 's1',
+          timestamp: wireTimestamp,
+        },
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      const toolMsg = ss.messages.find((m: any) => m.id === 'tool-1')
+      expect(toolMsg).toBeDefined()
+      expect(toolMsg.timestamp).toBe(wireTimestamp)
+      // And the rebuilt activeTools entry must also use the wire timestamp.
+      expect(ss.activeTools).toHaveLength(1)
+      expect(ss.activeTools[0].startedAt).toBe(wireTimestamp)
+    })
   })
 
   // #4493 — the replay flag must be scoped per-session. Pre-fix it was a
