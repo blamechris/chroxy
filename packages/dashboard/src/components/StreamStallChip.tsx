@@ -12,6 +12,7 @@
  * hover for the underlying server message.
  */
 import { useCallback } from 'react'
+import { formatDurationVerbose } from '../utils/duration'
 
 export interface StreamStallChipProps {
   /** The raw error text from the server (e.g. "Stream stalled — no response for 5 minutes"). */
@@ -41,23 +42,10 @@ export interface StreamStallChipProps {
   timeoutMs?: number
 }
 
-/**
- * #4497 — verbose duration humaniser tailored for the stall headline copy.
- *
- * Returns "30 seconds", "1 minute", "5 minutes", "2 hours", etc. The terser
- * "5m" / "30s" form used by ActivityIndicator's `formatDuration` is wrong
- * for prose — we want the chip text to read naturally. Thresholds at 1s /
- * 1min / 1h keep the helper simple; rounding (Math.round) avoids "4 minutes"
- * for a 299_999ms window.
- */
-function humanizeDuration(ms: number): string {
-  const seconds = Math.round(ms / 1000)
-  if (seconds < 60) return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
-  const hours = Math.round(minutes / 60)
-  return `${hours} ${hours === 1 ? 'hour' : 'hours'}`
-}
+// #4497 — verbose duration humaniser tailored for the stall headline copy.
+// #4510 — implementation now lives in `utils/duration.ts`
+// (`formatDurationVerbose`), shared with any other prose-register consumer.
+// Headline copy still reads "No response for ${verbose(ms)} — retry?".
 
 export function StreamStallChip({ errorText, onRetry, timeoutMs }: StreamStallChipProps) {
   const handleClick = useCallback(() => {
@@ -69,7 +57,7 @@ export function StreamStallChip({ errorText, onRetry, timeoutMs }: StreamStallCh
   // non-finite values so a malformed auth_ok can't degrade the UI.
   const headline =
     typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
-      ? `No response for ${humanizeDuration(timeoutMs)} — retry?`
+      ? `No response for ${formatDurationVerbose(timeoutMs)} — retry?`
       : 'Stream stalled — retry?'
 
   return (
