@@ -300,17 +300,27 @@ export class PushManager {
         next.bypassCategories = [...defaultNotificationPrefs().bypassCategories]
       }
     }
-    this._prefs = next
+    // #4550: persist FIRST, swap in-memory state only after the save
+    // succeeds. Pre-#4550 we assigned `this._prefs = next` unconditionally
+    // and then tried to save; a failed rename (EACCES / EXDEV / quota)
+    // re-threw out to the WS handler but left `_prefs` already mutated,
+    // so `isCategoryEnabled` answered based on a value the user thought
+    // failed to save — and the next process restart silently reverted
+    // the change because disk never received it.
     if (this._prefsPath) {
       try {
-        saveNotificationPrefs(this._prefs, this._prefsPath)
+        saveNotificationPrefs(next, this._prefsPath)
       } catch (err) {
         log.error(`Failed to persist notification prefs: ${err?.message || err}`)
         // Re-throw so the WS handler can surface a CREDENTIALS_WRITE_FAILED-
-        // style error rather than silently lying about persistence.
+        // style error rather than silently lying about persistence. The
+        // in-memory `_prefs` is intentionally left untouched here so the
+        // next isCategoryEnabled / getPrefs call reflects the pre-patch
+        // state, matching what's actually on disk.
         throw err
       }
     }
+    this._prefs = next
     return this.getPrefs()
   }
 
