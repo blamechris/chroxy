@@ -375,10 +375,26 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // store) so the raw key is never observable beyond this one render.
   const [byokKeyInput, setByokKeyInput] = useState('')
   const [byokError, setByokError] = useState<string | null>(null)
+  // #4559: inline "server disconnected" warning surfaced when a BYOK or
+  // notification-prefs WS write fires while `socket.readyState !== OPEN`.
+  // Pre-#4559 these actions silently no-op'd and the toggle reverted, so
+  // the user saw nothing to explain why their change didn't stick. Split
+  // into two state vars so a stale BYOK error doesn't bleed into the
+  // notifications section (and vice versa) — each section owns its own
+  // banner that clears the next time a successful write goes out.
+  const [byokWsClosedError, setByokWsClosedError] = useState<string | null>(null)
+  const [notifWsClosedError, setNotifWsClosedError] = useState<string | null>(null)
   const [allowAutoPerm, setAllowAutoPerm] = useState<boolean>(false)
   const [autoPermError, setAutoPermError] = useState<string | null>(null)
   const [autoPermDirty, setAutoPermDirty] = useState<boolean>(false)
   const [autoPermSaving, setAutoPermSaving] = useState<boolean>(false)
+
+  // #4559: shared copy for the inline "server disconnected" banner so the
+  // BYOK and notifications sections stay in lockstep on phrasing. Mentions
+  // the exact recovery path (wait for reconnect, then retry) so the user
+  // doesn't need to dig through docs to know what to do next.
+  const WS_CLOSED_MESSAGE =
+    'Settings save failed — server disconnected. Reconnect and try again.'
 
   // Load tunnel mode from Tauri settings and running server on open
   useEffect(() => {
@@ -407,6 +423,12 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // #4052: Pull the latest credentials status whenever the panel opens so
   // it's accurate even after an out-of-band change (e.g. the user edited
   // ~/.chroxy/credentials.json directly in another terminal).
+  //
+  // #4559: ignore the boolean return here intentionally — a closed socket
+  // on panel open is the common case (Settings can be opened while the
+  // ConnectionPhase is still 'reconnecting'). The banner only fires for
+  // user-initiated writes; the refresh path quietly retries on the next
+  // open or when notificationPrefs/byokCredentialsStatus actually need it.
   useEffect(() => {
     if (!isOpen) return
     refreshByokCredentialsStatus()
@@ -421,6 +443,17 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     refreshNotificationPrefs()
   }, [isOpen, refreshNotificationPrefs])
 
+  // #4559: clear the inline "server disconnected" banners when the panel
+  // closes so re-opening Settings starts from a clean slate. A stale
+  // banner from a prior open would confuse the user if the connection has
+  // since recovered — the next interaction will surface a fresh banner if
+  // the socket is still closed.
+  useEffect(() => {
+    if (isOpen) return
+    setByokWsClosedError(null)
+    setNotifWsClosedError(null)
+  }, [isOpen])
+
   const handleSaveByokKey = useCallback(() => {
     setByokError(null)
     const trimmed = byokKeyInput.trim()
@@ -428,14 +461,55 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
       setByokError('Anthropic API keys start with "sk-ant-".')
       return
     }
-    setByokCredentials(trimmed)
-    setByokKeyInput('')
+    // #4559: surface inline error when the WS is closed instead of the
+    // pre-existing silent no-op. Clear the input only on a successful
+    // send so the user can retry without re-pasting.
+    const sent = setByokCredentials(trimmed)
+    if (sent) {
+      setByokWsClosedError(null)
+      setByokKeyInput('')
+    } else {
+      setByokWsClosedError(WS_CLOSED_MESSAGE)
+    }
   }, [byokKeyInput, setByokCredentials])
 
   const handleClearByokKey = useCallback(() => {
     setByokError(null)
-    clearByokCredentials()
+    // #4559: same fail-loud contract as Save.
+    const sent = clearByokCredentials()
+    if (sent) setByokWsClosedError(null)
+    else setByokWsClosedError(WS_CLOSED_MESSAGE)
   }, [clearByokCredentials])
+
+  // #4559: notification-prefs wrappers. Each handler delegates to the
+  // store action (which returns `true` when sent, `false` when the WS is
+  // closed) and updates the inline banner accordingly. Sharing the
+  // wrappers across all four prefs setters keeps the success → clear /
+  // failure → set pattern uniform — no chance of forgetting to clear on a
+  // subsequent successful save.
+  const handleSetNotificationCategory = useCallback((cat: string, enabled: boolean) => {
+    const sent = setNotificationPrefsCategory(cat, enabled)
+    if (sent) setNotifWsClosedError(null)
+    else setNotifWsClosedError(WS_CLOSED_MESSAGE)
+  }, [setNotificationPrefsCategory])
+
+  const handleSetNotificationDevice = useCallback((deviceKey: string, cat: string, enabled: boolean) => {
+    const sent = setNotificationPrefsDevice(deviceKey, cat, enabled)
+    if (sent) setNotifWsClosedError(null)
+    else setNotifWsClosedError(WS_CLOSED_MESSAGE)
+  }, [setNotificationPrefsDevice])
+
+  const handleSetNotificationQuietHours = useCallback((window: { start: string; end: string; timezone: string } | null) => {
+    const sent = setNotificationPrefsQuietHours(window)
+    if (sent) setNotifWsClosedError(null)
+    else setNotifWsClosedError(WS_CLOSED_MESSAGE)
+  }, [setNotificationPrefsQuietHours])
+
+  const handleSetNotificationBypassCategories = useCallback((categories: string[]) => {
+    const sent = setNotificationPrefsBypassCategories(categories)
+    if (sent) setNotifWsClosedError(null)
+    else setNotifWsClosedError(WS_CLOSED_MESSAGE)
+  }, [setNotificationPrefsBypassCategories])
 
   const handleToggleAutoPerm = useCallback(async (next: boolean) => {
     setAutoPermError(null)
@@ -777,6 +851,21 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 {byokError}
               </p>
             )}
+            {/* #4559: inline "server disconnected" warning. Same
+                .settings-hint + error color as `byokError` so the BYOK
+                section has a single error treatment. role=alert so
+                screen readers announce the failure rather than letting
+                the toggle revert silently. */}
+            {byokWsClosedError && (
+              <p
+                className="settings-hint"
+                role="alert"
+                data-testid="byok-ws-closed-error"
+                style={{ color: 'var(--error, #f00)' }}
+              >
+                {byokWsClosedError}
+              </p>
+            )}
             <div className="settings-field">
               <button
                 type="button"
@@ -821,6 +910,19 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               limits still apply as a defensive floor — these toggles can only
               mute further, never amplify.
             </p>
+            {/* #4559: inline "server disconnected" warning. role=alert so
+                screen readers announce the failure rather than letting
+                a reverted toggle pass without explanation. */}
+            {notifWsClosedError && (
+              <p
+                className="settings-hint"
+                role="alert"
+                data-testid="notification-prefs-ws-closed-error"
+                style={{ color: 'var(--error, #f00)' }}
+              >
+                {notifWsClosedError}
+              </p>
+            )}
             {notificationPrefs == null ? (
               <p
                 className="settings-hint"
@@ -868,7 +970,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                                 id={toggleId}
                                 type="checkbox"
                                 checked={checked}
-                                onChange={(e) => setNotificationPrefsCategory(cat, e.target.checked)}
+                                onChange={(e) => handleSetNotificationCategory(cat, e.target.checked)}
                                 data-testid={`notification-prefs-toggle-${cat}`}
                               />
                               {label}
@@ -894,7 +996,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                                   type="checkbox"
                                   checked={mutedOnThisDevice}
                                   onChange={(e) =>
-                                    setNotificationPrefsDevice(currentDeviceKey, cat, !e.target.checked)
+                                    handleSetNotificationDevice(currentDeviceKey, cat, !e.target.checked)
                                   }
                                   data-testid={`notification-prefs-device-toggle-${cat}`}
                                 />
@@ -917,8 +1019,8 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                   window={notificationPrefs.quietHours}
                   categories={notificationPrefs.categories}
                   bypassCategories={notificationPrefs.bypassCategories ?? DEFAULT_BYPASS_CATEGORIES}
-                  onWindowChange={setNotificationPrefsQuietHours}
-                  onBypassChange={setNotificationPrefsBypassCategories}
+                  onWindowChange={handleSetNotificationQuietHours}
+                  onBypassChange={handleSetNotificationBypassCategories}
                 />
               </>
             )}

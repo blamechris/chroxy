@@ -782,9 +782,16 @@ export interface ConnectionState {
     // shadowed but the user can still want it cleared).
     fileExists?: boolean;
   } | null;
-  refreshByokCredentialsStatus: () => void;
-  setByokCredentials: (anthropicApiKey: string) => void;
-  clearByokCredentials: () => void;
+  /**
+   * #4559: actions return a boolean indicating whether the WS message was
+   * sent. `true` = the socket was OPEN and the patch went on the wire;
+   * `false` = the socket was closed and the action was a silent no-op.
+   * Callers MUST surface an inline error when `false` is returned so the
+   * user knows their change did not reach the server.
+   */
+  refreshByokCredentialsStatus: () => boolean;
+  setByokCredentials: (anthropicApiKey: string) => boolean;
+  clearByokCredentials: () => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the
@@ -808,13 +815,21 @@ export interface ConnectionState {
     quietHours: { start: string; end: string; timezone: string } | null;
     bypassCategories?: string[];
   } | null;
-  refreshNotificationPrefs: () => void;
+  /**
+   * #4559: same fail-loud contract as the BYOK actions. Returns `true` when
+   * the WS message was sent, `false` when the socket was closed and the
+   * action no-op'd. UI must surface inline error feedback on `false`.
+   */
+  refreshNotificationPrefs: () => boolean;
   /**
    * Patch a single category's enabled flag. Sends a `notification_prefs_set`
    * with a minimal shallow-merge patch (server merges over the existing
    * categories map, so other toggles are preserved).
+   *
+   * #4559: returns `false` when the socket is closed (silent-drop is gone —
+   * SettingsPanel surfaces an inline error to keep the user honest).
    */
-  setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => boolean;
   /**
    * #4543: stable per-device key used to address THIS client in the
    * `notification_prefs.devices` map. Sourced once at store init from
@@ -831,23 +846,30 @@ export interface ConnectionState {
    * { [category]: enabled } } } }`. Server shallow-merges so other device
    * entries — and other categories under THIS device — survive untouched.
    * `enabled = false` mutes the category on this device only; `true` is the
-   * explicit-unmute path (overrides a `false` global default). No-op when
-   * the socket is closed; the action does not surface errors back to the
-   * UI — the broadcast snapshot is the source of truth.
+   * explicit-unmute path (overrides a `false` global default).
+   *
+   * #4559: returns `true` when the WS message was sent, `false` when the
+   * socket was closed OR the deviceKey was empty (both cases yield a
+   * no-op). UI surfaces an inline error on `false` so the toggle revert
+   * isn't mistaken for the user mis-clicking.
    */
-  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => void;
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => boolean;
   /**
    * #4544: patch the global quiet-hours window. `null` clears the window;
    * a window object (with `timezone`) sets it. The server broadcasts the
    * merged snapshot so all clients update in lockstep.
+   *
+   * #4559: returns `false` when the socket is closed.
    */
-  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => void;
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => boolean;
   /**
    * #4544: patch the global bypass-category list. Sends the full list
    * (replacement, not delta) so an empty array maps to "nothing bypasses,
    * not even errors".
+   *
+   * #4559: returns `false` when the socket is closed.
    */
-  setNotificationPrefsBypassCategories: (categories: string[]) => void;
+  setNotificationPrefsBypassCategories: (categories: string[]) => boolean;
 
   // Multi-server registry actions
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;

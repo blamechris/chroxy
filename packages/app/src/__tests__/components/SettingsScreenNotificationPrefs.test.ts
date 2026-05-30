@@ -48,7 +48,10 @@ describe('SettingsScreen — Notification categories section (#4542)', () => {
   it('calls refreshNotificationPrefs on mount via useEffect', () => {
     // The useEffect body must invoke refreshNotificationPrefs(); the
     // dependency array must include the action so React doesn't warn.
-    expect(settingsSource).toMatch(/useEffect\([\s\S]{0,200}refreshNotificationPrefs\(\)/);
+    // #4559 widened the inner gap to 600 chars to accommodate the
+    // ignore-the-boolean-return docblock that explains why the boolean
+    // is unused on the initial mount refresh.
+    expect(settingsSource).toMatch(/useEffect\([\s\S]{0,600}refreshNotificationPrefs\(\)/);
   });
 
   it('shows a loading hint until the first snapshot lands', () => {
@@ -70,8 +73,13 @@ describe('SettingsScreen — Notification categories section (#4542)', () => {
 
   it('passes the toggled value through Switch.onValueChange to setNotificationPrefsCategory', () => {
     // The Switch component MUST forward the new boolean — not the
-    // category name — as the second arg.
-    expect(settingsSource).toMatch(/onValueChange=\{\(value\) => setNotificationPrefsCategory\(cat, value\)\}/);
+    // category name — as the second arg. #4559 routed the call through
+    // a thin handler wrapper (`handleSetCategory`) so the WS-closed
+    // boolean return can drive the inline error banner; the handler
+    // forwards `(cat, value)` to `setNotificationPrefsCategory` so the
+    // wire payload is unchanged.
+    expect(settingsSource).toMatch(/onValueChange=\{\(value\) => handleSetCategory\(cat, value\)\}/);
+    expect(settingsSource).toMatch(/handleSetCategory\s*=\s*useCallback[\s\S]{0,300}setNotificationPrefsCategory\(cat, value\)/);
   });
 
   it('emits a testID per category toggle for E2E + a11y discovery', () => {
@@ -89,11 +97,15 @@ describe('ConnectionState — notification prefs surface (#4542)', () => {
   });
 
   it('declares refreshNotificationPrefs in ServerNotificationActions', () => {
-    expect(typesSource).toMatch(/refreshNotificationPrefs:\s*\(\)\s*=>\s*void/);
+    // #4559: returns boolean (true = sent, false = WS-closed no-op) so
+    // SettingsScreen can surface an inline "server disconnected" warning
+    // instead of silently dropping the user's tap.
+    expect(typesSource).toMatch(/refreshNotificationPrefs:\s*\(\)\s*=>\s*boolean/);
   });
 
   it('declares setNotificationPrefsCategory with (category, enabled) signature', () => {
-    expect(typesSource).toMatch(/setNotificationPrefsCategory:\s*\(category:\s*string,\s*enabled:\s*boolean\)\s*=>\s*void/);
+    // #4559: returns boolean — see refreshNotificationPrefs comment above.
+    expect(typesSource).toMatch(/setNotificationPrefsCategory:\s*\(category:\s*string,\s*enabled:\s*boolean\)\s*=>\s*boolean/);
   });
 });
 
@@ -200,14 +212,16 @@ describe('SettingsScreen — Quiet hours editor section (#4544)', () => {
 
 describe('ConnectionState — quiet-hours actions (#4544)', () => {
   it('declares setNotificationPrefsQuietHours with the documented signature', () => {
+    // #4559: returns boolean — see refreshNotificationPrefs comment above.
     expect(typesSource).toMatch(
-      /setNotificationPrefsQuietHours:\s*\(window:\s*\{\s*start:\s*string;\s*end:\s*string;\s*timezone:\s*string\s*\}\s*\|\s*null\)\s*=>\s*void/,
+      /setNotificationPrefsQuietHours:\s*\(window:\s*\{\s*start:\s*string;\s*end:\s*string;\s*timezone:\s*string\s*\}\s*\|\s*null\)\s*=>\s*boolean/,
     );
   });
 
   it('declares setNotificationPrefsBypassCategories with the documented signature', () => {
+    // #4559: returns boolean — see refreshNotificationPrefs comment above.
     expect(typesSource).toMatch(
-      /setNotificationPrefsBypassCategories:\s*\(categories:\s*string\[\]\)\s*=>\s*void/,
+      /setNotificationPrefsBypassCategories:\s*\(categories:\s*string\[\]\)\s*=>\s*boolean/,
     );
   });
 
@@ -231,5 +245,113 @@ describe('connection.ts — quiet-hours actions (#4544)', () => {
     expect(connectionSource).toMatch(
       /setNotificationPrefsBypassCategories[\s\S]{0,400}notification_prefs_set[\s\S]{0,200}bypassCategories:\s*categories/,
     );
+  });
+});
+
+// #4559: fail-loud inline error when a notification-prefs WS write fires
+// while the socket is closed. Pre-#4559 the action silently no-op'd; the
+// Switch revert was the only signal and looked like a misfire. Both the
+// store action and the SettingsScreen banner are covered here.
+describe('connection.ts — notification-prefs WS-closed return values (#4559)', () => {
+  it('setNotificationPrefsCategory returns true after sending and false on the no-op path', () => {
+    // The action body must return `true` once `wsSend(...)` has shipped
+    // the patch and `false` from the fall-through (closed socket).
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsCategory[\s\S]{0,1400}wsSend\(socket,[\s\S]{0,200}notification_prefs_set[\s\S]{0,300}return true[\s\S]{0,80}return false/,
+    );
+  });
+
+  it('setNotificationPrefsDevice returns false for empty deviceKey AND closed socket', () => {
+    // Defensive: the empty-deviceKey guard must short-circuit with
+    // `return false` (so the UI can still surface "save failed" should
+    // a stale render somehow fire), and the closed-socket fall-through
+    // must also return `false`.
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsDevice[\s\S]{0,300}if\s*\(!deviceKey\)\s*return false[\s\S]{0,1600}return false/,
+    );
+  });
+
+  it('refreshNotificationPrefs returns true on send and false on closed socket', () => {
+    expect(connectionSource).toMatch(
+      /refreshNotificationPrefs[\s\S]{0,400}wsSend\(socket,[\s\S]{0,150}notification_prefs_get[\s\S]{0,80}return true[\s\S]{0,80}return false/,
+    );
+  });
+
+  it('setNotificationPrefsQuietHours returns true on send and false on closed socket', () => {
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsQuietHours[\s\S]{0,800}return true[\s\S]{0,80}return false/,
+    );
+  });
+
+  it('setNotificationPrefsBypassCategories returns true on send and false on closed socket', () => {
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsBypassCategories[\s\S]{0,800}return true[\s\S]{0,80}return false/,
+    );
+  });
+});
+
+describe('SettingsScreen — fail-loud inline error on WS-closed write (#4559)', () => {
+  it('declares a notifWsClosedError useState slot for the inline banner', () => {
+    // The error is component-local rather than store-state because each
+    // SettingsScreen mount is the only consumer; surfacing it via the
+    // store would risk a banner appearing on screens that don't expose
+    // the failing toggle.
+    expect(settingsSource).toMatch(
+      /\[notifWsClosedError,\s*setNotifWsClosedError\]\s*=\s*useState<string\s*\|\s*null>\(null\)/,
+    );
+  });
+
+  it('declares a shared WS_CLOSED_MESSAGE constant with the documented copy', () => {
+    // The exact copy mirrors the dashboard banner so users see the same
+    // instruction on both clients. Capture the substring so a rename
+    // / soften / typo breaks here intentionally.
+    expect(settingsSource).toMatch(/WS_CLOSED_MESSAGE\s*=/);
+    expect(settingsSource).toMatch(/Settings save failed/);
+    expect(settingsSource).toMatch(/server disconnected/);
+    expect(settingsSource).toMatch(/Reconnect and try again/);
+  });
+
+  it('renders the banner with testID notification-prefs-ws-closed-error when the error is set', () => {
+    expect(settingsSource).toMatch(/testID="notification-prefs-ws-closed-error"/);
+    // The banner is a conditional render keyed on notifWsClosedError.
+    expect(settingsSource).toMatch(/\{notifWsClosedError\s*&&/);
+  });
+
+  it('exposes the banner as an accessibility alert for screen readers', () => {
+    // Without role="alert" VoiceOver / TalkBack just announces the
+    // banner like any other Text — easy to miss for the same reason
+    // the original toggle revert was invisible.
+    expect(settingsSource).toMatch(/accessibilityRole="alert"/);
+  });
+
+  it('handleSetCategory delegates to setNotificationPrefsCategory and sets/clears the banner from the boolean', () => {
+    expect(settingsSource).toMatch(
+      /handleSetCategory\s*=\s*useCallback[\s\S]{0,300}setNotificationPrefsCategory\(cat, value\)[\s\S]{0,200}setNotifWsClosedError\(sent\s*\?\s*null\s*:\s*WS_CLOSED_MESSAGE\)/,
+    );
+  });
+
+  it('handleSetDevice delegates to setNotificationPrefsDevice and sets/clears the banner from the boolean', () => {
+    expect(settingsSource).toMatch(
+      /handleSetDevice\s*=\s*useCallback[\s\S]{0,300}setNotificationPrefsDevice\(deviceKey, cat, value\)[\s\S]{0,200}setNotifWsClosedError\(sent\s*\?\s*null\s*:\s*WS_CLOSED_MESSAGE\)/,
+    );
+  });
+
+  it('handleSetQuietHours delegates to setNotificationPrefsQuietHours and sets/clears the banner', () => {
+    expect(settingsSource).toMatch(
+      /handleSetQuietHours\s*=\s*useCallback[\s\S]{0,300}setNotificationPrefsQuietHours\(win\)[\s\S]{0,200}setNotifWsClosedError\(sent\s*\?\s*null\s*:\s*WS_CLOSED_MESSAGE\)/,
+    );
+  });
+
+  it('handleSetBypassCategories delegates to setNotificationPrefsBypassCategories and sets/clears the banner', () => {
+    expect(settingsSource).toMatch(
+      /handleSetBypassCategories\s*=\s*useCallback[\s\S]{0,300}setNotificationPrefsBypassCategories\(cats\)[\s\S]{0,200}setNotifWsClosedError\(sent\s*\?\s*null\s*:\s*WS_CLOSED_MESSAGE\)/,
+    );
+  });
+
+  it('QuietHoursEditor receives the handler wrappers — not the raw store actions', () => {
+    // Without this routing the editor would silently no-op on a closed
+    // socket and the user would never see the banner.
+    expect(settingsSource).toMatch(/onWindowChange=\{handleSetQuietHours\}/);
+    expect(settingsSource).toMatch(/onBypassChange=\{handleSetBypassCategories\}/);
   });
 });

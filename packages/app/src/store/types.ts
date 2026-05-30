@@ -512,8 +512,14 @@ export interface ServerNotificationActions {
   // `notification_prefs_get`; `setCategory` sends `notification_prefs_set`
   // with a single-category patch (server shallow-merges so other toggles
   // are preserved).
-  refreshNotificationPrefs: () => void;
-  setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
+  //
+  // #4559: each action returns a boolean indicating whether the WS message
+  // actually went on the wire. `true` = sent; `false` = socket was closed
+  // and the write was a no-op. Pre-#4559 the silent-drop made the toggle
+  // look unresponsive; SettingsScreen now surfaces an inline error so the
+  // user knows to retry after reconnect.
+  refreshNotificationPrefs: () => boolean;
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => boolean;
   // #4543: patch a per-device category override. Sends a single
   // `notification_prefs_set` with `{ devices: { [deviceKey]: { categories:
   // { [category]: enabled } } } }`. Server shallow-merges so other device
@@ -521,15 +527,22 @@ export interface ServerNotificationActions {
   // false` mutes the category on this device only; `true` is the
   // explicit-unmute path that overrides a `false` global default. No-op
   // when deviceKey is empty or the socket is closed.
-  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => void;
+  //
+  // #4559: returns `true` when sent, `false` for both no-op branches
+  // (empty deviceKey OR closed socket).
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => boolean;
   // #4544: patch the global quiet-hours window. `null` clears the window;
   // a window object (with `timezone`) sets it. Server broadcasts the
   // merged snapshot so all clients update in lockstep.
-  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => void;
+  //
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => boolean;
   // #4544: replace the global bypass-category list wholesale. An empty
   // array means "nothing bypasses, not even errors" — the UI should
   // always send the desired final list.
-  setNotificationPrefsBypassCategories: (categories: string[]) => void;
+  //
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsBypassCategories: (categories: string[]) => boolean;
 }
 
 /**
