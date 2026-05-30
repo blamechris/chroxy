@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.16] - 2026-05-30
+
+Wave 4 of the from-review marathon — 13 follow-ups polishing what v0.9.13–0.9.15 shipped. Notification preferences round out with optimistic toggles (#4558), WS-closed error surfacing (#4559), capability gating for pre-v0.9.14 servers (#4560), quiet-hours editor draft preservation (#4570), and per-device override cleanup (#4564). Quiet-hours validation and perf hardened (#4566, #4567, #4568). K8s `workspacePVC` finally gets an operator-facing config surface (#4556). Plus a refactor (#4569), accessibility (#4562), styling (#4563), test coverage (#4555), and v0.9.15 SidebarTokenView coverage extension (#4546 — which actually shipped in v0.9.15, but the polish chain continues here).
+
+### Added
+
+- **Capability-gate Notifications section (#4560 / #4584):** server now declares `notificationPrefs: true` in `auth_ok` capabilities; clients (dashboard + mobile) hide the Notifications section (or show "requires newer server" message) when connecting to pre-v0.9.14 servers that lack the foundation. Mirrors the existing `serverCapabilities` pattern used by `promptEvaluator` and `chroxyContextHint`. Follow-up [#4585](https://github.com/blamechris/chroxy/issues/4585) tracks mobile copy consistency.
+- **Optimistic notification toggle (#4558 / #4578):** SettingsPanel toggles now apply locally before the WS round-trip lands, masking the ~50-200ms snapshot-broadcast latency. Server snapshot wins on disagreement (server is the truth source); rollback if the WS round-trip fails. Same shape in dashboard and mobile.
+- **Inline error on WS-closed notification/BYOK writes (#4559 / #4582):** if a write fires while the WS is closed, the dashboard and mobile surfaces now show "Can't save changes — reconnecting…" instead of silently dropping. Uses the existing dashboard error-banner pattern.
+- **Per-device override cleanup UI (#4564 / #4586):** SettingsPanel now lists known per-device entries with a friendly label (truncated token + "this device" marker) and per-row Clear button. Server `notification_prefs_set` learned a `devices: { [token]: null }` delete semantics. Follow-ups [#4587](https://github.com/blamechris/chroxy/issues/4587) (richer device labels — last-seen + platform) and [#4588](https://github.com/blamechris/chroxy/issues/4588) (confirm prompt for current-device clear).
+- **chroxy-config surface for K8s workspacePVC (#4556 / #4583):** `[k8s.workspace]` block with `claimName` (required), `mountPath` (default `/workspace`), `readOnly` (default false). EnvironmentManager auto-injects `workspacePVC` when K8sBackend is active AND block is present (explicit per-call opts win if/when added). Config validated at load time so operators see errors at startup rather than first env-create. K8s docs updated.
+
+### Fixed
+
+- **Quiet-hours HH:MM range validation (#4566 / #4575):** `sanitizeQuietHours` now rejects hour > 23, minute > 59, non-numeric, missing colon, wrong length. Invalid input falls through to disabled (safe default) + warn log.
+- **`isInQuietHoursIn` finite guard (#4567 / #4576):** defensive `Number.isFinite` on parsed hour/minute values; non-finite parses fall through to "not in quiet hours" so a future schema-drift can't silently block delivery.
+- **Quiet-hours editor draft preservation (#4570 / #4580):** mid-edit snapshot broadcasts no longer clobber the in-flight editor. Dirty tracking + `pendingSnapshot` sentinel pattern: server snapshots park when local edit is dirty; user accepts or discards explicitly. Follow-up [#4581](https://github.com/blamechris/chroxy/issues/4581) tracks mobile a11y for the conflict banner.
+- **SidebarTokenView nested-label hoist (#4562 / #4573):** v0.9.14's #4525 fix nested a `<label>` inside a parent `<label>` (invalid HTML, unpredictable screen-reader behavior). Restructured so each checkbox has its own non-nested label.
+
+### Changed
+
+- **Per-device notification row visual hierarchy (#4563 / #4577):** `.notification-prefs-device-row` CSS adds indent + de-emphasized typography so the per-device toggle reads as a sub-row of the global per-category toggle. Pure CSS + regression-test addition.
+
+### Performance
+
+- **Memoize `Intl.DateTimeFormat` per timezone (#4568 / #4579):** module-level Map cache replaces per-call constructor in the quiet-hours gate hot path. Timezone set is small + stable, so unbounded memory isn't a concern.
+
+### Internal
+
+- **Shared quiet-hours timezone choices (#4569 / #4574):** the IANA timezone list duplicated in dashboard and mobile is now `QUIET_HOURS_TIMEZONES` in `@chroxy/store-core`. Both surfaces import from the single source.
+- **EnvironmentManager workspacePVC passthrough test comment (#4555 / #4572):** clarifies the stub-vs-real-backend invariant — the manager has no opinion about `cwd`+`workspacePVC` coexistence; that's the backend's job to enforce.
+
 ## [0.9.15] - 2026-05-29
 
 Wave 3 of the from-review marathon — five follow-ups, completing the three deferred UI sub-issues from v0.9.14's #4349 decomposition. Notification preferences are now fully user-controllable: per-category mute (#4542), per-device routing (#4543), and quiet-hours window (#4544) all land here on top of v0.9.14's #4541 foundation. Plus a third regression test for v0.9.14's SidebarTokenView focus-restore (#4546) and the EnvironmentManager plumbing follow-up for v0.9.14's K8s PVC strategy (#4548).
