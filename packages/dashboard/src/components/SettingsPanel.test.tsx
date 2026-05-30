@@ -1071,6 +1071,184 @@ describe('SettingsPanel', () => {
       expect(permCheck.checked).toBe(true)
       expect(errCheck.checked).toBe(true)
     })
+
+    // #4570: snapshot broadcasts must not clobber unsaved edits.
+    //
+    // Background: PR #4565 wired `useEffect([win])` to re-sync the draft on
+    // every snapshot — which is correct for a remote save with no local
+    // pending changes, but wrong when the user is mid-edit. A broadcast
+    // from another client (or an unrelated notification_prefs_set for a
+    // different field that re-broadcasts the merged snapshot) would
+    // overwrite the user's typed-but-unsaved text. Now: the editor tracks
+    // a `dirty` flag, skips snapshot apply when dirty, and surfaces a
+    // conflict banner with explicit accept/discard.
+    describe('snapshot-vs-draft preservation (#4570)', () => {
+      it('does NOT overwrite the start input when a snapshot arrives mid-edit', () => {
+        const initial = {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        }
+        setMockState({ notificationPrefs: initial })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+        // User starts typing — draft is now dirty.
+        const startInput = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+        fireEvent.change(startInput, { target: { value: '23:45' } })
+        expect(startInput.value).toBe('23:45')
+
+        // A new snapshot lands from the server (another client saved a
+        // different end time). Re-render with the new prefs.
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '21:00', end: '06:00', timezone: 'America/Los_Angeles' },
+          },
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+        // The user's in-flight edit is preserved — NOT replaced by the
+        // broadcast value.
+        const startAfter = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+        expect(startAfter.value).toBe('23:45')
+      })
+
+      it('surfaces a conflict banner with accept/discard when the snapshot diverges from the dirty draft', () => {
+        const initial = {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        }
+        setMockState({ notificationPrefs: initial })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+        // Make the draft dirty.
+        fireEvent.change(screen.getByTestId('quiet-hours-start-input'), { target: { value: '23:45' } })
+
+        // Snapshot lands from another client with a divergent window.
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '21:00', end: '06:00', timezone: 'America/Los_Angeles' },
+          },
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+        // Banner appears with the explicit accept/discard affordances.
+        expect(screen.getByTestId('quiet-hours-conflict-banner')).toBeInTheDocument()
+        expect(screen.getByTestId('quiet-hours-conflict-accept')).toBeInTheDocument()
+        expect(screen.getByTestId('quiet-hours-conflict-discard')).toBeInTheDocument()
+      })
+
+      it('clicking discard accepts the snapshot, replacing the draft and clearing the banner', () => {
+        const initial = {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        }
+        setMockState({ notificationPrefs: initial })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('quiet-hours-start-input'), { target: { value: '23:45' } })
+
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '21:00', end: '06:00', timezone: 'America/Los_Angeles' },
+          },
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('quiet-hours-conflict-discard'))
+
+        // Draft now reflects the snapshot; banner is gone.
+        const startAfter = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+        expect(startAfter.value).toBe('21:00')
+        expect(screen.queryByTestId('quiet-hours-conflict-banner')).toBeNull()
+      })
+
+      it('clicking accept keeps the local draft and clears the banner', () => {
+        const initial = {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        }
+        setMockState({ notificationPrefs: initial })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('quiet-hours-start-input'), { target: { value: '23:45' } })
+
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '21:00', end: '06:00', timezone: 'America/Los_Angeles' },
+          },
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('quiet-hours-conflict-accept'))
+
+        // Draft preserved; banner dismissed.
+        const startAfter = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+        expect(startAfter.value).toBe('23:45')
+        expect(screen.queryByTestId('quiet-hours-conflict-banner')).toBeNull()
+      })
+
+      it('accepts snapshot updates normally when the editor is clean', () => {
+        const initial = {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        }
+        setMockState({ notificationPrefs: initial })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+        // No edits — a fresh snapshot replaces the draft as before.
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '21:00', end: '06:00', timezone: 'America/Los_Angeles' },
+          },
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const startAfter = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+        const endAfter = screen.getByTestId('quiet-hours-end-input') as HTMLInputElement
+        expect(startAfter.value).toBe('21:00')
+        expect(endAfter.value).toBe('06:00')
+        expect(screen.queryByTestId('quiet-hours-conflict-banner')).toBeNull()
+      })
+
+      it('accepts the next snapshot after Save (dirty flag clears on save)', () => {
+        const setNotificationPrefsQuietHours = vi.fn()
+        const initial = {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        }
+        setMockState({ notificationPrefs: initial, setNotificationPrefsQuietHours })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+        // User edits + saves; dirty clears.
+        fireEvent.change(screen.getByTestId('quiet-hours-start-input'), { target: { value: '23:30' } })
+        fireEvent.click(screen.getByTestId('quiet-hours-save-button'))
+        expect(setNotificationPrefsQuietHours).toHaveBeenCalledWith({
+          start: '23:30', end: '07:00', timezone: 'America/Los_Angeles',
+        })
+
+        // Echo snapshot from server with the saved values arrives — accepted.
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '23:30', end: '07:00', timezone: 'America/Los_Angeles' },
+          },
+          setNotificationPrefsQuietHours,
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.queryByTestId('quiet-hours-conflict-banner')).toBeNull()
+
+        // A subsequent unrelated snapshot still applies normally.
+        setMockState({
+          notificationPrefs: {
+            ...baseSnapshot,
+            quietHours: { start: '00:00', end: '08:00', timezone: 'America/Los_Angeles' },
+          },
+          setNotificationPrefsQuietHours,
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const startAfter = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+        expect(startAfter.value).toBe('00:00')
+      })
+    })
   })
 
   // #4559: fail-loud inline error when a notification-prefs / BYOK write
