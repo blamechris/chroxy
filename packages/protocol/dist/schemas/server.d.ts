@@ -555,6 +555,20 @@ export declare const ServerPushTokenErrorSchema: z.ZodObject<{
     type: z.ZodLiteral<"push_token_error">;
     message: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerNotificationPrefsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    prefs: z.ZodObject<{
+        categories: z.ZodRecord<z.ZodString, z.ZodBoolean>;
+        devices: z.ZodRecord<z.ZodString, z.ZodObject<{
+            categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        }, z.core.$loose>>;
+        quietHours: z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+        }, z.core.$strip>]>;
+    }, z.core.$loose>;
+}, z.core.$loose>;
 export declare const ServerShutdownSchema: z.ZodObject<{
     type: z.ZodLiteral<"server_shutdown">;
     reason: z.ZodEnum<{

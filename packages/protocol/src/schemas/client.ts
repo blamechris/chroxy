@@ -279,6 +279,75 @@ export const RegisterPushTokenSchema = z.object({
   token: z.string().min(1).max(512),
 })
 
+// -- Notification preferences (#4541) --
+//
+// Foundation for user-controllable notification settings (parent #4349).
+// Three layers persisted at ~/.chroxy/notification-prefs.json:
+//   1. global category toggles (`categories` map, keyed by RATE_LIMITS keys
+//      from `push.js`)
+//   2. per-device overrides (`devices` keyed by push token)
+//   3. quiet-hours window (parsed today, time-of-day enforcement deferred
+//      to sub-issue #4544)
+//
+// The per-category toggle map is intentionally open-ended (z.record) so the
+// wire shape doesn't need to be re-bumped each time a new push category
+// lands in `push.js` RATE_LIMITS. The server's loader sanitises unknown
+// keys at the storage boundary — see notification-prefs.js.
+
+/** Inner shape of a global / per-device category toggle map. */
+const NotificationCategoryMapSchema = z.record(z.string().min(1).max(64), z.boolean())
+
+/** Quiet-hours window. `null` clears the window; otherwise both times are HH:MM. */
+const NotificationQuietHoursSchema = z.union([
+  z.null(),
+  z.object({
+    start: z.string().regex(/^\d{2}:\d{2}$/),
+    end: z.string().regex(/^\d{2}:\d{2}$/),
+  }),
+])
+
+/** Per-device override entry. Today only `categories` is configurable. */
+const NotificationDeviceEntrySchema = z.object({
+  categories: NotificationCategoryMapSchema.optional(),
+}).passthrough()
+
+/**
+ * Patch shape accepted by `notification_prefs_set`. Every top-level field
+ * is optional — the server shallow-merges, so an inbound patch that only
+ * mentions `categories.result` will not wipe `categories.permission`.
+ *
+ * The device map is bounded at 1000 entries to keep a malicious client
+ * from bloating the on-disk file; in practice users have at most a
+ * handful of devices.
+ */
+export const NotificationPrefsPatchSchema = z.object({
+  categories: NotificationCategoryMapSchema.optional(),
+  devices: z.record(z.string().min(1).max(512), NotificationDeviceEntrySchema)
+    .refine((obj) => Object.keys(obj).length <= 1000, { message: 'Too many device entries (max 1000)' })
+    .optional(),
+  quietHours: NotificationQuietHoursSchema.optional(),
+})
+
+/**
+ * Request the current notification preferences. Server replies with a
+ * `notification_prefs` snapshot. `requestId` is optional for correlation.
+ */
+export const NotificationPrefsGetSchema = z.object({
+  type: z.literal('notification_prefs_get'),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
+/**
+ * Patch the notification preferences and re-emit the resulting snapshot.
+ * The server shallow-merges over the existing prefs and persists the
+ * merged result atomically (temp+rename) to ~/.chroxy/notification-prefs.json.
+ */
+export const NotificationPrefsSetSchema = z.object({
+  type: z.literal('notification_prefs_set'),
+  requestId: z.string().max(128).optional(),
+  prefs: NotificationPrefsPatchSchema,
+}).passthrough()
+
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
   answer: z.string().max(100_000),
@@ -575,6 +644,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   DestroySessionSchema,
   RenameSessionSchema,
   RegisterPushTokenSchema,
+  NotificationPrefsGetSchema,
+  NotificationPrefsSetSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,
   BrowseFilesSchema,

@@ -1,10 +1,12 @@
 /**
  * Input and user interaction message handlers.
  *
- * Handles: input, interrupt, resume_budget, register_push_token, user_question_response
+ * Handles: input, interrupt, resume_budget, register_push_token,
+ *          user_question_response, notification_prefs_get,
+ *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { createLogger } from '../logger.js'
 
@@ -439,6 +441,63 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
   client._ownedPushTokens.add(msg.token)
 }
 
+/**
+ * Notification preferences handlers (#4541).
+ *
+ * Two message types: get the current prefs snapshot, patch + re-emit. The
+ * server shallow-merges the patch over existing prefs (so the UI can send
+ * one toggle at a time) and persists the result via PushManager.setPrefs,
+ * which atomically writes ~/.chroxy/notification-prefs.json.
+ *
+ * After a successful set the snapshot is broadcast to every connected
+ * client so additional dashboards / mobile sessions stay in lockstep —
+ * mirrors the BYOK credentials handler pattern (#4052).
+ *
+ * Auth posture: any authenticated WS client can call these. chroxy isn't
+ * multi-tenant — the user controls their own notification routing. The
+ * existing WS auth gate is sufficient.
+ */
+function handleNotificationPrefsGet(ws, client, msg, ctx) {
+  if (!ctx.pushManager) {
+    sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)')
+    return
+  }
+  ctx.send(ws, {
+    type: 'notification_prefs',
+    requestId: msg?.requestId,
+    prefs: ctx.pushManager.getPrefs(),
+  })
+}
+
+function handleNotificationPrefsSet(ws, client, msg, ctx) {
+  if (!ctx.pushManager) {
+    sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)')
+    return
+  }
+  const patch = msg?.prefs
+  if (!patch || typeof patch !== 'object') {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'prefs object is required')
+    return
+  }
+  let next
+  try {
+    next = ctx.pushManager.setPrefs(patch)
+  } catch (err) {
+    log.warn(`notification_prefs_set persist failed: ${err?.message}`)
+    sendError(ws, msg?.requestId, 'NOTIFICATION_PREFS_WRITE_FAILED', err?.message || 'write failed')
+    return
+  }
+  // Reply to the originating client with the requestId so promise-style
+  // callers can resolve.
+  ctx.send(ws, { type: 'notification_prefs', requestId: msg?.requestId, prefs: next })
+  // Broadcast without requestId so other dashboards / clients update too.
+  // Without this, a second dashboard would keep showing stale state until
+  // the user re-opened Settings.
+  if (typeof ctx.broadcast === 'function') {
+    ctx.broadcast({ type: 'notification_prefs', prefs: next })
+  }
+}
+
 function handleUserQuestionResponse(ws, client, msg, ctx) {
   const questionSessionId = (msg.toolUseId && ctx.questionSessionMap.get(msg.toolUseId))
     || client.activeSessionId
@@ -461,5 +520,7 @@ export const inputHandlers = {
   interrupt: handleInterrupt,
   resume_budget: handleResumeBudget,
   register_push_token: handleRegisterPushToken,
+  notification_prefs_get: handleNotificationPrefsGet,
+  notification_prefs_set: handleNotificationPrefsSet,
   user_question_response: handleUserQuestionResponse,
 }

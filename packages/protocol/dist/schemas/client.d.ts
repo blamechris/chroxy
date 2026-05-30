@@ -260,6 +260,52 @@ export declare const RegisterPushTokenSchema: z.ZodObject<{
     type: z.ZodLiteral<"register_push_token">;
     token: z.ZodString;
 }, z.core.$strip>;
+/**
+ * Patch shape accepted by `notification_prefs_set`. Every top-level field
+ * is optional — the server shallow-merges, so an inbound patch that only
+ * mentions `categories.result` will not wipe `categories.permission`.
+ *
+ * The device map is bounded at 1000 entries to keep a malicious client
+ * from bloating the on-disk file; in practice users have at most a
+ * handful of devices.
+ */
+export declare const NotificationPrefsPatchSchema: z.ZodObject<{
+    categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+    devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+    }, z.core.$loose>>>;
+    quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+        start: z.ZodString;
+        end: z.ZodString;
+    }, z.core.$strip>]>>;
+}, z.core.$strip>;
+/**
+ * Request the current notification preferences. Server replies with a
+ * `notification_prefs` snapshot. `requestId` is optional for correlation.
+ */
+export declare const NotificationPrefsGetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_get">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Patch the notification preferences and re-emit the resulting snapshot.
+ * The server shallow-merges over the existing prefs and persists the
+ * merged result atomically (temp+rename) to ~/.chroxy/notification-prefs.json.
+ */
+export declare const NotificationPrefsSetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_set">;
+    requestId: z.ZodOptional<z.ZodString>;
+    prefs: z.ZodObject<{
+        categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+            categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        }, z.core.$loose>>>;
+        quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+        }, z.core.$strip>]>>;
+    }, z.core.$strip>;
+}, z.core.$loose>;
 export declare const UserQuestionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
@@ -590,6 +636,22 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"register_push_token">;
     token: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_get">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_set">;
+    requestId: z.ZodOptional<z.ZodString>;
+    prefs: z.ZodObject<{
+        categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+            categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        }, z.core.$loose>>>;
+        quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+        }, z.core.$strip>]>>;
+    }, z.core.$strip>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
     answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
