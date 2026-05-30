@@ -393,6 +393,55 @@ export function shouldBypassQuietHours(prefs, category, pushToken) {
 }
 
 /**
+ * Memoized `Intl.DateTimeFormat` instances keyed by IANA timezone (#4568).
+ *
+ * The quiet-hours gate runs once per registered push token per
+ * `PushManager.send()` call. Each `Intl.DateTimeFormat` instance carries a
+ * few KB of locale data, so re-allocating on every call wastes work in a hot
+ * path that scales with token count.
+ *
+ * Bounded memory: the set of timezones in real prefs is tiny (one global
+ * window plus at most one per device) and stable for the process lifetime,
+ * so a plain `Map` with no eviction is safe — no LRU bookkeeping needed.
+ * If a future feature lets users construct ad-hoc timezone strings (e.g.
+ * from untrusted input), revisit this; today every timezone arrives via
+ * `sanitizeQuietHours`, which only persists strings the constructor accepts.
+ *
+ * Failure-cache policy: we only cache SUCCESSFUL constructions. A
+ * `RangeError` from an unrecognised IANA zone returns `null` upstream so
+ * the gate fail-opens; never caching the failure means a later prefs reload
+ * that fixes the typo will reconstruct cleanly with the same key.
+ */
+const _dtfCache = new Map()
+
+/**
+ * Test-only escape hatch: clear the cached formatters so a test can
+ * deterministically count constructor invocations (e.g. by spying on
+ * `Intl.DateTimeFormat`). Production code never needs this — the cache is
+ * correct for the process lifetime.
+ */
+export function _resetDateTimeFormatCacheForTests() {
+  _dtfCache.clear()
+}
+
+function _getDateTimeFormat(timezone) {
+  let dtf = _dtfCache.get(timezone)
+  if (dtf) return dtf
+  try {
+    dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+  } catch {
+    return null
+  }
+  _dtfCache.set(timezone, dtf)
+  return dtf
+}
+
+/**
  * Format `now` (epoch ms) in the given IANA timezone and return its
  * minute-of-day (0..1439). Uses `Intl.DateTimeFormat` with a 24-hour
  * `h23` cycle so DST transitions and non-Pacific zones are handled
@@ -400,20 +449,13 @@ export function shouldBypassQuietHours(prefs, category, pushToken) {
  *
  * Returns `null` when the timezone is unrecognised (Node throws
  * `RangeError` from the constructor; we treat that as a malformed window
- * and let the caller fail open).
+ * and let the caller fail open). Formatter instances are memoized in
+ * `_dtfCache` to avoid re-allocating locale data on every call (#4568).
  */
 function _wallClockMinutes(now, timezone) {
-  let parts
-  try {
-    parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).formatToParts(new Date(now))
-  } catch {
-    return null
-  }
+  const dtf = _getDateTimeFormat(timezone)
+  if (!dtf) return null
+  const parts = dtf.formatToParts(new Date(now))
   const hour = Number(parts.find((p) => p.type === 'hour')?.value)
   const minute = Number(parts.find((p) => p.type === 'minute')?.value)
   if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null
