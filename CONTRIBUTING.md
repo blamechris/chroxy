@@ -84,3 +84,20 @@ Thanks for your interest in contributing! This document covers how to get starte
 ## Questions?
 
 Open an issue or start a discussion. We're friendly!
+
+## Stale PR policy
+
+To keep the PR queue manageable, external contributions follow an automated stale policy:
+
+- **7 days** without contributor activity (commits, comments, or pushes) — a friendly reminder comment is posted and the PR is labeled `stale`.
+- **14 days** without contributor activity (7 days after the reminder) — the PR is closed with a "feel free to reopen" message.
+
+PRs from the repo owner are exempt. Issues are not affected by this policy.
+
+### How to keep your PR open
+
+Just comment on the PR (anything works — a status update, a question, or a "still working on this") to reset the timer. Pushing new commits also counts as activity.
+
+If your PR is closed and you come back to it later, you can reopen it directly on GitHub — no need to file a new one.
+
+The policy is automated via [`.github/workflows/stale.yml`](.github/workflows/stale.yml).

@@ -25,6 +25,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
+import { formatDurationTerse } from '../utils/duration'
 
 /**
  * #4420 — Tail-ellipsis truncation for the pending-shell command label. User-
@@ -104,17 +105,11 @@ function formatElapsed(ms: number): string {
 }
 
 // #4308 — duration without the "ago" suffix, used for the "Running X · 12s"
-// label (the named tool is current, not past, so "ago" is wrong).
-function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  const remS = s % 60
-  if (m < 60) return remS === 0 ? `${m}m` : `${m}m ${remS}s`
-  const h = Math.floor(m / 60)
-  return `${h}h ${m % 60}m`
-}
-
+// label (the named tool is current, not past, so "ago" is wrong). #4510 — the
+// implementation lives in `utils/duration.ts` (`formatDurationTerse`) so the
+// terse register is shared with any future consumer; ActivityIndicator
+// continues to consume the terse form because the chip's compact pill layout
+// can't accommodate "5 minutes 12 seconds".
 function statusClass(elapsedMs: number, timeoutMs: number): string {
   if (elapsedMs >= timeoutMs - 60_000) return 'activity-indicator--red'
   if (elapsedMs >= 60_000) return 'activity-indicator--orange'
@@ -369,7 +364,7 @@ export function ActivityIndicator() {
                   const cmd = shell.command && shell.command.length > 0
                     ? shell.command
                     : shell.shellId
-                  const elapsed = formatDuration(Math.max(0, now - shell.startedAt))
+                  const elapsed = formatDurationTerse(Math.max(0, now - shell.startedAt))
                   return (
                     <li
                       key={shell.shellId}
@@ -438,9 +433,9 @@ export function ActivityIndicator() {
   // criteria and intentionally do not enter the preference order here.
   let label: string
   if (agentDescription != null && agentStartedAt != null) {
-    label = `Running ${agentDescription} · ${formatDuration(now - agentStartedAt)}`
+    label = `Running ${agentDescription} · ${formatDurationTerse(now - agentStartedAt)}`
   } else if (inFlightTool != null && inFlightStartedAt != null) {
-    label = `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)} · ${formatDuration(now - inFlightStartedAt)}`
+    label = `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)} · ${formatDurationTerse(now - inFlightStartedAt)}`
   } else {
     label = `Working… last activity ${formatElapsed(elapsed)}`
   }
