@@ -149,16 +149,20 @@ describe('notification prefs handlers (#4541)', () => {
     })
 
     it('per-device override resolves through PushManager.isCategoryEnabled', () => {
+      // Real-token-format keys (#4551 — handler now requires isValidPushTokenFormat
+      // pass on every devices map key, matching the register_push_token gate).
+      const tokA = 'ExponentPushToken[aaaaaaaaaaaaaaaaaaaaaa]'
+      const tokB = 'ExponentPushToken[bbbbbbbbbbbbbbbbbbbbbb]'
       const ctx = makeCtx(pushManager)
       inputHandlers.notification_prefs_set(
         makeWs(), { id: 'c1' },
-        { prefs: { categories: { result: false }, devices: { 'tok-a': { categories: { result: true } } } } },
+        { prefs: { categories: { result: false }, devices: { [tokA]: { categories: { result: true } } } } },
         ctx,
       )
-      // Per-device override re-enables result for tok-a, but tok-b still
+      // Per-device override re-enables result for tokA, but tokB still
       // sees the global mute.
-      assert.equal(pushManager.isCategoryEnabled('result', 'tok-a'), true)
-      assert.equal(pushManager.isCategoryEnabled('result', 'tok-b'), false)
+      assert.equal(pushManager.isCategoryEnabled('result', tokA), true)
+      assert.equal(pushManager.isCategoryEnabled('result', tokB), false)
     })
 
     it('emits NOT_AVAILABLE when pushManager is missing from ctx', () => {
@@ -173,6 +177,77 @@ describe('notification prefs handlers (#4541)', () => {
       const err = ws._messages.find((m) => m.type === 'error')
       assert.ok(err)
       assert.equal(err.code, 'NOT_AVAILABLE')
+    })
+
+    // #4551 — device keys in the patch must clear the same
+    // isValidPushTokenFormat gate that register_push_token enforces.
+    // Without this an authenticated client can stuff arbitrary strings
+    // into ~/.chroxy/notification-prefs.json and have them re-served on
+    // every notification_prefs_get. Reject the whole patch (do NOT
+    // partial-apply) so the on-disk state stays clean.
+    it('rejects notification_prefs_set with malformed device key', () => {
+      const setPrefsSpy = createSpy((patch, opts) => pushManager.setPrefs(patch, opts))
+      const wrappedManager = Object.assign(Object.create(Object.getPrototypeOf(pushManager)), pushManager, {
+        setPrefs: setPrefsSpy,
+      })
+      const ctx = makeCtx(wrappedManager)
+      const ws = makeWs()
+      const before = JSON.parse(JSON.stringify(pushManager.getPrefs()))
+      inputHandlers.notification_prefs_set(
+        ws, { id: 'c1' },
+        {
+          requestId: 'r1',
+          prefs: { devices: { 'bad key with spaces': { categories: { result: false } } } },
+        },
+        ctx,
+      )
+      const err = ws._messages.find((m) => m.type === 'error')
+      assert.ok(err, 'expected an error reply')
+      assert.equal(err.code, 'INVALID_REQUEST')
+      assert.match(err.message, /Invalid device token format/)
+      // setPrefs must not be called on a rejected patch — the prefs file
+      // stays exactly as it was.
+      assert.equal(setPrefsSpy.callCount, 0, 'setPrefs must not be invoked on invalid input')
+      assert.deepEqual(pushManager.getPrefs(), before, 'prefs snapshot must be unchanged')
+      // No persisted file either (no prior writes on this temp dir).
+      assert.equal(existsSync(prefsPath), false, 'prefs file must not exist after rejection')
+    })
+
+    it('rejects notification_prefs_set when device key is too short', () => {
+      const setPrefsSpy = createSpy((patch, opts) => pushManager.setPrefs(patch, opts))
+      const wrappedManager = Object.assign(Object.create(Object.getPrototypeOf(pushManager)), pushManager, {
+        setPrefs: setPrefsSpy,
+      })
+      const ctx = makeCtx(wrappedManager)
+      const ws = makeWs()
+      inputHandlers.notification_prefs_set(
+        ws, { id: 'c1' },
+        { requestId: 'r1', prefs: { devices: { 'short': { categories: { result: false } } } } },
+        ctx,
+      )
+      const err = ws._messages.find((m) => m.type === 'error')
+      assert.ok(err)
+      assert.equal(err.code, 'INVALID_REQUEST')
+      assert.equal(setPrefsSpy.callCount, 0)
+      assert.equal(existsSync(prefsPath), false)
+    })
+
+    it('accepts a valid 64-char hex device key', () => {
+      const validKey = 'a'.repeat(64)
+      const ctx = makeCtx(pushManager)
+      inputHandlers.notification_prefs_set(
+        makeWs(), { id: 'c1' },
+        {
+          requestId: 'r1',
+          prefs: { devices: { [validKey]: { categories: { result: false } } } },
+        },
+        ctx,
+      )
+      const reply = ctx._sent[0]
+      assert.equal(reply.type, 'notification_prefs')
+      assert.equal(reply.requestId, 'r1')
+      assert.ok(reply.prefs.devices[validKey], 'valid device key must be persisted in reply')
+      assert.ok(existsSync(prefsPath), 'valid set must persist to disk')
     })
   })
 
