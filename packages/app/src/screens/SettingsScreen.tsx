@@ -1024,7 +1024,20 @@ function QuietHoursEditor(props: {
           {pendingSnapshot !== undefined && (
             <>
               <View style={styles.separator} />
-              <View style={styles.row} testID="quiet-hours-conflict-banner">
+              {/* #4581: accessibilityLiveRegion="polite" lets TalkBack /
+                  VoiceOver announce the divergence the moment the banner
+                  mounts — a screen-reader user editing the field would
+                  otherwise miss the conflict entirely. Matches the
+                  dashboard's role="alert" semantic without using `assertive`,
+                  which would interrupt mid-typing speech. The two action
+                  TouchableOpacity children get accessibilityRole="button"
+                  + accessibilityLabel below for the same reason. */}
+              <View
+                style={styles.row}
+                testID="quiet-hours-conflict-banner"
+                accessibilityLiveRegion="polite"
+                accessible={true}
+              >
                 <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={styles.rowLabel}>Another client updated quiet hours</Text>
                   <Text style={[styles.rowHint, { marginTop: 2 }]}>
@@ -1038,6 +1051,8 @@ function QuietHoursEditor(props: {
                 style={styles.row}
                 onPress={handleAcceptDraft}
                 testID="quiet-hours-conflict-accept"
+                accessibilityRole="button"
+                accessibilityLabel="Keep my edits"
               >
                 <Text style={styles.actionText}>Keep my edits</Text>
               </TouchableOpacity>
@@ -1046,6 +1061,8 @@ function QuietHoursEditor(props: {
                 style={styles.row}
                 onPress={handleDiscardDraft}
                 testID="quiet-hours-conflict-discard"
+                accessibilityRole="button"
+                accessibilityLabel="Discard and load latest"
               >
                 <Text style={styles.actionText}>Discard and load latest</Text>
               </TouchableOpacity>
