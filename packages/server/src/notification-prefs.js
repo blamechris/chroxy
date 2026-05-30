@@ -449,6 +449,14 @@ function _parseHHMM(s) {
  * `RATE_LIMITS`) provide layered protection regardless.
  */
 export function isInQuietHoursIn(prefs, now, pushToken) {
+  // Defensive: `now` must be a finite epoch-ms. Without this guard a caller
+  // passing `null`/`undefined`/`NaN` would coerce through `new Date(now)`
+  // (e.g. `new Date(null)` → 1970-01-01T00:00:00Z) and silently activate
+  // quiet hours for every push that happens to fall inside a window
+  // overlapping 00:00 UTC. Fail-open (return false) matches the rest of
+  // the function's posture — better to deliver a push than to silently
+  // suppress all of them on a caller bug. (#4567)
+  if (!Number.isFinite(now)) return false
   const window = resolveQuietHoursWindow(prefs, pushToken)
   if (!window) return false
   if (typeof window.timezone !== 'string' || window.timezone.length === 0) return false

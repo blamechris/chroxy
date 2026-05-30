@@ -394,6 +394,27 @@ describe('isInQuietHoursIn — defensive cases (#4544)', () => {
     const prefs = { categories: {}, devices: {}, quietHours: { start: '22:00', end: '07:00', timezone: 'Not/Real_Zone' } }
     assert.equal(isInQuietHoursIn(prefs, Date.now(), 'tok'), false)
   })
+
+  it('returns false when `now` is not a finite number (#4567)', () => {
+    // Defensive guard: a future caller passing null/undefined/NaN/Infinity
+    // must NOT silently activate quiet hours. Without the guard,
+    // `new Date(null)` coerces to the unix epoch (1970-01-01T00:00:00Z),
+    // which falls inside a 22:00-07:00 UTC window and would suppress every
+    // push for the affected token. Fail-open (return false) matches the
+    // rest of the function's defensive posture.
+    const prefs = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '22:00', end: '07:00', timezone: 'UTC' },
+    }
+    assert.equal(isInQuietHoursIn(prefs, null, 'tok'), false)
+    assert.equal(isInQuietHoursIn(prefs, undefined, 'tok'), false)
+    assert.equal(isInQuietHoursIn(prefs, NaN, 'tok'), false)
+    assert.equal(isInQuietHoursIn(prefs, Infinity, 'tok'), false)
+    assert.equal(isInQuietHoursIn(prefs, -Infinity, 'tok'), false)
+    assert.equal(isInQuietHoursIn(prefs, '1700000000000', 'tok'), false)
+    assert.equal(isInQuietHoursIn(prefs, {}, 'tok'), false)
+  })
 })
 
 describe('loadPrefs — extended quiet-hours schema (#4544)', () => {
