@@ -282,6 +282,56 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.streamStallTimeoutMs, undefined)
   })
 
+  // #4560 — `notificationPrefs` capability surfaced in auth_ok so dashboard /
+  // mobile can gate the Notifications settings section on the server having a
+  // `notification_prefs_get` handler (added in #4541). Older servers omit the
+  // flag and clients fall through to the "not supported" branch.
+  it('accepts auth_ok with notificationPrefs capability (#4560)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.9.13',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      capabilities: {
+        skillTrustAccept: true,
+        skillTrustGrant: true,
+        notificationPrefs: true,
+      },
+    })
+    assert.ok(result.success, 'Should validate auth_ok with notificationPrefs capability')
+    assert.equal(result.data.capabilities.notificationPrefs, true)
+  })
+
+  it('accepts auth_ok without notificationPrefs capability (older servers, pre-#4541)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'c',
+      serverMode: 'cli',
+      serverVersion: '0.9.0',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
+      capabilities: { skillTrustAccept: true },
+    })
+    assert.ok(result.success, 'Should accept auth_ok without notificationPrefs capability')
+    assert.equal(result.data.capabilities.notificationPrefs, undefined)
+  })
+
   it('rejects auth_ok with invalid streamStallTimeoutMs (#4477)', async () => {
     const { ServerAuthOkSchema, MAX_SANE_DURATION_MS: MAX } = await import('../src/schemas/server.ts')
     const base = {

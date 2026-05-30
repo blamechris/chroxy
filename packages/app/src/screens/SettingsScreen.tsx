@@ -195,6 +195,17 @@ export function SettingsScreen() {
   // list of categories that fire even during quiet hours.
   const setNotificationPrefsQuietHours = useConnectionStore((s) => s.setNotificationPrefsQuietHours);
   const setNotificationPrefsBypassCategories = useConnectionStore((s) => s.setNotificationPrefsBypassCategories);
+  // #4560: capability gate for the Notifications sections. Pre-#4541 servers
+  // have no `notification_prefs_get` handler — without this gate the
+  // category list + quiet-hours editor sat on "Loading preferences…" forever
+  // waiting for a snapshot that would never arrive. Empty map = fail-closed
+  // so an older server (or a still-connecting one) surfaces the explicit
+  // "not supported" message instead of dead UI. Declared above the refresh
+  // useEffect so it can be referenced from both the dep array and the
+  // early-return guard.
+  const notificationPrefsSupported = useConnectionLifecycleStore(
+    (s) => !!s.serverCapabilities?.notificationPrefs,
+  );
 
   useEffect(() => {
     // #4559: ignore the boolean return on initial refresh — a closed
@@ -202,8 +213,16 @@ export function SettingsScreen() {
     // the tunnel is still recovering). The inline banner only fires for
     // user-initiated writes; the snapshot will arrive once the connection
     // settles.
+    //
+    // #4560: skip the refresh entirely when the server doesn't advertise
+    // the `notificationPrefs` capability. Pre-#4541 servers have no handler
+    // for `notification_prefs_get`, so the request would either get
+    // rejected as an `unknown_message` error or silently dropped — either
+    // way no snapshot lands and the loading hint sits forever. Skipping
+    // the WS write also keeps the gated render decisions self-consistent.
+    if (!notificationPrefsSupported) return;
     refreshNotificationPrefs();
-  }, [refreshNotificationPrefs]);
+  }, [notificationPrefsSupported, refreshNotificationPrefs]);
 
   // #4559: thin wrappers around the four notification-prefs setters. Each
   // delegates to the store action (which returns `true` when sent, `false`
@@ -512,7 +531,17 @@ export function SettingsScreen() {
         </View>
       )}
       <View style={styles.section} testID="notification-prefs-section">
-        {notificationPrefs == null ? (
+        {!notificationPrefsSupported ? (
+          // #4560: capability-gated branch. Pre-#4541 servers don't have a
+          // `notification_prefs_get` handler — the user must upgrade to
+          // chroxy v0.9.14+ to manage these. Without this branch the
+          // section sat on "Loading preferences…" forever.
+          <View style={styles.row}>
+            <Text style={styles.rowHint} testID="notification-prefs-not-supported">
+              Your server does not support notification preferences. Upgrade to chroxy v0.9.14 or newer to manage per-category opt-in, per-device mutes, and quiet hours from here.
+            </Text>
+          </View>
+        ) : notificationPrefs == null ? (
           <View style={styles.row}>
             <Text style={styles.rowHint} testID="notification-prefs-loading">
               Loading preferences&hellip;
@@ -578,7 +607,17 @@ export function SettingsScreen() {
       {/* NOTIFICATIONS — Quiet hours (#4544) */}
       <Text style={styles.sectionHeader}>QUIET HOURS</Text>
       <View style={styles.section} testID="quiet-hours-section">
-        {notificationPrefs == null ? (
+        {!notificationPrefsSupported ? (
+          // #4560: same capability gate as the categories section above.
+          // The QuietHoursEditor reads from `notificationPrefs.quietHours`
+          // which never lands on a pre-#4541 server, so rendering the
+          // editor would put it in a permanent loading state.
+          <View style={styles.row}>
+            <Text style={styles.rowHint} testID="quiet-hours-not-supported">
+              Requires chroxy v0.9.14 or newer.
+            </Text>
+          </View>
+        ) : notificationPrefs == null ? (
           <View style={styles.row}>
             <Text style={styles.rowHint}>Loading preferences&hellip;</Text>
           </View>

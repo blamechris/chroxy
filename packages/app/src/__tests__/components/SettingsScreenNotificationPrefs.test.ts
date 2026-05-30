@@ -51,7 +51,13 @@ describe('SettingsScreen — Notification categories section (#4542)', () => {
     // #4559 widened the inner gap to 600 chars to accommodate the
     // ignore-the-boolean-return docblock that explains why the boolean
     // is unused on the initial mount refresh.
-    expect(settingsSource).toMatch(/useEffect\([\s\S]{0,600}refreshNotificationPrefs\(\)/);
+    // #4560 widened further to 1000 chars to fit the capability-gate
+    // docblock (`notificationPrefsSupported` early-return) that explains
+    // why we skip the WS write when the server doesn't advertise the
+    // notification-prefs handler — pre-#4541 servers would otherwise see
+    // an `unknown_message` error and the client would sit on "Loading
+    // preferences…" forever waiting for a snapshot that will never arrive.
+    expect(settingsSource).toMatch(/useEffect\([\s\S]{0,1000}refreshNotificationPrefs\(\)/);
   });
 
   it('shows a loading hint until the first snapshot lands', () => {
@@ -421,5 +427,77 @@ describe('SettingsScreen — Quiet-hours editor: snapshot-vs-draft (#4570)', () 
     expect(settingsSource).toMatch(
       /handleDiscardDraft[\s\S]{0,800}setStart\(snap\.start\)[\s\S]{0,200}setDirty\(false\)[\s\S]{0,200}setPendingSnapshot\(undefined\)/,
     );
+  });
+});
+
+// #4560: capability gate for the Notifications sections. Pre-#4541 servers
+// (no `notification_prefs_get` handler) used to leave the sections stuck on
+// "Loading preferences…" forever waiting for a snapshot that would never
+// arrive. The gate reads `serverCapabilities.notificationPrefs` from the
+// lifecycle store, swaps the section body for an explicit "not supported"
+// hint when the capability is missing, and skips the WS refresh write so
+// pre-#4541 servers don't log `unknown_message` noise on every Settings open.
+describe('SettingsScreen — notification-prefs capability gate (#4560)', () => {
+  const lifecycleSource = fs.readFileSync(
+    path.resolve(__dirname, '../../store/connection-lifecycle.ts'),
+    'utf-8',
+  );
+
+  it('reads notificationPrefsSupported from the lifecycle store', () => {
+    expect(settingsSource).toMatch(
+      /notificationPrefsSupported\s*=\s*useConnectionLifecycleStore\([\s\S]{0,200}serverCapabilities\?\.notificationPrefs/,
+    );
+  });
+
+  it('skips the refresh when capability is missing (early-return in useEffect)', () => {
+    // The early-return must short-circuit BEFORE the wsSend so pre-#4541
+    // servers don't log `unknown_message` noise on every mount.
+    expect(settingsSource).toMatch(
+      /if\s*\(!notificationPrefsSupported\)\s*return;\s*\n\s*refreshNotificationPrefs\(\);/,
+    );
+  });
+
+  it('keys the refresh useEffect on notificationPrefsSupported (so reconnects retry)', () => {
+    // The dep array must include the capability flag so a reconnect that
+    // flips the flag from false → true triggers the deferred refresh.
+    expect(settingsSource).toMatch(
+      /\}, \[notificationPrefsSupported,\s*refreshNotificationPrefs\]\);/,
+    );
+  });
+
+  it('renders the not-supported hint with the documented testID + copy', () => {
+    expect(settingsSource).toMatch(/testID="notification-prefs-not-supported"/);
+    expect(settingsSource).toMatch(/Your server does not support notification preferences/);
+    expect(settingsSource).toMatch(/v0\.9\.14/);
+  });
+
+  it('gates both the categories AND the quiet-hours sections', () => {
+    // Quiet-hours uses the same QuietHoursEditor which reads from
+    // `notificationPrefs.quietHours` — that field never arrives on a
+    // pre-#4541 server, so the editor would also be stuck. The fix is to
+    // gate both sections on the same capability flag.
+    expect(settingsSource).toMatch(/testID="quiet-hours-not-supported"/);
+  });
+
+  it('declares serverCapabilities on the lifecycle store with a fail-closed default', () => {
+    // Empty `{}` is the fail-closed default: an absent flag reads as
+    // `false`, so feature-gated UI hides itself rather than silently
+    // no-oping clicks against a missing server handler.
+    expect(lifecycleSource).toMatch(/serverCapabilities:\s*Record<string,\s*boolean>/);
+    expect(lifecycleSource).toMatch(/serverCapabilities:\s*\{\}\s*as\s*Record<string,\s*boolean>/);
+  });
+
+  it('parses the auth_ok capability map in the message-handler (coerces non-true to false)', () => {
+    // Mirror of the dashboard's parser: malformed entries (string "true",
+    // numeric 1, null, etc.) must be coerced to `false` so a buggy server
+    // can't accidentally enable a UI gate.
+    expect(messageHandlerSource).toMatch(/capabilitiesRaw\s*=\s*msg\.capabilities/);
+    expect(messageHandlerSource).toMatch(
+      /serverCapabilities\s*:\s*Record<string,\s*boolean>\s*=\s*\{\}/,
+    );
+    expect(messageHandlerSource).toMatch(/serverCapabilities\[k\]\s*=\s*v\s*===\s*true/);
+    // Forwarded to the lifecycle store on auth_ok so the gate flips
+    // immediately on (re)connect.
+    expect(messageHandlerSource).toMatch(/setServerInfo\([\s\S]{0,800}serverCapabilities,/);
   });
 });

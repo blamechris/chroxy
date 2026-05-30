@@ -39,6 +39,9 @@ interface ServerInfo {
   serverResultTimeoutMs?: number | null;
   sessionCwd?: string | null;
   isEncrypted?: boolean;
+  // #4560 — server-advertised capability map from auth_ok. See the
+  // doc comment on ConnectionLifecycleState.serverCapabilities below.
+  serverCapabilities?: Record<string, boolean>;
 }
 
 interface ConnectionLifecycleState {
@@ -64,6 +67,18 @@ interface ConnectionLifecycleState {
    */
   serverResultTimeoutMs: number | null;
   isEncrypted: boolean;
+
+  /**
+   * #4560 — server-advertised capability map from auth_ok. Keyed by feature
+   * name (e.g. `notificationPrefs`), value=boolean. Lets the app gate UI
+   * affordances on the server actually supporting the matching WS message —
+   * pre-#4541 servers omit `notificationPrefs` so the Notifications section
+   * in SettingsScreen renders an explicit "not supported" message instead
+   * of sitting on "Loading preferences…" forever. Empty `{}` on fresh
+   * connect, repopulated on every auth_ok; cleared on disconnect so a
+   * reconnect against an older server can't have stale flags left set.
+   */
+  serverCapabilities: Record<string, boolean>;
 
   // Connection quality
   latencyMs: number | null;
@@ -99,6 +114,10 @@ const initialState = {
   serverProtocolVersion: null as number | null,
   serverResultTimeoutMs: null as number | null,
   isEncrypted: false,
+  // #4560 — empty map until auth_ok lands; cleared on every disconnect via
+  // reset() so a reconnect against a different (or older) server can't have
+  // its UI gates left enabled by stale state. Empty = fail-closed.
+  serverCapabilities: {} as Record<string, boolean>,
   latencyMs: null as number | null,
   connectionQuality: null as 'good' | 'fair' | 'poor' | null,
   connectionError: null as string | null,

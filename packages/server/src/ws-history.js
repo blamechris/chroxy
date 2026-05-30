@@ -82,6 +82,14 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // #3297 — `skill_trust_grant` handler + `skill_trust_granted` broadcast.
     // Gates the community-skill first-activation trust-grant UI.
     skillTrustGrant: true,
+    // #4560 — `notification_prefs_get` / `notification_prefs_set` handlers
+    // + `notification_prefs` snapshot broadcast (added in #4541). Gates the
+    // Notifications section in SettingsPanel / SettingsScreen so a client
+    // connecting to a pre-#4541 server doesn't sit on "Loading
+    // preferences…" indefinitely waiting for a snapshot that will never
+    // arrive — instead the section either hides itself or surfaces a
+    // "not supported on this server" message.
+    notificationPrefs: true,
   }
 
   // #3760, #3905: surface the effective inactivity timeouts so clients

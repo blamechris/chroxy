@@ -465,6 +465,32 @@ describe('multi-client awareness', () => {
     ws.close()
   })
 
+  // #4560 — the Notifications settings section sits on "Loading preferences…"
+  // forever when connecting to a pre-#4541 server (no `notification_prefs_get`
+  // handler). Advertising `notificationPrefs: true` in the auth_ok capability
+  // map lets clients gate the section render so older servers either hide it
+  // or show a "not supported on this server" message instead of dead UI.
+  it('advertises notificationPrefs capability in auth_ok (#4560)', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    assert.ok(authOk.capabilities, 'auth_ok should include capabilities map')
+    assert.equal(authOk.capabilities.notificationPrefs, true, 'capabilities.notificationPrefs should be true')
+
+    ws.close()
+  })
+
   it('stores deviceInfo from auth message', async () => {
     const mockSession = createMockSession()
     server = new WsServer({

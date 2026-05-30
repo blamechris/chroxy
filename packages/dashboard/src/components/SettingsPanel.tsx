@@ -459,6 +459,15 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // is the list of categories that fire even during quiet hours.
   const setNotificationPrefsQuietHours = useConnectionStore(s => s.setNotificationPrefsQuietHours)
   const setNotificationPrefsBypassCategories = useConnectionStore(s => s.setNotificationPrefsBypassCategories)
+  // #4560: capability gate for the Notifications section. Pre-#4541 servers
+  // have no `notification_prefs_get` handler; firing the request was a
+  // fire-and-forget no-op that left the section stuck on "Loading
+  // preferences…" forever. Mirrors the per-capability pattern already used
+  // by skillTrustAccept / skillTrustGrant (App.tsx), gated server-wide
+  // rather than per-session. Default to fail-closed: an empty map (older
+  // server, or pre-connect) reads as "feature not supported" so the user
+  // sees an explicit "needs a newer server" message instead of dead UI.
+  const notificationPrefsSupported = useConnectionStore(s => !!s.serverCapabilities?.notificationPrefs)
   const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
   // #3805: same capability gate pattern as promptEvaluator — only
   // render the toggle when the active session reports the boolean
@@ -538,10 +547,19 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // (other dashboard / mobile client setting a category) are pushed via the
   // server's broadcast after every `notification_prefs_set`, so once
   // connected we stay in sync without polling.
+  //
+  // #4560: skip the refresh entirely when the server doesn't advertise the
+  // `notificationPrefs` capability — pre-#4541 servers have no handler for
+  // `notification_prefs_get`, so the request would either get rejected as
+  // an `unknown_message` error or be silently dropped. Either way the
+  // section never receives a snapshot and the loading hint sits forever.
+  // Skipping the WS write keeps the server logs clean and makes the gated
+  // render decisions self-consistent.
   useEffect(() => {
     if (!isOpen) return
+    if (!notificationPrefsSupported) return
     refreshNotificationPrefs()
-  }, [isOpen, refreshNotificationPrefs])
+  }, [isOpen, notificationPrefsSupported, refreshNotificationPrefs])
 
   // #4559: clear the inline "server disconnected" banners when the panel
   // closes so re-opening Settings starts from a clean slate. A stale
@@ -1002,7 +1020,14 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               stable localStorage id sent in `deviceInfo` on auth), so the
               dashboard always addresses the same `devices` entry across
               reconnects. When `currentDeviceKey` is null (storage broken),
-              the per-device toggle row is suppressed entirely. */}
+              the per-device toggle row is suppressed entirely.
+
+              #4560: the section header is always rendered so the user knows
+              the feature exists. When the server doesn't advertise the
+              `notificationPrefs` capability (pre-#4541), the body is
+              replaced with an explicit "needs a newer server" message —
+              the prior behaviour left "Loading preferences…" up forever
+              because pre-#4541 servers never reply to `notification_prefs_get`. */}
           <section className="settings-section" data-testid="notification-prefs-section">
             <h3>Notifications</h3>
             <p className="settings-hint">
@@ -1023,7 +1048,16 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 {notifWsClosedError}
               </p>
             )}
-            {notificationPrefs == null ? (
+            {!notificationPrefsSupported ? (
+              <p
+                className="settings-hint"
+                data-testid="notification-prefs-not-supported"
+              >
+                Your server does not support notification preferences. Upgrade
+                to chroxy v0.9.14 or newer to manage per-category opt-in,
+                per-device mutes, and quiet hours from here.
+              </p>
+            ) : notificationPrefs == null ? (
               <p
                 className="settings-hint"
                 data-testid="notification-prefs-loading"
