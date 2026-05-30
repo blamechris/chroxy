@@ -188,6 +188,10 @@ function InfoDisclosure({
   const [open, setOpen] = useState(false)
   const popoverId = useId()
   const containerRef = useRef<HTMLSpanElement | null>(null)
+  // #4539 — keep a handle on the disclosure button so Escape dismiss can
+  // return focus to the invoker per WAI-ARIA APG disclosure guidance.
+  // Mirrors the ActivityIndicator fix from PR #4525.
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
   // Track whether the popover was opened via hover (mouse) so a subsequent
   // mouseleave can close it. Click-opened popovers stay until explicit
   // dismissal (Escape, click-outside, or second click).
@@ -206,12 +210,23 @@ function InfoDisclosure({
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         setOpen(false)
+        // #4539 — WAI-ARIA APG: a disclosure-triggered popover dismissed
+        // via Escape should return focus to the invoker so keyboard users
+        // don't get parked on document.body and lose their place in the
+        // tab order. Mirrors PR #4525 which did the same for
+        // ActivityIndicator.
+        triggerRef.current?.focus()
       }
     }
     function onPointerDown(e: PointerEvent) {
       const target = e.target as Node | null
       if (!target) return
       if (containerRef.current && containerRef.current.contains(target)) return
+      // #4539 — outside-click dismiss intentionally does NOT restore focus
+      // to the disclosure trigger: the user explicitly clicked elsewhere,
+      // so stealing focus back would fight their pointer intent. Escape
+      // (above) is the keyboard-only path that needs focus restoration
+      // per WAI-ARIA APG disclosure guidance.
       setOpen(false)
     }
     document.addEventListener('keydown', onKeyDown)
@@ -232,6 +247,7 @@ function InfoDisclosure({
     <span className="sidebar-token-view-disclosure" ref={containerRef}>
       <button
         type="button"
+        ref={triggerRef}
         className={triggerClassName}
         data-testid={testIdBase}
         aria-label={ariaLabel}
