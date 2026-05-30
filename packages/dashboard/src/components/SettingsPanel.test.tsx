@@ -73,6 +73,10 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     notificationPrefs: null,
     refreshNotificationPrefs: vi.fn(),
     setNotificationPrefsCategory: vi.fn(),
+    // #4544: quiet-hours editor actions. Default no-op spies; individual
+    // tests override.
+    setNotificationPrefsQuietHours: vi.fn(),
+    setNotificationPrefsBypassCategories: vi.fn(),
     ...extra,
   }
 }
@@ -753,6 +757,147 @@ describe('SettingsPanel', () => {
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.getByTestId('notification-prefs-toggle-future_category')).toBeInTheDocument()
+    })
+  })
+
+  describe('Notification preferences — quiet-hours editor (#4544)', () => {
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+    }
+    const baseSnapshot = { categories, devices: {}, quietHours: null }
+
+    it('renders the quiet-hours toggle inside the Notifications section', () => {
+      setMockState({ notificationPrefs: baseSnapshot })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('quiet-hours-editor')).toBeInTheDocument()
+      expect(screen.getByTestId('quiet-hours-enabled-toggle')).toBeInTheDocument()
+    })
+
+    it('hides the start/end/timezone inputs when quiet hours are disabled', () => {
+      setMockState({ notificationPrefs: baseSnapshot })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('quiet-hours-start-input')).toBeNull()
+      expect(screen.queryByTestId('quiet-hours-end-input')).toBeNull()
+      expect(screen.queryByTestId('quiet-hours-timezone-select')).toBeNull()
+    })
+
+    it('shows start/end/timezone inputs when quiet hours are enabled', () => {
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const startInput = screen.getByTestId('quiet-hours-start-input') as HTMLInputElement
+      const endInput = screen.getByTestId('quiet-hours-end-input') as HTMLInputElement
+      const tzSelect = screen.getByTestId('quiet-hours-timezone-select') as HTMLSelectElement
+      expect(startInput.value).toBe('22:00')
+      expect(endInput.value).toBe('07:00')
+      expect(tzSelect.value).toBe('America/Los_Angeles')
+    })
+
+    it('calls setNotificationPrefsQuietHours(null) when disabling', () => {
+      const setNotificationPrefsQuietHours = vi.fn()
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        },
+        setNotificationPrefsQuietHours,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('quiet-hours-enabled-toggle'))
+      expect(setNotificationPrefsQuietHours).toHaveBeenCalledWith(null)
+    })
+
+    it('calls setNotificationPrefsQuietHours with a default window when enabling for the first time', () => {
+      const setNotificationPrefsQuietHours = vi.fn()
+      setMockState({ notificationPrefs: baseSnapshot, setNotificationPrefsQuietHours })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('quiet-hours-enabled-toggle'))
+      const called = setNotificationPrefsQuietHours.mock.calls[0]?.[0]
+      // Default: 22:00-07:00 in the browser timezone.
+      expect(called).toMatchObject({ start: '22:00', end: '07:00' })
+      expect(typeof called.timezone).toBe('string')
+      expect(called.timezone.length).toBeGreaterThan(0)
+    })
+
+    it('Save button sends the edited window', () => {
+      const setNotificationPrefsQuietHours = vi.fn()
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        },
+        setNotificationPrefsQuietHours,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Change the start time, then click Save.
+      fireEvent.change(screen.getByTestId('quiet-hours-start-input'), { target: { value: '23:30' } })
+      fireEvent.click(screen.getByTestId('quiet-hours-save-button'))
+      expect(setNotificationPrefsQuietHours).toHaveBeenCalledWith({
+        start: '23:30',
+        end: '07:00',
+        timezone: 'America/Los_Angeles',
+      })
+    })
+
+    it('renders the bypass fieldset with permission + activity_error checked by default', () => {
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+          bypassCategories: ['permission', 'activity_error'],
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const permCheck = screen.getByTestId('quiet-hours-bypass-toggle-permission') as HTMLInputElement
+      const errCheck = screen.getByTestId('quiet-hours-bypass-toggle-activity_error') as HTMLInputElement
+      const resultCheck = screen.getByTestId('quiet-hours-bypass-toggle-result') as HTMLInputElement
+      expect(permCheck.checked).toBe(true)
+      expect(errCheck.checked).toBe(true)
+      expect(resultCheck.checked).toBe(false)
+    })
+
+    it('toggling a bypass checkbox sends the full updated list', () => {
+      const setNotificationPrefsBypassCategories = vi.fn()
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+          bypassCategories: ['permission', 'activity_error'],
+        },
+        setNotificationPrefsBypassCategories,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Uncheck activity_error — replacement wire sends just ['permission'].
+      fireEvent.click(screen.getByTestId('quiet-hours-bypass-toggle-activity_error'))
+      const called = setNotificationPrefsBypassCategories.mock.calls[0]?.[0]
+      expect(Array.isArray(called)).toBe(true)
+      expect(called.sort()).toEqual(['permission'])
+    })
+
+    it('falls back to documented bypass defaults when the snapshot omits bypassCategories', () => {
+      // Older server omits the field. The UI must still show permission +
+      // activity_error checked so the user sees the active gate state.
+      setMockState({
+        notificationPrefs: {
+          ...baseSnapshot,
+          quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const permCheck = screen.getByTestId('quiet-hours-bypass-toggle-permission') as HTMLInputElement
+      const errCheck = screen.getByTestId('quiet-hours-bypass-toggle-activity_error') as HTMLInputElement
+      expect(permCheck.checked).toBe(true)
+      expect(errCheck.checked).toBe(true)
     })
   })
 })

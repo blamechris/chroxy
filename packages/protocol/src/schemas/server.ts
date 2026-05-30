@@ -770,17 +770,26 @@ export const ServerPushTokenErrorSchema = z.object({
 // broadcast variant emitted after a set carries no requestId so all
 // connected clients update in lockstep.
 const NotificationPrefsCategoriesSchema = z.record(z.string().min(1).max(64), z.boolean())
-const NotificationPrefsDevicesSchema = z.record(
-  z.string().min(1).max(512),
-  z.object({ categories: NotificationPrefsCategoriesSchema.optional() }).passthrough(),
-)
+// #4544: quiet-hours window carries an IANA timezone; per-device entries
+// may also carry their own `quietHours` and `bypassCategories` (the
+// device-level fields REPLACE the global value, see `notification-prefs.js`).
 const NotificationPrefsQuietHoursSchema = z.union([
   z.null(),
   z.object({
     start: z.string().regex(/^\d{2}:\d{2}$/),
     end: z.string().regex(/^\d{2}:\d{2}$/),
+    timezone: z.string().min(1).max(64),
   }),
 ])
+const NotificationPrefsBypassListSchema = z.array(z.string().min(1).max(64)).max(64)
+const NotificationPrefsDevicesSchema = z.record(
+  z.string().min(1).max(512),
+  z.object({
+    categories: NotificationPrefsCategoriesSchema.optional(),
+    quietHours: NotificationPrefsQuietHoursSchema.optional(),
+    bypassCategories: NotificationPrefsBypassListSchema.optional(),
+  }).passthrough(),
+)
 
 export const ServerNotificationPrefsSchema = z.object({
   type: z.literal('notification_prefs'),
@@ -789,6 +798,10 @@ export const ServerNotificationPrefsSchema = z.object({
     categories: NotificationPrefsCategoriesSchema,
     devices: NotificationPrefsDevicesSchema,
     quietHours: NotificationPrefsQuietHoursSchema,
+    // #4544: globally-applied bypass list. Optional in the wire schema so
+    // older servers that omit the field still parse — clients should treat
+    // `undefined` as "use the documented defaults" (permission + activity_error).
+    bypassCategories: NotificationPrefsBypassListSchema.optional(),
   }).passthrough(),
 }).passthrough()
 

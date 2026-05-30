@@ -127,12 +127,102 @@ describe('message-handler.ts — notification_prefs WS message (#4542)', () => {
   });
 
   it('handles the notification_prefs case and stores the parsed snapshot', () => {
-    expect(messageHandlerSource).toMatch(/case 'notification_prefs'[\s\S]{0,800}ServerNotificationPrefsSchema\.safeParse[\s\S]{0,300}notificationPrefs:/);
+    expect(messageHandlerSource).toMatch(/case 'notification_prefs'[\s\S]{0,1500}ServerNotificationPrefsSchema\.safeParse[\s\S]{0,800}notificationPrefs:/);
   });
 
   it('logs and skips when the payload fails schema validation', () => {
     expect(messageHandlerSource).toMatch(
       /case 'notification_prefs'[\s\S]{0,600}!parsed\.success[\s\S]{0,200}console\.warn\(\s*'notification_prefs:/,
+    );
+  });
+
+  // #4544: the wire snapshot now carries an optional bypassCategories
+  // array. The handler must forward it when present so the UI sees the
+  // current gate state; absent means "use documented defaults".
+  it('forwards bypassCategories from the parsed snapshot when present (#4544)', () => {
+    expect(messageHandlerSource).toMatch(/bypassCategories\s*=\s*\(prefs\s*as[\s\S]{0,150}\.bypassCategories/);
+    expect(messageHandlerSource).toMatch(/Array\.isArray\(bypassCategories\)/);
+  });
+});
+
+describe('SettingsScreen — Quiet hours editor section (#4544)', () => {
+  it('renders a QUIET HOURS section header', () => {
+    expect(settingsSource).toMatch(/QUIET HOURS/);
+  });
+
+  it('imports the quiet-hours store actions from the connection store', () => {
+    expect(settingsSource).toMatch(/setNotificationPrefsQuietHours\s*=\s*useConnectionStore/);
+    expect(settingsSource).toMatch(/setNotificationPrefsBypassCategories\s*=\s*useConnectionStore/);
+  });
+
+  it('renders the QuietHoursEditor sub-component inside the QUIET HOURS section', () => {
+    expect(settingsSource).toMatch(/<QuietHoursEditor[\s\S]{0,800}window=\{notificationPrefs\.quietHours\}/);
+  });
+
+  it('defines the QuietHoursEditor component with the documented props shape', () => {
+    expect(settingsSource).toMatch(/function QuietHoursEditor\(props:\s*\{[\s\S]{0,400}window:\s*\{\s*start:\s*string;\s*end:\s*string;\s*timezone:\s*string\s*\}\s*\|\s*null/);
+    expect(settingsSource).toMatch(/onWindowChange:\s*\(w:[\s\S]{0,150}timezone:\s*string\s*\}\s*\|\s*null\)\s*=>\s*void/);
+    expect(settingsSource).toMatch(/onBypassChange:\s*\(categories:\s*string\[\]\)\s*=>\s*void/);
+  });
+
+  it('emits the documented quiet-hours testIDs', () => {
+    expect(settingsSource).toMatch(/testID="quiet-hours-editor"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-enabled-toggle"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-start-input"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-end-input"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-timezone-picker"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-save-button"/);
+    expect(settingsSource).toMatch(/testID=\{`quiet-hours-bypass-toggle-\$\{cat\}`\}/);
+  });
+
+  it('validates HH:MM before round-tripping', () => {
+    expect(settingsSource).toMatch(/function isValidHHMM/);
+    expect(settingsSource).toMatch(/Invalid time[\s\S]{0,100}HH:MM/);
+  });
+
+  it('declares a sensible curated timezone list', () => {
+    expect(settingsSource).toMatch(/QUIET_HOURS_TIMEZONE_CHOICES/);
+    expect(settingsSource).toMatch(/America\/Los_Angeles/);
+    expect(settingsSource).toMatch(/Europe\/London/);
+  });
+
+  it('falls back to DEFAULT_BYPASS_CATEGORIES when the snapshot omits the list', () => {
+    expect(settingsSource).toMatch(/bypassCategories=\{notificationPrefs\.bypassCategories\s*\?\?\s*DEFAULT_BYPASS_CATEGORIES\}/);
+  });
+});
+
+describe('ConnectionState — quiet-hours actions (#4544)', () => {
+  it('declares setNotificationPrefsQuietHours with the documented signature', () => {
+    expect(typesSource).toMatch(
+      /setNotificationPrefsQuietHours:\s*\(window:\s*\{\s*start:\s*string;\s*end:\s*string;\s*timezone:\s*string\s*\}\s*\|\s*null\)\s*=>\s*void/,
+    );
+  });
+
+  it('declares setNotificationPrefsBypassCategories with the documented signature', () => {
+    expect(typesSource).toMatch(
+      /setNotificationPrefsBypassCategories:\s*\(categories:\s*string\[\]\)\s*=>\s*void/,
+    );
+  });
+
+  it('extends notificationPrefs.quietHours with a timezone field', () => {
+    expect(typesSource).toMatch(/quietHours:\s*\{\s*start:\s*string;\s*end:\s*string;\s*timezone:\s*string\s*\}\s*\|\s*null/);
+  });
+
+  it('declares optional bypassCategories on notificationPrefs', () => {
+    expect(typesSource).toMatch(/bypassCategories\?:\s*string\[\]/);
+  });
+});
+
+describe('connection.ts — quiet-hours actions (#4544)', () => {
+  it('setNotificationPrefsQuietHours sends a notification_prefs_set patch with quietHours', () => {
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsQuietHours[\s\S]{0,400}notification_prefs_set[\s\S]{0,200}quietHours:\s*window/,
+    );
+  });
+
+  it('setNotificationPrefsBypassCategories sends a notification_prefs_set patch with bypassCategories', () => {
+    expect(connectionSource).toMatch(
+      /setNotificationPrefsBypassCategories[\s\S]{0,400}notification_prefs_set[\s\S]{0,200}bypassCategories:\s*categories/,
     );
   });
 });

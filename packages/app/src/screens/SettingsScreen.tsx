@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
   Switch,
   TouchableOpacity,
+  TextInput,
   StyleSheet,
   Alert,
   Modal,
@@ -61,6 +62,52 @@ const NOTIFICATION_CATEGORY_ORDER = [
   'result',
   'live_activity',
 ];
+
+/**
+ * #4544: documented defaults for the quiet-hours bypass list. Mirrors
+ * `DEFAULT_BYPASS_CATEGORIES` from packages/server/src/notification-prefs.js.
+ * Used when a snapshot omits the field (older server, fresh install) so
+ * the UI shows the right initial checkboxes.
+ */
+const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error'];
+
+/**
+ * #4544: curated timezone short-list. Same set as the dashboard's
+ * `getQuietHoursTimezoneOptions` so mobile + desktop pickers agree on
+ * the most-likely picks. The device's resolved zone is prepended so the
+ * user can pick "this device" without scrolling.
+ */
+const QUIET_HOURS_TIMEZONE_CHOICES = [
+  'UTC',
+  'America/Los_Angeles',
+  'America/Denver',
+  'America/Chicago',
+  'America/New_York',
+  'America/Sao_Paulo',
+  'Europe/London',
+  'Europe/Berlin',
+  'Europe/Paris',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Shanghai',
+  'Asia/Tokyo',
+  'Asia/Singapore',
+  'Australia/Sydney',
+  'Pacific/Auckland',
+];
+
+/**
+ * #4544: HH:MM validation predicate. Mirrors the server-side regex in
+ * `notification-prefs.js` so the mobile UI rejects malformed times before
+ * round-tripping them.
+ */
+const HHMM_RE = /^\d{2}:\d{2}$/;
+function isValidHHMM(s: string): boolean {
+  if (!HHMM_RE.test(s)) return false;
+  const [h, m] = s.split(':').map(Number);
+  return h <= 23 && m <= 59;
+}
 
 const SPEECH_LANGUAGES = [
   { tag: 'en-US', label: 'English (US)' },
@@ -150,6 +197,11 @@ export function SettingsScreen() {
   const notificationPrefs = useConnectionStore((s) => s.notificationPrefs);
   const refreshNotificationPrefs = useConnectionStore((s) => s.refreshNotificationPrefs);
   const setNotificationPrefsCategory = useConnectionStore((s) => s.setNotificationPrefsCategory);
+  // #4544: quiet-hours editor actions. The window is global; per-device
+  // overrides are owned by a future iteration. `bypassCategories` is the
+  // list of categories that fire even during quiet hours.
+  const setNotificationPrefsQuietHours = useConnectionStore((s) => s.setNotificationPrefsQuietHours);
+  const setNotificationPrefsBypassCategories = useConnectionStore((s) => s.setNotificationPrefsBypassCategories);
 
   useEffect(() => {
     refreshNotificationPrefs();
@@ -457,6 +509,24 @@ export function SettingsScreen() {
         )}
       </View>
 
+      {/* NOTIFICATIONS — Quiet hours (#4544) */}
+      <Text style={styles.sectionHeader}>QUIET HOURS</Text>
+      <View style={styles.section} testID="quiet-hours-section">
+        {notificationPrefs == null ? (
+          <View style={styles.row}>
+            <Text style={styles.rowHint}>Loading preferences&hellip;</Text>
+          </View>
+        ) : (
+          <QuietHoursEditor
+            window={notificationPrefs.quietHours}
+            categories={notificationPrefs.categories}
+            bypassCategories={notificationPrefs.bypassCategories ?? DEFAULT_BYPASS_CATEGORIES}
+            onWindowChange={setNotificationPrefsQuietHours}
+            onBypassChange={setNotificationPrefsBypassCategories}
+          />
+        )}
+      </View>
+
       {/* PORTABILITY */}
       {conversationId != null && (
         <>
@@ -662,6 +732,220 @@ export function SettingsScreen() {
   );
 }
 
+/**
+ * #4544: mobile quiet-hours editor.
+ *
+ * Mirrors the dashboard `QuietHoursEditor` shape: enable toggle, HH:MM
+ * inputs for start/end, timezone picker (modal), and a per-category bypass
+ * list. Owns draft state so partial edits don't round-trip every keystroke;
+ * `Save` commits the window in one WS message. Bypass toggles patch
+ * immediately because they're booleans without an intermediate form
+ * stage.
+ */
+function QuietHoursEditor(props: {
+  window: { start: string; end: string; timezone: string } | null;
+  categories: Record<string, boolean>;
+  bypassCategories: string[];
+  onWindowChange: (w: { start: string; end: string; timezone: string } | null) => void;
+  onBypassChange: (categories: string[]) => void;
+}) {
+  const { window: win, categories, bypassCategories, onWindowChange, onBypassChange } = props;
+  // Resolve the device's IANA timezone once. `Intl.DateTimeFormat` is
+  // available in modern Hermes / JSC — the try/catch covers an extremely
+  // old runtime gracefully.
+  const browserTz = useMemo(() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return 'UTC'; }
+  }, []);
+  const tzOptions = useMemo(() => {
+    const list = [...QUIET_HOURS_TIMEZONE_CHOICES];
+    if (browserTz && !list.includes(browserTz)) list.unshift(browserTz);
+    return list;
+  }, [browserTz]);
+
+  const [enabled, setEnabled] = useState<boolean>(win != null);
+  const [start, setStart] = useState<string>(win?.start ?? '22:00');
+  const [end, setEnd] = useState<string>(win?.end ?? '07:00');
+  const [timezone, setTimezone] = useState<string>(win?.timezone ?? browserTz);
+  const [showTzPicker, setShowTzPicker] = useState(false);
+
+  // Re-sync draft when the snapshot changes (remote save, broadcast).
+  useEffect(() => {
+    setEnabled(win != null);
+    if (win) {
+      setStart(win.start);
+      setEnd(win.end);
+      setTimezone(win.timezone);
+    }
+  }, [win]);
+
+  const handleToggleEnable = useCallback((next: boolean) => {
+    setEnabled(next);
+    if (!next) {
+      onWindowChange(null);
+    } else if (win == null) {
+      onWindowChange({ start, end, timezone });
+    }
+  }, [win, start, end, timezone, onWindowChange]);
+
+  const handleSaveWindow = useCallback(() => {
+    if (!isValidHHMM(start) || !isValidHHMM(end)) {
+      Alert.alert('Invalid time', 'Use HH:MM (24-hour). Example: 22:00');
+      return;
+    }
+    onWindowChange({ start, end, timezone });
+  }, [start, end, timezone, onWindowChange]);
+
+  const handleToggleBypass = useCallback((cat: string, next: boolean) => {
+    const set = new Set(bypassCategories);
+    if (next) set.add(cat); else set.delete(cat);
+    onBypassChange([...set]);
+  }, [bypassCategories, onBypassChange]);
+
+  const bypassCandidates = useMemo(() => {
+    const known = NOTIFICATION_CATEGORY_ORDER.filter((k) => k in categories || bypassCategories.includes(k));
+    const extras = bypassCategories.filter((k) => !NOTIFICATION_CATEGORY_ORDER.includes(k) && !(k in categories));
+    return [...known, ...extras];
+  }, [categories, bypassCategories]);
+
+  const dirty = enabled && (start !== (win?.start ?? '') || end !== (win?.end ?? '') || timezone !== (win?.timezone ?? ''));
+
+  return (
+    <View testID="quiet-hours-editor">
+      <View style={styles.row}>
+        <View style={{ flex: 1, paddingRight: 12 }}>
+          <Text style={styles.rowLabel}>Enable quiet hours</Text>
+          <Text style={[styles.rowHint, { marginTop: 2 }]}>
+            Mute pushes during a fixed window. Operator-blocking categories
+            still fire by default — uncheck them below to silence too.
+          </Text>
+        </View>
+        <Switch
+          value={enabled}
+          onValueChange={handleToggleEnable}
+          trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
+          testID="quiet-hours-enabled-toggle"
+        />
+      </View>
+      {enabled && (
+        <>
+          <View style={styles.separator} />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>From</Text>
+            <TextInput
+              value={start}
+              onChangeText={setStart}
+              placeholder="22:00"
+              placeholderTextColor={COLORS.textMuted}
+              keyboardType="numbers-and-punctuation"
+              maxLength={5}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={styles.timeInput}
+              testID="quiet-hours-start-input"
+            />
+          </View>
+          <View style={styles.separator} />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>To</Text>
+            <TextInput
+              value={end}
+              onChangeText={setEnd}
+              placeholder="07:00"
+              placeholderTextColor={COLORS.textMuted}
+              keyboardType="numbers-and-punctuation"
+              maxLength={5}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={styles.timeInput}
+              testID="quiet-hours-end-input"
+            />
+          </View>
+          <View style={styles.separator} />
+          <TouchableOpacity
+            style={styles.row}
+            onPress={() => setShowTzPicker(true)}
+            testID="quiet-hours-timezone-picker"
+          >
+            <Text style={styles.rowLabel}>Timezone</Text>
+            <Text style={styles.rowValue}>{timezone}</Text>
+          </TouchableOpacity>
+          {dirty && (
+            <>
+              <View style={styles.separator} />
+              <TouchableOpacity
+                style={styles.row}
+                onPress={handleSaveWindow}
+                testID="quiet-hours-save-button"
+              >
+                <Text style={styles.actionText}>Save Quiet Hours</Text>
+              </TouchableOpacity>
+            </>
+          )}
+          <View style={styles.separator} />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Bypass during quiet hours</Text>
+          </View>
+          {bypassCandidates.map((cat, idx) => {
+            const meta = NOTIFICATION_CATEGORY_LABELS[cat];
+            const label = meta?.label ?? cat;
+            const checked = bypassCategories.includes(cat);
+            return (
+              <React.Fragment key={cat}>
+                {idx === 0 ? null : <View style={styles.separator} />}
+                <View style={styles.row}>
+                  <View style={{ flex: 1, paddingRight: 12 }}>
+                    <Text style={styles.rowLabel}>{label}</Text>
+                  </View>
+                  <Switch
+                    value={checked}
+                    onValueChange={(value) => handleToggleBypass(cat, value)}
+                    trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
+                    testID={`quiet-hours-bypass-toggle-${cat}`}
+                  />
+                </View>
+              </React.Fragment>
+            );
+          })}
+        </>
+      )}
+      <Modal
+        visible={showTzPicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowTzPicker(false)}
+      >
+        <Pressable style={styles.sheetOverlay} onPress={() => setShowTzPicker(false)}>
+          <Pressable
+            style={[styles.sheetContent, { paddingBottom: 16 }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <Text style={styles.sheetTitle}>Timezone</Text>
+            <ScrollView style={styles.sheetList} bounces={false}>
+              {tzOptions.map((tz) => (
+                <TouchableOpacity
+                  key={tz}
+                  style={[styles.sheetOption, tz === timezone && styles.sheetOptionActive]}
+                  onPress={() => { setTimezone(tz); setShowTzPicker(false); }}
+                >
+                  <Text style={[styles.sheetOptionText, tz === timezone && styles.sheetOptionTextActive]}>
+                    {tz === browserTz ? `${tz} (this device)` : tz}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={[styles.sheetOption, styles.sheetCancel]}
+              onPress={() => setShowTzPicker(false)}
+            >
+              <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -706,6 +990,16 @@ const styles = StyleSheet.create({
   rowValueSmall: {
     fontSize: 13,
     maxWidth: 200,
+  },
+  // #4544: HH:MM picker field — small fixed width so the keyboard slots
+  // straight into the row layout without pushing the label.
+  timeInput: {
+    color: COLORS.textPrimary,
+    fontSize: 15,
+    minWidth: 64,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    textAlign: 'right',
   },
   rowHint: {
     color: COLORS.textMuted,

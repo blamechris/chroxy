@@ -2932,11 +2932,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         break;
       }
       const prefs = parsed.data.prefs;
+      // #4544: the wire snapshot now carries an optional `bypassCategories`
+      // array (categories that fire even during quiet hours). Older servers
+      // omit it — clients fall back to the documented defaults
+      // (permission + activity_error). The quiet-hours window's
+      // `timezone` field is also new in #4544; the schema requires it
+      // when present, so per-device timezone-less windows from an
+      // intermediate state simply won't validate.
+      const bypassCategories = (prefs as { bypassCategories?: string[] }).bypassCategories;
       set({
         notificationPrefs: {
           categories: prefs.categories,
           devices: prefs.devices,
           quietHours: prefs.quietHours,
+          ...(Array.isArray(bypassCategories) ? { bypassCategories } : {}),
         },
       });
       break;

@@ -288,10 +288,23 @@ export interface ServerNotificationData {
   // `notification_prefs` snapshot received from the server. `null` until
   // the first snapshot arrives. Server is the single source of truth —
   // ~/.chroxy/notification-prefs.json on the host.
+  //
+  // #4544 extends the shape with `timezone` on the quiet-hours window, a
+  // globally-applied `bypassCategories` list (defaults to
+  // permission + activity_error — categories that fire even at 3am), and
+  // optional per-device overrides for quietHours / bypassCategories.
+  // Per-device REPLACES the global value entirely (see
+  // packages/server/src/notification-prefs.js for the precedence
+  // rationale).
   notificationPrefs: {
     categories: Record<string, boolean>;
-    devices: Record<string, { categories?: Record<string, boolean> }>;
-    quietHours: { start: string; end: string } | null;
+    devices: Record<string, {
+      categories?: Record<string, boolean>;
+      quietHours?: { start: string; end: string; timezone: string } | null;
+      bypassCategories?: string[];
+    }>;
+    quietHours: { start: string; end: string; timezone: string } | null;
+    bypassCategories?: string[];
   } | null;
 }
 
@@ -493,6 +506,14 @@ export interface ServerNotificationActions {
   // are preserved).
   refreshNotificationPrefs: () => void;
   setNotificationPrefsCategory: (category: string, enabled: boolean) => void;
+  // #4544: patch the global quiet-hours window. `null` clears the window;
+  // a window object (with `timezone`) sets it. Server broadcasts the
+  // merged snapshot so all clients update in lockstep.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => void;
+  // #4544: replace the global bypass-category list wholesale. An empty
+  // array means "nothing bypasses, not even errors" — the UI should
+  // always send the desired final list.
+  setNotificationPrefsBypassCategories: (categories: string[]) => void;
 }
 
 /**

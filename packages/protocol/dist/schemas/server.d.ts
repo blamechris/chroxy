@@ -562,11 +562,19 @@ export declare const ServerNotificationPrefsSchema: z.ZodObject<{
         categories: z.ZodRecord<z.ZodString, z.ZodBoolean>;
         devices: z.ZodRecord<z.ZodString, z.ZodObject<{
             categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+            quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+                start: z.ZodString;
+                end: z.ZodString;
+                timezone: z.ZodString;
+            }, z.core.$strip>]>>;
+            bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$loose>>;
         quietHours: z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
             end: z.ZodString;
+            timezone: z.ZodString;
         }, z.core.$strip>]>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$loose>;
 }, z.core.$loose>;
 export declare const ServerShutdownSchema: z.ZodObject<{

@@ -273,11 +273,19 @@ export declare const NotificationPrefsPatchSchema: z.ZodObject<{
     categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
     devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
         categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+            timezone: z.ZodString;
+        }, z.core.$strip>]>>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$loose>>>;
     quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
         start: z.ZodString;
         end: z.ZodString;
+        timezone: z.ZodString;
     }, z.core.$strip>]>>;
+    bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 /**
  * Request the current notification preferences. Server replies with a
@@ -299,11 +307,19 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
         categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
         devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
             categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+            quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+                start: z.ZodString;
+                end: z.ZodString;
+                timezone: z.ZodString;
+            }, z.core.$strip>]>>;
+            bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$loose>>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
             end: z.ZodString;
+            timezone: z.ZodString;
         }, z.core.$strip>]>>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>;
 }, z.core.$loose>;
 export declare const UserQuestionResponseSchema: z.ZodObject<{
@@ -645,11 +661,19 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
         devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
             categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+            quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+                start: z.ZodString;
+                end: z.ZodString;
+                timezone: z.ZodString;
+            }, z.core.$strip>]>>;
+            bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$loose>>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
             end: z.ZodString;
+            timezone: z.ZodString;
         }, z.core.$strip>]>>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
