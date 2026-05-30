@@ -224,6 +224,23 @@ describe('SidebarTokenView (#4303 v0)', () => {
       expect(popover.textContent ?? '').toContain('claude TUI')
     })
 
+    // #4546: the Escape focus-restore wiring lives on the shared
+    // `InfoDisclosure` component, so it benefits both the cost-info trigger
+    // (covered above) AND the TUI-untracked trigger. Cover the TUI path
+    // explicitly so a future refactor that splits `InfoDisclosure` into two
+    // components — or introduces a per-trigger override — can't silently
+    // lose focus-restoration coverage for the TUI-untracked popover.
+    it('restores focus to the TUI-untracked disclosure on Escape (#4539)', () => {
+      const sessions = [makeSession('tui', 'claude-tui', makeUsage(0, 0, 0))]
+      render(<SidebarTokenView sessions={sessions} />)
+      const trigger = screen.getByTestId('sidebar-token-view-provider-claude-tui-untracked')
+      fireEvent.click(trigger)
+      const popover = screen.getByTestId('sidebar-token-view-provider-claude-tui-untracked-popover')
+      ;(popover as HTMLElement).focus()
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(document.activeElement).toBe(trigger)
+    })
+
     it('renders aggregate total and cost when present', () => {
       const sessions = [
         makeSession('byok', 'claude-byok', makeUsage(1000, 500, 0.10)),
