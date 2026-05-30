@@ -245,6 +245,83 @@ describe('EnvironmentManager.create()', () => {
   })
 })
 
+/**
+ * #4548 — EnvironmentManager.create() must forward opts.workspacePVC through to
+ * the backend's createEnvironment() so callers of the high-level manager API can
+ * reach K8sBackend's PVC workspace strategy (added in #4547 for #3385) without
+ * bypassing the manager.
+ *
+ * The manager itself does not validate the shape of workspacePVC — that lives in
+ * K8sBackend.validateWorkspacePVC(). The manager is a pure passthrough: it must
+ * not strip, mutate, or default the option. Other backends (e.g. DockerBackend)
+ * simply ignore the field.
+ */
+describe('EnvironmentManager.create() — workspacePVC passthrough (#4548)', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  /**
+   * Build a stub backend that records every opts payload it receives. The
+   * minimal Backend surface we touch in create() is createEnvironment — we don't
+   * need to implement the rest of the interface for these tests.
+   */
+  function createRecordingBackend() {
+    const calls = []
+    return {
+      calls,
+      async createEnvironment(opts) {
+        calls.push(opts)
+        return {
+          containerId: 'stub-container-id',
+          containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+        }
+      },
+    }
+  }
+
+  it('forwards opts.workspacePVC verbatim to the backend', async () => {
+    const backend = createRecordingBackend()
+    const manager = new EnvironmentManager({ statePath, backend })
+
+    const workspacePVC = { claimName: 'shared-workspace-pvc', mountPath: '/work', readOnly: true }
+
+    await manager.create({
+      name: 'pvc-env',
+      cwd: '/tmp',
+      workspacePVC,
+    })
+
+    assert.equal(backend.calls.length, 1, 'backend.createEnvironment must be invoked exactly once')
+    assert.deepEqual(
+      backend.calls[0].workspacePVC,
+      workspacePVC,
+      'workspacePVC must be forwarded verbatim — manager is a pure passthrough'
+    )
+  })
+
+  it('omits workspacePVC from the backend call when the caller does not pass it', async () => {
+    const backend = createRecordingBackend()
+    const manager = new EnvironmentManager({ statePath, backend })
+
+    await manager.create({ name: 'no-pvc-env', cwd: '/tmp' })
+
+    assert.equal(backend.calls.length, 1)
+    assert.equal(
+      backend.calls[0].workspacePVC,
+      undefined,
+      'workspacePVC must be undefined when the caller does not pass it (no synthetic defaults)'
+    )
+  })
+})
+
 describe('EnvironmentManager.destroy()', () => {
   let tmpDir, statePath
 
