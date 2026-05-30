@@ -233,3 +233,71 @@ describe('connection.ts — quiet-hours actions (#4544)', () => {
     );
   });
 });
+
+// #4570: snapshot broadcasts must not clobber the in-flight quiet-hours
+// draft. The mobile-app test suite is static-source-analysis (mirrors the
+// #4542/#4544 blocks above) — we verify the editor declares a dirty flag,
+// reads it via a ref inside the snapshot effect, parks the divergent
+// snapshot, and surfaces an accept/discard conflict banner. End-to-end
+// behaviour for these guarantees is covered by the dashboard vitest suite.
+describe('SettingsScreen — Quiet-hours editor: snapshot-vs-draft (#4570)', () => {
+  it('declares a dirty flag in the QuietHoursEditor', () => {
+    expect(settingsSource).toMatch(/const\s+\[dirty,\s*setDirty\]\s*=\s*useState\(false\)/);
+  });
+
+  it('mirrors dirty into a ref so the snapshot effect can read it without depending on it', () => {
+    // Adding `dirty` to the snapshot useEffect's dependency array would
+    // re-fire the effect when dirty changes and re-apply the snapshot we
+    // were trying to skip. The ref pattern keeps the effect keyed on `win`
+    // alone, the way #4570 intends.
+    expect(settingsSource).toMatch(/dirtyRef\s*=\s*useRef\(dirty\)/);
+    expect(settingsSource).toMatch(/dirtyRef\.current\s*=\s*dirty/);
+  });
+
+  it('parks the snapshot in pendingSnapshot state when dirty and divergent', () => {
+    expect(settingsSource).toMatch(/pendingSnapshot,\s*setPendingSnapshot/);
+    expect(settingsSource).toMatch(/setPendingSnapshot\(win\)/);
+  });
+
+  it('clears dirty + pendingSnapshot on save', () => {
+    // handleSaveWindow runs setDirty(false) + setPendingSnapshot(undefined)
+    // before forwarding to onWindowChange so the next snapshot echo is
+    // accepted cleanly.
+    expect(settingsSource).toMatch(
+      /handleSaveWindow[\s\S]{0,400}setDirty\(false\)[\s\S]{0,200}setPendingSnapshot\(undefined\)[\s\S]{0,200}onWindowChange\(\{\s*start,\s*end,\s*timezone\s*\}\)/,
+    );
+  });
+
+  it('clears dirty + pendingSnapshot on enable/disable toggle', () => {
+    expect(settingsSource).toMatch(
+      /handleToggleEnable[\s\S]{0,400}setDirty\(false\)[\s\S]{0,200}setPendingSnapshot\(undefined\)/,
+    );
+  });
+
+  it('routes field edits through dirty-flagging setter wrappers', () => {
+    expect(settingsSource).toMatch(/setStartDirty[\s\S]{0,200}setDirty\(true\)/);
+    expect(settingsSource).toMatch(/setEndDirty[\s\S]{0,200}setDirty\(true\)/);
+    expect(settingsSource).toMatch(/setTimezoneDirty[\s\S]{0,200}setDirty\(true\)/);
+    // And the inputs use the dirty-flagging versions, NOT the raw setState.
+    expect(settingsSource).toMatch(/onChangeText=\{setStartDirty\}/);
+    expect(settingsSource).toMatch(/onChangeText=\{setEndDirty\}/);
+  });
+
+  it('renders the conflict banner with accept + discard buttons', () => {
+    expect(settingsSource).toMatch(/testID="quiet-hours-conflict-banner"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-conflict-accept"/);
+    expect(settingsSource).toMatch(/testID="quiet-hours-conflict-discard"/);
+  });
+
+  it('handleAcceptDraft drops the parked snapshot but keeps the draft', () => {
+    expect(settingsSource).toMatch(
+      /handleAcceptDraft[\s\S]{0,200}setPendingSnapshot\(undefined\)/,
+    );
+  });
+
+  it('handleDiscardDraft applies the parked snapshot and clears dirty', () => {
+    expect(settingsSource).toMatch(
+      /handleDiscardDraft[\s\S]{0,800}setStart\(snap\.start\)[\s\S]{0,200}setDirty\(false\)[\s\S]{0,200}setPendingSnapshot\(undefined\)/,
+    );
+  });
+});

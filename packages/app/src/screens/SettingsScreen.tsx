@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -774,18 +774,53 @@ function QuietHoursEditor(props: {
   const [timezone, setTimezone] = useState<string>(win?.timezone ?? browserTz);
   const [showTzPicker, setShowTzPicker] = useState(false);
 
+  // #4570: track "user has typed but not saved" so an incoming snapshot
+  // broadcast doesn't clobber the in-flight draft. Cleared on save / disable
+  // / explicit accept. Read via ref inside the snapshot effect so the
+  // dependency array stays minimal (adding `dirty` would re-run the effect
+  // when dirty changes and re-apply the snapshot we just skipped).
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(dirty);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+
+  // #4570: parked snapshot when a broadcast arrives mid-edit. `undefined`
+  // means no pending conflict; `null` means "remote disabled"; an object
+  // means "remote changed window".
+  const [pendingSnapshot, setPendingSnapshot] = useState<
+    | { start: string; end: string; timezone: string }
+    | null
+    | undefined
+  >(undefined);
+
   // Re-sync draft when the snapshot changes (remote save, broadcast).
+  //
+  // #4570: skip the apply when the editor is dirty AND the incoming
+  // snapshot diverges from the local draft. Park the snapshot so the user
+  // can resolve it via the conflict banner instead of losing their typing.
   useEffect(() => {
+    const isDirty = dirtyRef.current;
+    const matchesDraft = win
+      ? (win.start === start && win.end === end && win.timezone === timezone && enabled)
+      : !enabled;
+    if (isDirty && !matchesDraft) {
+      setPendingSnapshot(win);
+      return;
+    }
     setEnabled(win != null);
     if (win) {
       setStart(win.start);
       setEnd(win.end);
       setTimezone(win.timezone);
     }
+    setPendingSnapshot(undefined);
+    setDirty(false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win]);
 
   const handleToggleEnable = useCallback((next: boolean) => {
     setEnabled(next);
+    setDirty(false);
+    setPendingSnapshot(undefined);
     if (!next) {
       onWindowChange(null);
     } else if (win == null) {
@@ -798,8 +833,35 @@ function QuietHoursEditor(props: {
       Alert.alert('Invalid time', 'Use HH:MM (24-hour). Example: 22:00');
       return;
     }
+    setDirty(false);
+    setPendingSnapshot(undefined);
     onWindowChange({ start, end, timezone });
   }, [start, end, timezone, onWindowChange]);
+
+  // #4570: keep the local draft, dismiss the parked snapshot.
+  const handleAcceptDraft = useCallback(() => {
+    setPendingSnapshot(undefined);
+  }, []);
+
+  // #4570: take the remote snapshot, overwrite the draft, clear dirty.
+  const handleDiscardDraft = useCallback(() => {
+    const snap = pendingSnapshot;
+    if (snap === undefined) return;
+    setEnabled(snap != null);
+    if (snap) {
+      setStart(snap.start);
+      setEnd(snap.end);
+      setTimezone(snap.timezone);
+    }
+    setDirty(false);
+    setPendingSnapshot(undefined);
+  }, [pendingSnapshot]);
+
+  // #4570: dirty-tracking wrappers around field setters so every edit path
+  // flips the flag — used by the TextInputs and the timezone picker.
+  const setStartDirty = useCallback((next: string) => { setStart(next); setDirty(true); }, []);
+  const setEndDirty = useCallback((next: string) => { setEnd(next); setDirty(true); }, []);
+  const setTimezoneDirty = useCallback((next: string) => { setTimezone(next); setDirty(true); }, []);
 
   const handleToggleBypass = useCallback((cat: string, next: boolean) => {
     const set = new Set(bypassCategories);
@@ -813,7 +875,9 @@ function QuietHoursEditor(props: {
     return [...known, ...extras];
   }, [categories, bypassCategories]);
 
-  const dirty = enabled && (start !== (win?.start ?? '') || end !== (win?.end ?? '') || timezone !== (win?.timezone ?? ''));
+  // Save button visibility: surface whenever the draft diverges from the
+  // last known snapshot (existing behaviour) OR whenever dirty is set.
+  const saveVisible = enabled && (dirty || start !== (win?.start ?? '') || end !== (win?.end ?? '') || timezone !== (win?.timezone ?? ''));
 
   return (
     <View testID="quiet-hours-editor">
@@ -834,12 +898,42 @@ function QuietHoursEditor(props: {
       </View>
       {enabled && (
         <>
+          {pendingSnapshot !== undefined && (
+            <>
+              <View style={styles.separator} />
+              <View style={styles.row} testID="quiet-hours-conflict-banner">
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.rowLabel}>Another client updated quiet hours</Text>
+                  <Text style={[styles.rowHint, { marginTop: 2 }]}>
+                    Keep your unsaved edits, or discard them and load the
+                    latest values?
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.separator} />
+              <TouchableOpacity
+                style={styles.row}
+                onPress={handleAcceptDraft}
+                testID="quiet-hours-conflict-accept"
+              >
+                <Text style={styles.actionText}>Keep my edits</Text>
+              </TouchableOpacity>
+              <View style={styles.separator} />
+              <TouchableOpacity
+                style={styles.row}
+                onPress={handleDiscardDraft}
+                testID="quiet-hours-conflict-discard"
+              >
+                <Text style={styles.actionText}>Discard and load latest</Text>
+              </TouchableOpacity>
+            </>
+          )}
           <View style={styles.separator} />
           <View style={styles.row}>
             <Text style={styles.rowLabel}>From</Text>
             <TextInput
               value={start}
-              onChangeText={setStart}
+              onChangeText={setStartDirty}
               placeholder="22:00"
               placeholderTextColor={COLORS.textMuted}
               keyboardType="numbers-and-punctuation"
@@ -855,7 +949,7 @@ function QuietHoursEditor(props: {
             <Text style={styles.rowLabel}>To</Text>
             <TextInput
               value={end}
-              onChangeText={setEnd}
+              onChangeText={setEndDirty}
               placeholder="07:00"
               placeholderTextColor={COLORS.textMuted}
               keyboardType="numbers-and-punctuation"
@@ -875,7 +969,7 @@ function QuietHoursEditor(props: {
             <Text style={styles.rowLabel}>Timezone</Text>
             <Text style={styles.rowValue}>{timezone}</Text>
           </TouchableOpacity>
-          {dirty && (
+          {saveVisible && (
             <>
               <View style={styles.separator} />
               <TouchableOpacity
@@ -931,7 +1025,7 @@ function QuietHoursEditor(props: {
                 <TouchableOpacity
                   key={tz}
                   style={[styles.sheetOption, tz === timezone && styles.sheetOptionActive]}
-                  onPress={() => { setTimezone(tz); setShowTzPicker(false); }}
+                  onPress={() => { setTimezoneDirty(tz); setShowTzPicker(false); }}
                 >
                   <Text style={[styles.sheetOptionText, tz === timezone && styles.sheetOptionTextActive]}>
                     {tz === browserTz ? `${tz} (this device)` : tz}

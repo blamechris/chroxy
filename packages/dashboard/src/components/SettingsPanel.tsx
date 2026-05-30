@@ -118,6 +118,12 @@ export interface SettingsPanelProps {
  * fire `onWindowChange` once; on `Disable` we send `null`. The bypass
  * checkboxes patch immediately because they're individual booleans that
  * don't benefit from a Save buffer.
+ *
+ * #4570: snapshots arriving mid-edit must not clobber the unsaved draft.
+ * We track a `dirty` flag (true after the user touches any field, false
+ * after Save / Disable / explicit accept). When dirty AND an incoming
+ * snapshot diverges from the user's draft, we hold the draft and surface
+ * a conflict banner with accept (keep mine) / discard (take theirs).
  */
 function QuietHoursEditor(props: {
   window: { start: string; end: string; timezone: string } | null
@@ -139,22 +145,59 @@ function QuietHoursEditor(props: {
   const [end, setEnd] = useState<string>(win?.end ?? '07:00')
   const [timezone, setTimezone] = useState<string>(win?.timezone ?? browserTz)
 
+  // #4570: dirty flips on any edit and clears on save/disable/accept.
+  // The snapshot effect below reads dirty via a ref so we don't add it to
+  // the dependency array (which would re-run the effect when dirty changes
+  // and re-apply the snapshot we were trying to skip).
+  const [dirty, setDirty] = useState(false)
+  const dirtyRef = useRef(dirty)
+  useEffect(() => { dirtyRef.current = dirty }, [dirty])
+
+  // #4570: when a snapshot lands while the draft is dirty AND its values
+  // diverge from the user's draft, we hold the snapshot here and render
+  // the conflict banner. Null = no pending conflict.
+  const [pendingSnapshot, setPendingSnapshot] = useState<
+    | { start: string; end: string; timezone: string }
+    | null
+    | undefined
+  >(undefined)
+
   // Re-sync draft when the snapshot changes (e.g. another client saved a
   // window or the user just hit Save and the broadcast came back). The
   // dependency array intentionally captures the inner fields; comparing
   // object identity wouldn't help since the message-handler always builds
   // a fresh object.
+  //
+  // #4570: skip the apply when the editor is dirty AND the incoming
+  // snapshot diverges from the local draft. Park the snapshot so the user
+  // can resolve via the conflict banner.
   useEffect(() => {
+    const isDirty = dirtyRef.current
+    const matchesDraft = win
+      ? (win.start === start && win.end === end && win.timezone === timezone && enabled)
+      : !enabled
+    if (isDirty && !matchesDraft) {
+      // Hold the snapshot for the user to resolve. We intentionally do NOT
+      // overwrite the draft fields.
+      setPendingSnapshot(win)
+      return
+    }
+    // Clean apply (or snapshot already matches draft — e.g. Save echo).
     setEnabled(win != null)
     if (win) {
       setStart(win.start)
       setEnd(win.end)
       setTimezone(win.timezone)
     }
+    setPendingSnapshot(undefined)
+    setDirty(false)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win])
 
   const handleToggleEnable = useCallback((next: boolean) => {
     setEnabled(next)
+    setDirty(false)
+    setPendingSnapshot(undefined)
     if (!next) {
       // Sending null on disable wipes the persisted window so the server
       // gate short-circuits. Draft fields stay in form state so the user
@@ -169,8 +212,36 @@ function QuietHoursEditor(props: {
   }, [win, start, end, timezone, onWindowChange])
 
   const handleSaveWindow = useCallback(() => {
+    setDirty(false)
+    setPendingSnapshot(undefined)
     onWindowChange({ start, end, timezone })
   }, [start, end, timezone, onWindowChange])
+
+  // #4570: user keeps their local draft — discard the parked snapshot.
+  // The next divergent snapshot will surface the banner again.
+  const handleAcceptDraft = useCallback(() => {
+    setPendingSnapshot(undefined)
+  }, [])
+
+  // #4570: user takes the remote snapshot — overwrite draft + clear dirty.
+  const handleDiscardDraft = useCallback(() => {
+    const snap = pendingSnapshot
+    if (snap === undefined) return
+    setEnabled(snap != null)
+    if (snap) {
+      setStart(snap.start)
+      setEnd(snap.end)
+      setTimezone(snap.timezone)
+    }
+    setDirty(false)
+    setPendingSnapshot(undefined)
+  }, [pendingSnapshot])
+
+  // #4570: dirty-tracking wrappers around the field setters so every edit
+  // path flips the flag without sprinkling setDirty() through JSX.
+  const setStartDirty = useCallback((next: string) => { setStart(next); setDirty(true) }, [])
+  const setEndDirty = useCallback((next: string) => { setEnd(next); setDirty(true) }, [])
+  const setTimezoneDirty = useCallback((next: string) => { setTimezone(next); setDirty(true) }, [])
 
   const handleToggleBypass = useCallback((cat: string, next: boolean) => {
     const set = new Set(bypassCategories)
@@ -208,13 +279,42 @@ function QuietHoursEditor(props: {
       </div>
       {enabled && (
         <>
+          {pendingSnapshot !== undefined && (
+            <div
+              className="settings-hint quiet-hours-conflict-banner"
+              role="alert"
+              data-testid="quiet-hours-conflict-banner"
+            >
+              <p>
+                Another client updated quiet hours while you were editing.
+                Keep your unsaved changes, or discard them and load the
+                latest values?
+              </p>
+              <div className="settings-field">
+                <button
+                  type="button"
+                  onClick={handleAcceptDraft}
+                  data-testid="quiet-hours-conflict-accept"
+                >
+                  Keep my edits
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDiscardDraft}
+                  data-testid="quiet-hours-conflict-discard"
+                >
+                  Discard and load latest
+                </button>
+              </div>
+            </div>
+          )}
           <div className="settings-field">
             <label htmlFor="quiet-hours-start">From</label>
             <input
               id="quiet-hours-start"
               type="time"
               value={start}
-              onChange={(e) => setStart(e.target.value)}
+              onChange={(e) => setStartDirty(e.target.value)}
               data-testid="quiet-hours-start-input"
             />
           </div>
@@ -224,7 +324,7 @@ function QuietHoursEditor(props: {
               id="quiet-hours-end"
               type="time"
               value={end}
-              onChange={(e) => setEnd(e.target.value)}
+              onChange={(e) => setEndDirty(e.target.value)}
               data-testid="quiet-hours-end-input"
             />
           </div>
@@ -233,7 +333,7 @@ function QuietHoursEditor(props: {
             <select
               id="quiet-hours-timezone"
               value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
+              onChange={(e) => setTimezoneDirty(e.target.value)}
               data-testid="quiet-hours-timezone-select"
             >
               {tzOptions.map((opt) => (
