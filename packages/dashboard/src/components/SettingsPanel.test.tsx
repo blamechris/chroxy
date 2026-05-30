@@ -909,6 +909,18 @@ describe('SettingsPanel', () => {
       expect(muteLabel!.getAttribute('for')).toBe('notification-prefs-device-result')
       expect(muteLabel!.textContent).toBe('Mute on this device')
     })
+
+    it('applies the .notification-prefs-device-row class for visual hierarchy (#4563)', () => {
+      // Regression for #4563: the per-device row must carry the
+      // `notification-prefs-device-row` className so the matching CSS rule
+      // (indent + muted label) renders it as subordinate to the global
+      // per-category toggle. Without the class the row reads as a sibling
+      // toggle — the original visual-hierarchy bug.
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const row = screen.getByTestId('notification-prefs-device-row-result')
+      expect(row.classList.contains('notification-prefs-device-row')).toBe(true)
+    })
   })
 
   describe('Notification preferences — quiet-hours editor (#4544)', () => {
