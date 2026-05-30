@@ -194,9 +194,21 @@ export class PushManager {
    * (defaults to permission + activity_error). Both fields accept the
    * same per-device override shape as the existing `categories` map.
    *
+   * #4587: per-device entries are stamped with `lastSeenAt = Date.now()`
+   * on every touch (create + modify; not on `null` delete). When the
+   * caller supplies a `platform` (e.g. WS handler passing
+   * `client.deviceInfo?.platform`) it's persisted with the entry — a
+   * patch-supplied `platform` wins over the caller-supplied default so a
+   * future client carrying richer info can still override the
+   * auth-derived value.
+   *
    * @param {object} patch - Partial prefs ({ categories?, devices?, quietHours?, bypassCategories? })
+   * @param {object} [opts]
+   * @param {string|null} [opts.platform] - Caller-supplied platform hint
+   *   (from `client.deviceInfo.platform` in the WS auth context) used to
+   *   stamp NEW per-device entries when the patch itself doesn't carry one.
    */
-  setPrefs(patch) {
+  setPrefs(patch, { platform = null } = {}) {
     if (!patch || typeof patch !== 'object') return this.getPrefs()
     const next = {
       categories: { ...this._prefs.categories },
@@ -253,6 +265,21 @@ export class PushManager {
             merged.bypassCategories = entry.bypassCategories.filter((c) => typeof c === 'string' && c.length > 0)
           }
         }
+        // #4587: stamp lastSeenAt on every touch. The per-device list UI
+        // uses this to render "Last seen X ago" so operators can tell
+        // recently-active devices apart from stale orphans without having
+        // to hand-read the prefs file.
+        merged.lastSeenAt = Date.now()
+        // Allow the caller to inject the canonical platform (from auth
+        // deviceInfo). Patch-supplied platform wins over caller-supplied
+        // (forward-compat: a future client could send a more specific value
+        // than auth carries). Both paths clamp to 32 chars to match the
+        // wire schema bound.
+        if (typeof entry.platform === 'string' && entry.platform.length > 0) {
+          merged.platform = entry.platform.slice(0, 32)
+        } else if (typeof platform === 'string' && platform.length > 0) {
+          merged.platform = platform.slice(0, 32)
+        }
         next.devices[token] = merged
       }
     }
@@ -285,6 +312,43 @@ export class PushManager {
       }
     }
     return this.getPrefs()
+  }
+
+  /**
+   * Stamp `lastSeenAt` (and optionally `platform`) on an EXISTING device
+   * entry without otherwise modifying it (#4587).
+   *
+   * No-op when the device has no entry — `register_push_token` calls this
+   * on every reconnect, but we don't want to create empty per-device
+   * entries for devices that have never muted anything. Empty entries
+   * would clutter the per-device list with rows that have no overrides to
+   * clear, defeating the purpose of the orphan-clearing UI in #4564.
+   *
+   * Called from `handleRegisterPushToken` so the per-device list reflects
+   * the last CONNECT time of each device, not just the last time its
+   * prefs were patched — without this, a device that registers but never
+   * mutes a category would show a `lastSeenAt` from the first mute
+   * forever.
+   */
+  touchDevice(token, platform = null) {
+    if (typeof token !== 'string' || token.length === 0) return
+    const existing = this._prefs.devices?.[token]
+    if (!existing) return
+    existing.lastSeenAt = Date.now()
+    if (typeof platform === 'string' && platform.length > 0) {
+      existing.platform = platform.slice(0, 32)
+    }
+    if (this._prefsPath) {
+      try {
+        saveNotificationPrefs(this._prefs, this._prefsPath)
+      } catch (err) {
+        // Metadata write failure is non-critical (push delivery still
+        // works), so log and continue rather than throwing — unlike
+        // setPrefs, which surfaces a write failure to the WS handler so
+        // the client knows their patch didn't persist.
+        log.error(`Failed to persist notification prefs: ${err?.message || err}`)
+      }
+    }
   }
 
   /**

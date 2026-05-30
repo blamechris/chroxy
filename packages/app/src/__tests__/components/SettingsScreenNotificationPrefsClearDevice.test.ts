@@ -105,6 +105,35 @@ describe('ConnectionState — deleteNotificationPrefsDevice surface (#4564)', ()
   });
 });
 
+describe('SettingsScreen — current-device clear confirmation (#4588)', () => {
+  it('prompts via Alert.alert before clearing when deviceKey matches the current pushToken', () => {
+    // The (this device) row silently wipes the operator's own mutes /
+    // quiet-hours overrides if cleared by accident — the prompt is a
+    // second cue after the (this device) tag.
+    expect(settingsSource).toMatch(
+      /handleClearDevice\s*=\s*useCallback[\s\S]{0,800}deviceKey === pushToken[\s\S]{0,400}Alert\.alert/,
+    );
+  });
+
+  it('uses a destructive Clear button alongside Cancel in the alert (#4588)', () => {
+    // Matches the existing pattern for handleClearSessionHistory /
+    // handleClearSavedConnection — destructive styles the action red on
+    // both platforms so the operator reads the affordance as risky.
+    expect(settingsSource).toMatch(
+      /handleClearDevice[\s\S]{0,800}style: 'cancel'[\s\S]{0,200}style: 'destructive'/,
+    );
+  });
+
+  it('falls through to the dispatch when deviceKey !== pushToken (orphan rows stay one-tap)', () => {
+    // Without the early-return inside the `if (deviceKey === pushToken)`
+    // branch, orphan-row clears would also be gated behind Alert.alert —
+    // exactly the behaviour the issue text rules out.
+    expect(settingsSource).toMatch(
+      /if\s*\(deviceKey === pushToken\)[\s\S]{0,600}return;[\s\S]{0,200}dispatch\(\);/,
+    );
+  });
+});
+
 describe('connection.ts — delete action wiring (#4564)', () => {
   it('sends a notification_prefs_set with `devices: { [deviceKey]: null }` as the patch', () => {
     // The null sentinel is the on-wire convention the server interprets

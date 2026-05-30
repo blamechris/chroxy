@@ -27,6 +27,17 @@ const AUTO_PERMISSION_CONFIRM_MESSAGE =
   'Auto-permission mode disables all per-tool prompts for non-paired clients. Continue?'
 
 /**
+ * #4588: confirmation copy for clearing the current device's per-device
+ * overrides. Only fires when the user clicks Clear on the row tagged
+ * `(this device)` — orphan-row clears stay one-click because the whole
+ * point of the orphan list is fast cleanup. A misclick on your own row,
+ * though, silently wipes whatever mutes / quiet-hours overrides you set
+ * up; the prompt is the second cue (after the `(this device)` tag).
+ */
+const CURRENT_DEVICE_CLEAR_CONFIRM_MESSAGE =
+  'Clear your per-device overrides? Notifications on this device will fall back to global defaults.'
+
+/**
  * #4542: friendly labels + ordering for the per-category notification
  * toggles. Keys MUST match the server-side `ALL_CATEGORIES` enum from
  * packages/server/src/notification-prefs.js (mirrors RATE_LIMITS in
@@ -403,6 +414,51 @@ function truncateDeviceLabel(key: string): string {
 }
 
 /**
+ * #4587: friendly label for the canonical platform values shipped by
+ * `deviceInfo.platform` on auth (`ios`/`android`/`web`/`desktop` plus
+ * `unknown` and any future values). Falls back to the raw string so a
+ * forward-compatible client carrying a new value still renders, just
+ * without the title-cased rewrite.
+ */
+function formatPlatform(p: string): string {
+  switch (p) {
+    case 'ios': return 'iOS'
+    case 'android': return 'Android'
+    case 'web': return 'Web'
+    case 'desktop': return 'Desktop'
+    default: return p
+  }
+}
+
+/**
+ * #4587: cheap human-readable "X ago" for the per-device list. Renders at
+ * minute granularity (rounds down) so the smallest unit the operator sees
+ * is "just now" or "N min ago" — nothing as precise as seconds. Future
+ * timestamps (clock skew, server stamping ahead of dashboard read) fall
+ * through to "just now" rather than rendering nonsense like "-1 min ago".
+ *
+ * Kept module-local instead of imported from a shared utility because the
+ * dashboard already has a few tiny ad-hoc formatters in this file; the
+ * mobile copy is a parallel implementation in `SettingsScreen.tsx` to
+ * avoid pulling a shared dep into the RN bundle for a 12-line helper.
+ */
+function formatRelativeTime(epochMs: number): string {
+  const diffMs = Date.now() - epochMs
+  if (diffMs < 0) return 'just now'
+  const minutes = Math.floor(diffMs / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} hr ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months} mo ago`
+  const years = Math.floor(months / 12)
+  return `${years} yr ago`
+}
+
+/**
  * #4564: list of currently-known per-device override entries with a
  * per-row "Clear" button. Lets the user drain orphans accumulated when a
  * push token refreshes, an app reinstalls, or a browser tab loses its
@@ -424,6 +480,12 @@ function KnownDevicesList(props: {
     categories?: Record<string, boolean>
     quietHours?: { start: string; end: string; timezone: string } | null
     bypassCategories?: string[]
+    // #4587: optional last-seen + platform metadata stamped by the server
+    // on each device patch + register_push_token. Pre-#4587 servers omit
+    // both fields, in which case the row renders exactly as before
+    // (truncated token + optional "this device" tag, no meta spans).
+    lastSeenAt?: number
+    platform?: string
   }>
   currentDeviceKey: string | null
   onClear: (deviceKey: string) => void
@@ -463,6 +525,14 @@ function KnownDevicesList(props: {
         <ul className="notification-prefs-devices-list">
           {sorted.map(key => {
             const isCurrent = key === currentDeviceKey
+            const entry = devices[key]
+            // Index access on Record<string, T> returns `T | undefined`
+            // under noUncheckedIndexedAccess. `key` came from
+            // Object.keys(devices) so `entry` is always present in
+            // practice, but the type narrowing keeps strict TS happy
+            // and guards against a race where `devices` mutates
+            // between the keys() snapshot and the render.
+            if (!entry) return null
             return (
               <li
                 key={key}
@@ -474,6 +544,28 @@ function KnownDevicesList(props: {
                   {isCurrent && (
                     <span className="notification-prefs-device-self-tag"> (this device)</span>
                   )}
+                  {/* #4587: optional platform + last-seen metadata. Both
+                      hidden when absent (pre-#4587 server snapshot) so the
+                      row degrades to the original token-only render.
+                      Ternary (not `&&`) so a stray 0 in lastSeenAt — or
+                      empty-string platform that bypassed the sanitizer —
+                      can never render as a raw literal text node. */}
+                  {entry.platform ? (
+                    <span
+                      className="notification-prefs-device-meta"
+                      data-testid={`notification-prefs-device-platform-${key}`}
+                    >
+                      {' · '}{formatPlatform(entry.platform)}
+                    </span>
+                  ) : null}
+                  {entry.lastSeenAt ? (
+                    <span
+                      className="notification-prefs-device-meta"
+                      data-testid={`notification-prefs-device-last-seen-${key}`}
+                    >
+                      {' · Last seen '}{formatRelativeTime(entry.lastSeenAt)}
+                    </span>
+                  ) : null}
                 </span>
                 <button
                   type="button"
@@ -731,11 +823,22 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // #4564: clear an entire per-device entry. Same WS-closed banner contract
   // as the rest of the notification-prefs handlers — a closed-socket clear
   // would silently fail and the orphan would stay on disk.
+  //
+  // #4588: clearing the row tagged `(this device)` silently wipes the
+  // operator's own mute/quiet-hours overrides — surface a confirm prompt
+  // for that case only. Orphan-row clears stay one-click; the whole point
+  // of the orphan list is fast cleanup.
   const handleClearNotificationDevice = useCallback((deviceKey: string) => {
+    if (deviceKey === currentDeviceKey) {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm(CURRENT_DEVICE_CLEAR_CONFIRM_MESSAGE)
+        : true
+      if (!ok) return
+    }
     const sent = deleteNotificationPrefsDevice(deviceKey)
     if (sent) setNotifWsClosedError(null)
     else setNotifWsClosedError(WS_CLOSED_MESSAGE)
-  }, [deleteNotificationPrefsDevice])
+  }, [deleteNotificationPrefsDevice, currentDeviceKey])
 
   const handleSetNotificationQuietHours = useCallback((window: { start: string; end: string; timezone: string } | null) => {
     const sent = setNotificationPrefsQuietHours(window)

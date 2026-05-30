@@ -256,10 +256,31 @@ export function SettingsScreen() {
 
   // #4564: per-row "Clear" handler. Same WS-closed banner contract as the
   // other notification-prefs setters so a botched clear isn't silent.
+  //
+  // #4588: clearing the row matching `pushToken` (the operator's own
+  // device) silently wipes whatever per-category mutes / quiet-hours
+  // overrides they had set up; the next push will fire under global
+  // defaults with no other warning. Prompt with a destructive Clear
+  // button only for that row — orphan rows (key !== pushToken) flow
+  // straight through so the orphan-cleanup affordance stays one-tap.
   const handleClearDevice = useCallback((deviceKey: string) => {
-    const sent = deleteNotificationPrefsDevice(deviceKey);
-    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
-  }, [deleteNotificationPrefsDevice]);
+    const dispatch = () => {
+      const sent = deleteNotificationPrefsDevice(deviceKey);
+      setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+    };
+    if (deviceKey === pushToken) {
+      Alert.alert(
+        'Clear this device?',
+        'Notifications on this device will fall back to global defaults.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Clear', style: 'destructive', onPress: dispatch },
+        ],
+      );
+      return;
+    }
+    dispatch();
+  }, [deleteNotificationPrefsDevice, pushToken]);
 
   const handleSetQuietHours = useCallback((win: { start: string; end: string; timezone: string } | null) => {
     const sent = setNotificationPrefsQuietHours(win);
@@ -1193,6 +1214,45 @@ function truncateDeviceLabel(key: string): string {
 }
 
 /**
+ * #4587: friendly label for the canonical `deviceInfo.platform` values
+ * persisted with per-device entries. Mirrors the dashboard copy in
+ * `packages/dashboard/src/components/SettingsPanel.tsx` rather than
+ * importing a shared util — pulling a shared dep into the RN bundle for
+ * a 6-line switch isn't worth the indirection.
+ */
+function formatPlatform(p: string): string {
+  switch (p) {
+    case 'ios': return 'iOS';
+    case 'android': return 'Android';
+    case 'web': return 'Web';
+    case 'desktop': return 'Desktop';
+    default: return p;
+  }
+}
+
+/**
+ * #4587: minute-granularity "X ago" renderer for the per-device list.
+ * See dashboard sibling for the rationale on local-only formatting.
+ * Future timestamps (clock skew between server and phone) fall through
+ * to "just now" so we never render negative durations.
+ */
+function formatRelativeTime(epochMs: number): string {
+  const diffMs = Date.now() - epochMs;
+  if (diffMs < 0) return 'just now';
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} mo ago`;
+  const years = Math.floor(months / 12);
+  return `${years} yr ago`;
+}
+
+/**
  * #4564: list of per-device override entries with a "Clear" button per
  * row. The map can accumulate orphans when Expo refreshes the push token
  * or the app is reinstalled — without this list the only way to drain
@@ -1204,6 +1264,11 @@ function KnownDevicesList(props: {
     categories?: Record<string, boolean>;
     quietHours?: { start: string; end: string; timezone: string } | null;
     bypassCategories?: string[];
+    // #4587: optional last-seen + platform metadata stamped by the server.
+    // Pre-#4587 servers omit both fields, in which case the row renders
+    // exactly as before (truncated token + optional "this device" tag).
+    lastSeenAt?: number;
+    platform?: string;
   }>;
   currentDeviceKey: string | null;
   onClear: (deviceKey: string) => void;
@@ -1232,6 +1297,7 @@ function KnownDevicesList(props: {
     <View testID="notification-prefs-devices-list">
       {sorted.map((key, idx) => {
         const isCurrent = key === currentDeviceKey;
+        const entry = devices[key];
         return (
           <React.Fragment key={key}>
             {idx > 0 && <View style={styles.separator} />}
@@ -1250,6 +1316,25 @@ function KnownDevicesList(props: {
                 {isCurrent && (
                   <Text style={styles.deviceSelfTag}> (this device)</Text>
                 )}
+                {/* #4587: optional platform + last-seen metadata. Both
+                    hidden when absent (pre-#4587 server snapshot) so the
+                    row degrades to the original token-only render. */}
+                {entry.platform ? (
+                  <Text
+                    style={styles.deviceMetaText}
+                    testID={`notification-prefs-device-platform-${key}`}
+                  >
+                    {' · '}{formatPlatform(entry.platform)}
+                  </Text>
+                ) : null}
+                {entry.lastSeenAt ? (
+                  <Text
+                    style={styles.deviceMetaText}
+                    testID={`notification-prefs-device-last-seen-${key}`}
+                  >
+                    {' · Last seen '}{formatRelativeTime(entry.lastSeenAt)}
+                  </Text>
+                ) : null}
               </View>
               <TouchableOpacity
                 onPress={() => onClear(key)}
@@ -1382,6 +1467,13 @@ const styles = StyleSheet.create({
   },
   deviceSelfTag: {
     color: COLORS.accentBlue,
+    fontSize: 12,
+  },
+  // #4587: subdued meta text for the platform + last-seen badges. Borrows
+  // the same `textMuted` accent already used for hints and section
+  // headers so the badges read as secondary content next to the token.
+  deviceMetaText: {
+    color: COLORS.textMuted,
     fontSize: 12,
   },
   deviceClearButton: {

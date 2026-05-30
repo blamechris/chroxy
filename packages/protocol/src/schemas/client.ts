@@ -331,18 +331,28 @@ const NotificationQuietHoursSchema = z.union([
 const NotificationBypassListSchema = z.array(z.string().min(1).max(64)).max(64)
 
 /**
- * Per-device override entry (#4544 extended).
+ * Per-device override entry (#4544 extended, #4587 added metadata).
  *
  * Per-device fields REPLACE the corresponding global value entirely:
  *   - `quietHours: null` opts the device out of muting even if global is set.
  *   - `bypassCategories: []` opts the device out of all bypasses even if
  *     global lists them.
  * See `notification-prefs.js` for the precedence rationale.
+ *
+ * #4587: `lastSeenAt` (epoch ms) is stamped by the server every time the
+ * entry is patched or its push token re-registers. `platform`
+ * (`ios`/`android`/`web`/`desktop`/`unknown` or a future value) is read
+ * from the connecting client's `deviceInfo` during auth and persisted with
+ * the entry. Both are optional on the wire so a pre-#4587 server snapshot
+ * still validates cleanly; the dashboard + mobile per-device lists hide
+ * the meta when absent.
  */
 const NotificationDeviceEntrySchema = z.object({
   categories: NotificationCategoryMapSchema.optional(),
   quietHours: NotificationQuietHoursSchema.optional(),
   bypassCategories: NotificationBypassListSchema.optional(),
+  lastSeenAt: z.number().int().positive().optional(),
+  platform: z.string().min(1).max(32).optional(),
 }).passthrough()
 
 /**
