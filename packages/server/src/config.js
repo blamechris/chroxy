@@ -296,6 +296,54 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
+  // #4556: validate the optional environments.k8s.workspace block (operator
+  // surface for the K8sBackend PVC strategy added in #4547 / #4548). Done at
+  // config-load time so a typo (missing claimName, wrong type) surfaces at
+  // startup rather than on the first environment-creation call. Shape mirrors
+  // `K8sBackend.validateWorkspacePVC()` so an operator never sees a different
+  // message at load-time vs runtime for the same malformed value.
+  //
+  // Only fires when the sub-block is present — the common case (Docker
+  // operators without any k8s key, or with other k8s settings but no
+  // workspace block) passes through untouched.
+  if (config.environments && typeof config.environments === 'object' && !Array.isArray(config.environments)) {
+    const k8sBlock = config.environments.k8s
+    if (k8sBlock && typeof k8sBlock === 'object' && !Array.isArray(k8sBlock)) {
+      if (Object.prototype.hasOwnProperty.call(k8sBlock, 'workspace')) {
+        const ws = k8sBlock.workspace
+        if (typeof ws !== 'object' || ws === null || Array.isArray(ws)) {
+          warnings.push(
+            `Invalid 'environments.k8s.workspace': must be an object with a claimName property`,
+          )
+        } else {
+          if (!Object.prototype.hasOwnProperty.call(ws, 'claimName')) {
+            warnings.push(
+              `Missing 'environments.k8s.workspace.claimName': required, non-empty string`,
+            )
+          } else if (typeof ws.claimName !== 'string') {
+            warnings.push(
+              `Invalid type for 'environments.k8s.workspace.claimName': expected string, got ${typeof ws.claimName}`,
+            )
+          } else if (ws.claimName.length === 0) {
+            warnings.push(
+              `Invalid value for 'environments.k8s.workspace.claimName': must be a non-empty string`,
+            )
+          }
+          if (Object.prototype.hasOwnProperty.call(ws, 'mountPath') && typeof ws.mountPath !== 'string') {
+            warnings.push(
+              `Invalid type for 'environments.k8s.workspace.mountPath': expected string, got ${typeof ws.mountPath}`,
+            )
+          }
+          if (Object.prototype.hasOwnProperty.call(ws, 'readOnly') && typeof ws.readOnly !== 'boolean') {
+            warnings.push(
+              `Invalid type for 'environments.k8s.workspace.readOnly': expected boolean, got ${typeof ws.readOnly}`,
+            )
+          }
+        }
+      }
+    }
+  }
+
   // Validate externalUrl format if provided
   if (config.externalUrl && typeof config.externalUrl === 'string') {
     try {

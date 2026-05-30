@@ -37,7 +37,22 @@ export { UNREACHABLE_STATUSES } from './environment-statuses.js'
  * creating sessions with an environmentId.
  */
 export class EnvironmentManager extends EventEmitter {
-  constructor({ statePath, _execFile, backend } = {}) {
+  /**
+   * @param {Object}  [opts]
+   * @param {string}  [opts.statePath] - On-disk path for environments.json
+   * @param {Function} [opts._execFile] - Injected execFile (testing seam)
+   * @param {Object}  [opts.backend]   - Pluggable backend (defaults to DockerBackend)
+   * @param {Object}  [opts.workspacePVCDefault] - #4556: operator-configured
+   *   PVC workspace strategy applied to every `create()` call that doesn't pass
+   *   an explicit `opts.workspacePVC`. Wires the chroxy-config
+   *   `environments.k8s.workspace` block into the manager. Shape mirrors
+   *   `K8sBackend.validateWorkspacePVC()`: `{ claimName, mountPath?, readOnly? }`.
+   *   Forwarded verbatim to the backend; non-K8s backends ignore it. Shape
+   *   validation lives in `validateConfig()` at load-time and (defensively
+   *   again) in `K8sBackend.validateWorkspacePVC()` at create-time — the
+   *   manager performs no validation of its own.
+   */
+  constructor({ statePath, _execFile, backend, workspacePVCDefault } = {}) {
     super()
     this._statePath = statePath || DEFAULT_STATE_PATH
     this._environments = new Map()
@@ -50,6 +65,10 @@ export class EnvironmentManager extends EventEmitter {
     // Pluggable backend — defaults to DockerBackend with the same _execFile
     // so the existing _execFile test seam still reaches Docker shellouts.
     this._backend = backend || new DockerBackend({ _execFile: this._execFile })
+    // #4556: configured PVC workspace default (operator surface). When set,
+    // every create() that doesn't pass workspacePVC falls back to this value.
+    // null when no `environments.k8s.workspace` block is configured.
+    this._workspacePVCDefault = workspacePVCDefault ?? null
   }
 
   /**
@@ -89,6 +108,12 @@ export class EnvironmentManager extends EventEmitter {
    *   (`{ claimName, mountPath?, readOnly? }`). Forwarded verbatim to the backend;
    *   DockerBackend and other non-K8s backends ignore it. Mutually exclusive with
    *   `opts.cwd`-as-hostPath on K8sBackend — the backend validates and throws.
+   *
+   *   #4556 — when the operator has configured `environments.k8s.workspace` in
+   *   chroxy config (wired via the constructor's `workspacePVCDefault` option),
+   *   a `create()` call that omits this field falls back to the configured
+   *   default. An explicit value here always wins (per-call override surface
+   *   for any future dashboard/CLI input).
    * @returns {Promise<Object>} The created environment object
    */
   async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser, compose, primaryService, devcontainer, workspacePVC } = {}) {
@@ -123,6 +148,12 @@ export class EnvironmentManager extends EventEmitter {
     const validatedMounts = this._validateMounts(dcConfig.mounts, cwd)
     const validatedEnv = this._sanitizeContainerEnv(dcConfig.containerEnv)
 
+    // #4556: caller-supplied workspacePVC wins; otherwise fall back to the
+    // configured default (when the operator has set `environments.k8s.workspace`
+    // in chroxy config). Resolved here so the backend always sees the final
+    // effective value and the manager remains the single wiring point.
+    const effectiveWorkspacePVC = workspacePVC !== undefined ? workspacePVC : (this._workspacePVCDefault ?? undefined)
+
     const { containerId, containerCliPath } = await this._backend.createEnvironment({
       envId: id,
       cwd,
@@ -136,7 +167,9 @@ export class EnvironmentManager extends EventEmitter {
       postCreateCommand: dcConfig.postCreateCommand,
       // #4548: forward verbatim — only K8sBackend acts on this. Manager does no
       // shape validation; that lives in K8sBackend.validateWorkspacePVC().
-      workspacePVC,
+      // #4556: `effectiveWorkspacePVC` resolves the caller-vs-config-default
+      // precedence so the backend sees a single value.
+      workspacePVC: effectiveWorkspacePVC,
     })
 
     const env = {

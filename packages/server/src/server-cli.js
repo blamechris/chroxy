@@ -401,7 +401,23 @@ export async function startCliServer(config) {
   let environmentManager = null
   if (config?.environments?.enabled) {
     const { EnvironmentManager } = await import('./environment-manager.js')
-    environmentManager = new EnvironmentManager()
+    // #4556: forward the operator-configured K8s workspace PVC default so
+    // every environment created on a K8s backend picks up the strategy
+    // without per-call plumbing. Shape was validated at config-load time
+    // (`validateConfig` in config.js); the manager re-passes it verbatim to
+    // the backend, which is the single enforcement point for runtime checks
+    // (K8sBackend.validateWorkspacePVC). Docker / other backends ignore the
+    // field, so this is safe to pass regardless of the active backend.
+    const workspacePVCDefault = config?.environments?.k8s?.workspace || null
+    if (workspacePVCDefault) {
+      const mountPath = workspacePVCDefault.mountPath || '/workspace'
+      const readOnlyTag = workspacePVCDefault.readOnly ? ' (readOnly)' : ''
+      // Make the K8s-only scope explicit so an operator who set this block
+      // against a Docker deployment doesn't assume the PVC is being mounted —
+      // Docker / other backends silently ignore the field at runtime.
+      log.info(`EnvironmentManager: K8s workspace PVC configured (claim: ${workspacePVCDefault.claimName}, mount: ${mountPath})${readOnlyTag} — active only on K8sBackend; ignored by Docker and other backends`)
+    }
+    environmentManager = new EnvironmentManager({ workspacePVCDefault })
     await logEnvironmentManagerReconnectResult(environmentManager, log)
   }
 
