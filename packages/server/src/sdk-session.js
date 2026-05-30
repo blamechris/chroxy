@@ -244,8 +244,8 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, stdinForwardingDisabled, resultTimeoutMs, hardTimeoutMs } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs })
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, stdinForwardingDisabled, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -552,20 +552,26 @@ export class SdkSession extends BaseSession {
       options.resume = this._sdkSessionId
     }
 
-    // Safety timeouts: SOFT warning + HARD cap, both armed on every SDK
-    // event. Soft fires `inactivity_warning` (session stays alive);
-    // hard fires the existing kill path (force-clear, auto-deny
-    // pending perms, emit error). Both paused while a permission
-    // prompt is outstanding (#2831) — awaiting user input is not
-    // inactivity. Both windows configurable per server (#3749 / #3899)
-    // — see BaseSession.
+    // Safety timeouts: SOFT warning + HARD cap + STREAM-STALL recovery,
+    // all armed on every SDK event. Soft fires `inactivity_warning`
+    // (session stays alive); hard fires the existing kill path (force-
+    // clear, auto-deny pending perms, emit error); stall (#4467) fires
+    // the active-recovery path — clears busy state and emits
+    // `error{code:'stream_stall'}` so the dashboard's StreamStallChip
+    // can offer a retry without the user having to click Stop. All
+    // three paused while a permission prompt is outstanding (#2831) —
+    // awaiting user input is not inactivity / not a stall. Windows
+    // configurable per server (#3749 / #3899 / #4467) — see BaseSession.
     const SOFT_TIMEOUT_MS = this._resultTimeoutMs
     const HARD_TIMEOUT_MS = this._hardTimeoutMs
+    const STALL_TIMEOUT_MS = this._streamStallTimeoutMs
     const resetResultTimeout = () => {
       if (this._resultTimeout) clearTimeout(this._resultTimeout)
       if (this._hardTimeout) clearTimeout(this._hardTimeout)
+      if (this._streamStallTimeout) clearTimeout(this._streamStallTimeout)
       this._resultTimeout = null
       this._hardTimeout = null
+      this._streamStallTimeout = null
       if (this._resultTimeoutPaused) return
       this._resultTimeout = setTimeout(() => {
         this._resultTimeout = null
@@ -575,6 +581,15 @@ export class SdkSession extends BaseSession {
         this._hardTimeout = null
         this._handleHardTimeout(messageId, streamState.hasStreamStarted)
       }, HARD_TIMEOUT_MS)
+      // #4467: only arm the stall timer when the operator has not
+      // disabled the active-recovery path (value > 0). Soft + hard
+      // still apply regardless. Mirrors CliSession._armResultTimeout.
+      if (STALL_TIMEOUT_MS > 0) {
+        this._streamStallTimeout = setTimeout(() => {
+          this._streamStallTimeout = null
+          this._handleStreamStall(messageId, streamState.hasStreamStarted)
+        }, STALL_TIMEOUT_MS)
+      }
     }
     this._resetResultTimeout = resetResultTimeout
     resetResultTimeout()
@@ -1292,6 +1307,42 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Handle the STREAM-STALL recovery timer (#4467). Fires when the SDK
+   * has been silent for `_streamStallTimeoutMs` despite the session
+   * being busy — typically a half-open HTTPS to the Anthropic API that
+   * the OS hasn't surfaced as an error yet. Distinct from the SOFT
+   * inactivity warning (which is passive — just a chip) and the HARD
+   * cap (which is the absolute backstop at 2h): this is the ACTIVE
+   * recovery path so the user can retry without clicking Stop.
+   *
+   * On fire: log with context (messageId, elapsed) for triage; abort
+   * the in-flight query so further events don't land in a cleared
+   * context; emit `stream_end` (if streaming) then `error` with
+   * `code: 'stream_stall'` so the dashboard's StreamStallChip can
+   * render a dedicated retry affordance distinct from generic errors;
+   * clear message state so `_isBusy` flips false and the next
+   * `sendMessage` is no longer rejected by the busy guard.
+   */
+  _handleStreamStall(messageId, hasStreamStarted) {
+    if (!this._isBusy) return
+    const friendly = formatIdleDuration(this._streamStallTimeoutMs)
+    log.warn(
+      `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
+    )
+    if (hasStreamStarted) {
+      this.emit('stream_end', { messageId })
+    }
+    // Attempt to abort the SDK query generator so no further events land
+    // into a cleared message context. Best-effort — matches _handleHardTimeout.
+    this._abortActiveQuery()
+    this._clearMessageState()
+    this.emit('error', {
+      code: 'stream_stall',
+      message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+    })
+  }
+
+  /**
    * Best-effort abort of the active SDK query generator. Used when the
    * session times out mid-turn so tool results don't stream into a
    * cleared message context (#2831).
@@ -1332,6 +1383,11 @@ export class SdkSession extends BaseSession {
       if (this._hardTimeout) {
         clearTimeout(this._hardTimeout)
         this._hardTimeout = null
+      }
+      // #4467: clear the stall timer too — waiting on the user is not a stall.
+      if (this._streamStallTimeout) {
+        clearTimeout(this._streamStallTimeout)
+        this._streamStallTimeout = null
       }
     }
   }
@@ -1378,6 +1434,12 @@ export class SdkSession extends BaseSession {
     if (this._hardTimeout) {
       clearTimeout(this._hardTimeout)
       this._hardTimeout = null
+    }
+    // #4467: clear stall timer on destroy so a stale fire can't run
+    // against a torn-down session.
+    if (this._streamStallTimeout) {
+      clearTimeout(this._streamStallTimeout)
+      this._streamStallTimeout = null
     }
 
     // Interrupt active query

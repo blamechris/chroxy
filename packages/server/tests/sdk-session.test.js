@@ -2562,4 +2562,64 @@ describe('SdkSession', () => {
       assert.equal(totalsEvents[2].count, 3, 'count still increments on unknown payloads')
     })
   })
+
+  // #4467: stream-stall recovery — SDK sibling of the CLI watchdog
+  // (already shipped in cli-session.js via #4475). The SDK path was
+  // missing the third timer, so a half-open HTTPS connection to the
+  // Anthropic API would leave the session at "Thinking…" until the user
+  // clicked Stop. These tests pin the unit behaviour of the handler
+  // itself; the arm/reset/pause integration tests live in
+  // sdk-session-timeout-pause.test.js alongside the soft+hard suite.
+  describe('SdkSession._handleStreamStall (#4467: stream-stall recovery)', () => {
+    it('emits stream_end + error{code:stream_stall} so dashboard can offer retry', () => {
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+      s._sessionId = 'sess_ss'
+
+      const events = []
+      s.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+      s.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+      s._handleStreamStall('msg_ss', true)
+
+      assert.deepEqual(events.map((e) => e.name), ['stream_end', 'error'])
+      assert.equal(events[0].payload.messageId, 'msg_ss')
+      assert.equal(events[1].payload.code, 'stream_stall',
+        'error MUST carry code:stream_stall so dashboard can distinguish from generic errors')
+      assert.match(events[1].payload.message, /stalled/i)
+      assert.equal(s._isBusy, false,
+        'busy state must clear so the user can retry from the same session')
+      s.destroy()
+    })
+
+    it('does NOT emit stream_end when the stream had not yet started', () => {
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+
+      const events = []
+      s.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+      s.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+      s._handleStreamStall('msg_ss', false)
+
+      assert.deepEqual(events.map((e) => e.name), ['error'])
+      assert.equal(events[0].payload.code, 'stream_stall')
+      s.destroy()
+    })
+
+    it('no-ops when not busy (timer fired against an idle session)', () => {
+      const s = createSession()
+      s._isBusy = false
+
+      const events = []
+      s.on('stream_end', () => events.push('stream_end'))
+      s.on('error', () => events.push('error'))
+
+      s._handleStreamStall('msg_x', true)
+      assert.deepEqual(events, [])
+      s.destroy()
+    })
+  })
 })
