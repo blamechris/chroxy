@@ -384,21 +384,6 @@ export class K8sBackend {
    *   scheduler).  The PVC strategy above does NOT have this restriction and
    *   is the safe default for shared / multi-tenant clusters.
    *
-   * **Security warning — hostPath privilege escalation:**
-   *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
-   *   Pod direct access to the underlying node's filesystem. This is a
-   *   privilege-escalation vector on multi-tenant clusters: a malicious or
-   *   misconfigured workspace path could mount sensitive node paths such as
-   *   `/etc/kubernetes/pki`, `/var/run/docker.sock`, or `/var/lib/kubelet`,
-   *   allowing the workload to read cluster credentials or break out of the
-   *   container.
-   *
-   *   Most production clusters block `hostPath` via PodSecurity admission —
-   *   PSA `restricted` and `baseline` policies both prohibit it, so Pod
-   *   creation will be rejected by the PSA admission controller (the API
-   *   server returns a 4xx at create time, before the Pod ever reaches the
-   *   scheduler).
-   *
    *   **This mode is not safe for shared / multi-tenant clusters.** Operators
    *   running on shared infrastructure should use the PVC-based workspace
    *   strategy (`opts.workspacePVC`) instead of relying on `hostPath`. Use
