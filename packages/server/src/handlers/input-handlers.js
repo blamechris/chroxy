@@ -439,6 +439,12 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
     client._ownedPushTokens = new Set()
   }
   client._ownedPushTokens.add(msg.token)
+
+  // #4587: bump lastSeenAt + platform on the matching per-device entry
+  // (if one exists) so the per-device list UI reflects last-connect time
+  // rather than last-pref-change time. NO-OPs on devices that have never
+  // muted anything — touchDevice deliberately won't create empty entries.
+  ctx.pushManager.touchDevice(msg.token, client.deviceInfo?.platform || null)
 }
 
 /**
@@ -481,7 +487,11 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
   }
   let next
   try {
-    next = ctx.pushManager.setPrefs(patch)
+    // #4587: pass the auth-derived platform so new per-device entries get
+    // tagged with ios/android/desktop/web without the client having to
+    // include it in every patch. A patch-supplied `platform` (future
+    // client carrying richer info) still wins inside setPrefs.
+    next = ctx.pushManager.setPrefs(patch, { platform: client.deviceInfo?.platform || null })
   } catch (err) {
     log.warn(`notification_prefs_set persist failed: ${err?.message}`)
     sendError(ws, msg?.requestId, 'NOTIFICATION_PREFS_WRITE_FAILED', err?.message || 'write failed')

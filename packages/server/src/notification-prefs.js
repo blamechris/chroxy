@@ -184,6 +184,17 @@ function sanitizeDevices(raw, { log } = {}) {
       const bypass = sanitizeBypassList(entry.bypassCategories)
       if (bypass !== null) cleaned.bypassCategories = bypass
     }
+    // #4587: non-critical metadata for the per-device list UI. Operators
+    // need to tell orphan entries apart before clicking Clear — the truncated
+    // token alone is opaque. Strict type/range guards; no log warns
+    // because a malformed metadata field should never affect notification
+    // delivery (it just degrades the UI hint).
+    if (typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt) && entry.lastSeenAt > 0) {
+      cleaned.lastSeenAt = entry.lastSeenAt
+    }
+    if (typeof entry.platform === 'string' && entry.platform.length > 0 && entry.platform.length <= 32) {
+      cleaned.platform = entry.platform
+    }
     out[token] = cleaned
   }
   return out

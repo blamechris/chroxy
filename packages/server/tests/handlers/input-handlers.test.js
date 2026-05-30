@@ -263,7 +263,7 @@ describe('input-handlers', () => {
   describe('register_push_token', () => {
     it('calls pushManager.registerToken when present', () => {
       const ctx = makeCtx()
-      ctx.pushManager = { registerToken: createSpy(() => true) }
+      ctx.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
 
       inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'expo-tok-123' }, ctx)
 
@@ -273,7 +273,7 @@ describe('input-handlers', () => {
 
     it('sends push_token_error when registerToken returns false', () => {
       const ctx = makeCtx()
-      ctx.pushManager = { registerToken: createSpy(() => false) }
+      ctx.pushManager = { registerToken: createSpy(() => false), touchDevice: createSpy() }
 
       inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'bad' }, ctx)
 
@@ -285,6 +285,32 @@ describe('input-handlers', () => {
       // Should not throw
       inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'tok' }, ctx)
       assert.equal(ctx._sent.length, 0)
+    })
+
+    // #4587: touchDevice bumps the matching per-device entry's lastSeenAt
+    // + platform from the auth deviceInfo. The handler MUST forward the
+    // platform string so the per-device list shows ios/android/desktop —
+    // a regression that dropped this arg would leave every entry tagged
+    // with `null` and break the dashboard label.
+    it('calls touchDevice with the auth-derived platform from client.deviceInfo (#4587)', () => {
+      const ctx = makeCtx()
+      ctx.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
+      const client = makeClient({ deviceInfo: { platform: 'ios' } })
+
+      inputHandlers.register_push_token(makeWs(), client, { token: 'expo-tok-xyz' }, ctx)
+
+      assert.equal(ctx.pushManager.touchDevice.callCount, 1)
+      assert.equal(ctx.pushManager.touchDevice.lastCall[0], 'expo-tok-xyz')
+      assert.equal(ctx.pushManager.touchDevice.lastCall[1], 'ios')
+    })
+
+    it('passes null to touchDevice when client lacks deviceInfo.platform (#4587)', () => {
+      const ctx = makeCtx()
+      ctx.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
+      // Default makeClient() has no deviceInfo — platform falls back to null
+      // so touchDevice still no-ops correctly on the existing-entry check.
+      inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'expo-tok-xyz' }, ctx)
+      assert.equal(ctx.pushManager.touchDevice.lastCall[1], null)
     })
   })
 
