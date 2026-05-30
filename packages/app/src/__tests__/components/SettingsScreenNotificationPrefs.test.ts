@@ -428,6 +428,30 @@ describe('SettingsScreen — Quiet-hours editor: snapshot-vs-draft (#4570)', () 
       /handleDiscardDraft[\s\S]{0,800}setStart\(snap\.start\)[\s\S]{0,200}setDirty\(false\)[\s\S]{0,200}setPendingSnapshot\(undefined\)/,
     );
   });
+
+  it('announces the conflict banner via accessibilityLiveRegion (#4581)', () => {
+    // The dashboard uses role="alert" which screen readers announce
+    // automatically on mount. The RN equivalent for that "polite" announce
+    // is accessibilityLiveRegion="polite" on the banner View. Without it,
+    // TalkBack / VoiceOver users editing the field would never know a
+    // divergent snapshot arrived.
+    expect(settingsSource).toMatch(
+      /testID="quiet-hours-conflict-banner"[\s\S]{0,400}accessibilityLiveRegion="polite"/,
+    );
+  });
+
+  it('marks both conflict-banner buttons with accessibilityRole + label (#4581)', () => {
+    // Without accessibilityRole="button" the TouchableOpacity exposes as a
+    // generic touchable; the screen reader doesn't announce "button" before
+    // the label. accessibilityLabel echoes the visible text so the
+    // announcement is unambiguous even if the visual changes later.
+    expect(settingsSource).toMatch(
+      /testID="quiet-hours-conflict-accept"[\s\S]{0,300}accessibilityRole="button"[\s\S]{0,200}accessibilityLabel="Keep my edits"/,
+    );
+    expect(settingsSource).toMatch(
+      /testID="quiet-hours-conflict-discard"[\s\S]{0,300}accessibilityRole="button"[\s\S]{0,200}accessibilityLabel="Discard and load latest"/,
+    );
+  });
 });
 
 // #4560: capability gate for the Notifications sections. Pre-#4541 servers
