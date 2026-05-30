@@ -452,6 +452,43 @@ describe('SettingsScreen — Quiet-hours editor: snapshot-vs-draft (#4570)', () 
       /testID="quiet-hours-conflict-discard"[\s\S]{0,300}accessibilityRole="button"[\s\S]{0,200}accessibilityLabel="Discard and load latest"/,
     );
   });
+
+  it('imports AccessibilityInfo for the iOS VoiceOver fallback (#4595)', () => {
+    // accessibilityLiveRegion is Android-only — iOS needs an explicit
+    // AccessibilityInfo.announceForAccessibility call to speak when the
+    // banner appears. The import has to be present for the call to typecheck.
+    expect(settingsSource).toMatch(
+      /import\s*\{[\s\S]{0,400}AccessibilityInfo[\s\S]{0,400}\}\s*from\s*'react-native'/,
+    );
+  });
+
+  it('fires AccessibilityInfo.announceForAccessibility on pendingSnapshot mount, iOS only (#4595)', () => {
+    // The useEffect must (1) key on pendingSnapshot so it fires on banner
+    // mount, (2) gate on Platform.OS === 'ios' so Android (which already
+    // gets a live-region announce) doesn't double-speak, (3) actually call
+    // announceForAccessibility with the conflict copy.
+    expect(settingsSource).toMatch(
+      /useEffect\(\(\)\s*=>\s*\{[\s\S]{0,600}pendingSnapshot !== undefined[\s\S]{0,200}Platform\.OS === 'ios'[\s\S]{0,400}AccessibilityInfo\.announceForAccessibility/,
+    );
+  });
+
+  it('passes a sensible iOS announce string (#4595)', () => {
+    // The spoken sentence must convey "another client updated quiet hours"
+    // and offer the two recovery actions ("keep" / "discard"). Exact
+    // wording is documented in the issue.
+    expect(settingsSource).toMatch(
+      /announceForAccessibility\([\s\S]{0,100}Another client updated quiet hours/,
+    );
+  });
+
+  it('depends on pendingSnapshot in the useEffect dep array (#4595 — re-announce on new conflicts)', () => {
+    // If the dep array omits pendingSnapshot the effect fires once on mount
+    // and never re-announces — a second mid-edit conflict would silently
+    // surface without VoiceOver. Anchor the dep array specifically.
+    expect(settingsSource).toMatch(
+      /AccessibilityInfo\.announceForAccessibility[\s\S]{0,400}\},\s*\[pendingSnapshot\]\);/,
+    );
+  });
 });
 
 // #4560: capability gate for the Notifications sections. Pre-#4541 servers

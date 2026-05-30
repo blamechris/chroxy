@@ -11,6 +11,7 @@ import {
   Modal,
   Pressable,
   Platform,
+  AccessibilityInfo,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -946,6 +947,26 @@ function QuietHoursEditor(props: {
     | null
     | undefined
   >(undefined);
+
+  // #4595: VoiceOver fallback for the conflict banner on iOS.
+  // #4594 (the original a11y wiring) set `accessibilityLiveRegion="polite"`
+  // on the banner View, which is what Android TalkBack uses to auto-announce
+  // a region as it mounts. The prop is Android-only — iOS VoiceOver does
+  // NOT auto-announce live regions; it only speaks when focus moves to the
+  // View. A user editing the field via VoiceOver would never hear about the
+  // divergent snapshot. AccessibilityInfo.announceForAccessibility is the
+  // iOS equivalent of the live-region announce. We gate on Platform.OS so
+  // Android (which already gets the announcement via the live-region prop)
+  // doesn't double-speak the same line. The effect fires on every mount of
+  // a new pending conflict (`pendingSnapshot !== undefined` transition);
+  // resolving the conflict (banner unmounts) does not re-announce.
+  useEffect(() => {
+    if (pendingSnapshot !== undefined && Platform.OS === 'ios') {
+      AccessibilityInfo.announceForAccessibility(
+        'Another client updated quiet hours. Keep your edits, or discard and load the latest values.',
+      );
+    }
+  }, [pendingSnapshot]);
 
   // Re-sync draft when the snapshot changes (remote save, broadcast).
   //
