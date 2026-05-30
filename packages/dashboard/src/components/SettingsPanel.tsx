@@ -386,6 +386,112 @@ function QuietHoursEditor(props: {
   )
 }
 
+/**
+ * #4564: token label truncation. Expo push tokens look like
+ * `ExponentPushToken[~40-base64-chars]` — too wide to read in a settings
+ * row. Trim to a stable first-N prefix plus an ellipsis so the user can
+ * still match the row against a clear action without exposing the full
+ * token. The displayed prefix length (24 chars) keeps `ExponentPushToken[`
+ * (18 chars) plus a few discriminating characters of the inner token —
+ * enough to distinguish two simultaneously-registered devices from the
+ * same vendor.
+ */
+function truncateDeviceLabel(key: string): string {
+  const MAX = 24
+  if (key.length <= MAX) return key
+  return `${key.slice(0, MAX)}…`
+}
+
+/**
+ * #4564: list of currently-known per-device override entries with a
+ * per-row "Clear" button. Lets the user drain orphans accumulated when a
+ * push token refreshes, an app reinstalls, or a browser tab loses its
+ * `chroxy_device_id` — without those there's no way to remove a stale
+ * entry short of hand-editing `~/.chroxy/notification-prefs.json`.
+ *
+ * Render contract:
+ *   - Always renders (even when empty) so users can find the affordance
+ *     once they DO accumulate orphans.
+ *   - Tags the row matching `currentDeviceKey` as "this device" so a
+ *     misclick on the wrong row doesn't surprise the operator by muting
+ *     the device they're currently using.
+ *   - Truncates long tokens via `truncateDeviceLabel` so the list stays
+ *     readable; the full token is intentionally not shown — operators
+ *     who want to verify before clearing can read the prefs file.
+ */
+function KnownDevicesList(props: {
+  devices: Record<string, {
+    categories?: Record<string, boolean>
+    quietHours?: { start: string; end: string; timezone: string } | null
+    bypassCategories?: string[]
+  }>
+  currentDeviceKey: string | null
+  onClear: (deviceKey: string) => void
+}) {
+  const { devices, currentDeviceKey, onClear } = props
+  // Stable order: render the current device first (so the user reaches
+  // their own row without scrolling), then other tokens lexicographically
+  // for a deterministic ordering across reloads.
+  const keys = Object.keys(devices)
+  const sorted = keys.slice().sort((a, b) => {
+    if (a === currentDeviceKey) return -1
+    if (b === currentDeviceKey) return 1
+    return a.localeCompare(b)
+  })
+
+  return (
+    <fieldset
+      className="settings-fieldset notification-prefs-devices"
+      data-testid="notification-prefs-devices-list"
+    >
+      <legend>Per-device overrides</legend>
+      <p className="settings-hint">
+        Each entry is a device (browser tab or mobile app) that has set its
+        own notification preferences. Clear an entry to drop its overrides —
+        useful when a push token refreshes or an app is reinstalled and the
+        old entry becomes orphaned.
+      </p>
+      {sorted.length === 0 ? (
+        <p
+          className="settings-hint"
+          data-testid="notification-prefs-devices-empty"
+        >
+          No per-device overrides yet. Mute a category on this device above to
+          create one.
+        </p>
+      ) : (
+        <ul className="notification-prefs-devices-list">
+          {sorted.map(key => {
+            const isCurrent = key === currentDeviceKey
+            return (
+              <li
+                key={key}
+                className="notification-prefs-device-entry"
+                data-testid={`notification-prefs-device-entry-${key}`}
+              >
+                <span className="notification-prefs-device-label">
+                  <code>{truncateDeviceLabel(key)}</code>
+                  {isCurrent && (
+                    <span className="notification-prefs-device-self-tag"> (this device)</span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="notification-prefs-device-clear"
+                  onClick={() => onClear(key)}
+                  data-testid={`notification-prefs-device-clear-${key}`}
+                >
+                  Clear
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </fieldset>
+  )
+}
+
 /** Preview swatches for a theme */
 function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
   const bg = theme.colors['bg-primary'] || '#0f0f1a'
@@ -454,6 +560,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // ship a `devices[""]` / `devices[null]` patch.
   const currentDeviceKey = useConnectionStore(s => s.currentDeviceKey)
   const setNotificationPrefsDevice = useConnectionStore(s => s.setNotificationPrefsDevice)
+  // #4564: drop an entire per-device entry — the "Clear" buttons in the
+  // known-devices list call this to drain orphans left by token refresh,
+  // app reinstall, or browser storage wipe. Sends the null sentinel
+  // (`devices: { [token]: null }`) which the server interprets as delete.
+  const deleteNotificationPrefsDevice = useConnectionStore(s => s.deleteNotificationPrefsDevice)
   // #4544: quiet-hours editor actions. The window is global (per-device
   // overrides are a future iteration owned by #4543); `bypassCategories`
   // is the list of categories that fire even during quiet hours.
@@ -616,6 +727,15 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     if (sent) setNotifWsClosedError(null)
     else setNotifWsClosedError(WS_CLOSED_MESSAGE)
   }, [setNotificationPrefsDevice])
+
+  // #4564: clear an entire per-device entry. Same WS-closed banner contract
+  // as the rest of the notification-prefs handlers — a closed-socket clear
+  // would silently fail and the orphan would stay on disk.
+  const handleClearNotificationDevice = useCallback((deviceKey: string) => {
+    const sent = deleteNotificationPrefsDevice(deviceKey)
+    if (sent) setNotifWsClosedError(null)
+    else setNotifWsClosedError(WS_CLOSED_MESSAGE)
+  }, [deleteNotificationPrefsDevice])
 
   const handleSetNotificationQuietHours = useCallback((window: { start: string; end: string; timezone: string } | null) => {
     const sent = setNotificationPrefsQuietHours(window)
@@ -1155,6 +1275,17 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                   bypassCategories={notificationPrefs.bypassCategories ?? DEFAULT_BYPASS_CATEGORIES}
                   onWindowChange={handleSetNotificationQuietHours}
                   onBypassChange={handleSetNotificationBypassCategories}
+                />
+
+                {/* #4564: per-device override list — lets the user drain
+                    orphan entries left behind when Expo refreshes a push
+                    token, an app is reinstalled, or a browser tab loses
+                    its localStorage device id. Rendered even when the map
+                    is empty so users find the surface for later. */}
+                <KnownDevicesList
+                  devices={notificationPrefs.devices}
+                  currentDeviceKey={currentDeviceKey}
+                  onClear={handleClearNotificationDevice}
                 />
               </>
             )}

@@ -627,6 +627,45 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #4564: drop an entire per-device entry by sending the null sentinel
+  // (`devices: { [deviceKey]: null }`). The server's setPrefs interprets
+  // null as "remove this token from the persisted devices map". This is the
+  // only way to drain orphan entries left behind when an Expo push token
+  // refreshes, the app reinstalls, or a browser tab loses its
+  // localStorage device id — without it, the on-disk file grows forever.
+  //
+  // Defensive guards mirror setNotificationPrefsDevice:
+  // - empty deviceKey → no-op (we refuse to ship a `devices[""]` patch).
+  // - socket closed   → no-op AND no local mutation. An optimistic delete
+  //   on a closed socket would never reconcile and would resurrect on the
+  //   next reconnect snapshot, leaving the UI lying to the user.
+  //
+  // Optimistic local update mirrors setNotificationPrefsDevice: drop the
+  // key from the local snapshot immediately so the Settings list row
+  // disappears without waiting for the broadcast.
+  deleteNotificationPrefsDevice: (deviceKey: string): boolean => {
+    if (!deviceKey) return false;
+    const { socket, notificationPrefs } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      if (notificationPrefs) {
+        const { [deviceKey]: _removed, ...rest } = notificationPrefs.devices;
+        void _removed;
+        set({
+          notificationPrefs: {
+            ...notificationPrefs,
+            devices: rest,
+          },
+        });
+      }
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { devices: { [deviceKey]: null } },
+      });
+      return true;
+    }
+    return false;
+  },
+
   // #4544: global quiet-hours window patch. `null` clears the window;
   // a full window object (start/end/timezone) sets it. The server
   // shallow-merges at the top level, so other fields (categories,

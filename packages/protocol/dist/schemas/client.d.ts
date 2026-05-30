@@ -268,10 +268,17 @@ export declare const RegisterPushTokenSchema: z.ZodObject<{
  * The device map is bounded at 1000 entries to keep a malicious client
  * from bloating the on-disk file; in practice users have at most a
  * handful of devices.
+ *
+ * #4564: per-device entries also accept `null` as a sentinel meaning
+ * "delete this device entry". The "Clear" buttons in Settings emit
+ * `devices: { [token]: null }` to drain orphan entries left behind by
+ * push-token refresh, app reinstall, or browser-storage wipe. Server-side
+ * `setPrefs` interprets the null sentinel and removes the key from the
+ * persisted devices map.
  */
 export declare const NotificationPrefsPatchSchema: z.ZodObject<{
     categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
-    devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+    devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodObject<{
         categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
@@ -279,7 +286,7 @@ export declare const NotificationPrefsPatchSchema: z.ZodObject<{
             timezone: z.ZodString;
         }, z.core.$strip>]>>;
         bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
-    }, z.core.$loose>>>;
+    }, z.core.$loose>, z.ZodNull]>>>;
     quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
         start: z.ZodString;
         end: z.ZodString;
@@ -305,7 +312,7 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodString>;
     prefs: z.ZodObject<{
         categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
-        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodObject<{
             categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
             quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
                 start: z.ZodString;
@@ -313,7 +320,7 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
                 timezone: z.ZodString;
             }, z.core.$strip>]>>;
             bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
-        }, z.core.$loose>>>;
+        }, z.core.$loose>, z.ZodNull]>>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
             end: z.ZodString;
@@ -659,7 +666,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     requestId: z.ZodOptional<z.ZodString>;
     prefs: z.ZodObject<{
         categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
-        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodObject<{
             categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
             quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
                 start: z.ZodString;
@@ -667,7 +674,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 timezone: z.ZodString;
             }, z.core.$strip>]>>;
             bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
-        }, z.core.$loose>>>;
+        }, z.core.$loose>, z.ZodNull]>>>;
         quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
             start: z.ZodString;
             end: z.ZodString;

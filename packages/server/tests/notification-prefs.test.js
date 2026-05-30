@@ -333,3 +333,93 @@ describe('PushManager prefs surface (#4541)', () => {
     assert.equal(pm.isCategoryEnabled('result', 'tok'), false)
   })
 })
+
+/**
+ * #4564: per-device delete semantics.
+ *
+ * The shallow-merge in setPrefs cannot REMOVE a device entry without an
+ * explicit signal — adding/modifying a category under a token is the
+ * common path. Convention introduced here: `devices: { [token]: null }`
+ * in a patch deletes the entry entirely.
+ *
+ * Why: per-device entries are keyed by Expo push token (mobile) or
+ * `chroxy_device_id` (browser). When Expo refreshes a token, an app is
+ * reinstalled, or a browser tab loses its localStorage id, the OLD entry
+ * lingers on disk forever with no UI affordance to clear it. The null
+ * sentinel pairs with the new "Clear device" buttons in Settings to give
+ * the operator a way to drain orphans without hand-editing the prefs file.
+ */
+describe('PushManager prefs surface — per-device delete (#4564)', () => {
+  it('deletes a device entry when patch sets `devices[token] = null`', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    // Seed two device entries so we can verify the delete is targeted.
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    pm.setPrefs({ devices: { 'tok-b': { categories: { result: true } } } })
+    let snapshot = pm.getPrefs()
+    assert.ok(snapshot.devices['tok-a'], 'tok-a seeded')
+    assert.ok(snapshot.devices['tok-b'], 'tok-b seeded')
+
+    // Null sentinel deletes only the named device.
+    pm.setPrefs({ devices: { 'tok-a': null } })
+    snapshot = pm.getPrefs()
+    assert.equal(snapshot.devices['tok-a'], undefined, 'tok-a entry removed')
+    assert.ok(snapshot.devices['tok-b'], 'tok-b entry untouched')
+  })
+
+  it('persists the deletion to disk so the orphan does not resurrect on reload', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'orphan-tok': { categories: { result: false } } } })
+    pm.setPrefs({ devices: { 'orphan-tok': null } })
+
+    // Round-trip the on-disk file through a fresh loader — if the null
+    // sentinel were misinterpreted as a literal value, the loader would
+    // either crash or resurrect the entry with an empty body.
+    const reloaded = loadPrefs(prefsPath)
+    assert.equal(reloaded.devices['orphan-tok'], undefined, 'deletion survives reload')
+  })
+
+  it('tolerates deleting a token that was never registered (idempotent)', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    // No-op delete on an empty map must not throw or write malformed state.
+    pm.setPrefs({ devices: { 'never-seen': null } })
+    const snapshot = pm.getPrefs()
+    assert.deepEqual(snapshot.devices, {}, 'delete-of-nothing is a no-op')
+  })
+
+  it('falls back to global decision after a per-device entry is deleted', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    // Global says muted; per-device override unmutes for `tok-a`.
+    pm.setPrefs({ categories: { result: false } })
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: true } } } })
+    assert.equal(pm.isCategoryEnabled('result', 'tok-a'), true, 'override active')
+    // Drop the override — `tok-a` now falls back to the global mute.
+    pm.setPrefs({ devices: { 'tok-a': null } })
+    assert.equal(
+      pm.isCategoryEnabled('result', 'tok-a'),
+      false,
+      'after delete, the device follows the global default',
+    )
+  })
+
+  it('allows mixed add + delete in a single devices patch', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'old-tok': { categories: { result: false } } } })
+    // One patch drops the orphan and registers the fresh token. This is
+    // the shape a UI clicking "Clear old, register new" would emit if the
+    // two actions ever batched.
+    pm.setPrefs({
+      devices: {
+        'old-tok': null,
+        'new-tok': { categories: { result: true } },
+      },
+    })
+    const snapshot = pm.getPrefs()
+    assert.equal(snapshot.devices['old-tok'], undefined)
+    assert.deepEqual(snapshot.devices['new-tok'].categories, { result: true })
+  })
+})

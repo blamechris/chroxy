@@ -272,4 +272,87 @@ describe('#4558 — notification-prefs optimistic update', () => {
       prefs: { bypassCategories: ['permission'] },
     })
   })
+
+  // #4564: per-device delete semantics. The dashboard mirrors the server
+  // convention — sending `devices: { [token]: null }` drains an orphan
+  // entry. The local snapshot drops the key immediately (optimistic) and
+  // the server's broadcast confirms after the round-trip.
+  it('deleteNotificationPrefsDevice removes the device entry locally and ships a null sentinel patch', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sent: SentPayload[] = []
+    const socket = createMockSocket(sent)
+    useConnectionStore.setState({
+      socket,
+      notificationPrefs: {
+        categories: { result: true },
+        devices: {
+          'dev-a': { categories: { result: false } },
+          'dev-b': { categories: { result: false } },
+        },
+        quietHours: null,
+      },
+    })
+
+    const sentResult = useConnectionStore.getState().deleteNotificationPrefsDevice('dev-a')
+
+    expect(sentResult).toBe(true)
+    const after = useConnectionStore.getState().notificationPrefs!
+    expect(after.devices['dev-a']).toBeUndefined()
+    // Sibling entries survive.
+    expect(after.devices['dev-b']).toBeDefined()
+    expect(sent[0]).toEqual({
+      type: 'notification_prefs_set',
+      prefs: { devices: { 'dev-a': null } },
+    })
+  })
+
+  it('deleteNotificationPrefsDevice is a no-op when deviceKey is empty', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sent: SentPayload[] = []
+    const socket = createMockSocket(sent)
+    useConnectionStore.setState({
+      socket,
+      notificationPrefs: {
+        categories: { result: true },
+        devices: { 'dev-a': { categories: { result: false } } },
+        quietHours: null,
+      },
+    })
+
+    const sentResult = useConnectionStore.getState().deleteNotificationPrefsDevice('')
+
+    expect(sentResult).toBe(false)
+    expect(sent).toHaveLength(0)
+    expect(useConnectionStore.getState().notificationPrefs!.devices['dev-a']).toBeDefined()
+  })
+
+  it('deleteNotificationPrefsDevice returns false when the socket is closed and does not mutate state', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sent: SentPayload[] = []
+    const socket = {
+      send: vi.fn((raw: string) => {
+        try { sent.push(JSON.parse(raw) as SentPayload) } catch { /* noop */ }
+      }),
+      close: vi.fn(),
+      readyState: WebSocket.CLOSED,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as WebSocket
+    useConnectionStore.setState({
+      socket,
+      notificationPrefs: {
+        categories: { result: true },
+        devices: { 'dev-a': { categories: { result: false } } },
+        quietHours: null,
+      },
+    })
+
+    const sentResult = useConnectionStore.getState().deleteNotificationPrefsDevice('dev-a')
+
+    expect(sentResult).toBe(false)
+    // The optimistic deletion would never reconcile if the socket is closed,
+    // so the action must not mutate local state on the closed-socket branch.
+    expect(useConnectionStore.getState().notificationPrefs!.devices['dev-a']).toBeDefined()
+    expect(sent).toHaveLength(0)
+  })
 })
