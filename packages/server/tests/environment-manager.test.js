@@ -293,6 +293,11 @@ describe('EnvironmentManager.create() — workspacePVC passthrough (#4548)', () 
 
     const workspacePVC = { claimName: 'shared-workspace-pvc', mountPath: '/work', readOnly: true }
 
+    // NOTE: cwd: '/tmp' and workspacePVC are passed together here only because
+    // the recording stub does no validation — the manager's only requirement is
+    // that cwd is a non-empty string. A real K8sBackend would reject this
+    // combination via validateWorkspacePVC() (mutual-exclusion). The manager
+    // itself has no opinion on coexistence; enforcement lives in the backend.
     await manager.create({
       name: 'pvc-env',
       cwd: '/tmp',

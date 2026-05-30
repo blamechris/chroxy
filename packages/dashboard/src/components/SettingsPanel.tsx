@@ -11,6 +11,7 @@ import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { buildQuietHoursTimezoneList } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import {
   getTunnelMode,
@@ -83,41 +84,20 @@ const NOTIFICATION_CATEGORY_ORDER = [
 const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error']
 
 /**
- * #4544: timezone picker options. The full IANA database is hundreds of
- * entries; we surface a curated short list plus a "browser default" sentinel
- * so the user can pick the most common cases without scrolling. The actual
- * wire value is the IANA name (e.g. `America/Los_Angeles`).
+ * #4544: timezone picker options. The curated short-list lives in
+ * `@chroxy/store-core` (#4569) so the dashboard and mobile pickers share a
+ * single source of truth. We prepend the browser-resolved zone here so the
+ * user can pick "this device" without scrolling, and tag the matching entry
+ * with the trailing label.
  *
  * `Intl.supportedValuesOf('timeZone')` returns the full set on modern
- * browsers — listed here in case a future iteration switches to a
- * searchable combobox.
+ * browsers — kept in mind for a future searchable combobox.
  */
 function getQuietHoursTimezoneOptions(): { value: string; label: string }[] {
   const browser = (() => {
     try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
   })()
-  const curated = [
-    'UTC',
-    'America/Los_Angeles',
-    'America/Denver',
-    'America/Chicago',
-    'America/New_York',
-    'America/Sao_Paulo',
-    'Europe/London',
-    'Europe/Berlin',
-    'Europe/Paris',
-    'Europe/Moscow',
-    'Asia/Dubai',
-    'Asia/Kolkata',
-    'Asia/Shanghai',
-    'Asia/Tokyo',
-    'Asia/Singapore',
-    'Australia/Sydney',
-    'Pacific/Auckland',
-  ]
-  const set = new Set(curated)
-  if (browser && !set.has(browser)) curated.unshift(browser)
-  return curated.map((tz) => ({
+  return buildQuietHoursTimezoneList(browser).map((tz) => ({
     value: tz,
     label: tz === browser ? `${tz} (this device)` : tz,
   }))
@@ -895,8 +875,17 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                             </label>
                             {hint && <p className="settings-hint">{hint}</p>}
                             {currentDeviceKey && (
-                              <label
-                                htmlFor={deviceToggleId}
+                              // #4562: per-device row uses a <div> wrapper +
+                              // explicit `htmlFor` <label> sibling rather than
+                              // a wrapping <label>. The parent category row
+                              // already lives inside its own <label> on the
+                              // same <li>, and screen readers / click bubbling
+                              // get confused when two label elements share an
+                              // ancestor `<li>` — hoisting the per-device
+                              // label out of a wrapper element keeps the input
+                              // and its text label as flat siblings with a
+                              // single explicit association.
+                              <div
                                 className="notification-prefs-device-row"
                                 data-testid={`notification-prefs-device-row-${cat}`}
                               >
@@ -909,8 +898,8 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                                   }
                                   data-testid={`notification-prefs-device-toggle-${cat}`}
                                 />
-                                <span>Mute on this device</span>
-                              </label>
+                                <label htmlFor={deviceToggleId}>Mute on this device</label>
+                              </div>
                             )}
                           </li>
                         )
