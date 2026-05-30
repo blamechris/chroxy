@@ -324,6 +324,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #4542: per-category notification prefs snapshot. Populated by the
   // `notification_prefs` WS message; null until the first snapshot arrives.
   notificationPrefs: null,
+  // #4543: registered Expo push token for THIS device. Filled by
+  // registerPushToken (message-handler.ts) after register_push_token. Used
+  // as the key into notificationPrefs.devices when patching per-device
+  // overrides; null until registration succeeds (or forever on simulators
+  // without push capability).
+  pushToken: null,
   slashCommands: [],
   customAgents: [],
   checkpoints: [],
@@ -414,6 +420,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       wsSend(socket, {
         type: 'notification_prefs_set',
         prefs: { categories: { [category]: enabled } },
+      });
+    }
+  },
+
+  // #4543: patch a per-device category override. Server's setPrefs
+  // (push.js) shallow-merges per device key, so a single-category patch
+  // leaves other categories under THIS device — and every OTHER device's
+  // entry — untouched. Defensive guards:
+  // - empty deviceKey → no-op (refuse to ship a `devices[""]` patch).
+  // - socket closed   → no-op (the snapshot is the source of truth; we
+  //   don't queue, matching setNotificationPrefsCategory).
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => {
+    if (!deviceKey) return;
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: {
+          devices: {
+            [deviceKey]: { categories: { [category]: enabled } },
+          },
+        },
       });
     }
   },
@@ -822,6 +850,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #4542: clear the cached prefs snapshot on disconnect so the next
       // connect refetches from the actual server (snapshots are host-specific).
       notificationPrefs: null,
+      // #4543: clear pushToken on disconnect so a reconnect cycle
+      // re-registers and re-mirrors a fresh token. Stale tokens would
+      // address the wrong device's override map after a token refresh.
+      pushToken: null,
       slashCommands: [],
       customAgents: [],
       checkpoints: [],
