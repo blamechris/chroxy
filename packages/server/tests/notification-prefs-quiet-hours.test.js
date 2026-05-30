@@ -470,6 +470,161 @@ describe('loadPrefs — extended quiet-hours schema (#4544)', () => {
   })
 })
 
+describe('loadPrefs — strict HH:MM range validation (#4566)', () => {
+  // The regex `/^\d{2}:\d{2}$/` alone accepts out-of-range values like
+  // `25:99`. A hand-edited prefs file with `start: '25:99'` previously
+  // survived the loader and landed in memory — `_parseHHMM` then returned
+  // null at gate time and `isInQuietHoursIn` fail-opened, so the bad
+  // window was silently disabled. These tests pin the stricter contract:
+  // sanitizeQuietHours rejects the window AND loadPrefs warns so the
+  // operator notices the typo.
+  it('drops a quietHours window with hour > 23 (25:00)', () => {
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '25:00', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours, null)
+  })
+
+  it('drops a quietHours window with minute > 59 (12:99)', () => {
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '12:99', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours, null)
+  })
+
+  it('drops a quietHours window with hour and minute both out of range (25:99)', () => {
+    // The headline issue example. `25:99` matches the loose regex but
+    // describes no valid wall-clock instant.
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '25:99', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours, null)
+  })
+
+  it('drops a quietHours window with non-numeric components (ab:cd)', () => {
+    // Defensive: even though the existing regex catches this, pin it so a
+    // refactor of `_HHMM_RE` cannot silently weaken the contract.
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: 'ab:cd', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours, null)
+  })
+
+  it('drops a quietHours window with unpadded single-digit hour (9:00)', () => {
+    // Spec is two-digit zero-padded HH:MM. `9:00` is rejected — same as
+    // pre-#4566 behaviour from the regex, pinned to prevent regression.
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '9:00', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours, null)
+  })
+
+  it('drops a quietHours window with empty string start', () => {
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours, null)
+  })
+
+  it('accepts boundary values 00:00 and 23:59', () => {
+    // The narrowest legal range — pin both ends so a regex tweak that
+    // accidentally clamps the boundary is caught.
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '00:00', end: '23:59', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours.start, '00:00')
+    assert.equal(prefs.quietHours.end, '23:59')
+  })
+
+  it('accepts typical wall-clock values 09:00 and 23:59', () => {
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '09:00', end: '23:59', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.quietHours.start, '09:00')
+    assert.equal(prefs.quietHours.end, '23:59')
+  })
+
+  it('logs a warn when an on-disk quietHours block is rejected', () => {
+    // Acceptance criterion: the operator must see a signal in logs when a
+    // hand-edited typo survives JSON.parse but fails range validation.
+    // Without this warn the bad window is silently dropped and the
+    // operator believes their quiet-hours are active.
+    const onDisk = {
+      categories: {},
+      devices: {},
+      quietHours: { start: '25:99', end: '07:00', timezone: 'America/Los_Angeles' },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const warnings = []
+    const log = { warn: (msg) => warnings.push(msg) }
+    const prefs = loadPrefs(prefsPath, { log })
+    assert.equal(prefs.quietHours, null)
+    assert.equal(warnings.length, 1, 'exactly one warn fires for the rejected global window')
+    assert.match(warnings[0], /quietHours/i, 'warn mentions quietHours')
+  })
+
+  it('does NOT log a warn when on-disk quietHours is absent (default state)', () => {
+    // First-run / clean prefs files have no quietHours key — that's not a
+    // typo, so silence is correct.
+    const onDisk = { categories: {}, devices: {} }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const warnings = []
+    const log = { warn: (msg) => warnings.push(msg) }
+    loadPrefs(prefsPath, { log })
+    assert.equal(warnings.length, 0)
+  })
+
+  it('logs a warn when a per-device quietHours block is rejected', () => {
+    const onDisk = {
+      categories: {},
+      devices: {
+        'phone-1': {
+          quietHours: { start: '99:99', end: '07:00', timezone: 'America/Los_Angeles' },
+        },
+      },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const warnings = []
+    const log = { warn: (msg) => warnings.push(msg) }
+    const prefs = loadPrefs(prefsPath, { log })
+    assert.equal(prefs.devices['phone-1'].quietHours, null)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /phone-1/, 'warn identifies the device token')
+  })
+})
+
 describe('savePrefs — round-trip extended schema (#4544)', () => {
   it('round-trips timezone and bypassCategories', () => {
     const written = {
