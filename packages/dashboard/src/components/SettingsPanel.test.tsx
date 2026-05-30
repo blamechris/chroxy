@@ -89,6 +89,11 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     // tests override.
     setNotificationPrefsQuietHours: vi.fn().mockReturnValue(true),
     setNotificationPrefsBypassCategories: vi.fn().mockReturnValue(true),
+    // #4560: server-advertised capabilities. Default to the modern shape
+    // (notificationPrefs supported) so existing tests covering the
+    // Notifications section keep exercising the rendered path. Tests
+    // covering the older-server gate override with `{}`.
+    serverCapabilities: { notificationPrefs: true },
     ...extra,
   }
 }
@@ -1468,6 +1473,94 @@ describe('SettingsPanel', () => {
         fireEvent.click(screen.getByTestId('byok-save-button'))
         expect(screen.queryByTestId('byok-ws-closed-error')).toBeNull()
       })
+    })
+  })
+
+  // #4560: gate the Notifications section on the server advertising the
+  // `notificationPrefs` capability in auth_ok. Pre-#4541 servers have no
+  // `notification_prefs_get` handler — without this gate the section sat on
+  // "Loading preferences…" forever waiting for a snapshot that would never
+  // arrive. Capability-true keeps the existing render path; capability-false
+  // swaps in a "not supported" message that names the requirement.
+  describe('Notification preferences — capability gate (#4560)', () => {
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+    }
+    const defaultPrefs = { categories, devices: {}, quietHours: null }
+
+    it('renders the Notifications section when the server advertises notificationPrefs', () => {
+      setMockState({
+        notificationPrefs: defaultPrefs,
+        serverCapabilities: { notificationPrefs: true },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-section')).toBeInTheDocument()
+      // Loading hint is absent because prefs already landed.
+      expect(screen.queryByTestId('notification-prefs-not-supported')).toBeNull()
+    })
+
+    it('renders the loading hint when capability is on but the snapshot has not arrived yet', () => {
+      // Pre-snapshot state on a supported server still flows through the
+      // existing "Loading preferences…" affordance — the gate only changes
+      // behaviour for unsupported servers.
+      setMockState({
+        notificationPrefs: null,
+        serverCapabilities: { notificationPrefs: true },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-section')).toBeInTheDocument()
+      expect(screen.getByTestId('notification-prefs-loading')).toBeInTheDocument()
+      expect(screen.queryByTestId('notification-prefs-not-supported')).toBeNull()
+    })
+
+    it('renders the "not supported" message when the server omits the capability', () => {
+      setMockState({
+        notificationPrefs: null,
+        serverCapabilities: {},
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      // Section header still rendered so users can see the feature exists
+      // (and what they would need to upgrade to in order to use it), but
+      // the loading hint is replaced with an explicit explanation.
+      expect(screen.getByTestId('notification-prefs-section')).toBeInTheDocument()
+      const notSupported = screen.getByTestId('notification-prefs-not-supported')
+      expect(notSupported).toBeInTheDocument()
+      // Loading hint must NOT appear — the pre-#4560 bug was leaving it
+      // there forever; that's the behaviour this gate fixes.
+      expect(screen.queryByTestId('notification-prefs-loading')).toBeNull()
+      // No category toggles should be rendered against an unsupported
+      // server — the buttons would no-op against a missing handler.
+      expect(screen.queryByTestId('notification-prefs-toggle-result')).toBeNull()
+    })
+
+    it('does not call refreshNotificationPrefs when capability is missing', () => {
+      // Pre-#4541 servers don't recognise `notification_prefs_get`. Firing
+      // it against them produces an `unknown_message` error in the server
+      // logs and accomplishes nothing — gate the call out entirely.
+      const refreshNotificationPrefs = vi.fn()
+      setMockState({
+        notificationPrefs: null,
+        serverCapabilities: {},
+        refreshNotificationPrefs,
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshNotificationPrefs).not.toHaveBeenCalled()
+    })
+
+    it('treats serverCapabilities defaulting to {} as unsupported (fail-closed)', () => {
+      // Mirrors the auth_ok-handler default — older servers omit the field
+      // entirely and the store seeds an empty map. The UI must read absence
+      // as "feature off" so a stale connection (or a buggy server that
+      // omits the flag) doesn't accidentally re-enable the broken section.
+      setMockState({ notificationPrefs: null, serverCapabilities: {} })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('notification-prefs-not-supported')).toBeInTheDocument()
     })
   })
 })

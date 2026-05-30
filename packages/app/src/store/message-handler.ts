@@ -1015,6 +1015,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         teleport: !!webFeaturesRaw.teleport,
       } : { available: false, remote: false, teleport: false };
 
+      // #4560: parse server-advertised capability map. Older servers omit the
+      // field; treat absence as "no advertised capabilities" so feature-gated
+      // UI hides itself fail-closed (rather than silently no-oping clicks
+      // against unimplemented WS handlers). Coerce values to boolean so a
+      // malformed entry can't accidentally enable a gate.
+      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
+      const serverCapabilities: Record<string, boolean> = {};
+      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
+        for (const [k, v] of Object.entries(capabilitiesRaw)) {
+          serverCapabilities[k] = v === true;
+        }
+      }
+
 
       // On reconnect, preserve messages and terminal buffer
       // If server provided a sessionToken (via pairing), use it for future auth
@@ -1059,6 +1072,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         serverProtocolVersion: authProtocolVersion,
         serverResultTimeoutMs: authResultTimeoutMs,
         sessionCwd: authSessionCwd,
+        // #4560: overwrite stale capabilities from a previous connection on
+        // every auth_ok so a reconnect against a different (or older) server
+        // can't have UI gates left enabled by previously-advertised flags.
+        serverCapabilities,
       });
       useConnectionLifecycleStore.getState().setConnectionError(null, 0);
       useConnectionLifecycleStore.getState().setUserDisconnected(false);
