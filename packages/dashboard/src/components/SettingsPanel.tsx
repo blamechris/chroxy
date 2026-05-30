@@ -142,6 +142,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const notificationPrefs = useConnectionStore(s => s.notificationPrefs)
   const refreshNotificationPrefs = useConnectionStore(s => s.refreshNotificationPrefs)
   const setNotificationPrefsCategory = useConnectionStore(s => s.setNotificationPrefsCategory)
+  // #4543: per-device opt-in/out. `currentDeviceKey` is the stable
+  // localStorage id used to address THIS browser tab in the per-device
+  // override map. Null means we never minted a key (storage unavailable);
+  // when null, the per-device toggle row is suppressed entirely so we never
+  // ship a `devices[""]` / `devices[null]` patch.
+  const currentDeviceKey = useConnectionStore(s => s.currentDeviceKey)
+  const setNotificationPrefsDevice = useConnectionStore(s => s.setNotificationPrefsDevice)
   const activeSessionPromptEvaluator = sessions.find(s => s.sessionId === activeSessionId)?.promptEvaluator
   // #3805: same capability gate pattern as promptEvaluator — only
   // render the toggle when the active session reports the boolean
@@ -589,7 +596,14 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               via `notification_prefs_set` and the server re-broadcasts so
               other clients stay in lockstep. The section renders even
               before the first snapshot lands so the user knows the feature
-              exists (with a loading hint). */}
+              exists (with a loading hint).
+
+              #4543: each row also exposes a "Mute on this device" toggle.
+              The per-device entry is keyed by `currentDeviceKey` (the same
+              stable localStorage id sent in `deviceInfo` on auth), so the
+              dashboard always addresses the same `devices` entry across
+              reconnects. When `currentDeviceKey` is null (storage broken),
+              the per-device toggle row is suppressed entirely. */}
           <section className="settings-section" data-testid="notification-prefs-section">
             <h3>Notifications</h3>
             <p className="settings-hint">
@@ -610,6 +624,12 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 const knownKeys = NOTIFICATION_CATEGORY_ORDER.filter(k => k in cats)
                 const unknownKeys = Object.keys(cats).filter(k => !NOTIFICATION_CATEGORY_ORDER.includes(k))
                 const ordered = [...knownKeys, ...unknownKeys]
+                // #4543: look up THIS device's override map once per render
+                // so each row can determine its per-device state without
+                // re-reading the snapshot.
+                const deviceCategories = currentDeviceKey
+                  ? notificationPrefs.devices?.[currentDeviceKey]?.categories ?? {}
+                  : {}
                 return (
                   <ul className="notification-prefs-list">
                     {ordered.map(cat => {
@@ -618,6 +638,18 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                       const hint = meta?.hint
                       const checked = cats[cat] !== false
                       const toggleId = `notification-prefs-${cat}`
+                      // #4543: per-device override resolution.
+                      //   - explicit `false` → muted on this device.
+                      //   - explicit `true`  → unmuted on this device
+                      //                        (overrides a `false` global).
+                      //   - missing entry    → falls through to global default;
+                      //                        UI shows the row as NOT muted
+                      //                        (mute checkbox unchecked).
+                      // Toggling sends the inverse boolean so a checked
+                      // "mute" checkbox === `enabled: false` on the wire.
+                      const deviceOverride = deviceCategories[cat]
+                      const mutedOnThisDevice = deviceOverride === false
+                      const deviceToggleId = `notification-prefs-device-${cat}`
                       return (
                         <li key={cat} className="settings-field settings-field-checkbox">
                           <label htmlFor={toggleId}>
@@ -631,6 +663,24 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                             {label}
                           </label>
                           {hint && <p className="settings-hint">{hint}</p>}
+                          {currentDeviceKey && (
+                            <label
+                              htmlFor={deviceToggleId}
+                              className="notification-prefs-device-row"
+                              data-testid={`notification-prefs-device-row-${cat}`}
+                            >
+                              <input
+                                id={deviceToggleId}
+                                type="checkbox"
+                                checked={mutedOnThisDevice}
+                                onChange={(e) =>
+                                  setNotificationPrefsDevice(currentDeviceKey, cat, !e.target.checked)
+                                }
+                                data-testid={`notification-prefs-device-toggle-${cat}`}
+                              />
+                              <span>Mute on this device</span>
+                            </label>
+                          )}
                         </li>
                       )
                     })}

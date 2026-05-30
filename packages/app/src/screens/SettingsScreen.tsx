@@ -150,6 +150,13 @@ export function SettingsScreen() {
   const notificationPrefs = useConnectionStore((s) => s.notificationPrefs);
   const refreshNotificationPrefs = useConnectionStore((s) => s.refreshNotificationPrefs);
   const setNotificationPrefsCategory = useConnectionStore((s) => s.setNotificationPrefsCategory);
+  // #4543: per-device override. `pushToken` is the registered Expo token
+  // for THIS device, used as the key into `notificationPrefs.devices`. Null
+  // when push registration hasn't completed (simulator, permission denied,
+  // pre-`register_push_token`); the per-device toggle row is suppressed in
+  // that state so we never ship a `devices[null]` patch.
+  const pushToken = useConnectionStore((s) => s.pushToken);
+  const setNotificationPrefsDevice = useConnectionStore((s) => s.setNotificationPrefsDevice);
 
   useEffect(() => {
     refreshNotificationPrefs();
@@ -419,7 +426,7 @@ export function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* NOTIFICATIONS — Categories (#4542) */}
+      {/* NOTIFICATIONS — Categories (#4542) + per-device opt-in/out (#4543) */}
       <Text style={styles.sectionHeader}>NOTIFICATION CATEGORIES</Text>
       <View style={styles.section} testID="notification-prefs-section">
         {notificationPrefs == null ? (
@@ -434,6 +441,18 @@ export function SettingsScreen() {
             const label = meta?.label ?? cat;
             const hint = meta?.hint;
             const checked = notificationPrefs.categories[cat] !== false;
+            // #4543: per-device override resolution for THIS device.
+            //   - explicit `false` → muted on this device.
+            //   - explicit `true`  → unmuted on this device (overrides a
+            //                        `false` global default).
+            //   - missing entry    → falls through to global default; mute
+            //                        toggle shows unchecked.
+            // The mute Switch carries the inverse boolean: a tap to enable
+            // mute === sending `enabled: false` on the wire.
+            const deviceOverride = pushToken
+              ? notificationPrefs.devices?.[pushToken]?.categories?.[cat]
+              : undefined;
+            const mutedOnThisDevice = deviceOverride === false;
             return (
               <React.Fragment key={cat}>
                 {idx > 0 && <View style={styles.separator} />}
@@ -451,6 +470,22 @@ export function SettingsScreen() {
                     testID={`notification-prefs-toggle-${cat}`}
                   />
                 </View>
+                {pushToken && (
+                  <View
+                    style={[styles.row, styles.deviceOverrideRow]}
+                    testID={`notification-prefs-device-row-${cat}`}
+                  >
+                    <View style={{ flex: 1, paddingRight: 12 }}>
+                      <Text style={styles.rowHint}>Mute on this device</Text>
+                    </View>
+                    <Switch
+                      value={mutedOnThisDevice}
+                      onValueChange={(value) => setNotificationPrefsDevice(pushToken, cat, !value)}
+                      trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
+                      testID={`notification-prefs-device-toggle-${cat}`}
+                    />
+                  </View>
+                )}
               </React.Fragment>
             );
           })
@@ -689,6 +724,16 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     minHeight: 44,
+  },
+  // #4543: subordinate per-device row sits flush under the parent category
+  // row with a slight indent so the visual hierarchy makes it clear that
+  // "Mute on this device" is layered on top of the global toggle, not a
+  // peer of it.
+  deviceOverrideRow: {
+    paddingLeft: 32,
+    paddingTop: 4,
+    paddingBottom: 8,
+    minHeight: 36,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
