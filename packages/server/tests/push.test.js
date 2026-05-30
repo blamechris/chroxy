@@ -1,5 +1,8 @@
-import { describe, it, before, afterEach, mock } from 'node:test'
+import { describe, it, before, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PushManager } from '../src/push.js'
 
 /**
@@ -387,5 +390,65 @@ describe('PushManager', () => {
       await manager.send('custom', 'T', 'B')
       assert.equal(fetchMock.mock.calls.length, 2)
     })
+  })
+})
+
+// #4550 — setPrefs must persist BEFORE mutating in-memory state, so a
+// failed rename doesn't leave _prefs reporting a value the user thinks
+// failed to save. Without the rollback, isCategoryEnabled answers based
+// on the unsaved patch until the next server restart reloads from disk.
+describe('PushManager.setPrefs rollback on persist failure (#4550)', () => {
+  let tmpDir
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-push-rollback-'))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('rolls back in-memory prefs when persist fails', () => {
+    // Force the on-disk persist to fail by pointing prefsPath into a
+    // location whose "directory" is actually a regular file. savePrefs
+    // calls mkdirSync(dirname(prefsPath), { recursive: true }) which
+    // throws ENOTDIR / EEXIST in this layout, propagating out of
+    // setPrefs exactly the way a real EACCES / EXDEV / quota failure
+    // would. This avoids module-mocking the fs surface (and the ESM
+    // cache headaches that come with it) while still exercising the
+    // production write path.
+    const blocker = join(tmpDir, 'blocker-file')
+    writeFileSync(blocker, 'not-a-directory')
+    const blockedPrefsPath = join(blocker, 'notification-prefs.json')
+
+    const pm = new PushManager({ prefsPath: blockedPrefsPath })
+
+    // Sanity check: `result` defaults to enabled. The whole point of
+    // the test is that after a failed setPrefs trying to mute it,
+    // isCategoryEnabled('result') must STILL return true.
+    assert.equal(pm.isCategoryEnabled('result'), true, 'precondition: result starts enabled')
+
+    let threw = null
+    try {
+      pm.setPrefs({ categories: { result: false } })
+    } catch (err) {
+      threw = err
+    }
+    assert.ok(threw, 'setPrefs must re-throw the rename failure so the WS handler can surface it')
+
+    // The actual regression assertion: in-memory state must match the
+    // pre-patch decision because the persist failed.
+    assert.equal(
+      pm.isCategoryEnabled('result'),
+      true,
+      'isCategoryEnabled must return the pre-patch value when persist fails',
+    )
+    // Belt-and-braces: getPrefs() snapshot must also show the
+    // unchanged category, not the attempted patch.
+    assert.equal(
+      pm.getPrefs().categories.result,
+      true,
+      'getPrefs snapshot must reflect the rolled-back in-memory state',
+    )
   })
 })
