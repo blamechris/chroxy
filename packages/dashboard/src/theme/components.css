@@ -4994,6 +4994,14 @@
   color: var(--accent-blue);
 }
 
+/* #4587: per-device metadata badges (platform + last-seen). Subdued
+   styling so the token + Clear button still read as primary content;
+   the meta is just an aid for telling orphans apart. */
+.notification-prefs-device-meta {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+}
+
 .notification-prefs-device-clear {
   flex-shrink: 0;
   padding: 4px 10px;

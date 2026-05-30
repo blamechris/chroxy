@@ -423,3 +423,229 @@ describe('PushManager prefs surface — per-device delete (#4564)', () => {
     assert.deepEqual(snapshot.devices['new-tok'].categories, { result: true })
   })
 })
+
+/**
+ * #4587: per-device `lastSeenAt` (epoch ms) + `platform` metadata.
+ *
+ * Operators with multiple orphan entries in the per-device list need a way
+ * to tell which is which before clicking Clear. The truncated token alone
+ * is opaque — augment each entry with the platform (`ios`/`android`/
+ * `web`/`desktop`) and the timestamp of the last patch that touched the
+ * entry. Both fields are optional on the wire; older clients/servers
+ * round-trip without them.
+ */
+describe('sanitizeDevices — lastSeenAt + platform (#4587)', () => {
+  it('passes through a valid lastSeenAt (positive finite number)', () => {
+    const onDisk = {
+      devices: {
+        'tok-a': {
+          categories: { result: false },
+          lastSeenAt: 1_700_000_000_000,
+        },
+      },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-a'].lastSeenAt, 1_700_000_000_000)
+  })
+
+  it('passes through a valid platform (string, 1-32 chars)', () => {
+    const onDisk = {
+      devices: {
+        'tok-a': { categories: { result: false }, platform: 'ios' },
+      },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-a'].platform, 'ios')
+  })
+
+  it('drops a non-finite lastSeenAt (NaN, Infinity)', () => {
+    // NaN/Infinity round-trip through JSON as `null`, which would already
+    // miss `typeof === number`. Cover the in-memory path where the loader
+    // re-sanitises a malformed value (e.g. passed via setPrefs).
+    const onDisk = {
+      devices: {
+        'tok-a': { categories: {}, lastSeenAt: null },
+        'tok-b': { categories: {}, lastSeenAt: 'not-a-number' },
+      },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-a'].lastSeenAt, undefined)
+    assert.equal(prefs.devices['tok-b'].lastSeenAt, undefined)
+  })
+
+  it('drops a zero or negative lastSeenAt (epoch ms must be > 0)', () => {
+    const onDisk = {
+      devices: {
+        'tok-zero': { categories: {}, lastSeenAt: 0 },
+        'tok-neg': { categories: {}, lastSeenAt: -1 },
+      },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-zero'].lastSeenAt, undefined)
+    assert.equal(prefs.devices['tok-neg'].lastSeenAt, undefined)
+  })
+
+  it('drops an empty-string platform', () => {
+    const onDisk = {
+      devices: { 'tok-a': { categories: {}, platform: '' } },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-a'].platform, undefined)
+  })
+
+  it('drops a platform string longer than 32 chars', () => {
+    const tooLong = 'x'.repeat(33)
+    const onDisk = {
+      devices: { 'tok-a': { categories: {}, platform: tooLong } },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-a'].platform, undefined)
+  })
+
+  it('drops a non-string platform', () => {
+    const onDisk = {
+      devices: { 'tok-a': { categories: {}, platform: 123 } },
+    }
+    writeFileSync(prefsPath, JSON.stringify(onDisk))
+    const prefs = loadPrefs(prefsPath)
+    assert.equal(prefs.devices['tok-a'].platform, undefined)
+  })
+
+  it('round-trips lastSeenAt + platform through save+load', () => {
+    const written = {
+      categories: { result: true },
+      devices: {
+        'tok-a': {
+          categories: { result: false },
+          lastSeenAt: 1_700_000_000_000,
+          platform: 'desktop',
+        },
+      },
+    }
+    savePrefs(written, prefsPath)
+    const reread = loadPrefs(prefsPath)
+    assert.equal(reread.devices['tok-a'].lastSeenAt, 1_700_000_000_000)
+    assert.equal(reread.devices['tok-a'].platform, 'desktop')
+  })
+})
+
+/**
+ * #4587: PushManager.setPrefs + touchDevice stamping behaviour.
+ */
+describe('PushManager — lastSeenAt + platform stamping (#4587)', () => {
+  it('stamps lastSeenAt = Date.now() when creating a new device entry', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    const before = Date.now()
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    const after = Date.now()
+    const stamp = pm.getPrefs().devices['tok-a'].lastSeenAt
+    assert.equal(typeof stamp, 'number')
+    assert.ok(stamp >= before && stamp <= after, `expected stamp in [${before}, ${after}], got ${stamp}`)
+  })
+
+  it('stamps lastSeenAt when patching an existing device', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    const firstStamp = pm.getPrefs().devices['tok-a'].lastSeenAt
+    // Force a measurable gap so the second stamp is strictly newer.
+    await new Promise((r) => setTimeout(r, 5))
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: true } } } })
+    const secondStamp = pm.getPrefs().devices['tok-a'].lastSeenAt
+    assert.ok(secondStamp > firstStamp, `expected ${secondStamp} > ${firstStamp}`)
+  })
+
+  it('does NOT stamp lastSeenAt on the null-delete case (entry is gone)', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    pm.setPrefs({ devices: { 'tok-a': null } })
+    const snapshot = pm.getPrefs()
+    assert.equal(snapshot.devices['tok-a'], undefined)
+  })
+
+  it('honours patch-supplied platform over caller-supplied', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs(
+      { devices: { 'tok-a': { categories: { result: false }, platform: 'ios' } } },
+      { platform: 'android' },
+    )
+    assert.equal(pm.getPrefs().devices['tok-a'].platform, 'ios')
+  })
+
+  it('falls back to caller-supplied platform when patch has none', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs(
+      { devices: { 'tok-a': { categories: { result: false } } } },
+      { platform: 'desktop' },
+    )
+    assert.equal(pm.getPrefs().devices['tok-a'].platform, 'desktop')
+  })
+
+  it('clamps platform to 32 chars', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    const longPlatform = 'x'.repeat(50)
+    pm.setPrefs({ devices: { 'tok-a': { categories: {}, platform: longPlatform } } })
+    assert.equal(pm.getPrefs().devices['tok-a'].platform.length, 32)
+  })
+
+  it('touchDevice bumps lastSeenAt on an existing entry', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    const firstStamp = pm.getPrefs().devices['tok-a'].lastSeenAt
+    await new Promise((r) => setTimeout(r, 5))
+    pm.touchDevice('tok-a')
+    const secondStamp = pm.getPrefs().devices['tok-a'].lastSeenAt
+    assert.ok(secondStamp > firstStamp, `expected ${secondStamp} > ${firstStamp}`)
+  })
+
+  it('touchDevice is a NO-OP on a non-existing entry (no empty entry created)', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.touchDevice('never-seen', 'ios')
+    const snapshot = pm.getPrefs()
+    assert.equal(snapshot.devices['never-seen'], undefined, 'must not create empty entries')
+  })
+
+  it('touchDevice updates platform when supplied', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    pm.touchDevice('tok-a', 'android')
+    assert.equal(pm.getPrefs().devices['tok-a'].platform, 'android')
+  })
+
+  it('touchDevice ignores invalid token (non-string, empty)', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'tok-a': { categories: {} } } })
+    // Should not throw or mutate anything.
+    pm.touchDevice('')
+    pm.touchDevice(null)
+    pm.touchDevice(undefined)
+    const snapshot = pm.getPrefs()
+    assert.deepEqual(Object.keys(snapshot.devices), ['tok-a'])
+  })
+
+  it('touchDevice persists to disk when prefsPath is configured', async () => {
+    const { PushManager } = await import('../src/push.js')
+    const pm = new PushManager({ prefsPath })
+    pm.setPrefs({ devices: { 'tok-a': { categories: { result: false } } } })
+    await new Promise((r) => setTimeout(r, 5))
+    pm.touchDevice('tok-a', 'ios')
+    const reread = loadPrefs(prefsPath)
+    assert.equal(reread.devices['tok-a'].platform, 'ios')
+    assert.ok(typeof reread.devices['tok-a'].lastSeenAt === 'number')
+  })
+})

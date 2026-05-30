@@ -1063,6 +1063,71 @@ describe('SettingsPanel', () => {
       expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('orphan-device-key')
     })
 
+    it('prompts before clearing when the row matches currentDeviceKey (#4588)', () => {
+      // The (this device) row silently wipes the operator's own mutes /
+      // quiet-hours overrides if cleared by accident — the prompt is a
+      // second cue after the (this device) tag.
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { 'test-device-key': { categories: { result: false } } },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+        currentDeviceKey: 'test-device-key',
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-test-device-key'))
+      expect(confirmSpy).toHaveBeenCalledOnce()
+      expect(confirmSpy.mock.calls[0]![0]).toMatch(/fall back to global defaults/i)
+      expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('test-device-key')
+      confirmSpy.mockRestore()
+    })
+
+    it('does NOT dispatch the delete when the current-device confirm is dismissed (#4588)', () => {
+      // Cancel path — the dispatch must NOT fire. This is the whole point
+      // of the prompt: a misclick on your own row should be recoverable.
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { 'test-device-key': { categories: { result: false } } },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+        currentDeviceKey: 'test-device-key',
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-test-device-key'))
+      expect(confirmSpy).toHaveBeenCalledOnce()
+      expect(deleteNotificationPrefsDevice).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+
+    it('skips the confirm prompt for orphan rows (#4588)', () => {
+      // Orphan-row clears stay one-click — the whole point of the orphan
+      // list is fast cleanup. Only the current-device row gates the dispatch.
+      const deleteNotificationPrefsDevice = vi.fn().mockReturnValue(true)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      setMockState({
+        notificationPrefs: {
+          categories,
+          devices: { 'orphan-device-key': { categories: { result: false } } },
+          quietHours: null,
+        },
+        deleteNotificationPrefsDevice,
+        currentDeviceKey: 'test-device-key',
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('notification-prefs-device-clear-orphan-device-key'))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(deleteNotificationPrefsDevice).toHaveBeenCalledWith('orphan-device-key')
+      confirmSpy.mockRestore()
+    })
+
     it('does not render the list when the server lacks the notificationPrefs capability', () => {
       // The capability gate (#4560) replaces the body of the Notifications
       // section with an upgrade hint. The device list shares that gate so
@@ -1074,6 +1139,91 @@ describe('SettingsPanel', () => {
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.queryByTestId('notification-prefs-devices-list')).toBeNull()
+    })
+
+    // #4587: per-device metadata (lastSeenAt + platform). The dashboard
+    // surfaces these as a muted "{platform} · Last seen {relative}" suffix
+    // next to the truncated token so operators can tell orphan entries
+    // apart. Both fields are optional — pre-#4587 servers omit them and
+    // the row renders exactly as before.
+    describe('lastSeen + platform metadata (#4587)', () => {
+      it('renders a platform badge when entry.platform is set', () => {
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-ios': { categories: { result: false }, platform: 'ios' },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const badge = screen.getByTestId('notification-prefs-device-platform-tok-ios')
+        // Friendly label rewrite — `ios` -> `iOS` — so the row reads
+        // correctly for non-technical operators.
+        expect(badge.textContent).toMatch(/iOS/)
+      })
+
+      it('renders a last-seen badge when entry.lastSeenAt is set', () => {
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-seen': {
+                categories: { result: false },
+                // 1 minute ago — should render as "1 min ago"
+                lastSeenAt: Date.now() - 60_000,
+              },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const badge = screen.getByTestId('notification-prefs-device-last-seen-tok-seen')
+        // Match the minute-granularity render. Allow `1 min` or `2 min`
+        // depending on which side of the floor we land on.
+        expect(badge.textContent).toMatch(/Last seen \d+ min ago/)
+      })
+
+      it('renders both meta spans when both fields are set', () => {
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-both': {
+                categories: { result: false },
+                platform: 'android',
+                lastSeenAt: Date.now() - 3_600_000, // 1 hr ago
+              },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.getByTestId('notification-prefs-device-platform-tok-both').textContent).toMatch(/Android/)
+        expect(screen.getByTestId('notification-prefs-device-last-seen-tok-both').textContent).toMatch(/hr ago/)
+      })
+
+      it('omits both meta spans when fields are absent (pre-#4587 server)', () => {
+        // Graceful fallback — a snapshot from an older server still
+        // renders, just without the new affordances. The truncated token
+        // and Clear button are still present.
+        setMockState({
+          notificationPrefs: {
+            categories,
+            devices: {
+              'tok-legacy': { categories: { result: false } },
+            },
+            quietHours: null,
+          },
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.queryByTestId('notification-prefs-device-platform-tok-legacy')).toBeNull()
+        expect(screen.queryByTestId('notification-prefs-device-last-seen-tok-legacy')).toBeNull()
+        // Sanity — the row itself still renders.
+        expect(screen.getByTestId('notification-prefs-device-entry-tok-legacy')).toBeInTheDocument()
+        expect(screen.getByTestId('notification-prefs-device-clear-tok-legacy')).toBeInTheDocument()
+      })
     })
   })
 
