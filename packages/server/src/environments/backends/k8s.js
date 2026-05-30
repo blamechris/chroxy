@@ -128,6 +128,44 @@ function validateNamespace(ns, context) {
 }
 
 /**
+ * Validate `opts.workspacePVC` for createEnvironment (#3385).
+ *
+ * Accepts:
+ *   - `undefined` / `null` — no PVC workspace requested (caller will fall back
+ *     to the hostPath strategy via opts.cwd, or no workspace at all).
+ *   - `{ claimName: string, mountPath?: string, readOnly?: boolean }` — operator
+ *     opts into the PVC strategy.  `claimName` is required and must be a
+ *     non-empty string.
+ *
+ * Also enforces the mutual exclusion with `opts.cwd` (hostPath strategy):
+ * passing both is an operator-intent ambiguity, not a fallback chain.
+ *
+ * @param {*}      workspacePVC - Raw opts.workspacePVC value
+ * @param {*}      cwd          - opts.cwd value (for mutual-exclusion check)
+ * @throws {Error} If the value is malformed or both strategies are passed.
+ */
+function validateWorkspacePVC(workspacePVC, cwd) {
+  if (workspacePVC == null) return
+  if (typeof workspacePVC !== 'object' || Array.isArray(workspacePVC)) {
+    throw new Error(
+      'createEnvironment: opts.workspacePVC must be an object with a claimName property',
+    )
+  }
+  if (typeof workspacePVC.claimName !== 'string' || workspacePVC.claimName.length === 0) {
+    throw new Error(
+      'createEnvironment: opts.workspacePVC.claimName must be a non-empty string',
+    )
+  }
+  if (cwd != null && cwd !== '') {
+    throw new Error(
+      'createEnvironment: opts.cwd and opts.workspacePVC are mutually exclusive — ' +
+      'choose either the hostPath strategy (opts.cwd, single-node clusters) ' +
+      'or the PVC strategy (opts.workspacePVC, multi-node clusters), not both',
+    )
+  }
+}
+
+/**
  * K8sBackend implements the Backend interface (see types.js) using the
  * Kubernetes API via @kubernetes/client-node.
  *
@@ -299,14 +337,52 @@ export class K8sBackend {
    * Returns as soon as `createNamespacedPod` resolves — the Pod has been accepted
    * by the API server but may not yet be scheduled or Running.
    *
-   * Workspace mount strategy — hostPath:
-   *   `opts.cwd` is mounted into the Pod as a `hostPath` volume at `/workspace`.
-   *   This is the simplest strategy for local clusters (kind, minikube, Docker
-   *   Desktop) where the Node running the Pod shares the host filesystem.  For
-   *   production clusters where Pods run on remote nodes the host path will not
-   *   exist; operators should provision a PVC pre-populated with the workspace and
-   *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
-   *   must be able to read the path provided in opts.cwd from its local filesystem.
+   * Workspace mount strategies (mutually exclusive — pick exactly one):
+   *
+   * 1. hostPath (single-node clusters) — pass `opts.cwd`:
+   *      `opts.cwd` is mounted into the Pod as a `hostPath` volume at `/workspace`.
+   *      This is the simplest strategy for local clusters (kind, minikube, Docker
+   *      Desktop) where the Node running the Pod shares the host filesystem.
+   *      Cluster-side requirement: the K8s node the Pod schedules onto must be
+   *      able to read `opts.cwd` from its local filesystem.
+   *
+   *      Failure mode on multi-node clusters: the Pod schedules onto a node that
+   *      does not have the path, which `hostPath` `DirectoryOrCreate` silently
+   *      papers over by creating an empty directory — the workload then sees an
+   *      empty workspace with no surface error.
+   *
+   * 2. PersistentVolumeClaim (multi-node clusters) — pass `opts.workspacePVC`:
+   *      `opts.workspacePVC = { claimName, mountPath?, readOnly? }` translates to
+   *      a `persistentVolumeClaim` volume + matching `volumeMount`.  This is the
+   *      recommended strategy for production / multi-node clusters where the
+   *      workspace must follow the Pod across nodes.  Operators are responsible
+   *      for provisioning the PVC and seeding its contents out-of-band; the
+   *      backend only references the claim by name.  `mountPath` defaults to
+   *      `/workspace` to match the hostPath strategy.
+   *
+   *      Migration from hostPath → PVC:
+   *        - Drop `opts.cwd` and pass `opts.workspacePVC.claimName` instead.
+   *        - Pre-populate the PVC with the workspace contents (e.g. an initContainer
+   *          that clones a repo, a Job that rsyncs from object storage, or a
+   *          manual `kubectl cp`) before relying on the workspace inside the Pod.
+   *        - `opts.cwd` and `opts.workspacePVC` are mutually exclusive — passing
+   *          both throws.  Operators must explicitly choose one strategy.
+   *
+   * **Security warning — hostPath privilege escalation:**
+   *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
+   *   Pod direct access to the underlying node's filesystem. This is a
+   *   privilege-escalation vector on multi-tenant clusters: a malicious or
+   *   misconfigured workspace path could mount sensitive node paths such as
+   *   `/etc/kubernetes/pki`, `/var/run/docker.sock`, or `/var/lib/kubelet`,
+   *   allowing the workload to read cluster credentials or break out of the
+   *   container.
+   *
+   *   Most production clusters block `hostPath` via PodSecurity admission —
+   *   PSA `restricted` and `baseline` policies both prohibit it, so Pod
+   *   creation will be rejected by the PSA admission controller (the API
+   *   server returns a 4xx at create time, before the Pod ever reaches the
+   *   scheduler).  The PVC strategy above does NOT have this restriction and
+   *   is the safe default for shared / multi-tenant clusters.
    *
    * **Security warning — hostPath privilege escalation:**
    *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
@@ -324,8 +400,8 @@ export class K8sBackend {
    *   scheduler).
    *
    *   **This mode is not safe for shared / multi-tenant clusters.** Operators
-   *   running on shared infrastructure should use a PVC-based workspace
-   *   strategy (see follow-up #3385) instead of relying on `hostPath`. Use
+   *   running on shared infrastructure should use the PVC-based workspace
+   *   strategy (`opts.workspacePVC`) instead of relying on `hostPath`. Use
    *   this backend only on single-tenant clusters where you control every
    *   workload, or on a namespace where Pod Security Admission is enforced
    *   at the `privileged` level (or with an equivalent policy exemption) so
@@ -333,7 +409,12 @@ export class K8sBackend {
    *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
-   * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod
+   * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod (hostPath strategy).
+   *   Mutually exclusive with `opts.workspacePVC` — passing both throws.
+   * @param {Object}   [opts.workspacePVC] - PVC-based workspace strategy for multi-node clusters.
+   * @param {string}   opts.workspacePVC.claimName   - Name of a pre-provisioned PVC in the target namespace
+   * @param {string}   [opts.workspacePVC.mountPath] - Pod-side mount path (default: `/workspace`)
+   * @param {boolean}  [opts.workspacePVC.readOnly]  - Mount the PVC read-only (default: false)
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
    * @param {string}   [opts.memoryLimit]  - K8s memory quantity string (e.g. "2Gi").
    *   Applied to both `resources.limits.memory` and `resources.requests.memory`.
@@ -363,8 +444,14 @@ export class K8sBackend {
       envId, cwd, containerEnv, namespace,
       memoryLimit, cpuLimit, forwardPorts, mounts,
       imagePullPolicy: callImagePullPolicy,
+      workspacePVC,
     } = opts
     validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
+    // Workspace-strategy validation (#3385): `opts.cwd` (hostPath) and
+    // `opts.workspacePVC` (PVC) are two competing strategies for what to mount
+    // at /workspace. Accept either, never both — the alternative would be
+    // a silent precedence rule that hides operator intent.
+    validateWorkspacePVC(workspacePVC, cwd)
     const ns = this._validateNamespace(this._resolveNamespace(namespace), 'createEnvironment')
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
@@ -432,15 +519,24 @@ export class K8sBackend {
     const imagePullPolicy = callImagePullPolicy || this._imagePullPolicy
 
     // 4. Build volumes + volumeMounts
-    // 4a. Workspace: mount opts.cwd as /workspace via hostPath.
-    //     Requirement: the K8s node must be able to read opts.cwd from its local
-    //     filesystem.  Satisfied automatically for single-node clusters (kind,
-    //     minikube, Docker Desktop).  For multi-node clusters operators must ensure
-    //     the path exists on the scheduled node or use a PVC passed via opts.mounts.
+    // 4a. Workspace volume — one of two mutually-exclusive strategies (#3385):
+    //   - `opts.cwd`          → hostPath volume (single-node clusters)
+    //   - `opts.workspacePVC` → persistentVolumeClaim volume (multi-node clusters)
+    //   See the createEnvironment JSDoc for the strategy comparison and migration
+    //   guidance. validateWorkspacePVC() above already rejected the both-set case.
     const volumes = []
     const volumeMounts = []
 
-    if (cwd) {
+    if (workspacePVC) {
+      const mountPath = workspacePVC.mountPath || '/workspace'
+      volumes.push({
+        name: 'workspace',
+        persistentVolumeClaim: { claimName: workspacePVC.claimName },
+      })
+      const vm = { name: 'workspace', mountPath }
+      if (workspacePVC.readOnly) vm.readOnly = true
+      volumeMounts.push(vm)
+    } else if (cwd) {
       volumes.push({
         name: 'workspace',
         hostPath: { path: cwd, type: 'DirectoryOrCreate' },
