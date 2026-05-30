@@ -205,7 +205,10 @@ describe('SettingsScreen — Quiet hours editor section (#4544)', () => {
     // The list itself lives in store-core (see store-core/src/timezones.ts);
     // SettingsScreen must import the shared helper rather than redeclare a
     // duplicate array. Verify both the import and the call-site.
-    expect(settingsSource).toMatch(/import\s+\{\s*buildQuietHoursTimezoneList\s*\}\s+from\s+['"]@chroxy\/store-core['"]/);
+    // #4591: the import block now bundles other helpers (formatPlatform,
+    // formatRelativeTime) — match either a single-name import or a
+    // multi-member named-import block that contains buildQuietHoursTimezoneList.
+    expect(settingsSource).toMatch(/import\s*\{[\s\S]{0,400}buildQuietHoursTimezoneList[\s\S]{0,400}\}\s+from\s+['"]@chroxy\/store-core['"]/);
     expect(settingsSource).toMatch(/buildQuietHoursTimezoneList\(/);
     // The duplicate local constant from PR #4565 must be gone.
     expect(settingsSource).not.toMatch(/const\s+QUIET_HOURS_TIMEZONE_CHOICES\s*=/);

@@ -58,23 +58,22 @@ describe('SettingsScreen — per-device meta surface (#4587)', () => {
     expect(settingsSource).toMatch(/entry\.lastSeenAt\s*\?\s*[\s\S]{0,400}notification-prefs-device-last-seen/);
   });
 
-  it('rewrites the canonical platform values through formatPlatform()', () => {
-    // `ios` -> `iOS`, `android` -> `Android`, etc. — without the rewrite
-    // operators see lowercase tags that read as a debug string. Anchor on
-    // the function definition + a representative case so a future addition
-    // (web/desktop already present) doesn't accidentally drop the iOS case.
-    expect(settingsSource).toMatch(/function formatPlatform\(p: string\)/);
-    expect(settingsSource).toMatch(/case 'ios':\s*return 'iOS'/);
-    expect(settingsSource).toMatch(/case 'android':\s*return 'Android'/);
+  it('imports formatPlatform + formatRelativeTime from the shared store-core package (#4591)', () => {
+    // Pre-#4591 these were a verbatim local copy of the dashboard's helpers
+    // (8 + 16 lines). Now both surfaces import from `@chroxy/store-core` so
+    // the behaviour is exercised by one set of tests in `device-format.test.ts`
+    // and a regression in either surface trips the shared suite.
+    expect(settingsSource).toMatch(
+      /import\s*\{[\s\S]{0,200}formatPlatform[\s\S]{0,200}formatRelativeTime[\s\S]{0,200}\}\s*from\s*'@chroxy\/store-core'/,
+    );
   });
 
-  it('declares formatRelativeTime with minute-granularity output and forward-skew fallback', () => {
-    // Two anchors: (1) the function exists and rounds down to minutes,
-    // (2) future timestamps (clock skew) render "just now" rather than a
-    // negative duration. Both fail-safes were spelled out in #4587.
-    expect(settingsSource).toMatch(/function formatRelativeTime\(epochMs: number\)/);
-    expect(settingsSource).toMatch(/if \(diffMs < 0\) return 'just now'/);
-    expect(settingsSource).toMatch(/Math\.floor\(diffMs \/ 60_000\)/);
+  it('does NOT carry a local copy of either helper (#4591 regression guard)', () => {
+    // If a future refactor reintroduces the local copy, the two surfaces
+    // drift again. Assert the function declarations are GONE from this file
+    // so the shared import is the only call site.
+    expect(settingsSource).not.toMatch(/function formatPlatform\(/);
+    expect(settingsSource).not.toMatch(/function formatRelativeTime\(/);
   });
 
   it('uses a muted style for the meta text so it reads as secondary content', () => {
