@@ -11,7 +11,11 @@ import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
-import { buildQuietHoursTimezoneList } from '@chroxy/store-core'
+import {
+  buildQuietHoursTimezoneList,
+  formatPlatform,
+  formatRelativeTime,
+} from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import {
   getTunnelMode,
@@ -411,51 +415,6 @@ function truncateDeviceLabel(key: string): string {
   const MAX = 24
   if (key.length <= MAX) return key
   return `${key.slice(0, MAX)}…`
-}
-
-/**
- * #4587: friendly label for the canonical platform values shipped by
- * `deviceInfo.platform` on auth (`ios`/`android`/`web`/`desktop` plus
- * `unknown` and any future values). Falls back to the raw string so a
- * forward-compatible client carrying a new value still renders, just
- * without the title-cased rewrite.
- */
-function formatPlatform(p: string): string {
-  switch (p) {
-    case 'ios': return 'iOS'
-    case 'android': return 'Android'
-    case 'web': return 'Web'
-    case 'desktop': return 'Desktop'
-    default: return p
-  }
-}
-
-/**
- * #4587: cheap human-readable "X ago" for the per-device list. Renders at
- * minute granularity (rounds down) so the smallest unit the operator sees
- * is "just now" or "N min ago" — nothing as precise as seconds. Future
- * timestamps (clock skew, server stamping ahead of dashboard read) fall
- * through to "just now" rather than rendering nonsense like "-1 min ago".
- *
- * Kept module-local instead of imported from a shared utility because the
- * dashboard already has a few tiny ad-hoc formatters in this file; the
- * mobile copy is a parallel implementation in `SettingsScreen.tsx` to
- * avoid pulling a shared dep into the RN bundle for a 12-line helper.
- */
-function formatRelativeTime(epochMs: number): string {
-  const diffMs = Date.now() - epochMs
-  if (diffMs < 0) return 'just now'
-  const minutes = Math.floor(diffMs / 60_000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes} min ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} hr ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`
-  const months = Math.floor(days / 30)
-  if (months < 12) return `${months} mo ago`
-  const years = Math.floor(months / 12)
-  return `${years} yr ago`
 }
 
 /**

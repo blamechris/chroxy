@@ -378,3 +378,11 @@ export {
   handleStreamEnd,
   handleResultUsage,
 } from './handlers'
+
+// #4591: shared device-list formatters. Eliminates duplicated copies of
+// `formatPlatform` + `formatRelativeTime` from dashboard SettingsPanel
+// and mobile SettingsScreen (both added in #4587).
+export {
+  formatPlatform,
+  formatRelativeTime,
+} from './device-format'

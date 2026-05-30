@@ -30,7 +30,11 @@ import {
   setBiometricEnabled,
   authenticate,
 } from '../hooks/useBiometricLock';
-import { buildQuietHoursTimezoneList } from '@chroxy/store-core';
+import {
+  buildQuietHoursTimezoneList,
+  formatPlatform,
+  formatRelativeTime,
+} from '@chroxy/store-core';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
@@ -1249,45 +1253,6 @@ function truncateDeviceLabel(key: string): string {
   const MAX = 24;
   if (key.length <= MAX) return key;
   return `${key.slice(0, MAX)}…`;
-}
-
-/**
- * #4587: friendly label for the canonical `deviceInfo.platform` values
- * persisted with per-device entries. Mirrors the dashboard copy in
- * `packages/dashboard/src/components/SettingsPanel.tsx` rather than
- * importing a shared util — pulling a shared dep into the RN bundle for
- * a 6-line switch isn't worth the indirection.
- */
-function formatPlatform(p: string): string {
-  switch (p) {
-    case 'ios': return 'iOS';
-    case 'android': return 'Android';
-    case 'web': return 'Web';
-    case 'desktop': return 'Desktop';
-    default: return p;
-  }
-}
-
-/**
- * #4587: minute-granularity "X ago" renderer for the per-device list.
- * See dashboard sibling for the rationale on local-only formatting.
- * Future timestamps (clock skew between server and phone) fall through
- * to "just now" so we never render negative durations.
- */
-function formatRelativeTime(epochMs: number): string {
-  const diffMs = Date.now() - epochMs;
-  if (diffMs < 0) return 'just now';
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hr ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months} mo ago`;
-  const years = Math.floor(months / 12);
-  return `${years} yr ago`;
 }
 
 /**
