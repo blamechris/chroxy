@@ -434,4 +434,143 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       }
     })
   })
+
+  // #4467: stream-stall recovery — third timer armed in parallel with
+  // the soft warning + hard cap. Fires at `streamStallTimeoutMs` (default
+  // 5 min, configurable) when no SDK event has arrived. Distinct from
+  // the soft warning because it ACTIVELY clears busy state + emits
+  // `error{code:'stream_stall'}` so the dashboard's StreamStallChip
+  // (#4476/#4494) can offer a retry affordance instead of the user
+  // having to click Stop. Parity with the CLI stall suite (#4475 in
+  // cli-session.test.js) — the SDK's two-timer closure in
+  // `_iterateSdkQuery` needs the third timer too or SDK-driven sessions
+  // sit at "Thinking…" forever.
+  describe('stream-stall recovery (#4467)', () => {
+    const STALL = 60_000
+    // Pin SOFT + HARD far past the stall window so the stall handler
+    // fires first and we can assert its events in isolation.
+    const SOFT_WIDE = 60 * 60_000
+    const HARD_WIDE = 2 * 60 * 60_000
+
+    function createReadyStallSession(opts = {}) {
+      const s = new SdkSession({
+        cwd: '/tmp',
+        resultTimeoutMs: SOFT_WIDE,
+        hardTimeoutMs: HARD_WIDE,
+        streamStallTimeoutMs: STALL,
+        ...opts,
+      })
+      s._processReady = true
+      s._isBusy = true
+      s._currentMessageId = 'msg-stall'
+      return s
+    }
+
+    it('stall timer fires at exactly streamStallTimeoutMs with code:stream_stall', () => {
+      const s = createReadyStallSession()
+      const errors = []
+      const streamEnds = []
+      s.on('error', (d) => errors.push(d))
+      s.on('stream_end', (d) => streamEnds.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-stall', true)
+
+        mock.timers.tick(STALL - 1)
+        assert.equal(errors.length, 0, 'stall must not fire 1ms before configured window')
+
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'stall fires at exactly streamStallTimeoutMs')
+        assert.equal(errors[0].code, 'stream_stall',
+          'error MUST carry code:stream_stall so dashboard can distinguish from generic errors')
+        assert.match(errors[0].message, /stalled/i)
+        assert.equal(streamEnds.length, 1, 'stream_end fires before error because hasStreamStarted=true')
+        assert.equal(s._isBusy, false,
+          'busy state must clear so the user can retry from the same session')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('activity at 4 min resets the stall window (no fire until 4+5 = 9 min)', () => {
+      const s = createReadyStallSession()
+      const errors = []
+      s.on('error', (d) => errors.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-stall', true)
+
+        mock.timers.tick(STALL - 1_000) // 59s — almost stalled
+        assert.equal(errors.length, 0)
+
+        // Simulated SDK event resets the timer trio
+        s._resetResultTimeout()
+
+        mock.timers.tick(STALL - 1)
+        assert.equal(errors.length, 0, 'reset must restart the stall window from zero')
+
+        mock.timers.tick(1)
+        assert.equal(errors.length, 1, 'stall fires at exactly one full window after the reset')
+        assert.equal(errors[0].code, 'stream_stall')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('streamStallTimeoutMs=0 disables active recovery (soft+hard still apply)', () => {
+      const s = createReadyStallSession({ streamStallTimeoutMs: 0 })
+      const errors = []
+      s.on('error', (d) => errors.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-stall', true)
+        // Tick well past what would have been the default stall window.
+        mock.timers.tick(10 * 60_000)
+        assert.equal(errors.length, 0,
+          'disabled stall recovery must not emit stream_stall errors')
+        assert.equal(s._streamStallTimeout, null,
+          'stall timer handle must remain null when disabled')
+        assert.equal(s._isBusy, true,
+          'busy state must NOT be cleared by the disabled stall path')
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('pause during a pending permission clears the stall timer', async () => {
+      const s = createReadyStallSession()
+      try {
+        armResultTimeoutForTest(s, 'msg-stall', true)
+        assert.ok(s._streamStallTimeout, 'stall timer must be armed before pause')
+
+        const p = s._handlePermission('Bash', { command: 'ls' }, null)
+
+        assert.equal(s._streamStallTimeout, null,
+          'stall timer must clear when a permission prompt is outstanding')
+        assert.equal(s._resultTimeoutPaused, true)
+
+        // Resolve to let the awaited promise settle inside the finally block.
+        const reqId = Array.from(s._pendingPermissions.keys())[0]
+        s.respondToPermission(reqId, 'allow')
+        await p
+      } finally {
+        s.destroy()
+      }
+    })
+
+    it('stall fires without stream_end when hasStreamStarted=false', () => {
+      const s = createReadyStallSession()
+      const errors = []
+      const streamEnds = []
+      s.on('error', (d) => errors.push(d))
+      s.on('stream_end', (d) => streamEnds.push(d))
+      try {
+        armResultTimeoutForTest(s, 'msg-stall', false)
+        mock.timers.tick(STALL)
+        assert.equal(errors.length, 1, 'stall still fires')
+        assert.equal(errors[0].code, 'stream_stall')
+        assert.equal(streamEnds.length, 0,
+          'no stream_end when the SDK turn never started streaming')
+      } finally {
+        s.destroy()
+      }
+    })
+  })
 })

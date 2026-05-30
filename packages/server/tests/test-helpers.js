@@ -346,8 +346,10 @@ export function armResultTimeoutForTest(session, messageId, hasStreamStarted = f
   const reset = () => {
     if (session._resultTimeout) clearTimeout(session._resultTimeout)
     if (session._hardTimeout) clearTimeout(session._hardTimeout)
+    if (session._streamStallTimeout) clearTimeout(session._streamStallTimeout)
     session._resultTimeout = null
     session._hardTimeout = null
+    session._streamStallTimeout = null
     if (session._resultTimeoutPaused) return
     session._resultTimeout = setTimeout(() => {
       session._resultTimeout = null
@@ -357,6 +359,15 @@ export function armResultTimeoutForTest(session, messageId, hasStreamStarted = f
       session._hardTimeout = null
       session._handleHardTimeout(messageId, hasStreamStarted)
     }, session._hardTimeoutMs)
+    // #4467: stream-stall recovery — only arm when the operator has not
+    // disabled the active-recovery path (value > 0). Mirrors the
+    // production reset closure in `sdk-session.js`.
+    if (session._streamStallTimeoutMs > 0 && typeof session._handleStreamStall === 'function') {
+      session._streamStallTimeout = setTimeout(() => {
+        session._streamStallTimeout = null
+        session._handleStreamStall(messageId, hasStreamStarted)
+      }, session._streamStallTimeoutMs)
+    }
   }
   session._resetResultTimeout = reset
   reset()
