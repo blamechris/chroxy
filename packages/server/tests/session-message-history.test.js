@@ -481,8 +481,15 @@ describe('SessionMessageHistory', () => {
       const input = [
         { type: 'tool_start', toolUseId: 'A', tool: 'Bash', timestamp: 1000 },
       ]
+      const originalLength = input.length
       const copy = JSON.parse(JSON.stringify(input))
-      SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      // Belt-and-braces: assert array identity differs AND length/contents are
+      // unchanged. The deep-equal alone would miss a regression where
+      // someone refactors to `history.splice(...)` and the splice happens to
+      // leave the test fixture's values identical by accident.
+      assert.notStrictEqual(out, input, 'sweep must return a new array, not the input')
+      assert.equal(input.length, originalLength, 'input length unchanged')
       assert.deepStrictEqual(input, copy, 'input array left intact for crash-safe re-restore')
     })
 

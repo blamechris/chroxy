@@ -152,6 +152,15 @@ export class SessionMessageHistory extends EventEmitter {
         const baseTs = typeof entry.timestamp === 'number' && Number.isFinite(entry.timestamp)
           ? entry.timestamp
           : Date.now()
+        // `synthetic` / `interrupted` / `isError` / `reason` are diagnostic
+        // hints only — no client code branches on them today, and the wire
+        // schema (`ServerToolResultSchema` in packages/protocol) strips
+        // unknown fields on parse. The behaviour that clears the dashboard's
+        // activeTools entry is driven purely by the `tool_result` type +
+        // matching `toolUseId` going through `handleToolResult.applyToActiveTools`
+        // (store-core/handlers/index.ts). Keep these fields anyway so the
+        // synthetic stays grep-able on disk and a future renderer can show
+        // a distinct "interrupted" badge without a protocol change.
         out.push({
           type: 'tool_result',
           toolUseId: entry.toolUseId,
