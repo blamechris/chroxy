@@ -3051,48 +3051,81 @@ export function handleUserQuestion(
   if (!Array.isArray(questions) || questions.length === 0) return null
   const q = questions[0] as Record<string, unknown>
   if (!q || typeof q !== 'object' || typeof q.question !== 'string') return null
-  const questionContent = q.question as string
-  const rawOptions = Array.isArray(q.options)
-    ? (q.options as unknown[])
-        .filter(
-          (o: unknown): o is { label: string } =>
-            !!o &&
-            typeof o === 'object' &&
-            typeof (o as Record<string, unknown>).label === 'string',
-        )
-        .map((o: { label: string }) => ({ label: o.label, value: o.label }))
-    : []
-  // #3752: dedup against the synthetic sentinel BEFORE appending it.
-  // If the model itself supplied a "{label:'Other'}" option, prefer the
-  // model's own row over our sentinel (the user gets one "Other" row that
-  // resolves to the model's literal value, not the free-text escape hatch).
-  // If anything else happens to use OTHER_OPTION_VALUE as its label-derived
-  // value (astronomical, but possible — and React `key={opt.value}` collides
-  // either way), strip it defensively so the sentinel append below remains
-  // unique.
-  const baseOptions = rawOptions.filter(
-    (o) => o.label !== OTHER_OPTION_LABEL && o.value !== OTHER_OPTION_VALUE,
+
+  /**
+   * #4604 Chunk B — shared per-question normalization. Same dedup +
+   * Other-sentinel logic the original single-question path applied,
+   * pulled into a closure so every entry in the multi-question payload
+   * gets it. Returns `null` for malformed entries so the caller can
+   * skip them without poisoning the rest of the form.
+   */
+  const normalizeQuestion = (rawQ: unknown): {
+    question: string
+    options: { label: string; value: string }[]
+    multiSelect?: boolean
+  } | null => {
+    if (!rawQ || typeof rawQ !== 'object') return null
+    const qq = rawQ as Record<string, unknown>
+    if (typeof qq.question !== 'string') return null
+    const rawOptions = Array.isArray(qq.options)
+      ? (qq.options as unknown[])
+          .filter(
+            (o: unknown): o is { label: string } =>
+              !!o &&
+              typeof o === 'object' &&
+              typeof (o as Record<string, unknown>).label === 'string',
+          )
+          .map((o: { label: string }) => ({ label: o.label, value: o.label }))
+      : []
+    // #3752: dedup against the synthetic sentinel BEFORE appending it.
+    const baseOptions = rawOptions.filter(
+      (o) => o.label !== OTHER_OPTION_LABEL && o.value !== OTHER_OPTION_VALUE,
+    )
+    const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
+    const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
+    // #4604 Chunk B: only append the Other sentinel for single-select
+    // questions. Multi-select questions render as checkboxes and the
+    // free-text escape hatch doesn't compose cleanly with that UI;
+    // multi-select forms produced by claude SDK never include a
+    // free-text fallback anyway.
+    const isMultiSelect = qq.multiSelect === true
+    const options = !hasUsableOptions
+      ? []
+      : isMultiSelect
+        ? baseOptions
+        : modelSuppliedOther
+          ? [...baseOptions, modelSuppliedOther]
+          : [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
+    const out: { question: string; options: { label: string; value: string }[]; multiSelect?: boolean } = {
+      question: qq.question as string,
+      options,
+    }
+    if (isMultiSelect) out.multiSelect = true
+    return out
+  }
+
+  // Normalize every question. Drop malformed entries (return null from
+  // normalizeQuestion); if the first question is dropped, fail closed
+  // — that's the legacy null-return shape the call site already handles.
+  const normalizedAll = (questions as unknown[]).map(normalizeQuestion).filter(
+    (v): v is { question: string; options: { label: string; value: string }[]; multiSelect?: boolean } => v != null,
   )
-  const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
-  // #3746: append synthetic "Other" sentinel so renderers can offer a
-  // free-text escape hatch alongside the model-provided options. Skip when
-  // there are zero usable post-dedup options — renderers already show
-  // free-text-only in that case. Critically, this gates on POST-dedup state:
-  // a model that only supplied a colliding entry (e.g.
-  // `[{label:'__chroxy_other__'}]`) ends up with empty baseOptions + no
-  // modelSuppliedOther, and must fall through to free-text-only rather
-  // than re-appending the sentinel as a sole tap target (#3752 review).
-  const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
-  const options = !hasUsableOptions
-    ? []
-    : modelSuppliedOther
-      ? [...baseOptions, modelSuppliedOther]
-      : [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
+  // The top-level `options` mirrors q[0].options exactly (legacy
+  // contract — every existing test pin still applies). Multi-question
+  // renderers iterate `chatMessage.questions` instead.
+  const [firstNormalized] = normalizedAll
+  if (firstNormalized == null) return null
+  const questionContent = firstNormalized.question
+  const options = firstNormalized.options
   const chatMessage: ChatMessage = {
     id: nextMessageId('question'),
     type: 'prompt',
     content: questionContent,
     options,
+    // #4604 Chunk B: always populate `questions` (a single-question form
+    // is just an N=1 case of the multi-question shape). Renderers can
+    // detect multi-question by `questions.length > 1` and switch UI.
+    questions: normalizedAll,
     timestamp: Date.now(),
   }
   if (typeof msg.toolUseId === 'string') {

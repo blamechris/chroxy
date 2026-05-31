@@ -628,7 +628,15 @@ export interface ConnectionState {
    * state across remounts (#2833). Safe to call for an already-resolved
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
+  /**
+   * #4604 Chunk B — answer may be either a plain string (single-question /
+   * free-text path, back-compat) or a `Record<string,string>` map
+   * (multi-question form, keyed by question text with multi-select values
+   * JSON-stringified arrays). The Record path populates the wire's
+   * `answers` field; both paths populate `answer` with a human-readable
+   * summary so older servers stay functional.
+   */
+  sendUserQuestionResponse: (answer: string | Record<string, string>, toolUseId?: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
   setModel: (model: string) => void;

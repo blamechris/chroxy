@@ -11,18 +11,173 @@
  * one-line "✓ <chosen>" summary with a chevron to re-expand the full
  * disabled-button list for inspection. Claude's prose preamble is
  * rendered by the parent and remains visible at all times.
+ *
+ * #4604 Chunk B — multi-question forms: when `questions` is supplied
+ * with more than one entry, the component renders an inline form with
+ * one selection control per question (radio for single-select,
+ * checkboxes for multiSelect) and a single Submit button at the bottom
+ * that fires `onSelect(answersMap)`. The N=1 case falls back to the
+ * legacy single-question UI so single-question pins keep passing.
  */
 import { useState, useRef, useEffect } from 'react'
-import { OTHER_OPTION_VALUE } from '@chroxy/store-core'
+import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
 
 export interface QuestionPromptProps {
+  question: string
+  options: { label: string; value: string }[]
+  answered?: string
+  /**
+   * #4604 Chunk B — full per-question payload for multi-question forms.
+   * Always populated by store-core handleUserQuestion (questions[0]
+   * mirrors the top-level `question` + `options`). When length > 1 the
+   * component renders the multi-question form instead of the legacy
+   * single-question UI.
+   */
+  questions?: ChatMessageQuestion[]
+  /**
+   * Fires with either a plain string (single-question / free-text path,
+   * back-compat) or a `Record<string,string>` map (multi-question form,
+   * keyed by `question.question` with multi-select values
+   * JSON-stringified arrays of chosen labels).
+   */
+  onSelect: (answer: string | Record<string, string>) => void
+}
+
+export function QuestionPrompt({ question, options, answered, questions, onSelect }: QuestionPromptProps) {
+  const isMultiQuestion = Array.isArray(questions) && questions.length > 1
+
+  if (isMultiQuestion && answered == null) {
+    return <MultiQuestionForm questions={questions} onSelect={onSelect} />
+  }
+
+  return (
+    <SingleQuestionPrompt
+      question={question}
+      options={options}
+      answered={answered}
+      onSelect={onSelect}
+    />
+  )
+}
+
+/**
+ * #4604 Chunk B — N-question form. Each question gets its own selection
+ * control (radio for single-select, checkboxes for multiSelect); the
+ * single Submit button at the bottom fires `onSelect(answersMap)` with
+ * one entry per question (multi-select values are JSON-stringified
+ * arrays so the wire shape `Record<string,string>` is preserved — the
+ * server's respondToQuestion JSON.parse handles the round trip).
+ */
+interface MultiQuestionFormProps {
+  questions: ChatMessageQuestion[]
+  onSelect: (answersMap: Record<string, string>) => void
+}
+
+function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProps) {
+  // State per question: single-select holds the chosen value string,
+  // multi-select holds an array of chosen value strings. Indexed by
+  // question position so duplicate question texts don't collide.
+  const [singleSelectByIdx, setSingleSelectByIdx] = useState<Record<number, string>>({})
+  const [multiSelectByIdx, setMultiSelectByIdx] = useState<Record<number, string[]>>({})
+  const submittedRef = useRef(false)
+
+  const handleRadioChange = (idx: number, value: string) => {
+    setSingleSelectByIdx((prev) => ({ ...prev, [idx]: value }))
+  }
+
+  const handleCheckboxToggle = (idx: number, value: string) => {
+    setMultiSelectByIdx((prev) => {
+      const curr = prev[idx] || []
+      const next = curr.includes(value)
+        ? curr.filter((v) => v !== value)
+        : [...curr, value]
+      return { ...prev, [idx]: next }
+    })
+  }
+
+  const handleSubmit = () => {
+    if (submittedRef.current) return
+    submittedRef.current = true
+    const answersMap: Record<string, string> = {}
+    questions.forEach((q, idx) => {
+      if (q.multiSelect) {
+        const chosen = multiSelectByIdx[idx] || []
+        // JSON-encode multi-select answers so the wire shape
+        // (Record<string,string>) is preserved. The server's
+        // respondToQuestion JSON.parse splits this back into per-option
+        // digits + Tab to commit + advance.
+        answersMap[q.question] = JSON.stringify(chosen)
+      } else {
+        const chosen = singleSelectByIdx[idx]
+        if (chosen != null) answersMap[q.question] = chosen
+      }
+    })
+    onSelect(answersMap)
+  }
+
+  // Submit enabled only when every single-select question has a choice
+  // (multi-select is allowed to be empty — claude SDK accepts zero
+  // selections for multi-select).
+  const canSubmit = questions.every((q, idx) => {
+    if (q.multiSelect) return true
+    return singleSelectByIdx[idx] != null
+  })
+
+  return (
+    <div className="question-prompt question-prompt--multi" data-testid="question-prompt-multi">
+      {questions.map((q, idx) => (
+        <div key={`q-${idx}`} className="question-prompt-multi-row" data-testid={`question-multi-row-${idx}`}>
+          <div className="question-text">{q.question}</div>
+          <div className={`question-options${q.multiSelect ? ' question-options--multi' : ''}`}>
+            {q.options.map((opt) => {
+              const inputId = `q-${idx}-${opt.value}`
+              const inputName = `q-${idx}`
+              const isMulti = q.multiSelect === true
+              const isChecked = isMulti
+                ? (multiSelectByIdx[idx] || []).includes(opt.value)
+                : singleSelectByIdx[idx] === opt.value
+              return (
+                <label
+                  key={opt.value}
+                  htmlFor={inputId}
+                  className={`question-option question-option--${isMulti ? 'checkbox' : 'radio'}${isChecked ? ' chosen' : ''}`}
+                  data-testid={`question-multi-option-${idx}-${opt.value}`}
+                >
+                  <input
+                    id={inputId}
+                    type={isMulti ? 'checkbox' : 'radio'}
+                    name={inputName}
+                    checked={isChecked}
+                    onChange={() => isMulti ? handleCheckboxToggle(idx, opt.value) : handleRadioChange(idx, opt.value)}
+                  />
+                  <span>{opt.label}</span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="question-multi-submit"
+        data-testid="question-multi-submit"
+        disabled={!canSubmit}
+        onClick={handleSubmit}
+      >
+        Submit
+      </button>
+    </div>
+  )
+}
+
+interface SingleQuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
   answered?: string
   onSelect: (value: string) => void
 }
 
-export function QuestionPrompt({ question, options, answered, onSelect }: QuestionPromptProps) {
+function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQuestionPromptProps) {
   const [text, setText] = useState('')
   const [otherActive, setOtherActive] = useState(false)
   // #4312: post-answer the option block collapses to a one-line summary;

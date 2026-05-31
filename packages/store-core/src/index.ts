@@ -15,6 +15,8 @@ export type {
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
+  // #4604 Chunk B — one entry per question in a multi-question AskUserQuestion form
+  ChatMessageQuestion,
   // #3188: auto-evaluator rewrite metadata attached to system ChatMessages
   EvaluatorRewriteMeta,
   SavedConnection,

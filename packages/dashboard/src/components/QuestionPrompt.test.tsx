@@ -336,4 +336,205 @@ describe('QuestionPrompt', () => {
       expect(screen.getByText('my custom answer')).toBeInTheDocument()
     })
   })
+
+  // #4604 Chunk B — multi-question form UI. Renders one selection control
+  // per question (radio for single-select, checkboxes for multi-select)
+  // with a single Submit button that fires onSelect(answersMap).
+  describe('multi-question form (#4604 Chunk B)', () => {
+    // Using `as const` so the tuple types index without
+    // noUncheckedIndexedAccess complaints. Each question is consumed as
+    // a top-level fixture below.
+    const q1 = {
+      question: 'Which release strategy?',
+      options: [{ label: 'Patch', value: 'Patch' }, { label: 'Minor', value: 'Minor' }],
+    }
+    const q2 = {
+      question: 'Which targets?',
+      multiSelect: true,
+      options: [
+        { label: 'App', value: 'App' },
+        { label: 'Docs', value: 'Docs' },
+        { label: 'Tests', value: 'Tests' },
+      ],
+    }
+    const q3 = {
+      question: 'Confirm?',
+      options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }],
+    }
+    const multiQuestions = [q1, q2, q3]
+
+    it('renders every question with its label', () => {
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+      expect(screen.getByText('Which release strategy?')).toBeInTheDocument()
+      expect(screen.getByText('Which targets?')).toBeInTheDocument()
+      expect(screen.getByText('Confirm?')).toBeInTheDocument()
+    })
+
+    it('single-select questions render as radio buttons', () => {
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={vi.fn()}
+        />
+      )
+      // Q1 single-select renders radios; the two option inputs belong to
+      // the same radio group so only one is selectable at a time.
+      const patch = screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!
+      const minor = screen.getByTestId('question-multi-option-0-Minor').querySelector('input')!
+      expect(patch.getAttribute('type')).toBe('radio')
+      expect(minor.getAttribute('type')).toBe('radio')
+      expect(patch.getAttribute('name')).toBe(minor.getAttribute('name'))
+    })
+
+    it('multi-select questions render as checkboxes', () => {
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={vi.fn()}
+        />
+      )
+      const app = screen.getByTestId('question-multi-option-1-App').querySelector('input')!
+      const docs = screen.getByTestId('question-multi-option-1-Docs').querySelector('input')!
+      expect(app.getAttribute('type')).toBe('checkbox')
+      expect(docs.getAttribute('type')).toBe('checkbox')
+    })
+
+    it('Submit is disabled until every single-select question has a choice', () => {
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={vi.fn()}
+        />
+      )
+      const submit = screen.getByTestId('question-multi-submit') as HTMLButtonElement
+      expect(submit).toBeDisabled()
+
+      // Answer Q1 only — still disabled, Q3 unanswered.
+      fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
+      expect(submit).toBeDisabled()
+
+      // Answer Q3 (Q2 is multi-select, allowed empty) — enables Submit.
+      fireEvent.click(screen.getByTestId('question-multi-option-2-Yes').querySelector('input')!)
+      expect(submit).not.toBeDisabled()
+    })
+
+    it('multi-select toggles let the user pick multiple options', () => {
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={vi.fn()}
+        />
+      )
+      const app = screen.getByTestId('question-multi-option-1-App').querySelector<HTMLInputElement>('input')!
+      const docs = screen.getByTestId('question-multi-option-1-Docs').querySelector<HTMLInputElement>('input')!
+      fireEvent.click(app)
+      fireEvent.click(docs)
+      expect(app.checked).toBe(true)
+      expect(docs.checked).toBe(true)
+      // Toggling off works too.
+      fireEvent.click(app)
+      expect(app.checked).toBe(false)
+      expect(docs.checked).toBe(true)
+    })
+
+    it('Submit fires onSelect with the full answersMap, multi-select JSON-encoded', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.click(screen.getByTestId('question-multi-option-0-Minor').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-1-App').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-1-Tests').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-2-No').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-submit'))
+
+      expect(onSelect).toHaveBeenCalledTimes(1)
+      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string> | undefined
+      expect(arg).toBeDefined()
+      expect(typeof arg).toBe('object')
+      expect(arg!['Which release strategy?']).toBe('Minor')
+      // Multi-select wire shape: JSON-stringified array (Record<string,string>
+      // wire constraint — server's respondToQuestion JSON.parse splits it back).
+      expect(arg!['Which targets?']).toBe(JSON.stringify(['App', 'Tests']))
+      expect(arg!['Confirm?']).toBe('No')
+    })
+
+    it('Submit guards against double-fire (only first click registers)', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-2-Yes').querySelector('input')!)
+      const submit = screen.getByTestId('question-multi-submit')
+      fireEvent.click(submit)
+      fireEvent.click(submit)
+      fireEvent.click(submit)
+      expect(onSelect).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls back to single-question UI when questions has length <= 1', () => {
+      // N=1 multi-question payload — should render the legacy
+      // single-question UI (button list), not the multi-question form.
+      render(
+        <QuestionPrompt
+          question="Just one?"
+          options={[{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }]}
+          questions={[{ question: 'Just one?', options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }] }]}
+          onSelect={vi.fn()}
+        />
+      )
+      // Legacy single-q UI uses `question-prompt`, not `question-prompt-multi`.
+      expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+    })
+
+    it('falls back to single-question UI when answered is already set (multi-question post-answer summary path)', () => {
+      // The post-answer collapse/summary path is single-question UI only;
+      // once the user has submitted a multi-question form, render the
+      // legacy collapse UI with the answer summary string. Multi-question
+      // mode is only entered when answered is null/undefined.
+      render(
+        <QuestionPrompt
+          question="Q1?"
+          options={[{ label: 'a', value: 'a' }, { label: 'b', value: 'b' }]}
+          questions={[
+            { question: 'Q1?', options: [{ label: 'a', value: 'a' }, { label: 'b', value: 'b' }] },
+            { question: 'Q2?', options: [{ label: 'x', value: 'x' }] },
+          ]}
+          answered="Q1?: a | Q2?: x"
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      // Single-q UI renders the answered summary
+      expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
+    })
+  })
 })

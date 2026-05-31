@@ -4663,6 +4663,99 @@ describe('handleUserQuestion', () => {
     )
     expect(out3!.sessionId).toBe('sess-active')
   })
+
+  // #4604 Chunk B — multi-question forms. Previously handleUserQuestion
+  // dropped every question past q[0]; the server-side driver had no way
+  // to know what the user wanted to pick for q2/q3 and defaulted them
+  // to option 1 (or stalled the form entirely). Now the full N-question
+  // payload rides on `chatMessage.questions`.
+  describe('multi-question form support (#4604 Chunk B)', () => {
+    it('populates chatMessage.questions with every normalized question', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [
+            { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+            { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+            { question: 'Q3?', options: [{ label: 'x' }] },
+          ],
+          toolUseId: 'tu-multi',
+        },
+        null,
+      )
+      expect(out).not.toBeNull()
+      expect(out!.chatMessage.questions).toBeDefined()
+      expect(out!.chatMessage.questions!.length).toBe(3)
+      expect(out!.chatMessage.questions![0].question).toBe('Q1?')
+      expect(out!.chatMessage.questions![1].question).toBe('Q2?')
+      expect(out!.chatMessage.questions![2].question).toBe('Q3?')
+      // Single-select questions get the Other sentinel appended; the
+      // multi-select question does NOT (the checkbox UI doesn't compose
+      // with a free-text escape hatch).
+      expect(out!.chatMessage.questions![0].options).toEqual([
+        { label: 'a', value: 'a' },
+        { label: 'b', value: 'b' },
+        { label: 'Other', value: '__chroxy_other__' },
+      ])
+      expect(out!.chatMessage.questions![1].options).toEqual([
+        { label: 'p', value: 'p' },
+        { label: 'q', value: 'q' },
+      ])
+      expect(out!.chatMessage.questions![1].multiSelect).toBe(true)
+      expect(out!.chatMessage.questions![2].options).toEqual([
+        { label: 'x', value: 'x' },
+        { label: 'Other', value: '__chroxy_other__' },
+      ])
+    })
+
+    it('legacy top-level options + content mirror questions[0] (back-compat with single-q renderers)', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [
+            { question: 'First', options: [{ label: 'a' }, { label: 'b' }] },
+            { question: 'Second', options: [{ label: 'x' }] },
+          ],
+        },
+        null,
+      )
+      // questions[0] is the same as the legacy top-level fields so
+      // pre-Chunk-B renderers that only read `content` + `options`
+      // keep rendering the first question identically.
+      expect(out!.chatMessage.content).toBe(out!.chatMessage.questions![0].question)
+      expect(out!.chatMessage.options).toEqual(out!.chatMessage.questions![0].options)
+    })
+
+    it('single-question form still populates chatMessage.questions (N=1 case)', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [{ question: 'Just one', options: [{ label: 'a' }] }],
+        },
+        null,
+      )
+      // Even single-question prompts populate `questions` — renderers
+      // detect multi-question by `questions.length > 1` so the N=1 case
+      // must still be present (renderers can iterate uniformly).
+      expect(out!.chatMessage.questions).toBeDefined()
+      expect(out!.chatMessage.questions!.length).toBe(1)
+      expect(out!.chatMessage.questions![0].question).toBe('Just one')
+    })
+
+    it('skips malformed entries past q[0] without poisoning the rest of the form', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [
+            { question: 'Q1?', options: [{ label: 'a' }] },
+            { notAQuestion: true },           // malformed — skipped
+            'plain-string',                    // malformed — skipped
+            null,                              // malformed — skipped
+            { question: 'Q5?', options: [{ label: 'p' }] },
+          ],
+        },
+        null,
+      )
+      expect(out!.chatMessage.questions!.length).toBe(2)
+      expect(out!.chatMessage.questions!.map((q) => q.question)).toEqual(['Q1?', 'Q5?'])
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

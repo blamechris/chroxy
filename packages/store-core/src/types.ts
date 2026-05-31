@@ -41,12 +41,37 @@ export interface EvaluatorRewriteMeta {
   reasoning: string;
 }
 
+/**
+ * #4604 Chunk B — one entry per question in a multi-question
+ * AskUserQuestion form. `questions[0]` always mirrors the legacy
+ * top-level `content` + `options` on the ChatMessage so single-question
+ * renderers stay byte-compatible; renderers that handle multi-question
+ * forms iterate `questions[]` directly and call `onSelect(answersMap)`
+ * with one entry per question.
+ */
+export interface ChatMessageQuestion {
+  question: string;
+  options: { label: string; value: string }[];
+  /** `true` for multi-select questions (renderer shows checkboxes, server emits Tab between digits) */
+  multiSelect?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
   content: string;
   tool?: string;
   options?: { label: string; value: string }[];
+  /**
+   * #4604 Chunk B — full N-question payload for AskUserQuestion `prompt`
+   * messages. Always populated for `type === 'prompt'` messages produced
+   * by `handleUserQuestion`; `questions[0].question` always equals the
+   * top-level `content` and `questions[0].options` always equals the
+   * top-level `options` so legacy single-question renderers keep
+   * working without consulting this field. Renderers that drive
+   * multi-question forms iterate this array.
+   */
+  questions?: ChatMessageQuestion[];
   requestId?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
