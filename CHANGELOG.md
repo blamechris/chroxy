@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.19] - 2026-05-30
+
+Kills the "Running X · Nh Mm" zombie chip — three independent paths that left the dashboard's `activeTools` footer ticking forever after a stall, a restart, or a multi-question wedge. #4604 (multi-question AskUserQuestion) gets its root-cause fix: claude TUI's per-question key sequence pinned empirically via a `node-pty` recorder, then driven correctly by the new multi-question form driver. The two stall fallbacks ship alongside it so the chip clears even when the driver can't help.
+
+### Added
+
+- **TUI multi-question form driver (#4604 / #4620):** server `respondToQuestion` now iterates the full `questions` array and writes per-question keystrokes (`digit` for single-select auto-advance, `digit + Tab` for multi-select commit, `'1'` to submit) instead of treating every prompt as single-select. Dashboard `QuestionPrompt` renders N questions with multi-select checkbox UI; `handleUserQuestion` and `sendUserQuestionResponse` carry the full `questions`/`answers` shape end-to-end. Single-question path is byte-identical to #4290 (regression guard). Back-compat: old dashboards that only send `answer: string` default to option 1 with WARN. Empirical byte sequence captured via `scripts/tui-form-recorder.mjs` and pinned in [memory](https://github.com/blamechris/chroxy/blob/main/.claude-context/memory/tui_multi_question_form_keys.md) so future TUI changes can be re-validated quickly.
+
+### Fixed
+
+- **Stall watchdog clears activeTools footer chip (#4616 / #4618):** when the AskUserQuestion stall watchdog (#4604 Chunk C, shipped in v0.9.18) fired, the dashboard's `activeTools` entry stayed because `_onAskUserQuestionStall` only emitted `error` — no paired `tool_result`. Now emits `tool_result{toolUseId}` before `error`; store-core `handleToolResult.applyToActiveTools` removes the matching entry by toolUseId (#4308 wiring). Same fix applied symmetrically to `SdkSession._handleStreamStall` (#4467) which was emitting `stream_end + error` only — adds a synthetic `result{cost:null}` matching CLI's `_emitInterruptedTurnResult` so `event-normalizer` fans `result → agent_idle` and `handleAgentIdle` clears `activeTools: []` as the safety net. `cost:null` skips session-manager billing.
+- **Session restore sweeps unresolved tool_starts (#4617 / #4619):** if chroxy was killed (or SIGKILL'd) while a tool was running, the unresolved `tool_start` was persisted to `session-state.json`. On next restore, history replay re-emitted it to the dashboard's `activeTools` but no path ever cleared it — footer pill stuck on "Running X · 4h+" until the session ended. `restoreState()` now scans history before `setHistory()` and synthesizes `tool_result{interrupted:true, synthetic:true, reason:'session_restored'}` for any orphan `tool_start`. Dashboard's normal pairing logic clears the chip.
+
+### Tooling
+
+- **TUI form recorder (`scripts/tui-form-recorder.mjs`):** spawns the claude TUI under `node-pty` and JSONL-logs every stdin/stdout byte. Built to pin the multi-question key sequence for #4604 Chunk B; reusable for future TUI-shape changes. Accepts iTerm's modify-other-keys form of Ctrl+D (`\x1b[27;5;100~`) alongside raw `\x04` so the exit gesture works regardless of terminal config.
+
 ## [0.9.17] - 2026-05-30
 
 Waves 5 + 6 of the from-review marathon — 6 follow-ups polishing what v0.9.16 shipped. Per-device notification overrides become operator-friendly: server now stamps `lastSeenAt` + `platform` on each entry (#4587), the UI renders "iOS · Last seen 15 min ago" next to the truncated token, and clearing your own row prompts before wiping local mutes (#4588). Mobile a11y catches up to the dashboard's `role="alert"` semantic on both Android (live-region prop, #4581) and iOS (`AccessibilityInfo.announceForAccessibility`, #4595). Plus a shared-helper refactor (#4591) and a copy unification (#4585) cleaning up the marathon's wake.
