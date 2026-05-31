@@ -2218,6 +2218,60 @@
   opacity: 1;
 }
 
+/* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
+   The component renders these class names but they previously had no
+   CSS rules — Submit fell back to the native browser button (gray-on-
+   dark, unreadable) and questions had no visual separation. */
+.question-prompt--multi {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.question-prompt-multi-row {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.question-prompt-multi-row:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.question-multi-submit {
+  align-self: flex-start;
+  padding: 8px 24px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-purple);
+  background: var(--accent-purple);
+  color: #fff;
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.question-multi-submit:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.question-multi-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.question-multi-submit:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Soften the native radio/checkbox dot — pure white reads as foreign
+   inside the purple-outlined option pills on the dark theme. */
+.question-option input[type="radio"],
+.question-option input[type="checkbox"] {
+  accent-color: var(--accent-purple);
+}
+
 .question-freetext {
   display: flex;
   gap: 8px;
