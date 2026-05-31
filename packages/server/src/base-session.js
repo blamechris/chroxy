@@ -259,6 +259,17 @@ export class BaseSession extends EventEmitter {
     // result this turn are stranded; the agent's next turn re-emits a
     // fresh `tool_use` if it cares to wait again.
     this._pendingBackgroundCommands = new Map()
+    // #4628: in-flight tool_start tracking. Each entry is the toolUseId
+    // of a tool_start the session has emitted but for which no matching
+    // tool_result has fired yet. On `result` (turn end), `_emitResult`
+    // sweeps any remaining entries and emits synthetic tool_results so
+    // the dashboard's activeTools chip clears. Without this, claude TUI
+    // sessions that drop a PostToolUse hook (rare but observed — one
+    // Bash out of 35 per the #4628 forensic) leave the chip ticking
+    // forever AND persist the orphan to session-state.json. Companion
+    // path: SessionMessageHistory.sweepUnresolvedToolStarts (#4617/#4619)
+    // catches stragglers at restore-time as a backstop.
+    this._inFlightToolStarts = new Map()
     this._messageCounter = 0
     // Boot-unique prefix mixed into every emitted messageId (#3700).
     // The dashboard caches up to 100 messages per session in localStorage
@@ -974,6 +985,80 @@ export class BaseSession extends EventEmitter {
     return `${SKILLS_PROMPT_HEADER}${parts.join('\n\n---\n\n')}`
   }
 
+  /**
+   * #4628: track that a tool_start event was emitted. Pair with
+   * `_trackToolResult(toolUseId)` once the matching tool_result fires.
+   * Idempotent on duplicate ids (overwrites tool/startedAt). Safe to
+   * call before/after the actual emit — the tracking is decoupled.
+   */
+  _trackToolStart(toolUseId, tool) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
+    this._inFlightToolStarts.set(toolUseId, {
+      tool: typeof tool === 'string' && tool.length > 0 ? tool : 'unknown',
+      startedAt: Date.now(),
+    })
+  }
+
+  /**
+   * #4628: mark a tool_start resolved (matching tool_result fired).
+   * Idempotent — calling for an unknown id is a no-op.
+   */
+  _trackToolResult(toolUseId) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
+    this._inFlightToolStarts.delete(toolUseId)
+  }
+
+  /**
+   * #4628: sweep any tool_starts that never got their matching
+   * tool_result and emit synthetic tool_result events for each.
+   * Companion to SessionMessageHistory.sweepUnresolvedToolStarts (#4619)
+   * — that one runs at restore-time on persisted history; this one runs
+   * at turn-end on live in-memory tracking so the orphan never gets
+   * persisted in the first place.
+   *
+   * The synthetic tool_result carries the same shape as a real one (the
+   * dashboard's `handleToolResult.applyToActiveTools` only matches on
+   * `toolUseId`). Extra fields (`synthetic`, `interrupted`, `reason`)
+   * are diagnostic hints — the wire schema strips them on parse but
+   * they stay grep-able on disk in the persisted history.
+   *
+   * @param {string} reason — short identifier for the sweep cause
+   * @returns {number} count of sweeps emitted
+   */
+  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result') {
+    if (this._inFlightToolStarts.size === 0) return 0
+    const count = this._inFlightToolStarts.size
+    for (const [toolUseId, entry] of this._inFlightToolStarts) {
+      this.emit('tool_result', {
+        toolUseId,
+        result: `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
+        truncated: false,
+        synthetic: true,
+        interrupted: true,
+        isError: true,
+        reason,
+      })
+    }
+    this._inFlightToolStarts.clear()
+    return count
+  }
+
+  /**
+   * #4628: emit `result` after sweeping any in-flight tool_starts. All
+   * provider sessions should route through this rather than calling
+   * `this.emit('result', ...)` directly, so orphan tool_starts get
+   * paired with a synthetic tool_result BEFORE the result fires (and
+   * BEFORE state is persisted, since session-message-history listens
+   * for both events).
+   *
+   * @param {object} payload — the result event payload ({cost, duration, usage, sessionId})
+   * @param {string} [sweepReason] — optional override for the sweep reason
+   */
+  _emitResult(payload, sweepReason = 'stream_completed_without_result') {
+    this._sweepUnresolvedToolStarts(sweepReason)
+    this.emit('result', payload)
+  }
+
   _clearMessageState() {
     this._isBusy = false
     this._currentMessageId = null
@@ -986,6 +1071,16 @@ export class BaseSession extends EventEmitter {
     // turn — once the turn ends, any unmatched entries are stranded
     // and a fresh tool_use would re-populate.
     this._pendingBackgroundCommands.clear()
+    // #4628: sweep any orphan tool_starts that didn't get their
+    // matching tool_result this turn. Most providers route through
+    // _emitResult which sweeps before broadcasting result; this is the
+    // belt-and-braces for paths that call _clearMessageState directly
+    // (e.g. SDK stream-stall recovery clears state BEFORE emitting the
+    // synthetic result). Sweeping here ensures the orphan is paired
+    // with a synthetic tool_result rather than silently dropped — so
+    // the dashboard's activeTools clears whether result fires next or
+    // never fires at all.
+    this._sweepUnresolvedToolStarts('message_state_cleared')
 
     // Emit completions for any tracked agents so the app clears badges
     if (this._activeAgents.size > 0) {

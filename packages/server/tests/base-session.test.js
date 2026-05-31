@@ -1325,6 +1325,86 @@ describe('BaseSession', () => {
       assert.equal(s._getSkills().length, 1, 'malformed trust file must not break loading')
     })
   })
+
+  // #4628: in-flight tool_start tracking + sweep at turn-end
+  describe('in-flight tool_start sweep (#4628)', () => {
+    let s, sweepSkillsDir
+    beforeEach(() => {
+      sweepSkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bs-4628-'))
+      s = new BaseSession({ cwd: '/tmp', skillsDir: sweepSkillsDir, repoSkillsDir: null })
+    })
+    afterEach(() => { rmSync(sweepSkillsDir, { recursive: true, force: true }) })
+
+    it('_trackToolStart adds to in-flight map; _trackToolResult removes', () => {
+      s._trackToolStart('toolu_1', 'Bash')
+      s._trackToolStart('toolu_2', 'Read')
+      assert.equal(s._inFlightToolStarts.size, 2)
+      s._trackToolResult('toolu_1')
+      assert.equal(s._inFlightToolStarts.size, 1)
+      assert.ok(s._inFlightToolStarts.has('toolu_2'))
+    })
+
+    it('_trackToolStart ignores empty / non-string ids (defensive)', () => {
+      s._trackToolStart('', 'Bash')
+      s._trackToolStart(null, 'Bash')
+      s._trackToolStart(undefined, 'Bash')
+      s._trackToolStart(42, 'Bash')
+      assert.equal(s._inFlightToolStarts.size, 0)
+    })
+
+    it('_sweepUnresolvedToolStarts emits one synthetic tool_result per orphan and clears the map', () => {
+      s._trackToolStart('toolu_A', 'Bash')
+      s._trackToolStart('toolu_B', 'Read')
+      const events = []
+      s.on('tool_result', (ev) => events.push(ev))
+      const swept = s._sweepUnresolvedToolStarts('test_reason')
+      assert.equal(swept, 2)
+      assert.equal(events.length, 2)
+      const ids = events.map((e) => e.toolUseId).sort()
+      assert.deepEqual(ids, ['toolu_A', 'toolu_B'])
+      for (const ev of events) {
+        assert.equal(ev.synthetic, true, 'synthetic flag for grep-ability')
+        assert.equal(ev.interrupted, true)
+        assert.equal(ev.isError, true)
+        assert.equal(ev.reason, 'test_reason')
+        assert.equal(ev.truncated, false)
+        assert.ok(typeof ev.result === 'string' && ev.result.length > 0)
+      }
+      assert.equal(s._inFlightToolStarts.size, 0, 'map cleared after sweep')
+    })
+
+    it('_sweepUnresolvedToolStarts is a no-op when no orphans (returns 0, emits nothing)', () => {
+      const events = []
+      s.on('tool_result', (ev) => events.push(ev))
+      const swept = s._sweepUnresolvedToolStarts('test_reason')
+      assert.equal(swept, 0)
+      assert.equal(events.length, 0)
+    })
+
+    it('_emitResult sweeps orphans BEFORE emitting result (ordering matters for dashboard activeTools clear)', () => {
+      s._trackToolStart('toolu_orphan', 'Bash')
+      const events = []
+      s.on('tool_result', (ev) => events.push({ type: 'tool_result', toolUseId: ev.toolUseId, synthetic: ev.synthetic }))
+      s.on('result', (ev) => events.push({ type: 'result', cost: ev.cost }))
+      s._emitResult({ cost: null, duration: 100, usage: null, sessionId: 'sess_1' }, 'turn_end')
+      assert.equal(events.length, 2)
+      assert.equal(events[0].type, 'tool_result', 'synthetic tool_result fires FIRST')
+      assert.equal(events[0].toolUseId, 'toolu_orphan')
+      assert.equal(events[0].synthetic, true)
+      assert.equal(events[1].type, 'result', 'result fires SECOND')
+    })
+
+    it('_clearMessageState sweeps orphans (belt-and-braces for paths that bypass _emitResult)', () => {
+      s._trackToolStart('toolu_orphan', 'Bash')
+      const events = []
+      s.on('tool_result', (ev) => events.push(ev))
+      s._clearMessageState()
+      assert.equal(events.length, 1, 'sweep ran from within _clearMessageState')
+      assert.equal(events[0].toolUseId, 'toolu_orphan')
+      assert.equal(events[0].synthetic, true)
+      assert.equal(s._inFlightToolStarts.size, 0)
+    })
+  })
 })
 
 // #4509: BaseSession's three per-session inactivity timeouts must also clamp
