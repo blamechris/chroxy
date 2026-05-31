@@ -1936,7 +1936,11 @@ describe('ClaudeTuiSession', () => {
       })
       session._isBusy = true
       session._currentMessageId = 'msg-stall'
-      session._activeTurn = { startedAt: Date.now() - 100, aborted: false }
+      // Backdated startedAt so we can assert duration > 0 below — proves the
+      // computed duration is derived from _activeTurn.startedAt rather than
+      // the fallback to _streamStallTimeoutMs.
+      const TURN_AGE_MS = 100
+      session._activeTurn = { startedAt: Date.now() - TURN_AGE_MS, aborted: false }
       const ptyWrites = []
       session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
 
@@ -1963,6 +1967,8 @@ describe('ClaudeTuiSession', () => {
       const result = events.find((e) => e.type === 'result')
       assert.equal(result.cost, null, 'cost=null skips billing accumulation')
       assert.ok(Number.isFinite(result.duration), 'duration is finite')
+      assert.ok(result.duration >= TURN_AGE_MS,
+        `duration ≥ TURN_AGE_MS (${TURN_AGE_MS}ms) — sourced from _activeTurn.startedAt`)
 
       const err = events.find((e) => e.type === 'error')
       assert.equal(err.code, 'stream_stall', 'distinct code for dashboard chip')

@@ -1332,13 +1332,13 @@ export class ClaudeTuiSession extends BaseSession {
    * Hard: force-clears busy state + emits `error` after _hardTimeoutMs.
    * Last-resort kill path for sessions that are genuinely stuck.
    *
-   * Stream-stall: 5-min (default) active-recovery for the
-   * `stream_start fired then nothing` wedge — claude TUI accepting the
-   * prompt write, emitting nothing, never returning a Stop hook. #4467
-   * wired the same timer into CliSession + SdkSession; the TUI provider
-   * was the outlier, so this wedge surfaced as a "Working…" banner that
-   * ticked indefinitely. Only armed when `_streamStallTimeoutMs > 0`
-   * (operators can disable via config 0).
+   * Stream-stall: active-recovery for the `stream_start fired then
+   * nothing` wedge — claude TUI accepting the prompt write, emitting
+   * nothing, never returning a Stop hook. #4467 wired the same timer
+   * into CliSession + SdkSession; the TUI provider was the outlier, so
+   * this wedge surfaced as a "Working…" banner that ticked indefinitely.
+   * Default lives in `BaseSession.DEFAULT_STREAM_STALL_TIMEOUT_MS`; only
+   * armed when `_streamStallTimeoutMs > 0` (operators can disable via 0).
    *
    * All three are cleared+re-armed on each call, so any progress signal
    * (new hook file processed) resets every window. Mirrors
