@@ -139,6 +139,17 @@ export const SetChroxyContextHintSchema = z.object({
     value: z.boolean(),
     sessionId: z.string().max(256).optional(),
 });
+// #4660: per-session user-authored preamble prepended to the system prompt
+// every turn. Wire cap at 4096 — slightly above the server-side
+// SESSION_PREAMBLE_MAX_LENGTH (4000) so a tiny ahead-of-server trim doesn't
+// reject submissions; the server is the authoritative coercion site.
+// `sessionId` is optional; the handler falls back to the client's bound
+// active session. Empty string clears the preamble.
+export const SetSessionPreambleSchema = z.object({
+    type: z.literal('set_session_preamble'),
+    value: z.string().max(4096),
+    sessionId: z.string().max(256).optional(),
+});
 // #3209: runtime activate/deactivate of a manual skill. The skill name
 // is the loader-resolved name (the file's basename without extension);
 // the server validates it matches a real skill before mutating state.
@@ -585,6 +596,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SetPromptEvaluatorSchema,
     SetPromptEvaluatorSkipPatternSchema,
     SetChroxyContextHintSchema,
+    SetSessionPreambleSchema,
     SkillActivateSchema,
     SkillDeactivateSchema,
     SkillTrustAcceptSchema,

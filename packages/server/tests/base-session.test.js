@@ -803,6 +803,147 @@ describe('BaseSession', () => {
     })
   })
 
+  // #4660: per-session user-authored preamble. Free-text string prepended
+  // to the system prompt every turn so the user can pre-load context
+  // (style rules, stack notes, response format) without retyping it.
+  describe('sessionPreamble (#4660)', () => {
+    it('defaults to empty string when omitted from constructor opts', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.sessionPreamble, '')
+    })
+
+    it('coerces non-string constructor values to empty string', () => {
+      for (const bad of [123, true, null, undefined, {}, []]) {
+        const s = new BaseSession({ sessionPreamble: bad, skillsDir: emptySkillsDir, repoSkillsDir: null })
+        assert.equal(s.sessionPreamble, '', `expected non-string ${JSON.stringify(bad)} → ''`)
+      }
+    })
+
+    it('trims whitespace on construction', () => {
+      const s = new BaseSession({ sessionPreamble: '   hello world   ', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s.sessionPreamble, 'hello world')
+    })
+
+    it('treats whitespace-only as empty string', () => {
+      const s = new BaseSession({ sessionPreamble: '   \n\t  ', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s.sessionPreamble, '')
+    })
+
+    it('caps over-length input at SESSION_PREAMBLE_MAX_LENGTH (4000 chars)', () => {
+      const huge = 'x'.repeat(5000)
+      const s = new BaseSession({ sessionPreamble: huge, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s.sessionPreamble.length, 4000)
+    })
+
+    describe('_buildSystemPrompt with preamble', () => {
+      it('returns empty string when preamble is empty and hint is OFF (byte-identical to pre-#4660)', () => {
+        session._skillsText = ''
+        assert.equal(session.sessionPreamble, '')
+        assert.equal(session.chroxyContextHint, false)
+        assert.equal(session._buildSystemPrompt(), '')
+      })
+
+      it('returns just the preamble when set and hint is OFF and no skills', () => {
+        session._skillsText = ''
+        session.sessionPreamble = 'always use bullet points'
+        assert.equal(session._buildSystemPrompt(), 'always use bullet points')
+      })
+
+      it('puts preamble BEFORE chroxy hint when both are present', () => {
+        session._skillsText = ''
+        session.sessionPreamble = 'always use bullet points'
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        const preIdx = out.indexOf('always use bullet points')
+        const hintIdx = out.indexOf('Chroxy')
+        assert.ok(preIdx >= 0 && hintIdx >= 0)
+        assert.ok(preIdx < hintIdx, `preamble should precede chroxy hint (preamble at ${preIdx}, hint at ${hintIdx})`)
+      })
+
+      it('puts preamble BEFORE skills text when both are present (skills not overwritten)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        session.sessionPreamble = 'always use bullet points'
+        const out = session._buildSystemPrompt()
+        const preIdx = out.indexOf('always use bullet points')
+        const skillsIdx = out.indexOf('body text')
+        assert.ok(preIdx >= 0 && skillsIdx >= 0)
+        assert.ok(preIdx < skillsIdx)
+      })
+
+      it('full ordering — preamble, then hint, then skills', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        session.sessionPreamble = 'always use bullet points'
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        const preIdx = out.indexOf('always use bullet points')
+        const hintIdx = out.indexOf('Chroxy')
+        const skillsIdx = out.indexOf('body text')
+        assert.ok(preIdx < hintIdx && hintIdx < skillsIdx,
+          `expected preamble (${preIdx}) < hint (${hintIdx}) < skills (${skillsIdx})`)
+      })
+
+      it('byte-identical to pre-#4660 when preamble is empty (skills only)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        const out = session._buildSystemPrompt()
+        assert.equal(out, '# Skill: foo\n\nbody text')
+      })
+
+      it('joins multiple non-empty layers with double-newline', () => {
+        session._skillsText = 'SKILL'
+        session.sessionPreamble = 'PRE'
+        session.chroxyContextHint = false
+        assert.equal(session._buildSystemPrompt(), 'PRE\n\nSKILL')
+      })
+    })
+
+    describe('setSessionPreamble', () => {
+      it('accepts a string and updates state', () => {
+        assert.equal(session.sessionPreamble, '')
+        const result = session.setSessionPreamble('hello')
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble, 'hello')
+      })
+
+      it('accepts empty string to clear', () => {
+        session.sessionPreamble = 'something'
+        const result = session.setSessionPreamble('')
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble, '')
+      })
+
+      it('trims input on set', () => {
+        const result = session.setSessionPreamble('   trimmed   ')
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble, 'trimmed')
+      })
+
+      it('returns false when the trimmed value is unchanged (idempotent no-op)', () => {
+        session.sessionPreamble = 'hello'
+        assert.equal(session.setSessionPreamble('hello'), false)
+        assert.equal(session.setSessionPreamble('  hello  '), false, 'whitespace-only differences should not count as a change')
+      })
+
+      it('rejects non-string inputs without mutating state', () => {
+        session.sessionPreamble = 'existing'
+        for (const bad of [123, true, null, undefined, {}, []]) {
+          assert.equal(session.setSessionPreamble(bad), false, `expected setSessionPreamble(${JSON.stringify(bad)}) to return false`)
+          assert.equal(session.sessionPreamble, 'existing')
+        }
+      })
+
+      it('caps over-length input at SESSION_PREAMBLE_MAX_LENGTH', () => {
+        const huge = 'y'.repeat(5000)
+        const result = session.setSessionPreamble(huge)
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble.length, 4000)
+      })
+    })
+  })
+
   describe('_getSkills', () => {
     it('returns empty array by default (no skills loaded)', () => {
       assert.deepEqual(session._getSkills(), [])

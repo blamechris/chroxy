@@ -1785,6 +1785,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #4660: per-session preamble setter. String payload matches the
+  // server's validation; `sessionId` is passed when present so the
+  // setter targets the active session in multi-session mode. Server
+  // trims + caps the value and broadcasts `session_preamble_changed`
+  // back — no optimistic update so the rendered text matches what
+  // the server actually injects.
+  setSessionPreamble: (value: string) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const payload: Record<string, unknown> = { type: 'set_session_preamble', value };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    }
+  },
+
   // #3209: skills runtime API
   requestListSkills: () => {
     const { socket, activeSessionId } = get();

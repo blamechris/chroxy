@@ -139,6 +139,11 @@ export declare const ServerChroxyContextHintChangedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     value: z.ZodBoolean;
 }, z.core.$strip>;
+export declare const ServerSessionPreambleChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preamble_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodString;
+}, z.core.$strip>;
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *
@@ -321,6 +326,7 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     promptEvaluator: z.ZodOptional<z.ZodBoolean>;
     promptEvaluatorSkipPattern: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNull]>>;
     chroxyContextHint: z.ZodOptional<z.ZodBoolean>;
+    sessionPreamble: z.ZodOptional<z.ZodString>;
     stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
     stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
     stdinDroppedCount: z.ZodOptional<z.ZodNumber>;
@@ -358,6 +364,7 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         promptEvaluator: z.ZodOptional<z.ZodBoolean>;
         promptEvaluatorSkipPattern: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNull]>>;
         chroxyContextHint: z.ZodOptional<z.ZodBoolean>;
+        sessionPreamble: z.ZodOptional<z.ZodString>;
         stdinForwardingDisabled: z.ZodOptional<z.ZodBoolean>;
         stdinDroppedBytes: z.ZodOptional<z.ZodNumber>;
         stdinDroppedCount: z.ZodOptional<z.ZodNumber>;

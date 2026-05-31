@@ -105,6 +105,12 @@ export class JsonlSubprocessSession extends BaseSession {
     // Same pattern as the other per-session opts — drop it here and
     // the flag silently fails to take effect on subprocess providers.
     chroxyContextHint,
+    // #4660: per-session preamble flows through this middle layer to
+    // BaseSession so Codex / Gemini sessions also pick up the user-
+    // authored text. Same middle-layer trap as chroxyContextHint —
+    // drop it here and the preamble silently fails to inject on
+    // subprocess providers (see [[feedback_jsonl_subprocess_middle_layer]]).
+    sessionPreamble,
     resultTimeoutMs,
     // #3899: hard-cap timeout (per-session backstop) flows through this
     // middle layer to BaseSession exactly like resultTimeoutMs. Memory
@@ -130,6 +136,7 @@ export class JsonlSubprocessSession extends BaseSession {
       promptEvaluator,
       promptEvaluatorSkipPattern,
       chroxyContextHint,
+      sessionPreamble,
       resultTimeoutMs,
       hardTimeoutMs,
     })

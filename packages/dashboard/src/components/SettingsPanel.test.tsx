@@ -61,6 +61,9 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     sessions: [],
     setPromptEvaluator: vi.fn(),
     setChroxyContextHint: vi.fn(),
+    // #4660: per-session preamble default — overridden by the
+    // Active session preamble test cases.
+    setSessionPreamble: vi.fn(),
     // #4052: BYOK credentials defaults — refresh is a no-op spy by
     // default; individual tests override status / actions as needed.
     //
@@ -522,6 +525,97 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       fireEvent.click(screen.getByTestId('chroxy-context-hint-toggle'))
       expect(setChroxyContextHint).toHaveBeenCalledWith(false)
+    })
+  })
+
+  // #4660: per-session preamble. Mirrors the chroxy-context-hint
+  // capability-gated pattern — only renders when the active session
+  // reports a string `sessionPreamble` field (older servers omit it).
+  // Send is debounced 400ms so a single keystroke does not fire a WS
+  // message — tests use vi.useFakeTimers to deterministically advance
+  // past the debounce window.
+  describe('Active session — sessionPreamble text area (#4660)', () => {
+    function setActiveSessionState(extra: Record<string, unknown>) {
+      setMockState({
+        activeSessionId: 'sess-1',
+        sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', ...extra }],
+        setSessionPreamble: vi.fn(),
+      })
+    }
+
+    it('does not render the preamble text area when no active session reports the field', () => {
+      setActiveSessionState({})
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-preamble-input')).toBeNull()
+    })
+
+    it('renders the text area when the active session reports a string sessionPreamble', () => {
+      setActiveSessionState({ sessionPreamble: '' })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('active-session-section')).toBeInTheDocument()
+      expect(screen.getByTestId('session-preamble-input')).toBeInTheDocument()
+    })
+
+    it('hydrates the text area with the server-confirmed value', () => {
+      setActiveSessionState({ sessionPreamble: 'always use bullet points' })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+      expect(input.value).toBe('always use bullet points')
+    })
+
+    it('debounces 400ms before emitting the value', () => {
+      vi.useFakeTimers()
+      try {
+        const setSessionPreamble = vi.fn()
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: '' }],
+          setSessionPreamble,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        fireEvent.change(input, { target: { value: 'hello' } })
+        // Immediately after the change — debounce window still open.
+        expect(setSessionPreamble).not.toHaveBeenCalled()
+        vi.advanceTimersByTime(399)
+        expect(setSessionPreamble).not.toHaveBeenCalled()
+        vi.advanceTimersByTime(2)
+        expect(setSessionPreamble).toHaveBeenCalledTimes(1)
+        expect(setSessionPreamble).toHaveBeenCalledWith('hello')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('coalesces rapid keystrokes into a single send (only the latest value fires)', () => {
+      vi.useFakeTimers()
+      try {
+        const setSessionPreamble = vi.fn()
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: '' }],
+          setSessionPreamble,
+        })
+        render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        fireEvent.change(input, { target: { value: 'h' } })
+        vi.advanceTimersByTime(100)
+        fireEvent.change(input, { target: { value: 'he' } })
+        vi.advanceTimersByTime(100)
+        fireEvent.change(input, { target: { value: 'hello' } })
+        vi.advanceTimersByTime(401)
+        expect(setSessionPreamble).toHaveBeenCalledTimes(1)
+        expect(setSessionPreamble).toHaveBeenCalledWith('hello')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('enforces the 4000-char maxLength attribute', () => {
+      setActiveSessionState({ sessionPreamble: '' })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+      expect(input.maxLength).toBe(4000)
     })
   })
 

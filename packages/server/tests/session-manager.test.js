@@ -297,6 +297,36 @@ describe('SessionManager.serializeState', () => {
     assert.equal(typeof offEntry.chroxyContextHint, 'boolean')
   })
 
+  // #4660: per-session preamble surfaces on each session entry so the
+  // dashboard can hydrate its text area without an extra round-trip.
+  it('serializes sessionPreamble on each session entry (#4660)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionWith = new EventEmitter()
+    sessionWith.model = 'sonnet'
+    sessionWith.permissionMode = 'approve'
+    sessionWith.sessionPreamble = 'always use bullet points'
+    Object.defineProperty(sessionWith, 'resumeSessionId', { get: () => null })
+    sessionWith.destroy = () => {}
+    mgr._sessions.set('s-with', { session: sessionWith, name: 'WithPreamble', cwd: '/tmp' })
+
+    const sessionEmpty = new EventEmitter()
+    sessionEmpty.model = 'sonnet'
+    sessionEmpty.permissionMode = 'approve'
+    sessionEmpty.sessionPreamble = ''
+    Object.defineProperty(sessionEmpty, 'resumeSessionId', { get: () => null })
+    sessionEmpty.destroy = () => {}
+    mgr._sessions.set('s-empty', { session: sessionEmpty, name: 'EmptyPreamble', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    const withEntry = state.sessions.find(s => s.name === 'WithPreamble')
+    const emptyEntry = state.sessions.find(s => s.name === 'EmptyPreamble')
+    assert.equal(withEntry.sessionPreamble, 'always use bullet points')
+    assert.equal(emptyEntry.sessionPreamble, '')
+    assert.equal(typeof withEntry.sessionPreamble, 'string')
+    assert.equal(typeof emptyEntry.sessionPreamble, 'string')
+  })
+
   // #3639: per-session promptEvaluatorSkipPattern survives the
   // round-trip so a restart preserves the operator's per-session
   // skip-list override.
@@ -749,6 +779,49 @@ describe('SessionManager.restoreState', () => {
     assert.equal(noField.chroxyContextHint, false,
       'pre-#3805 state files (no field) restore with the flag OFF — safe default')
     assert.equal(typeof noField.chroxyContextHint, 'boolean')
+
+    mgr.destroyAll()
+  })
+
+  // #4660: per-session preamble round-trips through the full restore
+  // path — `restoreState` → `createSession` → providerOpts → provider
+  // constructor → super() → BaseSession.sessionPreamble. Exercises the
+  // jsonl-subprocess middle-layer trap (memory
+  // [[feedback_jsonl_subprocess_middle_layer]]): if any provider's
+  // constructor drops `sessionPreamble` from its destructured params
+  // or its super({...}) call, restored Codex / Gemini sessions would
+  // silently lose the preamble despite the state file containing it.
+  it('restores sessionPreamble across the state cycle (#4660)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'WithPreamble', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, sessionPreamble: 'always bullet points' },
+        { name: 'EmptyPreamble', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, sessionPreamble: '' },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Non-string field in the state file (hand-edited or schema
+        // drift) — restore must fall back to '' rather than throwing
+        // or carrying a non-string field through to BaseSession.
+        { name: 'BadShape', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, sessionPreamble: 12345 },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    const withP = sessions.find(s => s.name === 'WithPreamble')
+    const emptyP = sessions.find(s => s.name === 'EmptyPreamble')
+    const noField = sessions.find(s => s.name === 'NoField')
+    const badShape = sessions.find(s => s.name === 'BadShape')
+    assert.equal(withP.sessionPreamble, 'always bullet points',
+      'a state file with sessionPreamble must round-trip through the full provider constructor chain into BaseSession')
+    assert.equal(emptyP.sessionPreamble, '')
+    assert.equal(noField.sessionPreamble, '',
+      'pre-#4660 state files (no field) restore with the empty default')
+    assert.equal(badShape.sessionPreamble, '',
+      'non-string field in state file falls back to empty default rather than crashing')
+    assert.equal(typeof withP.sessionPreamble, 'string')
+    assert.equal(typeof noField.sessionPreamble, 'string')
 
     mgr.destroyAll()
   })

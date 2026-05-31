@@ -759,6 +759,103 @@ describe('settings-handlers', () => {
     })
   })
 
+  // #4660: per-session preamble. Mirrors set_chroxy_context_hint —
+  // string-typed payload validation, idempotent (handler relies on the
+  // setter's trim+cap comparison), broadcast + immediate persist on
+  // actual change. Default empty so existing users see no behaviour
+  // change.
+  describe('set_session_preamble (#4660)', () => {
+    it('rejects non-string values with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: 123 }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /string/)
+      assert.equal(session.setSessionPreamble.callCount, 0)
+    })
+
+    it('rejects when no active session', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: 'hello' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('sets and broadcasts session_preamble_changed with the trimmed stored value', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      // Send with leading/trailing whitespace; broadcast must carry the
+      // trimmed value the server actually injects, not the raw input.
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: '  hello world  ' }, ctx)
+
+      assert.equal(session.setSessionPreamble.callCount, 1)
+      assert.equal(session.setSessionPreamble.lastCall[0], '  hello world  ')
+      assert.equal(session.sessionPreamble, 'hello world')
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'session_preamble_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, 'hello world')
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('idempotent on no-op (already empty)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: '' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('idempotent when whitespace differences trim to the same stored value', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.sessionPreamble = 'pinned'
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: '   pinned   ' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('rejects when the session does not implement setSessionPreamble', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      delete session.setSessionPreamble
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: 'hello' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /does not support sessionPreamble/)
+    })
+  })
+
   // #3639: per-session promptEvaluatorSkipPattern setter. Mirrors the
   // #3185 pattern — strict-string payload validation, idempotent on
   // unchanged value, broadcast `prompt_evaluator_skip_pattern_changed`

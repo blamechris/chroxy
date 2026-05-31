@@ -460,6 +460,12 @@ export class SessionManager extends EventEmitter {
    *   when true, BaseSession._buildSystemPrompt prepends a short paragraph
    *   telling the model it's running inside Chroxy so it can adjust output
    *   for mobile clients. Persisted across reconnects.
+   * @param {string} [options.sessionPreamble] - Per-session user-authored
+   *   preamble prepended to the system prompt every turn (#4660). Default
+   *   empty string — when set, BaseSession._buildSystemPrompt puts the
+   *   preamble at the FRONT (before the optional chroxy hint and the
+   *   skills text). Trimmed + capped to SESSION_PREAMBLE_MAX_LENGTH by
+   *   BaseSession. Persisted across reconnects.
    * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
    *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
    *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
@@ -492,7 +498,7 @@ export class SessionManager extends EventEmitter {
    *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -663,6 +669,14 @@ export class SessionManager extends EventEmitter {
     // (see serializeState below).
     if (typeof chroxyContextHint === 'boolean') {
       providerOpts.chroxyContextHint = chroxyContextHint
+    }
+    // #4660: per-session preamble. Only forward when a string is supplied
+    // so omitting the field keeps BaseSession's `''` default. Trimming +
+    // length-capping happens inside BaseSession (single coercion site).
+    // Restored sessions persist this in session-state.json (see
+    // serializeState below).
+    if (typeof sessionPreamble === 'string') {
+      providerOpts.sessionPreamble = sessionPreamble
     }
     // #3540: hydrate the persisted stdin_disabled flag onto the new
     // session so restoreState() round-trips correctly. Only forwarded
@@ -878,6 +892,13 @@ export class SessionManager extends EventEmitter {
         // skips the BaseSession field initialiser still round-trips a
         // valid boolean on the wire.
         chroxyContextHint: !!entry.session.chroxyContextHint,
+        // #4660: surface the per-session preamble so the dashboard can
+        // hydrate its text area without a separate round-trip. String
+        // coerce so a custom provider that skips the BaseSession field
+        // initialiser still round-trips a valid string on the wire.
+        sessionPreamble: typeof entry.session.sessionPreamble === 'string'
+          ? entry.session.sessionPreamble
+          : '',
         // #3540: surface the latched stdin_disabled flag so reconnecting
         // clients (and clients connecting after a server restart) see
         // the disabled state without waiting for a fresh `error` event.
@@ -1180,6 +1201,14 @@ export class SessionManager extends EventEmitter {
         // coerce so older state files (pre-#3805) round-trip as
         // `false` rather than `undefined` after restore.
         chroxyContextHint: !!entry.session.chroxyContextHint,
+        // #4660: persist the user-authored preamble so reconnects
+        // across restarts preserve the user's pre-loaded context.
+        // String coerce so a custom provider that skips the BaseSession
+        // field initialiser still writes a valid string to the state
+        // file instead of `undefined`.
+        sessionPreamble: typeof entry.session.sessionPreamble === 'string'
+          ? entry.session.sessionPreamble
+          : '',
         // #3540: persist the SidecarProcess `stdin_disabled` latch so a
         // server restart preserves the disabled state. Without this, a
         // client connecting after restart would not see the banner — the
@@ -1271,6 +1300,11 @@ export class SessionManager extends EventEmitter {
           // user's choice. createSession ignores non-boolean inputs so
           // older state files (pre-#3805, no field) restore as `false`.
           chroxyContextHint: typeof saved.chroxyContextHint === 'boolean' ? saved.chroxyContextHint : undefined,
+          // #4660: restore the user-authored preamble from disk so
+          // reconnects across server restarts preserve the user's
+          // pre-loaded context. createSession ignores non-string inputs
+          // so older state files (pre-#4660, no field) restore as `''`.
+          sessionPreamble: typeof saved.sessionPreamble === 'string' ? saved.sessionPreamble : undefined,
           // #3540: forward the persisted stdin_disabled latch. Only
           // truthy values flip the flag; pre-#3540 state files (no
           // field) restore as `false`. The SdkSession constructor

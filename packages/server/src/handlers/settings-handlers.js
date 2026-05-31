@@ -1308,6 +1308,65 @@ function handleSetChroxyContextHint(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #4660 — set the per-session preamble (free-text context prepended to the
+ * system prompt every turn). Mirrors the #3805 chroxyContextHint handler:
+ * string-typed payload validation, idempotent (no-op when the trimmed value
+ * matches what's already stored so the dashboard can re-emit on every
+ * keystroke without churning state-file writes), and broadcast on actual
+ * change so multi-client UIs stay in sync.
+ *
+ * Persistence is an immediate `serializeState()` flush rather than the
+ * debounced `schedulePersist` other handlers use — same justification as
+ * #3805: per-session settings are infrequent operator actions where the
+ * sync write is free, and a crash within the debounce window would
+ * otherwise silently lose the change.
+ */
+function handleSetSessionPreamble(ws, client, msg, ctx) {
+  if (typeof msg.value !== 'string') {
+    ctx.send(ws, {
+      type: 'session_error',
+      message: 'set_session_preamble requires a string `value`',
+    })
+    return
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  if (typeof entry.session.setSessionPreamble !== 'function') {
+    // Defensive — every shipping provider extends BaseSession which adds
+    // the setter. A custom provider that bypasses BaseSession would land
+    // here; refuse rather than silently dropping the update.
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support sessionPreamble' })
+    return
+  }
+
+  const changed = entry.session.setSessionPreamble(msg.value)
+  if (!changed) {
+    // No actual change (either redundant set, type-rejected at the setter,
+    // or a string that trims to the same stored value). No broadcast,
+    // no persist.
+    return
+  }
+
+  ctx.broadcastToSession(sessionId, {
+    type: 'session_preamble_changed',
+    sessionId,
+    value: entry.session.sessionPreamble,
+  })
+
+  try {
+    ctx.sessionManager?.serializeState?.()
+  } catch (err) {
+    log.warn(`Failed to persist sessionPreamble for ${sessionId}: ${err?.message || err}`)
+  }
+}
+
 function handleSetPermissionRules(ws, client, msg, ctx) {
   const rules = msg.rules
 
@@ -1384,6 +1443,7 @@ export const settingsHandlers = {
   set_prompt_evaluator: handleSetPromptEvaluator,
   set_prompt_evaluator_skip_pattern: handleSetPromptEvaluatorSkipPattern,
   set_chroxy_context_hint: handleSetChroxyContextHint,
+  set_session_preamble: handleSetSessionPreamble,
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,

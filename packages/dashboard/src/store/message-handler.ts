@@ -863,6 +863,21 @@ function handleChroxyContextHintChanged(msg: Record<string, unknown>, get: MsgGe
   _set({ sessions });
 }
 
+// #4660: server-broadcast confirmation that the per-session preamble
+// landed (and what trimmed value it actually stored). Mirrors
+// handleChroxyContextHintChanged — accept only string-typed payloads,
+// fall back to no-op for malformed events instead of clobbering state.
+function handleSessionPreambleChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const value = typeof msg.value === 'string' ? msg.value : null;
+  if (value === null) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId) return;
+  const sessions = get().sessions.map(s =>
+    s.sessionId === targetId ? { ...s, sessionPreamble: value } : s,
+  );
+  _set({ sessions });
+}
+
 // #3209: full skills list response. Replaces the cached list on the
 // active (or message-targeted) session. Each entry carries `name`,
 // `description`, `source`, `activation`, `active`. The dashboard
@@ -1812,6 +1827,7 @@ const HANDLERS: Record<string, Handler> = {
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
   chroxy_context_hint_changed: handleChroxyContextHintChanged,
+  session_preamble_changed: handleSessionPreambleChanged,
   // #3188: auto-evaluator broadcast events (#3186 emit, #3208 schema)
   evaluator_rewrite: handleEvaluatorRewrite,
   evaluator_clarify: handleEvaluatorClarify,

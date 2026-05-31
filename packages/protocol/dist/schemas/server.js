@@ -191,6 +191,17 @@ export const ServerChroxyContextHintChangedSchema = z.object({
     sessionId: z.string(),
     value: z.boolean(),
 });
+// #4660: per-session preamble changed. Broadcast to every client bound to
+// `sessionId` whenever the trimmed value actually differs from the
+// previous stored value. Multi-client UIs use this to keep their text
+// areas in sync without re-fetching session_list. Value is the stored
+// (post-trim) string the server actually injects, not the raw input —
+// matters when the client typed leading/trailing whitespace.
+export const ServerSessionPreambleChangedSchema = z.object({
+    type: z.literal('session_preamble_changed'),
+    sessionId: z.string(),
+    value: z.string(),
+});
 /**
  * Schema for one entry of `available_models.models` (#3138).
  *
@@ -418,6 +429,11 @@ export const ServerSessionListEntrySchema = z.object({
     // older servers (pre-#3805) omit the field; the dashboard treats
     // `undefined` as `false` (toggle off).
     chroxyContextHint: z.boolean().optional(),
+    // #4660: per-session user-authored preamble (free text prepended to
+    // the system prompt every turn). Optional because older servers
+    // (pre-#4660) omit the field; the dashboard treats `undefined` as
+    // empty string (no preamble injected).
+    sessionPreamble: z.string().optional(),
     stdinForwardingDisabled: z.boolean().optional(),
     // #3573: cumulative stdin_dropped totals seeded into the handshake so a
     // late-joining client sees the running counter without waiting for the

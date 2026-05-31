@@ -149,6 +149,11 @@ export declare const SetChroxyContextHintSchema: z.ZodObject<{
     value: z.ZodBoolean;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SetSessionPreambleSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_session_preamble">;
+    value: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const SkillActivateSchema: z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;
     skillName: z.ZodString;
@@ -584,6 +589,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_chroxy_context_hint">;
     value: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_session_preamble">;
+    value: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;

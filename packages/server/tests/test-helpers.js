@@ -218,6 +218,10 @@ export function createMockSession(overrides = {}) {
   // BaseSession.setChroxyContextHint: strict-boolean validation, returns
   // true only when state actually changes.
   session.chroxyContextHint = false
+  // #4660: per-session preamble, default empty string. Setter mirrors
+  // BaseSession.setSessionPreamble: string validation, trim+cap, returns
+  // true only when the trimmed value differs from the stored value.
+  session.sessionPreamble = ''
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
   session.setModel = createSpy()
@@ -239,6 +243,14 @@ export function createMockSession(overrides = {}) {
   session.setChroxyContextHint = createSpy((value) => {
     if (typeof value !== 'boolean' || value === session.chroxyContextHint) return false
     session.chroxyContextHint = value
+    return true
+  })
+  session.setSessionPreamble = createSpy((value) => {
+    if (typeof value !== 'string') return false
+    const trimmed = value.trim()
+    const next = trimmed.length > 4000 ? trimmed.slice(0, 4000) : trimmed
+    if (next === session.sessionPreamble) return false
+    session.sessionPreamble = next
     return true
   })
   session.setPromptEvaluatorSkipPattern = createSpy((value) => {
