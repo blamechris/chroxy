@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.27] - 2026-05-31
+
+Short-term fix for the v0.9.26 multi-question AskUserQuestion wedge (#4668). When claude TUI retried as N "separate" single-question calls after the #4648 multi-question deny, it issued them as parallel `tool_use` blocks in one assistant turn — and chroxy's `_pendingUserAnswer` is a single field, so the user's answer to question 1 routed to question 4's slot and the 5-minute stream-stall watchdog fired. The hook now refuses sibling AskUserQuestion calls while one is already pending, forcing true serialization until the long-term Map-keyed refactor lands.
+
+### Fixed
+
+- **Sibling AskUserQuestion deny at the permission-hook layer (#4669):** `permission-hook.sh` now claims an `askuserquestion-active` lock in the session sink dir (`CHROXY_SINK_DIR`) on first AskUserQuestion and denies subsequent siblings while the lock is fresh (<60s). PostToolUse cleanup releases the lock via a `tee | grep | rm -rf` chain wired through `claude-tui-session.js`. Atomic via `mkdir` (TOCTOU-safe), portable across macOS and Linux (`uname -s`-switched `stat`), and stale-lock-resilient (auto-reclaims after 60s). Deny copy steers the model to wait for each `tool_result` before issuing the next `tool_use` instead of the ambiguous "answer each in turn" phrasing that the model previously read as "fire in parallel."
+
 ## [0.9.26] - 2026-05-31
 
 Adds a per-session, user-authored **preamble** that the server prepends to the system prompt every turn so you can pre-load context once instead of retyping it in every message ("always respond in bullet points", "this is a Godot 4 project — prefer GDScript over C#"). New text area lives in the dashboard's Active session section, persists across server restarts, and applies to every provider (Claude TUI/SDK/CLI, BYOK, DeepSeek, Codex, Gemini).
