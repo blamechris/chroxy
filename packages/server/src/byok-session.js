@@ -317,7 +317,14 @@ export class ClaudeByokSession extends BaseSession {
       // works fine; baseURL defaults to api.anthropic.com.
       const resolved = this._resolveCredentials()
       if (!resolved.key) {
-        this.emit('error', { message: `BYOK credentials not found — ${resolved.reason}` })
+        // Use the subclass's preflight label (or provider id) so the
+        // toast / error feed names the right provider. Pre-#4656 this
+        // was hardcoded "BYOK" — DeepSeek would inherit the misleading
+        // "BYOK credentials not found" string. Keep "BYOK" as the last
+        // resort in case a subclass declares neither preflight nor
+        // provider.
+        const label = this.constructor.preflight?.label || this._provider || 'BYOK'
+        this.emit('error', { message: `${label} credentials not found — ${resolved.reason}` })
         return
       }
       this._apiKeySource = resolved.source

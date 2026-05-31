@@ -239,7 +239,10 @@ describe('DeepSeekSession (#4656)', () => {
       await session.start()
       assert.equal(events.length, 1)
       assert.equal(events[0].kind, 'error')
-      assert.match(events[0].payload.message, /BYOK credentials not found|DEEPSEEK_API_KEY/i)
+      // After #4656 the error prefix uses the preflight label so DeepSeek
+      // doesn't inherit a misleading "BYOK credentials not found" string.
+      assert.match(events[0].payload.message, /DeepSeek credentials not found/i)
+      assert.match(events[0].payload.message, /DEEPSEEK_API_KEY/)
     })
 
     it('start() resolves credentials via the file path with 0600 enforcement', async () => {
