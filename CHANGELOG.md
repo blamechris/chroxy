@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.20] - 2026-05-30
+
+Patches the last remaining zombie-chip path in v0.9.19. Forensic on a live wedged session showed claude TUI sometimes drops a PostToolUse hook (1 of 35 observed in a clean turn — likely an upstream race between turn-end and post-hook fire). When that happens, chroxy persists an unpaired `tool_start` to `session-state.json`, and the dashboard's `activeTools` chip ticks forever — `result` is broadcast live so `handleAgentIdle` clears it, but `replayHistory` on dashboard reconnect sent the raw `result` event verbatim and the dashboard has no `result` handler, so the chip survived every reload until the next chroxy restart. Two-layer defense: prevent new orphans at turn-end (sweep), heal existing wedged sessions on reconnect (replay fan-out).
+
+### Fixed
+
+- **Zombie tool_start chip via emit-result sweep + replay agent_idle fan-out (#4628 / #4631):**
+  - **Layer 3 (BaseSession `_emitResult` sweep):** new `_inFlightToolStarts` Map tracks every emitted `tool_start` until matching `tool_result` fires. `_sweepUnresolvedToolStarts(reason)` emits a synthetic `tool_result` per orphan (carries `synthetic`, `interrupted`, `isError`, `reason` diagnostic fields + the original `toolUseId` — dashboard's `applyToActiveTools` pairs by `toolUseId` alone, so the chip clears). `_emitResult(payload, reason)` wraps sweep + result emit so the synthetic fires BEFORE the result. `_clearMessageState` also sweeps as belt-and-braces for paths that emit result via a different route (e.g. SDK `_handleStreamStall` clears state BEFORE emitting result). Wired into all three providers (`claude-tui-session.js` — all 3 result paths + hook pair tracking + AskUserQuestion stall path; `sdk-session.js` — tool_start track + turn-end via `_emitResult`; `cli-session.js` — tool_start track) and into the shared `tool-result.js` helper (untracks when emitting `tool_result` via `emitToolResults`).
+  - **Layer 2 (replay-time `result → agent_idle` fan-out in `ws-history.js`):** `replayHistory` now mirrors the live `event-normalizer.js` fan-out — any `result` entry in the replay stream is followed by a synthetic `agent_idle`. Without this, the dashboard's handler dispatch table (no `result` handler, only `agent_idle`) silently drops replayed results, so `handleAgentIdle` (the #4308 `activeTools` safety net) never fires. Heals existing wedged sessions on dashboard reconnect — no chroxy restart required.
+  - Pairs with the existing layers: #4308 (live `handleAgentIdle`), #4619 (restart-time sweep on persisted history), #4618 (stall watchdog `tool_result` emit), #4614 (AskUserQuestion stall watchdog). Together they cover every known path from `tool_start` to chip-not-clearing.
+
 ## [0.9.19] - 2026-05-30
 
 Coordinated attack on the "Running X · Nh Mm" zombie chip plus the stall paths that produced it — #4604 (multi-question AskUserQuestion) lands its full A→B→C arc: observability + 30s watchdog (#4614), root-cause multi-question form driver (#4620), and two fallbacks so the footer pill clears even when the driver can't help (#4618, #4619). Stream-stall watchdog extends to SDK sessions (#4608, closes #4467). Plus notification-prefs durability hardening (#4605, #4606) and a wire-timestamp respect for `tool_start` (#4612, closes #4607).
