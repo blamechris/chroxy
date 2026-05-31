@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.26] - 2026-05-31
+
+Adds a per-session, user-authored **preamble** that the server prepends to the system prompt every turn so you can pre-load context once instead of retyping it in every message ("always respond in bullet points", "this is a Godot 4 project — prefer GDScript over C#"). New text area lives in the dashboard's Active session section, persists across server restarts, and applies to every provider (Claude TUI/SDK/CLI, BYOK, DeepSeek, Codex, Gemini).
+
+### Added
+
+- **Per-session preamble (#4660):** new `set_session_preamble` WS message and `session_preamble_changed` broadcast. `BaseSession._buildSystemPrompt()` now layers `preamble → chroxy hint → skills text` with `\n\n` separators; preamble rides at the front so the user's voice takes precedence over chroxy-controlled context. Trimmed + capped to 4000 chars server-side, 4096 chars on the wire. Persists in `session-state.json` and round-trips across server restarts. Settings panel text area debounces 400ms before sending to bound WS chatter.
+
+### Changed
+
+- `BaseSession._buildSystemPrompt()` rewritten to join non-empty layers via `parts.join('\n\n')` so multiple optional layers (preamble, chroxy hint, skills) compose cleanly without nested branching. Byte-identical to pre-#3805 when both preamble is empty and `chroxyContextHint` is OFF — zero observable change for existing users.
+
 ## [0.9.25] - 2026-05-31
 
 Adds DeepSeek as a first-class provider alongside Claude, Codex, and Gemini. Subclasses the existing `ClaudeByokSession` and points at DeepSeek's Anthropic-compatible endpoint (`https://api.deepseek.com/anthropic`) so the entire BYOK agent loop — streaming, tools, permissions, MCP, history rollback, parallel tool execution — reuses unchanged. Two models in the picker: `deepseek-chat` (V3, 128k ctx) and `deepseek-reasoner` (R1, 128k ctx).
