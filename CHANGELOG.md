@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.22] - 2026-05-31
+
+Active-recovery for the TUI provider's "Working… forever" wedge mode — when `claude` TUI accepts the prompt and then emits absolutely nothing (no Stop hook, no tool hooks, no PTY output) the soft warning sat at 30 min and the hard cap at 2h, neither of which helped a user staring at a frozen session at the 5-min mark. CLI and SDK sessions already had this fix from #4467; the TUI provider was the outlier.
+
+### Fixed
+
+- **Stream-stall watchdog on `ClaudeTuiSession`** (#4638, #4640) — ports the #4467 `_streamStallTimeout` recovery to the TUI provider. On stall fire: best-effort Ctrl-C into the PTY (so `claude` itself unsticks for the next turn) → emit `stream_end` → `_emitResult` (sweeps orphan tool_starts and fans `result` → `agent_idle` via the event-normalizer) → emit `error` with `code: 'stream_stall'` so the dashboard surfaces the same retry chip CLI/SDK stalls trigger. Default 5 min; operators can override via `streamStallTimeoutMs` config or set to 0 to disable.
+
 ## [0.9.21] - 2026-05-30
 
 CSS polish for the multi-question AskUserQuestion form shipped in v0.9.19 — the component rendered with class names that had no rules at all, so Submit fell back to the native browser button (gray-on-dark, unreadable), questions ran together with no separator, and the native radio dot was harsh-white against the dark theme. No functional changes.
