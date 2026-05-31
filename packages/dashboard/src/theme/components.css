@@ -2272,6 +2272,17 @@
   accent-color: var(--accent-purple);
 }
 
+/* Multi-question form options wrap an input + span inside a label. The
+   default inline layout jammed the radio/checkbox dot against the text
+   with no gap. Use flex + gap on the radio/checkbox variants only so the
+   single-select QuestionPrompt path (no input element) is untouched. */
+.question-option--radio,
+.question-option--checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .question-freetext {
   display: flex;
   gap: 8px;
