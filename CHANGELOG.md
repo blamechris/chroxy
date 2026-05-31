@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.24] - 2026-05-31
+
+Rethinks chroxy's multi-question `AskUserQuestion` form handling end-to-end after a 6-agent `/swarm-audit` unanimously concluded the existing PTY-keystroke driver cannot work in production (0/7 success rate per `chroxy.log` forensic, 24h sample). Replaces the driver path with a permission-hook deny that forces the model to re-issue as N sequential single-question calls — each driven by the empirically-validated single-question happy path that has worked since v0.9.4. Also a cosmetic dashboard fix for the Read-tool collapsed preview.
+
+### Fixed
+
+- **Refuse multi-question AskUserQuestion at the permission hook** (#4648, #4649) — `packages/server/hooks/permission-hook.sh` now detects PreToolUse where `tool_name == "AskUserQuestion"` AND `questions[].length > 1`, returns `permissionDecision: "deny"` with a `permissionDecisionReason` instructing the model to re-issue as separate AskUserQuestion calls, one per question. Runs BEFORE permission-mode dispatch so `auto`/`approve`/`acceptEdits`/`plan` all behave consistently. Uses `python3` stdin JSON parse with safe fallthrough — malformed payload or `python3` absence falls through to existing behavior rather than denying broadly. Defense in depth: the v0.9.23 `_onAskUserQuestionStall` teardown still catches anything that slips through. The old multi-question driver code stays in place for one release cycle as defense-in-depth; deletion planned for a future release once refuse is proven stable in dogfood.
+- **Action-oriented error toast on `ASK_USER_QUESTION_STALL`** (#4648, #4649) — was `"The agent's question response could not be delivered — likely a multi-question form. Please retry from your last message."` (chroxy jargon); now `"Couldn't deliver your answers. Tap Retry to resend your original request."` (action-oriented). Most multi-question forms never reach this toast now because the permission hook denies them upstream; the toast is reserved for the rarer cases that slip past the hook.
+- **Raw `tool_input` JSON leaking into Read tool's collapsed preview** (#4648, #4649) — `packages/store-core/src/tool-summary.ts` adds `filePath` to the priority field list and a one-level nested-object walk so the Read tool input shape `{type:'text', file:{filePath:'/foo'}}` summarizes as `/foo` instead of falling through to `ToolBubble`'s raw-JSON-head fallback. Walk stops at depth one so bounded preview cost on the hot `ToolBubble` render path.
+
 ## [0.9.23] - 2026-05-31
 
 Two follow-ups from v0.9.22 dogfooding. The `ASK_USER_QUESTION_STALL` watchdog from #4604 was firing the user-facing error correctly but leaving the session looking busy — the dashboard kept the "Working…" banner and Stop button up for the next 4.5 min (until v0.9.22's new 5-min stream-stall watchdog kicked in), so the toast's "retry from your last message" instruction had no Send affordance to retry from. And the multi-question form's option labels rendered with the radio/checkbox dot jammed against the text.
