@@ -289,20 +289,51 @@ export class ClaudeByokSession extends BaseSession {
         : null
   }
 
+  // Subclass seams (#4656 — DeepSeek). Overriding these four lets a
+  // sibling provider (DeepSeek's Anthropic-compatible endpoint, any
+  // other future Anthropic-compatible service) reuse this entire agent
+  // loop by swapping credentials, base URL, default model, and pricing
+  // table — no fork, no re-implementation of the streaming + tool +
+  // permission + MCP machinery.
+  get _defaultModel() {
+    return 'claude-opus-4-7'
+  }
+
+  _resolveCredentials() {
+    return resolveAnthropicApiKey()
+  }
+
+  _buildClient(apiKey) {
+    return new Anthropic({ apiKey })
+  }
+
+  _getPricing(model) {
+    return getModelPricing(model)
+  }
+
   async start() {
     if (this._client === null) {
       // Spike (BYOK direct) confirmed the SDK's standard constructor
       // works fine; baseURL defaults to api.anthropic.com.
-      const resolved = resolveAnthropicApiKey()
+      const resolved = this._resolveCredentials()
       if (!resolved.key) {
-        this.emit('error', { message: `BYOK credentials not found — ${resolved.reason}` })
+        // Use the subclass's preflight label (or provider id) so the
+        // toast / error feed names the right provider. Pre-#4656 this
+        // was hardcoded "BYOK" — DeepSeek would inherit the misleading
+        // "BYOK credentials not found" string. Keep "BYOK" as the last
+        // resort in case a subclass declares neither preflight nor
+        // provider.
+        const label = this.constructor.preflight?.label || this._provider || 'BYOK'
+        this.emit('error', { message: `${label} credentials not found — ${resolved.reason}` })
         return
       }
       this._apiKeySource = resolved.source
       // Mask in logs — full key never appears on disk. logger.js redactor
-      // catches Bearer / sk-ant patterns as a defense in depth.
-      log.info(`BYOK session ready — key source=${this._apiKeySource} key=${maskApiKey(resolved.key)} model=${this.model || 'default'}`)
-      this._client = new Anthropic({ apiKey: resolved.key })
+      // catches Bearer / sk-ant patterns as a defense in depth. The
+      // `this._provider` label keeps the line accurate when a subclass
+      // (#4656 — DeepSeek) reuses this start() through the four seams.
+      log.info(`${this._provider || 'BYOK'} session ready — key source=${this._apiKeySource} key=${maskApiKey(resolved.key)} model=${this.model || 'default'}`)
+      this._client = this._buildClient(resolved.key)
     }
 
     // #4077: spawn MCP children lazily on first start(). Errors during
@@ -397,8 +428,8 @@ export class ClaudeByokSession extends BaseSession {
     // tool-use turn reports only 1/5th of the actual cost (#4056).
     const turnUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     let turnCost = 0
-    const pricingModel = this.model || 'claude-opus-4-7'
-    const pricing = getModelPricing(pricingModel)
+    const pricingModel = this.model || this._defaultModel
+    const pricing = this._getPricing(pricingModel)
     if (!pricing && !this._pricingWarnedModels.has(pricingModel)) {
       // #4085: warn at most once per (session, model) — not once per turn.
       this._pricingWarnedModels.add(pricingModel)
@@ -422,7 +453,7 @@ export class ClaudeByokSession extends BaseSession {
         try {
           stream = this._client.messages.stream(
             {
-              model: this.model || 'claude-opus-4-7',
+              model: this.model || this._defaultModel,
               max_tokens: DEFAULT_MAX_TOKENS,
               ...(systemPrompt ? { system: systemPrompt } : {}),
               // #4078: merge BUILTIN_TOOLS with live MCP tools at turn time.
@@ -666,7 +697,7 @@ export class ClaudeByokSession extends BaseSession {
           try {
             summaryStream = this._client.messages.stream(
               {
-                model: this.model || 'claude-opus-4-7',
+                model: this.model || this._defaultModel,
                 max_tokens: DEFAULT_MAX_TOKENS,
                 ...(systemPrompt ? { system: systemPrompt } : {}),
                 // No tools — force a text-only summary. Even if the model

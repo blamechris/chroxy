@@ -162,6 +162,40 @@ export function getModelPricing(modelId) {
   return key ? CLAUDE_PRICING_USD_PER_MTOK[key] : null
 }
 
+// Public DeepSeek pricing in USD per million tokens (#4656). Source:
+// https://api-docs.deepseek.com/quick_start/pricing — keep in sync.
+// DeepSeek bills cache hits separately from cache misses but does NOT
+// charge a separate cache-write fee, so `cacheWrite` is 0; the field is
+// kept so the same `computePromptCostUsd` helper consumes both tables
+// without a shape branch.
+//
+// DeepSeek hits chroxy through their Anthropic-compatible endpoint
+// (https://api.deepseek.com/anthropic), so usage objects arrive in the
+// Anthropic shape (`input_tokens` / `output_tokens` /
+// `cache_read_input_tokens` / `cache_creation_input_tokens`). DeepSeek's
+// own docs note that they map their internal cache-hit metric onto the
+// Anthropic `cache_read_input_tokens` slot, and they never report cache
+// writes — so the zero rate is correct, not a placeholder.
+const DEEPSEEK_PRICING_USD_PER_MTOK = Object.freeze({
+  // V3 chat — general-purpose model.
+  'deepseek-chat':     Object.freeze({ input: 0.27, output: 1.10, cacheRead: 0.07, cacheWrite: 0 }),
+  // R1 reasoning — emits a reasoning trace before the final answer.
+  'deepseek-reasoner': Object.freeze({ input: 0.55, output: 2.19, cacheRead: 0.14, cacheWrite: 0 }),
+})
+
+/**
+ * Returns the DeepSeek pricing rates for a model (USD per million tokens),
+ * or null if pricing is unknown (#4656).
+ *
+ * Verbatim-only lookup. DeepSeek doesn't ship date-suffixed model ids the
+ * way Anthropic does, so the strip-and-retry dance from `resolvePricingKey`
+ * isn't warranted here. If they ever do, extend along the same shape.
+ */
+export function getDeepSeekPricing(modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return null
+  return DEEPSEEK_PRICING_USD_PER_MTOK[modelId] || null
+}
+
 /**
  * Compute USD cost for a single turn's usage object as returned by the
  * Anthropic SDK (`{ input_tokens, output_tokens, cache_creation_input_tokens,

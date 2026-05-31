@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest } from '../src/providers.js'
@@ -106,7 +106,7 @@ describe('Provider Registry', () => {
   // so the dashboard can grey-out unusable providers and show a billing-
   // identity confidence panel without making the user run `chroxy doctor`.
   describe('auth status (#3404 audit)', () => {
-    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME']
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME']
     const saved = {}
     let _tmpClaudeHome = null
     let _tmpCodexHome = null
@@ -486,6 +486,82 @@ describe('Provider Registry', () => {
         assert.equal(gemini.auth.source, 'env')
         assert.equal(gemini.auth.envVar, 'GEMINI_API_KEY')
       } finally {
+        restoreKeys()
+      }
+    })
+
+    // #4656: DeepSeek mirrors the BYOK auth flow — DEEPSEEK_API_KEY env
+    // OR a `deepseekApiKey` field in ~/.chroxy/credentials.json (mode 0600).
+    // Both must resolve through the dedicated branch in getProviderAuthInfo;
+    // without it the file path would silently report ready=false.
+    it('deepseek validates and is registered', () => {
+      const list = listProviders()
+      const ds = list.find(p => p.name === 'deepseek')
+      assert.ok(ds, 'deepseek provider should be registered')
+      assert.equal(typeof ds.capabilities, 'object')
+    })
+
+    it('deepseek reports ready=true source=env when DEEPSEEK_API_KEY is set (#4656)', () => {
+      try {
+        clearKeys()
+        process.env.DEEPSEEK_API_KEY = 'sk-deepseek-test'
+        const list = listProviders()
+        const ds = list.find(p => p.name === 'deepseek')
+        assert.ok(ds?.auth)
+        assert.equal(ds.auth.ready, true)
+        assert.equal(ds.auth.source, 'env')
+        assert.equal(ds.auth.envVar, 'DEEPSEEK_API_KEY')
+        assert.match(ds.auth.detail, /DeepSeek API/)
+        assert.match(ds.auth.detail, /DEEPSEEK_API_KEY set/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('deepseek reports ready=false source=none when no credentials are present (#4656)', () => {
+      try {
+        clearKeys()
+        const list = listProviders()
+        const ds = list.find(p => p.name === 'deepseek')
+        assert.ok(ds?.auth)
+        assert.equal(ds.auth.ready, false)
+        assert.equal(ds.auth.source, 'none')
+        assert.match(ds.auth.detail, /DeepSeek API/)
+        // Hint must mention the env var so the user knows the fix.
+        assert.match(ds.auth.hint, /DEEPSEEK_API_KEY/)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('deepseek reports ready=true source=env when key is in credentials.json (#4656)', () => {
+      // Mirrors the claude-byok file-path test. Without the dedicated
+      // DeepSeek branch in getProviderAuthInfo, this would silently
+      // report ready=false because the generic env-var match only
+      // looks at process.env, not the credentials.json file.
+      const tmpFsHome = mkdtempSync(join(tmpdir(), 'chroxy-deepseek-auth-test-'))
+      const savedHome = process.env.HOME
+      try {
+        clearKeys()
+        process.env.HOME = tmpFsHome
+        mkdirSync(join(tmpFsHome, '.chroxy'), { recursive: true })
+        const credPath = join(tmpFsHome, '.chroxy', 'credentials.json')
+        writeFileSync(credPath, JSON.stringify({ deepseekApiKey: 'sk-from-file' }))
+        // Set mode after write because some tmp setups don't honour the
+        // mode arg on writeFileSync. chmod is the authoritative source.
+        chmodSync(credPath, 0o600)
+        const list = listProviders()
+        const ds = list.find(p => p.name === 'deepseek')
+        assert.ok(ds?.auth)
+        assert.equal(ds.auth.ready, true)
+        assert.equal(ds.auth.source, 'env',
+          'file path must surface as source=env so SettingsPanel renders the right tone')
+        assert.equal(ds.auth.envVar, null, 'file source has no env var')
+        assert.match(ds.auth.detail, /credentials\.json/)
+      } finally {
+        if (savedHome) process.env.HOME = savedHome
+        else delete process.env.HOME
+        rmSync(tmpFsHome, { recursive: true, force: true })
         restoreKeys()
       }
     })

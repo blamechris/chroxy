@@ -189,7 +189,13 @@ describe('ClaudeByokSession', () => {
       await session.start()
       const errorEvent = captured.find((e) => e.name === 'error')
       assert.ok(errorEvent, 'error event must fire')
-      assert.match(errorEvent.payload.message, /BYOK credentials not found/)
+      // After #4656 the prefix uses the preflight label ('Claude (BYOK)')
+      // so the legacy contiguous "BYOK credentials not found" no longer
+      // matches verbatim. Pin both the BYOK marker and the credentials
+      // phrase independently so a future label change doesn't silently
+      // pass an unrelated error string.
+      assert.match(errorEvent.payload.message, /BYOK/)
+      assert.match(errorEvent.payload.message, /credentials not found/)
       assert.equal(captured.find((e) => e.name === 'ready'), undefined)
     })
 

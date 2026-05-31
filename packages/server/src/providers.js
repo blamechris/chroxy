@@ -20,16 +20,19 @@ import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { ClaudeTuiSession } from './claude-tui-session.js'
 import { ClaudeByokSession } from './byok-session.js'
+import { DeepSeekSession } from './deepseek-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
 import { resolveAnthropicApiKey } from './byok-credentials.js'
+import { resolveDeepSeekApiKey } from './deepseek-credentials.js'
 
 const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
   'claude-tui': ClaudeTuiSession,
   'claude-byok': ClaudeByokSession,
+  'deepseek': DeepSeekSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
 }
@@ -289,6 +292,35 @@ function getProviderAuthInfo(name, ProviderClass) {
       envVars,
       hint,
       detail: `Anthropic API (${resolved.reason})`,
+    }
+  }
+
+  // DeepSeek mirrors the BYOK branch (#4656): env-var OR
+  // ~/.chroxy/credentials.json `deepseekApiKey` field. Both surface as
+  // source: 'env' so SettingsPanel's tone legend maps cleanly; the
+  // `detail` string disambiguates which path supplied the key. Without
+  // this dedicated branch the generic env-var match below would return
+  // ready:false whenever the user stored the key in credentials.json
+  // rather than exporting DEEPSEEK_API_KEY.
+  if (name === 'deepseek') {
+    const resolved = resolveDeepSeekApiKey()
+    if (resolved.key) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: resolved.source === 'env' ? 'DEEPSEEK_API_KEY' : null,
+        envVars,
+        hint: '',
+        detail: `DeepSeek API (${resolved.source === 'env' ? 'DEEPSEEK_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `DeepSeek API (${resolved.reason})`,
     }
   }
 
@@ -596,6 +628,7 @@ function describeBillingIdentity(name, envVar) {
   }
   if (name === 'codex') return 'OpenAI API'
   if (name === 'gemini') return 'Google API'
+  if (name === 'deepseek') return 'DeepSeek API'
   return 'External provider'
 }
 
