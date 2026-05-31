@@ -2621,5 +2621,45 @@ describe('SdkSession', () => {
       assert.deepEqual(events, [])
       s.destroy()
     })
+
+    it('emits synthetic `result` so event-normalizer fans to agent_idle → activeTools clear (#4616)', () => {
+      // #4616 — without the synthetic `result` event, the dashboard's
+      // activeTools entries linger after a stream stall: the event-
+      // normalizer only synthesizes `agent_idle` from `result` (see
+      // event-normalizer.js:253), and store-core handleAgentIdle clears
+      // `activeTools: []` as the #4308 safety net. CLI does the same via
+      // _emitInterruptedTurnResult (stream_end + result). Pre-#4616 the
+      // SDK was missing the `result` half of the pair, so its footer
+      // pill never cleared after a stall.
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+      s._sessionId = 'sess_ss'
+      s._sdkSessionId = 'sess_ss'
+
+      const events = []
+      s.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+      s.on('result', (p) => events.push({ name: 'result', payload: p }))
+      s.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+      s._handleStreamStall('msg_ss', true)
+
+      assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result', 'error'],
+        'order is stream_end → result → error so agent_idle lands before the toast')
+
+      const resultEvent = events[1].payload
+      assert.equal(resultEvent.cost, null,
+        'cost MUST be null so session-manager skips billing accumulation on a stalled turn')
+      assert.equal(resultEvent.usage, null,
+        'usage MUST be null on a stalled turn — no real assistant response was produced')
+      assert.equal(resultEvent.sessionId, 'sess_ss',
+        'sessionId snapshotted before _clearMessageState so the synthetic result is correctly identified')
+      assert.equal(typeof resultEvent.duration, 'number',
+        'duration carries the stall timeout so the dashboard can render an approximate turn time')
+
+      assert.equal(events[2].payload.code, 'stream_stall',
+        'error still carries the structured code for the dashboard stall chip')
+      s.destroy()
+    })
   })
 })
