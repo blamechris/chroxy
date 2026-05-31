@@ -81,9 +81,13 @@ describe('permission-hook.sh — sibling AskUserQuestion deny (#4668)', () => {
     assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny',
       'second sibling must deny while the first is pending')
     // The reason text must steer the model toward true serialization — pin
-    // the load-bearing phrases without locking the exact copy.
+    // the load-bearing phrases without locking the exact copy. tool_result
+    // is the explicit signal the model has been observed responding to;
+    // pre-#4668 "answer each in turn" was the ambiguous phrasing the model
+    // mis-read as "parallel within one turn".
     assert.match(decision.hookSpecificOutput.permissionDecisionReason, /pending/i)
     assert.match(decision.hookSpecificOutput.permissionDecisionReason, /parallel/i)
+    assert.match(decision.hookSpecificOutput.permissionDecisionReason, /tool_result/i)
   })
 
   it('allows the next AskUserQuestion after the lock is removed (PostToolUse cleanup path)', async () => {

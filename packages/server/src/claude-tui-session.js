@@ -536,7 +536,10 @@ export class ClaudeTuiSession extends BaseSession {
       // place its sibling-AskUserQuestion lockfile somewhere that's
       // automatically cleaned up by destroy()'s rmSync of this._sinkDir.
       // The hook silently no-ops the sibling-deny check when this env
-      // var is absent, so removing it again later is safe.
+      // var is absent, so removing it again later is safe. Set under
+      // permissionsEnabled because the hook itself only runs in that
+      // mode — outside it, claude TUI takes its own permission path and
+      // none of CHROXY_* env vars are read.
       env.CHROXY_SINK_DIR = this._sinkDir
     }
 

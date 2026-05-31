@@ -102,27 +102,58 @@ EOF
   # (claude-tui-session.js) clears this lock when the active AskUserQuestion
   # completes, so sequential AskUserQuestions are unaffected.
   #
-  # Lock dir + mkdir is atomic enough — first parallel hook wins the mkdir
-  # race; subsequent hooks see the existing dir and deny. The age fallback
-  # (60s) catches truly stale locks left by crashes / killed sessions.
+  # mkdir IS the atomic claim — not a follow-up to a separate existence
+  # check. POSIX guarantees mkdir is atomic across concurrent processes: at
+  # most one caller per parent directory wins; the rest see EEXIST. Pre-v1
+  # of this fix used `if [ -d "$LOCK" ]; then deny; else mkdir; fi` which
+  # is TOCTOU-broken: parallel hooks (chroxy's exact case — 4 AskUserQuestion
+  # hooks firing within milliseconds) can all observe "not exists" before
+  # any of them mkdir. The mkdir-first structure here eliminates that
+  # window: the race-winner gets through, every other caller sees the dir
+  # already there and falls into the stale-check / deny branch.
   if [ -n "$CHROXY_SINK_DIR" ] && [ -d "$CHROXY_SINK_DIR" ]; then
     SIBLING_LOCK="${CHROXY_SINK_DIR}/askuserquestion-active"
-    if [ -d "$SIBLING_LOCK" ]; then
-      LOCK_AGE=$(($(date +%s) - $(stat -f %m "$SIBLING_LOCK" 2>/dev/null || stat -c %Y "$SIBLING_LOCK" 2>/dev/null || echo 0)))
+    if ! mkdir "$SIBLING_LOCK" 2>/dev/null; then
+      # mkdir failed because the dir already exists (EEXIST — the only
+      # plausible cause once CHROXY_SINK_DIR is verified writable above).
+      # Inspect the existing lock's age to decide: fresh sibling (deny) or
+      # stale leftover (reclaim).
+      #
+      # stat flag portability: macOS uses BSD stat (-f %m, mtime as epoch
+      # seconds); Linux uses GNU stat (-c %Y). The platform branch keeps
+      # the wrong invocation from succeeding accidentally — GNU stat -f
+      # silently switches to filesystem-info mode and returns a mount-point
+      # string, which then breaks the arithmetic below (assigns LOCK_AGE
+      # to empty → the [ -lt 60 ] check evaluates falsy → would skip the
+      # deny path and bypass the fix entirely on Linux CI).
+      case "$(uname -s)" in
+        Darwin) LOCK_MTIME=$(stat -f %m "$SIBLING_LOCK" 2>/dev/null) ;;
+        *)      LOCK_MTIME=$(stat -c %Y "$SIBLING_LOCK" 2>/dev/null) ;;
+      esac
+      LOCK_AGE=$(($(date +%s) - ${LOCK_MTIME:-0}))
       if [ "$LOCK_AGE" -ge 0 ] && [ "$LOCK_AGE" -lt 60 ]; then
         cat <<'EOF'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Another AskUserQuestion is already pending in this session. Wait for the user's answer (tool_result) before issuing the next AskUserQuestion. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn — chroxy delivers them serially."}}
 EOF
         exit 0
       fi
-      # Stale lock (>60s, prior session likely crashed) — wipe and reclaim.
+      # Stale lock (>60s old OR mtime unreadable — LOCK_MTIME defaulted to
+      # 0 so LOCK_AGE ≈ epoch seconds, well past 60 → treated as stale and
+      # reclaimed; explicit "fall back to reclaim" semantics for the
+      # belt-and-suspenders case where stat fails for an unexpected reason).
+      # Reclaim by removing + recreating so mtime resets and our new claim
+      # is the active sibling. If a concurrent hook also detected staleness
+      # and reclaimed first, our mkdir fails — deny ourselves so we don't
+      # bypass the single-pending invariant the recovery is trying to
+      # preserve.
       rm -rf "$SIBLING_LOCK" 2>/dev/null
+      if ! mkdir "$SIBLING_LOCK" 2>/dev/null; then
+        cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Another AskUserQuestion is already pending in this session. Wait for the user's answer (tool_result) before issuing the next AskUserQuestion. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn — chroxy delivers them serially."}}
+EOF
+        exit 0
+      fi
     fi
-    # Claim the lock. mkdir is atomic across parallel hook invocations —
-    # exactly one will succeed; the losers fall into the `if [ -d "$SIBLING_LOCK" ]`
-    # branch above when re-checked. We don't re-check here because the
-    # parallel-race window is microseconds vs the 300s curl timeout below.
-    mkdir "$SIBLING_LOCK" 2>/dev/null || true
   fi
 fi
 
