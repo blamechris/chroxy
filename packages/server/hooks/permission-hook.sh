@@ -85,9 +85,75 @@ except Exception:
 ' 2>/dev/null)
   if [ -n "$QUESTION_COUNT" ] && [ "$QUESTION_COUNT" -gt 1 ]; then
     cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy currently delivers AskUserQuestion forms one question at a time. Please re-issue this call as separate AskUserQuestion tool calls, one per question, and the user will answer each in turn."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy currently delivers AskUserQuestion forms one question at a time. Please re-issue this call as separate AskUserQuestion tool calls, ONE AT A TIME — issue the next one only after the previous one's tool_result has been returned. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn."}}
 EOF
     exit 0
+  fi
+
+  # #4668 (short-term): deny when another AskUserQuestion is already pending
+  # in this session. The model interprets #4648's "separate AskUserQuestion
+  # tool calls" as "parallel within the same turn" — empirically, claude TUI
+  # was emitting 4 parallel AskUserQuestion tool_use blocks in one turn,
+  # which overwrote chroxy's single `_pendingUserAnswer` field and routed all
+  # user answers to the wrong question (chroxy.log forensic 2026-05-31 on
+  # v0.9.26 session 9ea82aed). Forcing true serialization at the hook layer
+  # restores the single-pending invariant that the existing keystroke driver
+  # was built around. The PostToolUse hook in writeHookSettings()
+  # (claude-tui-session.js) clears this lock when the active AskUserQuestion
+  # completes, so sequential AskUserQuestions are unaffected.
+  #
+  # mkdir IS the atomic claim — not a follow-up to a separate existence
+  # check. POSIX guarantees mkdir is atomic across concurrent processes: at
+  # most one caller per parent directory wins; the rest see EEXIST. Pre-v1
+  # of this fix used `if [ -d "$LOCK" ]; then deny; else mkdir; fi` which
+  # is TOCTOU-broken: parallel hooks (chroxy's exact case — 4 AskUserQuestion
+  # hooks firing within milliseconds) can all observe "not exists" before
+  # any of them mkdir. The mkdir-first structure here eliminates that
+  # window: the race-winner gets through, every other caller sees the dir
+  # already there and falls into the stale-check / deny branch.
+  if [ -n "$CHROXY_SINK_DIR" ] && [ -d "$CHROXY_SINK_DIR" ]; then
+    SIBLING_LOCK="${CHROXY_SINK_DIR}/askuserquestion-active"
+    if ! mkdir "$SIBLING_LOCK" 2>/dev/null; then
+      # mkdir failed because the dir already exists (EEXIST — the only
+      # plausible cause once CHROXY_SINK_DIR is verified writable above).
+      # Inspect the existing lock's age to decide: fresh sibling (deny) or
+      # stale leftover (reclaim).
+      #
+      # stat flag portability: macOS uses BSD stat (-f %m, mtime as epoch
+      # seconds); Linux uses GNU stat (-c %Y). The platform branch keeps
+      # the wrong invocation from succeeding accidentally — GNU stat -f
+      # silently switches to filesystem-info mode and returns a mount-point
+      # string, which then breaks the arithmetic below (assigns LOCK_AGE
+      # to empty → the [ -lt 60 ] check evaluates falsy → would skip the
+      # deny path and bypass the fix entirely on Linux CI).
+      case "$(uname -s)" in
+        Darwin) LOCK_MTIME=$(stat -f %m "$SIBLING_LOCK" 2>/dev/null) ;;
+        *)      LOCK_MTIME=$(stat -c %Y "$SIBLING_LOCK" 2>/dev/null) ;;
+      esac
+      LOCK_AGE=$(($(date +%s) - ${LOCK_MTIME:-0}))
+      if [ "$LOCK_AGE" -ge 0 ] && [ "$LOCK_AGE" -lt 60 ]; then
+        cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Another AskUserQuestion is already pending in this session. Wait for the user's answer (tool_result) before issuing the next AskUserQuestion. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn — chroxy delivers them serially."}}
+EOF
+        exit 0
+      fi
+      # Stale lock (>60s old OR mtime unreadable — LOCK_MTIME defaulted to
+      # 0 so LOCK_AGE ≈ epoch seconds, well past 60 → treated as stale and
+      # reclaimed; explicit "fall back to reclaim" semantics for the
+      # belt-and-suspenders case where stat fails for an unexpected reason).
+      # Reclaim by removing + recreating so mtime resets and our new claim
+      # is the active sibling. If a concurrent hook also detected staleness
+      # and reclaimed first, our mkdir fails — deny ourselves so we don't
+      # bypass the single-pending invariant the recovery is trying to
+      # preserve.
+      rm -rf "$SIBLING_LOCK" 2>/dev/null
+      if ! mkdir "$SIBLING_LOCK" 2>/dev/null; then
+        cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Another AskUserQuestion is already pending in this session. Wait for the user's answer (tool_result) before issuing the next AskUserQuestion. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn — chroxy delivers them serially."}}
+EOF
+        exit 0
+      fi
+    fi
   fi
 fi
 
