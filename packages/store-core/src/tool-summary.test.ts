@@ -94,3 +94,50 @@ describe('getInputSummary (#4243)', () => {
     expect(getInputSummary({ command: long })).toHaveLength(100)
   })
 })
+
+// #4648 — Read tool input shape from claude TUI is
+// `{type:'text', file:{filePath:'/path'}}`. Pre-fix, none of the priority
+// fields matched at the top level (filePath is camelCase + nested), so the
+// summary was '' and ToolBubble fell through to raw JSON head, leaking
+// `{"type":"text","file":{"filePath":...` as the collapsed preview. Fix
+// adds `filePath` to PRIORITY_FIELDS and one-level walk into nested
+// objects.
+describe('nested priority-field walk (#4648 — Read tool input)', () => {
+  it('getInputSummary extracts filePath from Read tool nested shape', () => {
+    expect(getInputSummary({ type: 'text', file: { filePath: '/Users/foo/x.md' } })).toBe('/Users/foo/x.md')
+  })
+
+  it('getPartialSummary extracts filePath from Read tool nested shape', () => {
+    const json = JSON.stringify({ type: 'text', file: { filePath: '/Users/foo/x.md' } })
+    expect(getPartialSummary(json)).toBe('/Users/foo/x.md')
+  })
+
+  it('top-level filePath also works (not just nested)', () => {
+    // Some tools may emit camelCase at the top level too — make sure adding
+    // filePath to PRIORITY_FIELDS doesn't regress that path.
+    expect(getInputSummary({ filePath: '/etc/hosts' })).toBe('/etc/hosts')
+  })
+
+  it('nested walk stops at one level (no recursion)', () => {
+    // Pathological deep nesting must NOT be walked — bounded preview cost
+    // is load-bearing on hot ToolBubble render path.
+    const deep = { a: { b: { c: { filePath: '/should/not/match' } } } }
+    expect(getInputSummary(deep)).toBe('')
+  })
+
+  it('nested walk does not descend into arrays', () => {
+    const arr = { items: [{ filePath: '/should/not/match' }] }
+    expect(getInputSummary(arr)).toBe('')
+  })
+
+  it('top-level priority wins over nested priority', () => {
+    // `command` at top level beats `filePath` nested — preserve documented
+    // priority order (top-level pass runs first).
+    expect(getInputSummary({ command: 'ls', file: { filePath: '/other' } })).toBe('ls')
+  })
+
+  it('nested walk caps at PREVIEW_MAX_LEN like top-level', () => {
+    const long = 'z'.repeat(500)
+    expect(getInputSummary({ file: { filePath: long } })).toHaveLength(100)
+  })
+})
