@@ -902,6 +902,58 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
+  // #4617 — a session wedged on a tool at shutdown persists a tool_start
+  // without a matching tool_result. Restore must splice in a synthetic
+  // interrupted tool_result so history replay clears the dashboard's
+  // activeTools entry instead of zombifying ("Running X · 4h+ forever").
+  it('sweeps unresolved tool_starts on restore so activeTools cannot zombify (#4617)', () => {
+    const wedgedHistory = [
+      { type: 'message', messageType: 'user_input', content: 'do something', timestamp: 1000 },
+      { type: 'tool_start', toolUseId: 'wedged-tool', tool: 'AskUserQuestion', timestamp: 1100 },
+      // No tool_result here — process died before it could complete.
+    ]
+    const completedHistory = [
+      { type: 'tool_start', toolUseId: 'completed', tool: 'Bash', timestamp: 2000 },
+      { type: 'tool_result', toolUseId: 'completed', result: 'done', timestamp: 2100 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'Wedged', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: wedgedHistory },
+        { name: 'Healthy', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: completedHistory },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    const wedged = sessions.find(s => s.name === 'Wedged')
+    const healthy = sessions.find(s => s.name === 'Healthy')
+    assert.ok(wedged && healthy)
+
+    const wedgedAfter = mgr.getHistory(wedged.sessionId)
+    assert.equal(wedgedAfter.length, 3, 'synthetic tool_result spliced after the orphan tool_start')
+    assert.equal(wedgedAfter[1].type, 'tool_start')
+    assert.equal(wedgedAfter[1].toolUseId, 'wedged-tool')
+    assert.equal(wedgedAfter[2].type, 'tool_result')
+    assert.equal(wedgedAfter[2].toolUseId, 'wedged-tool')
+    assert.equal(wedgedAfter[2].synthetic, true)
+    assert.equal(wedgedAfter[2].interrupted, true)
+    assert.equal(wedgedAfter[2].isError, true)
+    assert.equal(wedgedAfter[2].reason, 'session_restored')
+    assert.ok(wedgedAfter[2].timestamp > wedgedAfter[1].timestamp, 'synthetic timestamp stays monotonic')
+
+    // The healthy session must NOT pick up any synthetic results — its
+    // tool_start already had a matching tool_result.
+    const healthyAfter = mgr.getHistory(healthy.sessionId)
+    assert.equal(healthyAfter.length, 2)
+    assert.notEqual(healthyAfter[1].synthetic, true)
+
+    mgr.destroyAll()
+  })
+
   // Regression for #2906 / PR #2907 Copilot finding: createSession() flushes
   // synchronously on session-list mutations, but restoreState() calls it in a
   // loop and seeds history/budget AFTER the loop. Without skipPersist, each

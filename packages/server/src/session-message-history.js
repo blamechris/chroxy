@@ -110,6 +110,76 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * Sweep an in-memory history array for `tool_start` entries that lack a
+   * matching `tool_result` and splice in a synthetic `tool_result` right
+   * after each one. Used during session restore (#4617) so that a session
+   * which was wedged on a tool when chroxy shut down does not zombify the
+   * dashboard's `activeTools` pill on the next history replay — the
+   * synthetic result rides the same handler path that normally clears
+   * activeTools (`handleToolResult.applyToActiveTools`).
+   *
+   * Returns a NEW array; the input is not mutated. The original ordering
+   * is preserved and the synthetic result is inserted immediately after
+   * its matching `tool_start`, with a timestamp one millisecond later so
+   * downstream consumers that sort by timestamp stay monotonic without
+   * pretending the tool completed "now".
+   *
+   * Safe to call on:
+   *   - empty / non-array input (returns the input unchanged)
+   *   - history with no tool_start entries (returns a shallow copy)
+   *   - history with all tool_starts already matched (returns a shallow copy)
+   *
+   * @param {Array} history
+   * @returns {Array}
+   */
+  static sweepUnresolvedToolStarts(history) {
+    if (!Array.isArray(history) || history.length === 0) return history
+    const resolved = new Set()
+    for (const entry of history) {
+      if (entry && entry.type === 'tool_result' && typeof entry.toolUseId === 'string') {
+        resolved.add(entry.toolUseId)
+      }
+    }
+    const out = []
+    for (const entry of history) {
+      out.push(entry)
+      if (
+        entry
+        && entry.type === 'tool_start'
+        && typeof entry.toolUseId === 'string'
+        && !resolved.has(entry.toolUseId)
+      ) {
+        const baseTs = typeof entry.timestamp === 'number' && Number.isFinite(entry.timestamp)
+          ? entry.timestamp
+          : Date.now()
+        // `synthetic` / `interrupted` / `isError` / `reason` are diagnostic
+        // hints only — no client code branches on them today, and the wire
+        // schema (`ServerToolResultSchema` in packages/protocol) strips
+        // unknown fields on parse. The behaviour that clears the dashboard's
+        // activeTools entry is driven purely by the `tool_result` type +
+        // matching `toolUseId` going through `handleToolResult.applyToActiveTools`
+        // (store-core/handlers/index.ts). Keep these fields anyway so the
+        // synthetic stays grep-able on disk and a future renderer can show
+        // a distinct "interrupted" badge without a protocol change.
+        out.push({
+          type: 'tool_result',
+          toolUseId: entry.toolUseId,
+          result: 'Tool was in flight when chroxy was last shut down. Tool may have continued or been cancelled — no record of outcome.',
+          interrupted: true,
+          isError: true,
+          synthetic: true,
+          reason: 'session_restored',
+          timestamp: baseTs + 1,
+        })
+        // Mark this toolUseId resolved so a malformed history with two
+        // tool_starts for the same id does not get two synthetic results.
+        resolved.add(entry.toolUseId)
+      }
+    }
+    return out
+  }
+
+  /**
    * Record a user input message in the session's history ring buffer.
    * On the first non-empty input, emits auto_label if the session qualifies.
    *
