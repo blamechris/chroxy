@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "chroxy-desktop"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "base64 0.22.1",
  "cocoa",
