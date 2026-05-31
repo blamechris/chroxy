@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.25] - 2026-05-31
+
+Adds DeepSeek as a first-class provider alongside Claude, Codex, and Gemini. Subclasses the existing `ClaudeByokSession` and points at DeepSeek's Anthropic-compatible endpoint (`https://api.deepseek.com/anthropic`) so the entire BYOK agent loop — streaming, tools, permissions, MCP, history rollback, parallel tool execution — reuses unchanged. Two models in the picker: `deepseek-chat` (V3, 128k ctx) and `deepseek-reasoner` (R1, 128k ctx).
+
+### Added
+
+- **DeepSeek provider** (#4656, #4657) — pick it in the dashboard / mobile app under Settings → Provider → "DeepSeek (API key)". Auth via `DEEPSEEK_API_KEY` env OR a `deepseekApiKey` field in `~/.chroxy/credentials.json` (mode 0600 enforced, same security boundary as the BYOK Anthropic path). Pricing table sourced from DeepSeek's public docs; `npx chroxy doctor` confirms preflight readiness. `DEEPSEEK_BASE_URL` env override available for self-hosted / proxy endpoints. 28 new tests cover credentials, session, and registry wiring; all 50 existing BYOK tests stay green.
+
+### Changed
+
+- **`ClaudeByokSession` exposes four overridable seams** (#4657) — `_defaultModel`, `_resolveCredentials`, `_buildClient`, `_getPricing`. Behavior-preserving refactor that lets sibling Anthropic-compatible providers (DeepSeek now, potentially others later) reuse the entire agent loop by swapping only what differs (base URL, credentials, default model, pricing). The missing-credentials error toast now prefixes with the subclass's preflight label (`"DeepSeek credentials not found …"` instead of the contradictory `"BYOK credentials not found — DEEPSEEK_API_KEY not set …"`) and the per-session ready log uses the provider id rather than a hardcoded "BYOK" string.
+
 ## [0.9.24] - 2026-05-31
 
 Rethinks chroxy's multi-question `AskUserQuestion` form handling end-to-end after a 6-agent `/swarm-audit` unanimously concluded the existing PTY-keystroke driver cannot work in production (0/7 success rate per `chroxy.log` forensic, 24h sample). Replaces the driver path with a permission-hook deny that forces the model to re-issue as N sequential single-question calls — each driven by the empirically-validated single-question happy path that has worked since v0.9.4. Also a cosmetic dashboard fix for the Read-tool collapsed preview.
