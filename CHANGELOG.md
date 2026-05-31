@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.23] - 2026-05-31
+
+Two follow-ups from v0.9.22 dogfooding. The `ASK_USER_QUESTION_STALL` watchdog from #4604 was firing the user-facing error correctly but leaving the session looking busy — the dashboard kept the "Working…" banner and Stop button up for the next 4.5 min (until v0.9.22's new 5-min stream-stall watchdog kicked in), so the toast's "retry from your last message" instruction had no Send affordance to retry from. And the multi-question form's option labels rendered with the radio/checkbox dot jammed against the text.
+
+### Fixed
+
+- **Full turn teardown when `ASK_USER_QUESTION_STALL` watchdog fires** (#4645, #4646) — `_onAskUserQuestionStall` now mirrors `_handleStreamStall` / `_handleHardTimeout`: best-effort Ctrl-C into the PTY (so `claude` itself unsticks from the form screen for the next turn) → clear all three inactivity timers → drop per-turn attachment dir → null `_activeTurn` / `_currentMessageId` / pending answer slot → `stream_end` → `_emitResult` (sweeps orphan tool_starts and fans `result` → `agent_idle`) → emit `error{code:'ASK_USER_QUESTION_STALL'}` last. Dashboard's Working banner and Stop button clear immediately; Send button returns. Pre-fix the dashboard stayed busy-looking for 4.5 min or up to 2h.
+- **Spacing between radio/checkbox dot and option label in multi-question form** (#4644) — added `display: inline-flex; align-items: center; gap: 10px;` to `.question-option--radio` and `.question-option--checkbox` so the dot no longer reads as jammed against the text. Single-select `QuestionPrompt` path (no input element) is untouched.
+
 ## [0.9.22] - 2026-05-31
 
 Active-recovery for the TUI provider's "Working… forever" wedge mode — when `claude` TUI accepts the prompt and then emits absolutely nothing (no Stop hook, no tool hooks, no PTY output) the soft warning sat at 30 min and the hard cap at 2h, neither of which helped a user staring at a frozen session at the 5-min mark. CLI and SDK sessions already had this fix from #4467; the TUI provider was the outlier.
