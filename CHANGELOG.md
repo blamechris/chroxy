@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.21] - 2026-05-30
+
+CSS polish for the multi-question AskUserQuestion form shipped in v0.9.19 — the component rendered with class names that had no rules at all, so Submit fell back to the native browser button (gray-on-dark, unreadable), questions ran together with no separator, and the native radio dot was harsh-white against the dark theme. No functional changes.
+
+### Fixed
+
+- **MultiQuestionForm styling (#4634 / #4636):** added rules in `packages/dashboard/src/theme/components.css` for `.question-prompt--multi` (flex column with 16px gap between questions), `.question-prompt-multi-row` (12px bottom padding + subtle bottom divider; last row clears its border so there's no dangling line above Submit), and `.question-multi-submit` (matches the existing `.question-freetext-send` shape — filled accent-purple background, white text, hover/disabled/focus-visible states). Plus `accent-color: var(--accent-purple)` on the per-option radio/checkbox inputs so the selection dot blends with the purple option-pill outline instead of standing out as pure white. `accent-color` is Baseline since 2022, safe for Tauri WKWebView.
+
+### Known issues (filed)
+
+- **#4635** — multi-question Submit fails on **pure all-single-select** forms. The driver shipped in v0.9.19 was empirically validated only against a MIXED form (with at least one multi-select question, captured via `scripts/tui-form-recorder.mjs`); the all-single-select case wasn't pinned and the same byte sequence doesn't make claude TUI emit PostToolUse. Stall watchdog still correctly recovers (chip clears, error toast shown, session re-promptable). Needs a fresh recorder pass against an all-single-select prompt before the right fix can be written.
+
 ## [0.9.20] - 2026-05-30
 
 Patches the last remaining zombie-chip path in v0.9.19. Forensic on a live wedged session showed claude TUI sometimes drops a PostToolUse hook (1 of 35 observed in a clean turn — likely an upstream race between turn-end and post-hook fire). When that happens, chroxy persists an unpaired `tool_start` to `session-state.json`, and the dashboard's `activeTools` chip ticks forever — `result` is broadcast live so `handleAgentIdle` clears it, but `replayHistory` on dashboard reconnect sent the raw `result` event verbatim and the dashboard has no `result` handler, so the chip survived every reload until the next chroxy restart. Two-layer defense: prevent new orphans at turn-end (sweep), heal existing wedged sessions on reconnect (replay fan-out).
