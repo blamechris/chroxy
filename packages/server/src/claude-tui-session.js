@@ -1532,6 +1532,19 @@ export class ClaudeTuiSession extends BaseSession {
 
     this._pendingUserAnswer = null
     this._isBusy = false
+    // #4616: emit a synthetic tool_result FIRST so the dashboard's
+    // activeTools entry for this AskUserQuestion is cleared. Without it
+    // the footer "Running AskUserQuestion · Ns" pill keeps ticking
+    // forever even though _isBusy is clear and the user sees the
+    // ASK_USER_QUESTION_STALL error toast. The handler ignores any
+    // fields beyond {toolUseId, result, truncated, images} (see
+    // store-core handleToolResult); pairing-by-toolUseId is what drives
+    // the activeTools removal in store-core handlers.
+    this.emit('tool_result', {
+      toolUseId,
+      result: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      truncated: false,
+    })
     this.emit('error', {
       code: 'ASK_USER_QUESTION_STALL',
       message: 'The agent\'s question response could not be delivered — likely a multi-question form. Please retry from your last message.',

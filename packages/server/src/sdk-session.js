@@ -1335,7 +1335,18 @@ export class SdkSession extends BaseSession {
     // Attempt to abort the SDK query generator so no further events land
     // into a cleared message context. Best-effort — matches _handleHardTimeout.
     this._abortActiveQuery()
+    // #4616: snapshot sessionId BEFORE _clearMessageState wipes it so the
+    // synthetic `result` event below carries the correct identifier.
+    const sessionId = this._sdkSessionId || this._sessionId
     this._clearMessageState()
+    // #4616: emit a synthetic `result` so event-normalizer fans it to
+    // `agent_idle`. Per #4308 handleAgentIdle clears `activeTools: []`
+    // as a safety net, which is what stops the dashboard's footer pill
+    // from ticking after the stall. CLI does the equivalent via
+    // _emitInterruptedTurnResult (stream_end + result); the SDK was
+    // previously missing the `result` half of the pair. cost:null skips
+    // session-manager billing accumulation (mirrors CLI).
+    this.emit('result', { cost: null, duration: this._streamStallTimeoutMs, usage: null, sessionId })
     this.emit('error', {
       code: 'stream_stall',
       message: `Stream stalled — no response for ${friendly}. Try sending again.`,
