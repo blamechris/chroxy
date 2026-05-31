@@ -409,4 +409,114 @@ describe('SessionMessageHistory', () => {
       assert.equal(history.pendingStreams.size, 0)
     })
   })
+
+  // #4617 — session restore must not zombify the dashboard's activeTools pill.
+  // When a session was wedged on a tool at shutdown, the persisted history has
+  // a tool_start without a matching tool_result. The sweep synthesises the
+  // missing tool_result so history replay → handleToolResult → applyToActiveTools
+  // clears the entry on reconnect.
+  describe('sweepUnresolvedToolStarts (static)', () => {
+    it('injects a synthetic tool_result for an unresolved tool_start', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'A', tool: 'AskUserQuestion', timestamp: 1000 },
+        { type: 'tool_start', toolUseId: 'B', tool: 'Bash', timestamp: 2000 },
+        { type: 'tool_result', toolUseId: 'B', result: 'ok', timestamp: 2500 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+
+      assert.equal(out.length, 4, 'one synthetic result spliced after the orphan tool_start')
+      assert.equal(out[0].type, 'tool_start')
+      assert.equal(out[0].toolUseId, 'A')
+      assert.equal(out[1].type, 'tool_result')
+      assert.equal(out[1].toolUseId, 'A')
+      assert.equal(out[1].synthetic, true)
+      assert.equal(out[1].interrupted, true)
+      assert.equal(out[1].isError, true)
+      assert.equal(out[1].reason, 'session_restored')
+      // The matched B pair must remain untouched and in order.
+      assert.equal(out[2].type, 'tool_start')
+      assert.equal(out[2].toolUseId, 'B')
+      assert.equal(out[3].type, 'tool_result')
+      assert.equal(out[3].toolUseId, 'B')
+      assert.notEqual(out[3].synthetic, true)
+    })
+
+    it('is a no-op when every tool_start already has a matching tool_result', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'A', tool: 'Read', timestamp: 1000 },
+        { type: 'tool_result', toolUseId: 'A', result: 'ok', timestamp: 1100 },
+        { type: 'tool_start', toolUseId: 'B', tool: 'Bash', timestamp: 2000 },
+        { type: 'tool_result', toolUseId: 'B', result: 'ok', timestamp: 2100 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out.length, input.length, 'no synthetic entries when all pairs are matched')
+      for (let i = 0; i < input.length; i++) {
+        assert.deepStrictEqual(out[i], input[i])
+      }
+    })
+
+    it('flags synthetic results with synthetic + interrupted + isError', () => {
+      const input = [{ type: 'tool_start', toolUseId: 'X', tool: 'AskUserQuestion', timestamp: 5000 }]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out.length, 2)
+      const synthetic = out[1]
+      assert.equal(synthetic.type, 'tool_result')
+      assert.equal(synthetic.toolUseId, 'X')
+      assert.equal(synthetic.synthetic, true)
+      assert.equal(synthetic.interrupted, true)
+      assert.equal(synthetic.isError, true)
+      assert.equal(synthetic.reason, 'session_restored')
+      assert.equal(typeof synthetic.result, 'string')
+      assert.ok(synthetic.result.length > 0)
+    })
+
+    it('keeps the synthetic timestamp strictly greater than the tool_start timestamp', () => {
+      const input = [{ type: 'tool_start', toolUseId: 'X', tool: 'Read', timestamp: 1700000000000 }]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out[1].timestamp, 1700000000001)
+      assert.ok(out[1].timestamp > out[0].timestamp, 'timestamp monotonicity preserved')
+    })
+
+    it('does not mutate the input array', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'A', tool: 'Bash', timestamp: 1000 },
+      ]
+      const copy = JSON.parse(JSON.stringify(input))
+      SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.deepStrictEqual(input, copy, 'input array left intact for crash-safe re-restore')
+    })
+
+    it('handles empty / non-array input gracefully', () => {
+      assert.deepStrictEqual(SessionMessageHistory.sweepUnresolvedToolStarts([]), [])
+      assert.equal(SessionMessageHistory.sweepUnresolvedToolStarts(null), null)
+      assert.equal(SessionMessageHistory.sweepUnresolvedToolStarts(undefined), undefined)
+    })
+
+    it('falls back to Date.now() when tool_start has no usable timestamp', () => {
+      // A pre-shutdown bug or older state file could persist a tool_start
+      // without a timestamp. The sweep must still produce a synthetic result;
+      // base on Date.now() so order is at least "recent" rather than negative.
+      const before = Date.now()
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts([
+        { type: 'tool_start', toolUseId: 'A', tool: 'Read' },
+      ])
+      const after = Date.now()
+      assert.equal(out.length, 2)
+      assert.ok(out[1].timestamp >= before + 1)
+      assert.ok(out[1].timestamp <= after + 1)
+    })
+
+    it('only emits one synthetic result per toolUseId even if duplicate tool_starts appear', () => {
+      // Defence-in-depth: a malformed/concatenated history with two
+      // tool_starts sharing a toolUseId would otherwise produce two
+      // synthetics that both target the same activeTools entry.
+      const input = [
+        { type: 'tool_start', toolUseId: 'A', tool: 'Read', timestamp: 1000 },
+        { type: 'tool_start', toolUseId: 'A', tool: 'Read', timestamp: 2000 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      const synthetics = out.filter(e => e.type === 'tool_result' && e.synthetic === true)
+      assert.equal(synthetics.length, 1)
+    })
+  })
 })

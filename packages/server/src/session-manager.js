@@ -1334,9 +1334,16 @@ export class SessionManager extends EventEmitter {
             if (n > this._sessionCounter) this._sessionCounter = n
           }
         }
-        // Restore message history if present (v1+)
+        // Restore message history if present (v1+).
+        // Sweep any `tool_start` that lacks a matching `tool_result` and
+        // splice in a synthetic interrupted result (#4617) BEFORE seeding
+        // history so the subsequent dashboard history replay never sees a
+        // dangling tool_start. Without this, an unresolved tool_use from
+        // before shutdown re-enters `activeTools` on replay and never gets
+        // cleared — the footer shows "Running X · Nh Mm" forever.
         if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
-          this._history.setHistory(sessionId, saved.history)
+          const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
+          this._history.setHistory(sessionId, swept)
         }
         if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
           this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
