@@ -1797,8 +1797,29 @@ export class ClaudeTuiSession extends BaseSession {
    * Watchdog handler for an AskUserQuestion answer that claude TUI never
    * acknowledged via PostToolUse (#4604). Multi-question forms render a
    * per-question form needing more than the single digit chroxy writes,
-   * leaving _isBusy=true forever. We force-clear the busy state and
-   * surface a structured error so the dashboard can render a retry prompt.
+   * leaving _isBusy=true forever. We tear the turn down end-to-end and
+   * surface a structured error so the dashboard renders a retry prompt
+   * AND the Working banner / Stop button clear immediately.
+   *
+   * Pre-#4645 this only cleared `_isBusy` + emitted the stall error,
+   * leaving `stream_start` orphaned (no matching `stream_end`) and no
+   * `result` for the event-normalizer to fan into `agent_idle`. The
+   * dashboard kept showing "Working… Ns ago" + Stop forever (until the
+   * 5-min #4638 stream-stall watchdog or the 2h hard cap eventually
+   * cleaned up) even though the agent had already given up. Worse: the
+   * red error toast told the user to retry, but the Stop button was up
+   * and the input box read "Type to send follow-up…" — there was no
+   * Send affordance to retry FROM.
+   *
+   * Now: best-effort Ctrl-C into the TUI (so `claude` itself unsticks
+   * from the form screen for the next turn) → emit `stream_end` →
+   * `_emitResult` (sweeps orphan tool_starts and fans `result` →
+   * `agent_idle` via the event-normalizer, clearing both Working banner
+   * and Stop) → emit `error{code:'ASK_USER_QUESTION_STALL'}` last so the
+   * dashboard surfaces the user-facing toast AFTER state has settled.
+   *
+   * Shape mirrors `_handleStreamStall` and `_handleHardTimeout` —
+   * extracting a shared `_teardownTurn` helper is tracked in #4641.
    *
    * No-ops on destroyed sessions and on sessions where PostToolUse
    * already arrived (would have cleared _pendingUserAnswer + busy state
@@ -1808,10 +1829,12 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._destroying) return
     if (!this._pendingUserAnswer && !this._isBusy) return
 
-    log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Clearing busy state so the session is recoverable.`)
+    log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
+
+    const messageId = this._currentMessageId
+    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
 
     this._pendingUserAnswer = null
-    this._isBusy = false
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
     // the footer "Running AskUserQuestion · Ns" pill keeps ticking
@@ -1827,6 +1850,42 @@ export class ClaudeTuiSession extends BaseSession {
     })
     // #4628: matching tool_start resolved — drop from the in-flight map.
     this._trackToolResult(toolUseId)
+
+    // #4645: best-effort Ctrl-C so claude TUI itself unsticks from the
+    // form screen. Without this the next sendMessage's prompt write
+    // would queue behind the still-displayed form and silently desync.
+    // Mirrors _handleStreamStall / _handleHardTimeout.
+    if (this._term) {
+      try { this._term.write('\x03') } catch { /* ignore */ }
+    }
+
+    // Clear all three inactivity timers — turn is over, nothing to
+    // backstop, leaving them armed would fire stale callbacks on a
+    // session that's already idle.
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+
+    // #4022: drop per-turn attachment dir on stall (same as the other
+    // teardown paths) so a stalled turn doesn't leak materialized files
+    // until destroy().
+    this._cleanupTurnAttachments(this._activeTurn)
+    this._activeTurn = null
+    this._isBusy = false
+    this._currentMessageId = null
+
+    // #4645: pair the stream_start fired at turn-start with stream_end +
+    // result so the dashboard's streamingMessageId + Working banner +
+    // Stop button all clear immediately (event-normalizer turns result
+    // into result + agent_idle). The if-guard mirrors _handleStreamStall
+    // — silent skip is acceptable here because the only way messageId
+    // is null is a contract violation (_isBusy=true without an active
+    // turn), tracked in #4642.
+    if (messageId) this.emit('stream_end', { messageId })
+    this._emitResult(
+      { cost: null, duration, usage: null, sessionId: this._sessionId },
+      'ask_user_question_stall',
+    )
     this.emit('error', {
       code: 'ASK_USER_QUESTION_STALL',
       message: 'The agent\'s question response could not be delivered — likely a multi-question form. Please retry from your last message.',
