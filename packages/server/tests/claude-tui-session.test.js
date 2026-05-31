@@ -2661,6 +2661,205 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4604 Chunk B — multi-question form driver. Empirical byte sequence
+  // pinned via scripts/tui-form-recorder.mjs against claude CLI v2.1.158
+  // (see tui_multi_question_form_keys memory). Single-select digit
+  // auto-advances; multi-select needs an explicit Tab to commit + advance;
+  // focus auto-lands on the Submit screen after the last question.
+  describe('AskUserQuestion multi-question form driver (#4604 Chunk B)', () => {
+    let warnLines
+    let infoLines
+    let logSpy
+
+    beforeEach(() => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { uuid: 'test', synthSeq: 0 }
+      warnLines = []
+      infoLines = []
+      logSpy = (entry) => {
+        if (entry.component !== 'claude-tui-session') return
+        if (entry.level === 'warn') warnLines.push(entry.message)
+        if (entry.level === 'info') infoLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+    })
+
+    afterEach(() => {
+      if (logSpy) removeLogListener(logSpy)
+      logSpy = null
+      warnLines = null
+      infoLines = null
+    })
+
+    // Pin the exact byte sequence from the recorder spec:
+    // For a 4-question form (Q1 single 'a', Q2 single 'b', Q3 multi 'p'+'r',
+    // Q4 single 'q'), picking option 1 / option 2 / options 1+3 / option 2:
+    //   '\x1b[?2004l' + '1' + '2' + '1' + '3' + '\t' + '2' + '1' + '\x1b[?2004h'
+    it('drives a mixed 4-question form with the exact empirical byte sequence', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'aa' }, { label: 'bb' }] },
+        { question: 'Q3?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }, { label: 'r' }] },
+        { question: 'Q4?', options: [{ label: 'x' }, { label: 'y' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_multi', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',         // → '1' (single, auto-advances)
+        'Q2?': 'bb',        // → '2' (single, auto-advances)
+        'Q3?': JSON.stringify(['p', 'r']), // → '1' '3' (multi-select toggles, no advance) + '\t'
+        'Q4?': 'y',         // → '2' (single, auto-advances)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // Expected sequence: paste-disable, digits + Tab interleaved per the
+      // multi-question driver, '1' to confirm Submit, paste-enable.
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected empirical byte sequence, got ${JSON.stringify(writes)}`)
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
+
+    // Single-question regression guard: ensure the legacy text-driven path
+    // still produces the exact pre-Chunk-B byte sequence (#4290 happy path).
+    it('1-question form keeps the legacy text-driven byte sequence unchanged', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Pick a release strategy', options: [{ label: 'Patch' }, { label: 'Minor' }, { label: 'Major' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_single', questions, options: questions[0].options }
+
+      session.respondToQuestion('Minor')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // disable + '2' + \r + enable — identical to the #4290 single-question
+      // happy path. The trailing \r is harmless (digit auto-commits on TUI)
+      // and pinned by the test guard so a future refactor doesn't quietly
+      // drop it for single-q paths where downstream consumers might rely
+      // on the redundant Enter.
+      assert.deepEqual(writes, ['\x1b[?2004l', '2', '\r', '\x1b[?2004h'],
+        `expected legacy single-q byte sequence, got ${JSON.stringify(writes)}`)
+    })
+
+    // Back-compat fallback: old dashboard sent only `answer: string`
+    // (no answersMap). With >1 questions and no map, every question
+    // defaults to option 1 and a WARN fires so the wedge is visible
+    // in chroxy.log.
+    it('multi-question with missing answersMap: WARN + defaults all to option 1', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'x' }, { label: 'y' }] },
+        { question: 'Q3?', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_no_map', questions, options: questions[0].options }
+
+      // Old dashboard sends just the freeform string of q1's answer —
+      // we don't have an answersMap.
+      session.respondToQuestion('a')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // Q1 → '1', Q2 (multi-select) → '1' + '\t' (advance), Q3 → '1', Submit → '1'.
+      assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '\t', '1', '1', '\x1b[?2004h'],
+        `expected default-to-option-1 sequence, got ${JSON.stringify(writes)}`)
+
+      const missingMapWarn = warnLines.find((m) => /didn't send answersMap/.test(m))
+      assert.ok(missingMapWarn, `expected WARN about missing answersMap, got ${JSON.stringify(warnLines)}`)
+      assert.match(missingMapWarn, /defaulting every question to option 1/)
+      assert.match(missingMapWarn, /toolu_no_map/, 'WARN includes toolUseId for triage')
+    })
+
+    // Partial answersMap: user answered q1 and q3 but not q2. Missing
+    // entries default to option 1 (with WARN); the user's explicit
+    // answers are honored.
+    it('multi-question with partial answersMap: WARN per missing q, defaults missing to option 1', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+        { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }, { label: 'z' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_partial', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'b',  // → '2'
+        'Q3?': 'z',  // → '3'
+        // Q2 missing → defaults to '1'
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      assert.deepEqual(writes, ['\x1b[?2004l', '2', '1', '3', '1', '\x1b[?2004h'],
+        `expected partial-map sequence, got ${JSON.stringify(writes)}`)
+
+      const missingQWarn = warnLines.find((m) => /no resolvable answer for q=/.test(m) && /Q2/.test(m))
+      assert.ok(missingQWarn, `expected WARN about Q2 missing, got ${JSON.stringify(warnLines)}`)
+      assert.match(missingQWarn, /defaulting to option 1/)
+    })
+
+    // Pre-Chunk-B watchdog still arms for multi-question forms — if claude
+    // TUI's actual form differs from the empirical spec (a future TUI
+    // version, edge-case shape), the stall watchdog still surfaces the
+    // wedge to the user instead of silently hanging.
+    it('multi-question arms the stall watchdog (still surfaces wedges)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }] },
+          { question: 'Q2?', options: [{ label: 'p' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_arm', questions, options: questions[0].options }
+
+        session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'p' })
+
+        // Reinstate the stuck-form condition so the watchdog has something
+        // to fire about (same trick the original watchdog test uses).
+        session._pendingUserAnswer = { toolUseId: 'toolu_arm', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        mock.timers.tick(31_000)
+        assert.equal(errors.length, 1, 'watchdog fires for multi-question too')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_STALL')
+        assert.equal(errors[0].toolUseId, 'toolu_arm', 'watchdog armed with the multi-question toolUseId')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // PreToolUse for a multi-question prompt stashes the full questions
+    // array on _pendingUserAnswer (Chunk B requirement), not just q[0].options.
+    it('PreToolUse stashes the full questions array on _pendingUserAnswer (#4604 Chunk B)', () => {
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+        { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }] },
+      ]
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_stash',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions },
+      }, 'msg-stash')
+
+      assert.ok(session._pendingUserAnswer, 'pending answer set')
+      assert.equal(session._pendingUserAnswer.toolUseId, 'toolu_stash')
+      assert.deepEqual(session._pendingUserAnswer.questions, questions,
+        'full questions array stashed, not just q[0].options')
+      // Back-compat: pre-Chunk-B callers reading `.options` get q[0].options.
+      assert.deepEqual(session._pendingUserAnswer.options, questions[0].options,
+        'options still points at questions[0].options for back-compat')
+    })
+  })
+
   // #4044: per-session option that spawns claude TUI with the literal
   // --dangerously-skip-permissions flag and elides chroxy's permission
   // hook entirely. Distinct from `permissionMode: 'auto'`, which still

@@ -1150,25 +1150,31 @@ export class ClaudeTuiSession extends BaseSession {
         const questions = (payload.tool_input && Array.isArray(payload.tool_input.questions))
           ? payload.tool_input.questions
           : []
-        // #4290: stash the options array alongside toolUseId so
-        // respondToQuestion() can look up the chosen label's index and
-        // write the numbered TUI shortcut instead of the label text.
-        // claude TUI's prompt single-character-jump-navigates when fed
-        // raw label text (v0.9.3 finding) — the index hits the
-        // shortcut path directly. Pull options off the FIRST question
-        // (claude TUI shows one question at a time; multi-question
-        // AskUserQuestion would need per-prompt sequencing which is
-        // out of scope here).
+        // #4290 / #4604 Chunk B: stash the FULL questions array (not just
+        // q[0].options) so respondToQuestion can drive multi-question
+        // forms keystroke-by-keystroke. `options` is kept on the entry
+        // for back-compat with pre-Chunk-B tests/callers that read
+        // `_pendingUserAnswer.options` directly — it always points at
+        // questions[0].options (the only question the single-q happy
+        // path drives).
         const options = (questions[0] && Array.isArray(questions[0].options))
           ? questions[0].options
           : []
-        this._pendingUserAnswer = { toolUseId, options }
+        this._pendingUserAnswer = { toolUseId, questions, options }
         // #4604: surface the AskUserQuestion shape in chroxy.log so the
         // multi-question wedge condition is greppable. The bug was
         // diagnosed via /tmp/.../pre-*.json spelunking — never again.
         const questionCount = questions.length
         log.info(`AskUserQuestion pending: tool=${toolUseId} questions=${questionCount} options.q1=${options.length}`)
         if (questionCount > 1) {
+          // #4604 Chunk B note: kept the historical "not yet supported"
+          // wording so existing test guards (regex on this string) keep
+          // matching. The driver IS now multi-question-aware — what's
+          // still unsupported is the dashboard sending an answersMap
+          // covering all N questions on every client build. The
+          // back-compat default-to-option-1 fallback in respondToQuestion
+          // means even old dashboards no longer wedge the session, just
+          // pick defaults the user can re-prompt past.
           log.warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
         }
         this.emit('user_question', { toolUseId, questions })
@@ -1441,76 +1447,243 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * Send a response to an AskUserQuestion prompt (#4278). The dashboard's
-   * QuestionPrompt UI fires this when the user picks an option. The
-   * answer text is written character-by-character to the PTY (using the
-   * same throttle as the prompt write — claude TUI's paste detector
-   * rejects bulk writes, see #4269), followed by \r. claude's own
-   * TTY-style prompt is sitting on stdin; the throttled input satisfies
-   * it and the tool completes, firing PostToolUse → tool_result.
+   * Send a response to an AskUserQuestion prompt (#4278, multi-question
+   * support added in #4604 Chunk B). The dashboard's QuestionPrompt UI
+   * fires this when the user submits. Two paths:
    *
-   * No-op when no pending answer. `answersMap` is the per-question form
-   * used by the SDK; the TUI path uses the single answer text directly
-   * (claude TUI only ever surfaces one question at a time via its
-   * prompt, so the map shape is redundant here — receive it for
-   * interface compatibility but ignore it for now).
+   * - Single-question (`questions.length === 1`, the v0.9.4 happy path):
+   *   write the 1-indexed option digit through the throttled writer,
+   *   which appends \r. claude TUI's prompt accepts either; Enter is
+   *   redundant but harmless. Pin-tested via #4290.
    *
-   * @param {string} text — the chosen answer (typically the option label)
-   * @param {object} [_answersMap] — reserved; unused in TUI mode
+   * - Multi-question (#4604 Chunk B): drive the inline form per the
+   *   empirical key sequence captured by scripts/tui-form-recorder.mjs
+   *   against claude CLI v2.1.158 (see tui_multi_question_form_keys
+   *   memory). For each question:
+   *     - single-select → write the digit (auto-advances to next q)
+   *     - multi-select  → write each chosen digit (no advance) then
+   *                       write Tab `\t` to commit + advance
+   *   After the last question, focus lands on the Submit screen
+   *   (`❯ 1. Submit answers / 2. Cancel`); write `'1'` to confirm.
+   *   The whole sequence is wrapped in bracketed-paste-disable/re-enable
+   *   exactly once and every visible char goes through the same
+   *   per-char throttle the single-question path uses (#4269 paste
+   *   detector defense).
+   *
+   * `answersMap` keys are the question text (`q.question`), values are
+   * either the chosen option's label string (single-select) or a
+   * JSON-encoded `["label1","label2"]` array / comma-joined list
+   * (multi-select). Back-compat: when the dashboard only sends `text`
+   * with no map (old client + multi-question form), defaults every
+   * question to its first option and logs a WARN so the wedge is
+   * visible in chroxy.log even though the session isn't stalled.
+   *
+   * No-op when no pending answer.
+   *
+   * @param {string} text — the chosen answer (single-question path); ignored on the multi-question path when answersMap is populated
+   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`; required for multi-question forms (Chunk B)
    */
-  respondToQuestion(text, _answersMap) {
+  respondToQuestion(text, answersMap) {
     // #4604: capture toolUseId BEFORE clearing _pendingUserAnswer so the
     // observability log + watchdog arm have something to correlate on
     // when the response fails or stalls.
     const prevToolUseId = this._pendingUserAnswer?.toolUseId || null
-    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} text.length=${(text || '').length} answersMap.keys=${_answersMap ? Object.keys(_answersMap).length : 0} options=${this._pendingUserAnswer?.options?.length || 0}`)
+    const pendingQuestions = this._pendingUserAnswer?.questions || []
+    const answersMapKeyCount = answersMap && typeof answersMap === 'object' ? Object.keys(answersMap).length : 0
+    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${this._pendingUserAnswer?.options?.length || 0}`)
     if (!this._pendingUserAnswer) return
-    if (typeof text !== 'string' || text.length === 0) return
+    // Single-question / free-text path requires a non-empty `text`. The
+    // multi-question path is driven from answersMap (text is ignored when
+    // a map is present) so an empty string is permitted there.
+    if (typeof text !== 'string') return
+    if (text.length === 0 && answersMapKeyCount === 0) return
     const { options } = this._pendingUserAnswer
+    // pendingQuestions captured at the top so the .length read survives
+    // entries that only ever set { toolUseId, options } (pre-Chunk-B
+    // tests, the watchdog test fixtures, and any legacy caller).
+    const questions = pendingQuestions
     this._pendingUserAnswer = null
     if (!this._term) return
-    // #4290: if the chosen label matches one of the structured options
-    // exactly, write the 1-indexed TUI shortcut (e.g. "2") instead of
-    // the label text. v0.9.3 wrote the raw label and claude TUI's
-    // prompt parser single-character-jump-navigated through the menu,
-    // landing on "Other" (see #4288 for the empirical trace). Numbered
-    // shortcuts hit claude TUI's hotkey path directly. When no exact
-    // match is found (user picked "Other" in the dashboard and typed
-    // freeform text), fall through to typing the answer literally —
-    // claude TUI's Other-path may still mis-parse that, tracked in
-    // #4288 as a separate concern.
-    let writeText = text
-    if (Array.isArray(options) && options.length > 0) {
-      const matchIdx = options.findIndex((o) => o && o.label === text)
-      // #4292: single-digit guard (1..9). Multi-digit hotkeys
-      // (10+) are NOT assumed to work on claude TUI's prompt — most
-      // single-keystroke menus commit on the first digit and the
-      // second char would either be a spurious next-prompt input
-      // or get dropped. Falling through to the label-text path for
-      // 10+ options preserves v0.9.3 behavior (broken in the same
-      // mode-jump way) without silently sending a hotkey we can't
-      // trust. Vanishingly rare in practice.
-      if (matchIdx >= 0 && matchIdx < 9) {
-        writeText = String(matchIdx + 1)
+
+    const armWatchdog = () => {
+      // #4604: arm a stall watchdog. If claude TUI never emits PostToolUse
+      // for this AskUserQuestion (a form shape we don't yet drive),
+      // the watchdog clears _isBusy + _pendingUserAnswer and emits
+      // ASK_USER_QUESTION_STALL so the dashboard prompts the user to
+      // retry. Cancelled on PostToolUse (happy path) and on destroy().
+      if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = setTimeout(() => {
+        this._askUserQuestionWatchdog = null
+        this._onAskUserQuestionStall(prevToolUseId)
+      }, ASK_USER_QUESTION_WATCHDOG_MS)
+    }
+
+    // Single-question / no-questions-array path (back-compat with the
+    // pre-Chunk-B happy path). Stay on _writePtyTextThrottled which
+    // appends \r — TUI single-select auto-commits on digit, the trailing
+    // Enter is redundant but harmless, and the existing test guards
+    // (#4290) assert it's present. Requires non-empty `text`: the
+    // single-q path is text-driven, not answersMap-driven.
+    if (questions.length <= 1) {
+      if (text.length === 0) return
+      // #4290: if the chosen label matches one of the structured options
+      // exactly, write the 1-indexed TUI shortcut (e.g. "2") instead of
+      // the label text. v0.9.3 wrote the raw label and claude TUI's
+      // prompt parser single-character-jump-navigated through the menu,
+      // landing on "Other" (see #4288 for the empirical trace). Numbered
+      // shortcuts hit claude TUI's hotkey path directly. When no exact
+      // match is found (user picked "Other" in the dashboard and typed
+      // freeform text), fall through to typing the answer literally —
+      // claude TUI's Other-path may still mis-parse that, tracked in
+      // #4288 as a separate concern.
+      let writeText = text
+      if (Array.isArray(options) && options.length > 0) {
+        const matchIdx = options.findIndex((o) => o && o.label === text)
+        // #4292: single-digit guard (1..9). Multi-digit hotkeys (10+) are
+        // NOT assumed to work on claude TUI's prompt — most single-
+        // keystroke menus commit on the first digit and the second char
+        // would either be a spurious next-prompt input or get dropped.
+        // Falling through to the label-text path for 10+ options
+        // preserves v0.9.3 behavior (broken in the same mode-jump way)
+        // without silently sending a hotkey we can't trust.
+        if (matchIdx >= 0 && matchIdx < 9) {
+          writeText = String(matchIdx + 1)
+        }
+      }
+      // Fire-and-forget — the write is async due to the per-char throttle,
+      // but the caller (handleUserQuestionResponse) is sync. Errors here
+      // are non-fatal; worst case the user re-sends the answer.
+      this._writePtyTextThrottled(writeText).catch((err) => {
+        log.warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+      })
+      armWatchdog()
+      return
+    }
+
+    // #4604 Chunk B — multi-question form driver. Build the keystroke
+    // sequence per the empirical findings, then write through the
+    // dedicated multi-question writer (one bracketed-paste wrap around
+    // the whole sequence; per-char throttle; no trailing \r).
+    const map = (answersMap && typeof answersMap === 'object') ? answersMap : {}
+    const haveMap = Object.keys(map).length > 0
+    if (!haveMap) {
+      log.warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
+    }
+
+    /** Resolve a single label to its 1-indexed digit; null if no usable digit. */
+    const labelToDigit = (q, label) => {
+      if (!q || !Array.isArray(q.options) || q.options.length === 0) return null
+      const idx = q.options.findIndex((o) => o && o.label === label)
+      if (idx >= 0 && idx < 9) return String(idx + 1)
+      return null
+    }
+
+    /** Resolve a single question's answer entry to an array of digits to write. */
+    const resolveQuestionDigits = (q, rawAnswer) => {
+      const opts = Array.isArray(q.options) ? q.options : []
+      const defaultDigit = opts.length > 0 ? '1' : null
+
+      if (q.multiSelect) {
+        // multi-select expects 0+ choices. Accept array, JSON-encoded
+        // array string, or comma-joined list — the wire schema is
+        // string-only (Record<string,string>) so the dashboard encodes
+        // multi-selects as JSON.
+        let labels = []
+        if (Array.isArray(rawAnswer)) {
+          labels = rawAnswer.filter((s) => typeof s === 'string')
+        } else if (typeof rawAnswer === 'string' && rawAnswer.length > 0) {
+          let parsed = null
+          try { parsed = JSON.parse(rawAnswer) } catch { parsed = null }
+          if (Array.isArray(parsed)) {
+            labels = parsed.filter((s) => typeof s === 'string')
+          } else {
+            // Fallback: comma-joined "label1,label2" — only safe when
+            // labels themselves don't contain commas; defensive
+            // single-label case also handled here.
+            labels = rawAnswer.split(',').map((s) => s.trim()).filter(Boolean)
+          }
+        }
+        const digits = []
+        for (const label of labels) {
+          const d = labelToDigit(q, label)
+          if (d) digits.push(d)
+        }
+        if (digits.length === 0 && defaultDigit) {
+          log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
+          digits.push(defaultDigit)
+        }
+        return digits
+      }
+
+      // single-select — exactly one digit
+      if (typeof rawAnswer === 'string' && rawAnswer.length > 0) {
+        const d = labelToDigit(q, rawAnswer)
+        if (d) return [d]
+      } else if (Array.isArray(rawAnswer) && typeof rawAnswer[0] === 'string') {
+        const d = labelToDigit(q, rawAnswer[0])
+        if (d) return [d]
+      }
+      if (defaultDigit) {
+        if (haveMap) log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
+        return [defaultDigit]
+      }
+      return []
+    }
+
+    // Assemble the inner keystroke sequence (no paste-mode toggles —
+    // _writePtyMultiQuestionSequence wraps the whole thing).
+    const sequence = []
+    for (const q of questions) {
+      const rawAnswer = map[q.question]
+      const digits = resolveQuestionDigits(q, rawAnswer)
+      for (const d of digits) sequence.push(d)
+      if (q.multiSelect) {
+        // Multi-select needs an explicit advance keystroke; single-select
+        // auto-advances on digit (verified empirically).
+        sequence.push('\t')
       }
     }
-    // Fire-and-forget — the write is async due to the per-char throttle,
-    // but the caller (handleUserQuestionResponse) is sync. Errors here
-    // are non-fatal; worst case the user re-sends the answer.
-    this._writePtyTextThrottled(writeText).catch((err) => {
-      log.warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+    // Focus lands on `❯ 1. Submit answers / 2. Cancel` after the last
+    // question — press 1 to confirm submission.
+    sequence.push('1')
+
+    log.info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${sequence.length} haveAnswersMap=${haveMap}`)
+
+    this._writePtyMultiQuestionSequence(sequence).catch((err) => {
+      log.warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
     })
-    // #4604: arm a stall watchdog. If claude TUI never emits PostToolUse
-    // for this AskUserQuestion (multi-question form wedge), the watchdog
-    // clears _isBusy + _pendingUserAnswer and emits ASK_USER_QUESTION_STALL
-    // so the dashboard prompts the user to retry. Cancelled on PostToolUse
-    // (happy path) and on destroy().
-    const armedToolUseId = prevToolUseId
-    if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
-    this._askUserQuestionWatchdog = setTimeout(() => {
-      this._askUserQuestionWatchdog = null
-      this._onAskUserQuestionStall(armedToolUseId)
-    }, ASK_USER_QUESTION_WATCHDOG_MS)
+    armWatchdog()
+  }
+
+  /**
+   * Write a sequence of single-char keystrokes (digits, Tab, etc.) to
+   * the PTY for the multi-question AskUserQuestion form driver
+   * (#4604 Chunk B). The sequence is wrapped in bracketed-paste-disable /
+   * re-enable exactly once (same defense as _writePtyTextThrottled) and
+   * every char is throttled by PROMPT_CHAR_DELAY_MS so claude TUI's
+   * paste detector doesn't reject the rapid digit burst. Unlike
+   * _writePtyTextThrottled this writer does NOT append \r — the form
+   * driver supplies its own navigation keys (Tab between multi-select
+   * questions, '1' at Submit).
+   *
+   * @param {string[]} sequence — array of one-char strings to write in order
+   * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
+   */
+  async _writePtyMultiQuestionSequence(sequence) {
+    if (!this._term) return false
+    this._term.write('\x1b[?2004l')
+    try {
+      for (const ch of sequence) {
+        if (this._activeTurn?.aborted || this._ptyExited) return false
+        this._term.write(ch)
+        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+        }
+      }
+      return true
+    } finally {
+      try { this._term.write('\x1b[?2004h') } catch {}
+    }
   }
 
   /**

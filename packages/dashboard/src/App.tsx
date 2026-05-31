@@ -1497,10 +1497,19 @@ export function App() {
         <QuestionPrompt
           question={storeMsg.content}
           options={storeMsg.options}
+          questions={storeMsg.questions}
           answered={storeMsg.answered}
-          onSelect={(value) => {
-            sendUserQuestionResponse(value, storeMsg.toolUseId)
-            markPromptAnswered(storeMsg.id, value)
+          onSelect={(answer) => {
+            // #4604 Chunk B — answer is `string` for single-question /
+            // free-text paths and `Record<string,string>` for multi-question
+            // forms. sendUserQuestionResponse handles both shapes;
+            // markPromptAnswered records a string summary on the bubble so
+            // the post-answer collapse UI has something readable to show.
+            sendUserQuestionResponse(answer, storeMsg.toolUseId)
+            const summary = typeof answer === 'string'
+              ? answer
+              : Object.entries(answer).map(([q, v]) => `${q}: ${v}`).join(' | ')
+            markPromptAnswered(storeMsg.id, summary)
           }}
         />
       )

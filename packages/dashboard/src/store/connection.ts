@@ -1549,9 +1549,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => {
+  sendUserQuestionResponse: (answer: string | Record<string, string>, toolUseId?: string) => {
     const { socket, activeSessionId, sessionStates } = get();
-    const payload: Record<string, string> = { type: 'user_question_response', answer };
+    // #4604 Chunk B — split the wire payload by call shape:
+    // - string `answer`: legacy single-question / free-text path. Wire
+    //   shape stays `{ type, answer, toolUseId? }` so older servers
+    //   keep working without schema migration.
+    // - Record `answer`: multi-question form (Chunk B). Populate the
+    //   `answers` field (protocol already supports it) AND a string
+    //   `answer` summary so a server running an older build that only
+    //   reads `answer` falls through to its default-to-option-1 path
+    //   (a noisy WARN in chroxy.log) instead of stalling the form.
+    const isMultiAnswer = typeof answer !== 'string'
+    const answerSummary = isMultiAnswer
+      ? Object.entries(answer as Record<string, string>).map(([q, v]) => `${q}: ${v}`).join(' | ')
+      : (answer as string);
+    const payload: Record<string, unknown> = { type: 'user_question_response', answer: answerSummary };
+    if (isMultiAnswer) {
+      payload.answers = answer;
+    }
     if (toolUseId) payload.toolUseId = toolUseId;
     // #4296: echo the resolved answer to the terminal buffer so the Output
     // tab shows a visible "User answered: X" line between the AskUserQuestion
@@ -1559,8 +1575,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // line from yellow user-prompt echoes (\x1b[33m in sendInput). Skipped
     // for empty answers — nothing meaningful to render. Fires before the
     // wire send so the echo is present even when the socket queues.
-    if (answer) {
-      get().appendTerminalData(`\r\n\x1b[36m> User answered: ${answer}\x1b[0m\r\n`);
+    if (answerSummary) {
+      get().appendTerminalData(`\r\n\x1b[36m> User answered: ${answerSummary}\x1b[0m\r\n`);
     }
     // #4312: optimistically flip the active session into "running" so the
     // ActivityIndicator + per-session busy dot light up immediately on
