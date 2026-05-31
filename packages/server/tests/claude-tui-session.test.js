@@ -1919,6 +1919,122 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4638 — stream-stall active-recovery watchdog. CLI + SDK got this in
+  // #4467; TUI was the outlier and surfaced the wedge as a "Working…"
+  // banner that ticked forever when claude TUI accepted the prompt and
+  // emitted nothing. The fire path mirrors CliSession._handleStreamStall
+  // and SdkSession._handleStreamStall — stream_end + result fan-out +
+  // error{code:'stream_stall'} — so the dashboard's existing recovery
+  // affordance triggers without provider-specific handling.
+  describe('stream-stall watchdog (#4638)', () => {
+    it('fires after _streamStallTimeoutMs, clears busy state, emits the full recovery burst', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        // Long soft+hard so the stall timer wins; short stall so the
+        // test doesn't sleep for seconds.
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-stall'
+      session._activeTurn = { startedAt: Date.now() - 100, aborted: false }
+      const ptyWrites = []
+      session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+      session.on('result', (e) => events.push({ type: 'result', ...e }))
+      session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+      session._armResultTimeout()
+      await new Promise((r) => setTimeout(r, 80))
+
+      assert.equal(session._isBusy, false, 'busy cleared')
+      assert.equal(session._currentMessageId, null, 'messageId nulled')
+      // Best-effort Ctrl-C interrupt so claude TUI itself unsticks.
+      assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+
+      const types = events.map((e) => e.type)
+      assert.deepEqual(types, ['stream_end', 'result', 'error'],
+        'fan-out order: stream_end → result → error')
+
+      const streamEnd = events.find((e) => e.type === 'stream_end')
+      assert.equal(streamEnd.messageId, 'msg-stall')
+
+      const result = events.find((e) => e.type === 'result')
+      assert.equal(result.cost, null, 'cost=null skips billing accumulation')
+      assert.ok(Number.isFinite(result.duration), 'duration is finite')
+
+      const err = events.find((e) => e.type === 'error')
+      assert.equal(err.code, 'stream_stall', 'distinct code for dashboard chip')
+      assert.match(err.message, /Stream stalled/)
+    })
+
+    it('is a no-op when not busy (late fire after natural turn-end)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+      })
+      session._isBusy = false  // turn already ended
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+      session.on('result', () => events.push('result'))
+      session.on('error', () => events.push('error'))
+
+      session._handleStreamStall()
+      assert.deepEqual(events, [], 'no events fired when not busy')
+    })
+
+    it('is disabled when streamStallTimeoutMs=0 (operator opt-out)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 0,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-disabled'
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.equal(session._streamStallTimeout, null, 'stall timer not armed when disabled')
+
+      // Wait a few ticks just to be extra sure nothing fires.
+      await new Promise((r) => setTimeout(r, 30))
+      assert.equal(session._isBusy, true, 'still busy — watchdog opted out')
+    })
+
+    it('is cleared by _finishTurnError so a stalled-after-error fire cannot land', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = 'msg-x'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._streamStallTimeout, 'stall timer armed')
+
+      session._finishTurnError('test', 'msg-x')
+      assert.equal(session._streamStallTimeout, null, 'stall timer cleared on error path')
+    })
+
+    it('is cleared by destroy() so a late fire cannot land on a torn-down session', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-d'
+      session._armResultTimeout()
+      assert.ok(session._streamStallTimeout, 'stall timer armed')
+
+      await session.destroy()
+      assert.equal(session._streamStallTimeout, null, 'stall timer cleared on destroy')
+    })
+  })
+
   describe('PTY output ring buffer (#3919)', () => {
     it('keeps a tail of recent output with ANSI stripped', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })

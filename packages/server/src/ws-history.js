@@ -371,6 +371,18 @@ export function replayHistory(ctx, ws, sessionId) {
   const truncated = sessionManager.isHistoryTruncated(sessionId)
   send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory: true })
 
+  // #4638: track an unresolved-stream marker across the chunked replay.
+  // Set when we replay a `stream_start`; cleared when we hit the next
+  // `result` (or another stream_start, which would only happen if the
+  // history is malformed). At end-of-replay, if still set, the session
+  // was persisted while a stream was in flight — claude TUI emitted
+  // stream_start and then nothing (the v0.9.21 #4638 wedge mode).
+  // We synthesize stream_end + agent_idle so the dashboard's
+  // streamingMessageId/Working banner clear on reconnect without
+  // requiring a restart. Mirrors the live-recovery shape from
+  // ClaudeTuiSession._handleStreamStall (events emitted, not persisted).
+  let pendingStreamMessageId = null
+
   const CHUNK_SIZE = 20
   const sendChunk = (offset) => {
     if (ws.readyState !== 1) return
@@ -378,6 +390,11 @@ export function replayHistory(ctx, ws, sessionId) {
     for (let i = offset; i < end; i++) {
       const entry = history[i]
       send(ws, { ...entry, sessionId })
+      if (entry && entry.type === 'stream_start') {
+        pendingStreamMessageId = entry.messageId || null
+      } else if (entry && (entry.type === 'stream_end' || entry.type === 'result')) {
+        pendingStreamMessageId = null
+      }
       // #4628: mirror the live `result → agent_idle` fan-out from
       // event-normalizer.js. The dashboard's handler dispatch table has
       // no `result` entry — only `agent_idle` — so a raw `result` in
@@ -397,6 +414,15 @@ export function replayHistory(ctx, ws, sessionId) {
     if (end < history.length) {
       setImmediate(() => sendChunk(end))
     } else {
+      // #4638: if the replay ended with a stream_start that never closed,
+      // synthesize stream_end + agent_idle so the dashboard's busy state
+      // clears. The persisted history is not mutated — these are transient
+      // recovery events for the reconnecting client, matching the #4628
+      // agent_idle fan-out shape above.
+      if (pendingStreamMessageId !== null) {
+        send(ws, { type: 'stream_end', sessionId, messageId: pendingStreamMessageId })
+        send(ws, { type: 'agent_idle', sessionId })
+      }
       send(ws, { type: 'history_replay_end', sessionId })
     }
   }

@@ -287,8 +287,8 @@ export class ClaudeTuiSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
-  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs, skipPermissions } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs })
+  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, skipPermissions } = {}) {
+    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
 
     this._port = port || null
     // #4044: when true, spawn `claude` with --dangerously-skip-permissions
@@ -976,9 +976,10 @@ export class ClaudeTuiSession extends BaseSession {
       sessionId: this._sessionId,
     }, 'stop_hook_fired_without_post_hook')
 
-    // Clear inactivity timers — turn done, nothing to backstop (#3920).
+    // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638).
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
     // #4022: drop the per-turn attachment dir now that the Stop hook
     // has fired and the response has streamed back. The Read-tool
     // results are already in the model's context window, so the bytes
@@ -1256,6 +1257,10 @@ export class ClaudeTuiSession extends BaseSession {
   _finishTurnError(message, callerMessageId) {
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    // #4638: clear the stream-stall watchdog so a turn that fails or
+    // aborts before the stall window doesn't fire a stale stream_stall
+    // error into the dashboard mid-recovery.
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
     // #4010: balance the early stream_start with stream_end + result so the
     // dashboard's busy state clears (event-normalizer.js:215 synthesizes
     // agent_idle from result). Without this, an aborted/failed TUI turn
@@ -1318,7 +1323,8 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * Arm (or re-arm) the soft + hard inactivity timers (#3920).
+   * Arm (or re-arm) the soft + hard inactivity + stream-stall timers
+   * (#3920, #4638).
    *
    * Soft: fires `inactivity_warning` after _resultTimeoutMs of silence.
    * Session stays alive — the dashboard renders a check-in chip.
@@ -1326,15 +1332,25 @@ export class ClaudeTuiSession extends BaseSession {
    * Hard: force-clears busy state + emits `error` after _hardTimeoutMs.
    * Last-resort kill path for sessions that are genuinely stuck.
    *
-   * Both are cleared+re-armed on each call, so any progress signal
-   * (new hook file processed) resets both windows. Mirrors
+   * Stream-stall: 5-min (default) active-recovery for the
+   * `stream_start fired then nothing` wedge — claude TUI accepting the
+   * prompt write, emitting nothing, never returning a Stop hook. #4467
+   * wired the same timer into CliSession + SdkSession; the TUI provider
+   * was the outlier, so this wedge surfaced as a "Working…" banner that
+   * ticked indefinitely. Only armed when `_streamStallTimeoutMs > 0`
+   * (operators can disable via config 0).
+   *
+   * All three are cleared+re-armed on each call, so any progress signal
+   * (new hook file processed) resets every window. Mirrors
    * `CliSession._armResultTimeout()`.
    */
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)
     if (this._hardTimeout) clearTimeout(this._hardTimeout)
+    if (this._streamStallTimeout) clearTimeout(this._streamStallTimeout)
     this._resultTimeout = null
     this._hardTimeout = null
+    this._streamStallTimeout = null
     this._resultTimeout = setTimeout(() => {
       this._resultTimeout = null
       this._handleInactivityWarning()
@@ -1343,6 +1359,13 @@ export class ClaudeTuiSession extends BaseSession {
       this._hardTimeout = null
       this._handleHardTimeout()
     }, this._hardTimeoutMs)
+    // #4638: only arm if configured > 0 (operators can disable via 0).
+    if (this._streamStallTimeoutMs > 0) {
+      this._streamStallTimeout = setTimeout(() => {
+        this._streamStallTimeout = null
+        this._handleStreamStall()
+      }, this._streamStallTimeoutMs)
+    }
   }
 
   _handleInactivityWarning() {
@@ -1397,6 +1420,69 @@ export class ClaudeTuiSession extends BaseSession {
       { cost: null, duration, usage: null, sessionId: this._sessionId },
       'hard_timeout',
     )
+  }
+
+  /**
+   * #4638: stream-stall active recovery. Fires after
+   * `_streamStallTimeoutMs` of silence post-stream_start with no Stop
+   * hook, no tool hooks, and no PTY output at all — the wedge mode
+   * observed live in v0.9.21 where claude TUI accepts the prompt and
+   * then emits nothing forever. Mirrors `CliSession._handleStreamStall`
+   * (#4467) and `SdkSession._handleStreamStall` (#4616) so the
+   * dashboard's recovery path is provider-agnostic.
+   *
+   * Distinct from the soft inactivity warning (passive chip after 30
+   * min) and the hard cap (force-clear after 2h): this is the ACTIVE
+   * recovery in minutes, not hours, so a user staring at a stuck
+   * "Working…" banner can retry without waiting for the hard backstop
+   * or having to click Stop and hope.
+   *
+   * Sequence: best-effort Ctrl-C into the TUI (so claude TUI itself
+   * unsticks for the next turn) → emit stream_end (pairs with the
+   * stream_start fired at turn-start) → _emitResult (sweeps orphan
+   * tool_starts, fires synthetic result → agent_idle fan-out via the
+   * event-normalizer) → emit error with `code: 'stream_stall'` so the
+   * dashboard surfaces a dedicated retry affordance distinct from
+   * generic errors.
+   */
+  _handleStreamStall() {
+    if (!this._isBusy) return
+    const friendly = formatIdleDuration(this._streamStallTimeoutMs)
+    const messageId = this._currentMessageId
+    log.warn(
+      `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
+    )
+    // Best-effort Ctrl-C so the TUI process unsticks for the next turn.
+    // Doesn't kill the PTY — claude cancels the in-flight request and
+    // returns to its prompt. Mirrors _handleHardTimeout.
+    if (this._term) {
+      try { this._term.write('\x03') } catch { /* ignore */ }
+    }
+    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._streamStallTimeoutMs
+    if (messageId) this.emit('stream_end', { messageId })
+    // #4022: drop per-turn attachment dir on stall, same as hard timeout.
+    this._cleanupTurnAttachments(this._activeTurn)
+    this._activeTurn = null
+    this._isBusy = false
+    this._currentMessageId = null
+    // #4286/#4604 symmetry — clear pending AskUserQuestion slot + watchdog
+    // so a late answer / late stall fire can't write to a torn-down turn.
+    this._pendingUserAnswer = null
+    if (this._askUserQuestionWatchdog) {
+      clearTimeout(this._askUserQuestionWatchdog)
+      this._askUserQuestionWatchdog = null
+    }
+    // #4628 sweep + result fan-out (event-normalizer turns result into
+    // result+agent_idle so the dashboard's activeTools and Stop button
+    // both clear).
+    this._emitResult(
+      { cost: null, duration, usage: null, sessionId: this._sessionId },
+      'stream_stall',
+    )
+    this.emit('error', {
+      code: 'stream_stall',
+      message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+    })
   }
 
   /**
@@ -1758,6 +1844,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._pendingUserAnswer = null
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    // #4638: clear the stream-stall watchdog on destroy too — otherwise
+    // a late fire could land in _handleStreamStall after _term is null,
+    // skipping the Ctrl-C path but still emitting events into a dead session.
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
     // #4604: cancel the AskUserQuestion stall watchdog so it can't fire
     // a stale ASK_USER_QUESTION_STALL event into a torn-down listener.
     if (this._askUserQuestionWatchdog) {
