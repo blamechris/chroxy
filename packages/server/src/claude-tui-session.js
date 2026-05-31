@@ -188,7 +188,13 @@ function writeHookSettings(sinkDir, { permissionsEnabled }) {
         { hooks: preToolUseHooks },
       ],
       PostToolUse: [
-        { hooks: [{ type: 'command', command: `cat > ${sinkDirEsc}/post-$(uuidgen).json` }] },
+        // First hook: forensic sink — tee preserves stdin for the
+        // sibling-cleanup hook below. Replaces the pre-#4668 cat-to-file
+        // because cat would consume stdin entirely, leaving the cleanup
+        // hook with an empty payload.
+        { hooks: [
+          { type: 'command', command: `tee ${sinkDirEsc}/post-$(uuidgen).json | grep -q '"tool_name":"AskUserQuestion"' && rm -rf ${sinkDirEsc}/askuserquestion-active || true` },
+        ] },
       ],
     },
   }
@@ -526,6 +532,12 @@ export class ClaudeTuiSession extends BaseSession {
       if (this._permissionModeFile) {
         env.CHROXY_PERMISSION_MODE_FILE = this._permissionModeFile
       }
+      // #4668 (short-term): per-session sink directory so the hook can
+      // place its sibling-AskUserQuestion lockfile somewhere that's
+      // automatically cleaned up by destroy()'s rmSync of this._sinkDir.
+      // The hook silently no-ops the sibling-deny check when this env
+      // var is absent, so removing it again later is safe.
+      env.CHROXY_SINK_DIR = this._sinkDir
     }
 
     const args = [

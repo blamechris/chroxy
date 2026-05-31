@@ -85,9 +85,44 @@ except Exception:
 ' 2>/dev/null)
   if [ -n "$QUESTION_COUNT" ] && [ "$QUESTION_COUNT" -gt 1 ]; then
     cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy currently delivers AskUserQuestion forms one question at a time. Please re-issue this call as separate AskUserQuestion tool calls, one per question, and the user will answer each in turn."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy currently delivers AskUserQuestion forms one question at a time. Please re-issue this call as separate AskUserQuestion tool calls, ONE AT A TIME — issue the next one only after the previous one's tool_result has been returned. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn."}}
 EOF
     exit 0
+  fi
+
+  # #4668 (short-term): deny when another AskUserQuestion is already pending
+  # in this session. The model interprets #4648's "separate AskUserQuestion
+  # tool calls" as "parallel within the same turn" — empirically, claude TUI
+  # was emitting 4 parallel AskUserQuestion tool_use blocks in one turn,
+  # which overwrote chroxy's single `_pendingUserAnswer` field and routed all
+  # user answers to the wrong question (chroxy.log forensic 2026-05-31 on
+  # v0.9.26 session 9ea82aed). Forcing true serialization at the hook layer
+  # restores the single-pending invariant that the existing keystroke driver
+  # was built around. The PostToolUse hook in writeHookSettings()
+  # (claude-tui-session.js) clears this lock when the active AskUserQuestion
+  # completes, so sequential AskUserQuestions are unaffected.
+  #
+  # Lock dir + mkdir is atomic enough — first parallel hook wins the mkdir
+  # race; subsequent hooks see the existing dir and deny. The age fallback
+  # (60s) catches truly stale locks left by crashes / killed sessions.
+  if [ -n "$CHROXY_SINK_DIR" ] && [ -d "$CHROXY_SINK_DIR" ]; then
+    SIBLING_LOCK="${CHROXY_SINK_DIR}/askuserquestion-active"
+    if [ -d "$SIBLING_LOCK" ]; then
+      LOCK_AGE=$(($(date +%s) - $(stat -f %m "$SIBLING_LOCK" 2>/dev/null || stat -c %Y "$SIBLING_LOCK" 2>/dev/null || echo 0)))
+      if [ "$LOCK_AGE" -ge 0 ] && [ "$LOCK_AGE" -lt 60 ]; then
+        cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Another AskUserQuestion is already pending in this session. Wait for the user's answer (tool_result) before issuing the next AskUserQuestion. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn — chroxy delivers them serially."}}
+EOF
+        exit 0
+      fi
+      # Stale lock (>60s, prior session likely crashed) — wipe and reclaim.
+      rm -rf "$SIBLING_LOCK" 2>/dev/null
+    fi
+    # Claim the lock. mkdir is atomic across parallel hook invocations —
+    # exactly one will succeed; the losers fall into the `if [ -d "$SIBLING_LOCK" ]`
+    # branch above when re-checked. We don't re-check here because the
+    # parallel-race window is microseconds vs the 300s curl timeout below.
+    mkdir "$SIBLING_LOCK" 2>/dev/null || true
   fi
 fi
 
