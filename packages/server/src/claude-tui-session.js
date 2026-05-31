@@ -958,7 +958,12 @@ export class ClaudeTuiSession extends BaseSession {
     if (text) this.emit('stream_delta', { messageId, delta: text })
     this.emit('stream_end', { messageId })
 
-    this.emit('result', {
+    // #4628: sweep any tool_starts whose PostToolUse hook never fired
+    // BEFORE emitting result. _emitResult does this in one step. The
+    // sweep ensures the synthetic tool_result is broadcast first, so
+    // the dashboard's activeTools clears as part of the same turn-end
+    // burst rather than zombifying until next chroxy restart.
+    this._emitResult({
       // #4072: `cost: null` (not 0) is the chroxy convention for
       // "subscription-billed provider, cost not measured". The session-
       // manager `_trackCost`/`_trackUsage` gate is
@@ -969,7 +974,7 @@ export class ClaudeTuiSession extends BaseSession {
       duration,
       usage: null,                   // not exposed by Stop hook in MVP
       sessionId: this._sessionId,
-    })
+    }, 'stop_hook_fired_without_post_hook')
 
     // Clear inactivity timers — turn done, nothing to backstop (#3920).
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
@@ -1134,6 +1139,10 @@ export class ClaudeTuiSession extends BaseSession {
         tool: toolName,
         input: payload.tool_input ?? null,
       })
+      // #4628: track this tool_start so _emitResult can sweep it on
+      // turn-end if the matching PostToolUse hook is never written
+      // (the upstream failure mode observed in #4628).
+      this._trackToolStart(toolUseId, toolName)
       // #4278: AskUserQuestion in TUI sessions previously had no special
       // path — the tool_use bubble appeared in the chat with no
       // interactive way to answer, and claude sat on its own TTY-style
@@ -1220,6 +1229,9 @@ export class ClaudeTuiSession extends BaseSession {
       result,
       truncated,
     })
+    // #4628: matching tool_start resolved — drop from the in-flight map
+    // so _emitResult's sweep doesn't double-emit a synthetic for it.
+    this._trackToolResult(toolUseId)
 
     // #4307: scan PostToolUse output for the canonical "Command running
     // in background with ID: <id>" pattern. The PostToolUse hook
@@ -1261,7 +1273,12 @@ export class ClaudeTuiSession extends BaseSession {
     this.emit('error', { message })
     // #4072: subscription-billed → cost: null so SessionManager skips
     // accumulation. See companion sites above.
-    this.emit('result', { cost: null, duration, usage: null, sessionId: this._sessionId })
+    // #4628: sweep orphan tool_starts before result so the dashboard's
+    // activeTools clears as part of the same error burst.
+    this._emitResult(
+      { cost: null, duration, usage: null, sessionId: this._sessionId },
+      'turn_finished_with_error',
+    )
     // #4022: drop the per-turn attachment dir on every failure path so
     // a stalled/aborted/PTY-exited turn doesn't leak the materialized
     // files until destroy(). No-op when the turn had no attachments.
@@ -1375,7 +1392,11 @@ export class ClaudeTuiSession extends BaseSession {
     // #4010: emit result so the dashboard receives agent_idle and clears
     // the Stop button. stream_end on its own only clears streamingMessageId.
     // #4072: subscription-billed → cost: null. See companion sites above.
-    this.emit('result', { cost: null, duration, usage: null, sessionId: this._sessionId })
+    // #4628: sweep orphan tool_starts before the timeout-driven result.
+    this._emitResult(
+      { cost: null, duration, usage: null, sessionId: this._sessionId },
+      'hard_timeout',
+    )
   }
 
   /**
@@ -1718,6 +1739,8 @@ export class ClaudeTuiSession extends BaseSession {
       result: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
       truncated: false,
     })
+    // #4628: matching tool_start resolved — drop from the in-flight map.
+    this._trackToolResult(toolUseId)
     this.emit('error', {
       code: 'ASK_USER_QUESTION_STALL',
       message: 'The agent\'s question response could not be delivered — likely a multi-question form. Please retry from your last message.',

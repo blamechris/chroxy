@@ -728,6 +728,9 @@ export class CliSession extends BaseSession {
               const mcp = parseMcpToolName(event.content_block.name)
               if (mcp) toolStartData.serverName = mcp.serverName
               this.emit('tool_start', toolStartData)
+              // #4628: track so _clearMessageState (or _emitResult) can
+              // sweep on turn-end if the API ever drops a tool_result.
+              this._trackToolStart(toolId, event.content_block.name)
             }
             break
           }

@@ -691,6 +691,9 @@ export class SdkSession extends BaseSession {
                   const mcp = parseMcpToolName(event.content_block.name)
                   if (mcp) toolStartData.serverName = mcp.serverName
                   this.emit('tool_start', toolStartData)
+                  // #4628: defense-in-depth — track so _emitResult sweep
+                  // catches any orphan if the API ever drops a tool_result.
+                  this._trackToolStart(toolId, event.content_block.name)
                 }
                 break
               }
@@ -795,12 +798,17 @@ export class SdkSession extends BaseSession {
               this.emit('models_updated', { models: getModels() })
             }
 
-            this.emit('result', {
+            // #4628: sweep any orphan tool_starts before emitting result
+            // so the dashboard's activeTools clears as part of the same
+            // turn-end burst. _clearMessageState (called next) would also
+            // clear the in-flight map but without broadcasting synthetic
+            // tool_results to the dashboard.
+            this._emitResult({
               sessionId: msg.session_id || this._sdkSessionId,
               cost: msg.total_cost_usd,
               duration: msg.duration_ms,
               usage: msg.usage,
-            })
+            }, 'turn_ended_with_orphan_tool_start')
 
             this._clearMessageState()
             break

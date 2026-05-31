@@ -376,7 +376,23 @@ export function replayHistory(ctx, ws, sessionId) {
     if (ws.readyState !== 1) return
     const end = Math.min(offset + CHUNK_SIZE, history.length)
     for (let i = offset; i < end; i++) {
-      send(ws, { ...history[i], sessionId })
+      const entry = history[i]
+      send(ws, { ...entry, sessionId })
+      // #4628: mirror the live `result → agent_idle` fan-out from
+      // event-normalizer.js. The dashboard's handler dispatch table has
+      // no `result` entry — only `agent_idle` — so a raw `result` in
+      // history-replay is silently dropped, and `handleAgentIdle`
+      // (which clears activeTools as the #4308 safety net) never fires.
+      // Without this, a session that completed cleanly but had an
+      // orphan tool_start in history (e.g. dropped PostToolUse hook,
+      // #4628 root cause) shows a zombie "Running X" chip every time
+      // the dashboard reconnects, until the next chroxy restart. The
+      // companion `_emitResult` sweep in BaseSession prevents new
+      // orphans from being persisted; this heals the existing wedged
+      // sessions on reconnect without requiring a restart.
+      if (entry && entry.type === 'result') {
+        send(ws, { type: 'agent_idle', sessionId })
+      }
     }
     if (end < history.length) {
       setImmediate(() => sendChunk(end))

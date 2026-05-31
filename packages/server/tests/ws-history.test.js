@@ -1033,6 +1033,62 @@ describe('replayHistory', () => {
     const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
     assert.ok(endMsg)
   })
+
+  // #4628: replay must mirror the live event-normalizer fan-out so the
+  // dashboard's `handleAgentIdle` (the #4308 safety net that clears
+  // activeTools) actually fires for replayed sessions. Without this,
+  // a session with an orphan tool_start in history (e.g. dropped
+  // PostToolUse hook) shows a zombie chip on every dashboard
+  // reconnect until the next chroxy restart.
+  it('emits synthetic agent_idle after each `result` entry to mirror live event-normalizer fan-out (#4628)', async () => {
+    const history = [
+      { type: 'tool_start', tool: 'Bash', toolUseId: 'toolu_orphan' },
+      { type: 'result', cost: null, duration: 100 },
+    ]
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    assert.deepEqual(types, [
+      'history_replay_start',
+      'tool_start',
+      'result',
+      'agent_idle',
+      'history_replay_end',
+    ], 'agent_idle must follow result in the replay stream')
+    const agentIdle = ctx._sends.find(m => m.type === 'agent_idle')
+    assert.equal(agentIdle.sessionId, 'sess-1', 'agent_idle carries the session id')
+  })
+
+  it('does not emit agent_idle for histories without a result entry (#4628)', async () => {
+    const history = [
+      { type: 'user_message', content: 'hi' },
+      { type: 'response', content: 'hello' },
+    ]
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    assert.ok(!types.includes('agent_idle'), 'no result → no synthetic agent_idle')
+  })
 })
 
 // ── flushPostAuthQueue ─────────────────────────────────────────────────────
