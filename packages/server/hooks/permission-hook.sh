@@ -53,6 +53,44 @@ case "$PERM_MODE" in
   *) PERM_MODE="approve" ;;
 esac
 
+# #4648 (v0.9.24): refuse multi-question AskUserQuestion forms before any
+# mode-specific routing. Chroxy's PTY-keystroke driver for multi-question
+# forms has a 0% production success rate (per chroxy.log forensic, 2026-05-31
+# /swarm-audit consensus). Denying here forces the model to re-emit as N
+# sequential single-question calls, each driven by the empirically-validated
+# single-question happy path that has worked since v0.9.4. Defense in depth:
+# the v0.9.23 _onAskUserQuestionStall teardown still catches anything that
+# slips through. See docs/audit-results/tui-form-delivery-rethink/ for the
+# full audit (6 agents, unanimous on this path).
+#
+# Reads stdin once at the top because the deny check must apply regardless
+# of permission mode — auto/plan modes previously exited early without
+# touching the payload. Modes below that need the payload reuse $REQUEST.
+REQUEST=$(cat -)
+TOOL_NAME=$(echo "$REQUEST" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+  # Count `questions[]` length via python3 (stock macOS has it at /usr/bin/python3
+  # 3.9.6; Homebrew at /opt/homebrew/bin). On parse failure or python3 absence
+  # we get empty output → fall through to normal handling rather than
+  # crash/deny-everything. Worst case: same as today (the v0.9.23 watchdog
+  # catches the wedge), so this defaults safe.
+  QUESTION_COUNT=$(printf '%s' "$REQUEST" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    q = d.get("tool_input", {}).get("questions", [])
+    print(len(q) if isinstance(q, list) else 0)
+except Exception:
+    pass
+' 2>/dev/null)
+  if [ -n "$QUESTION_COUNT" ] && [ "$QUESTION_COUNT" -gt 1 ]; then
+    cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy currently delivers AskUserQuestion forms one question at a time. Please re-issue this call as separate AskUserQuestion tool calls, one per question, and the user will answer each in turn."}}
+EOF
+    exit 0
+  fi
+fi
+
 # ---- Shared: route a permission request to the phone via HTTP ----
 # Expects $REQUEST to contain the JSON body to POST.
 # Outputs the appropriate hookSpecificOutput JSON and exits.
@@ -104,8 +142,7 @@ fi
 
 # Accept Edits mode — auto-approve file operations, route everything else to phone
 if [ "$PERM_MODE" = "acceptEdits" ]; then
-  REQUEST=$(cat -)
-  TOOL_NAME=$(echo "$REQUEST" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+  # $REQUEST and $TOOL_NAME already populated at top of script (#4648).
   case "$TOOL_NAME" in
     Read|Write|Edit|NotebookEdit|Glob|Grep)
       cat <<'EOF'
@@ -126,5 +163,5 @@ EOF
 fi
 
 # Approve mode (default) — route to phone via HTTP
-REQUEST=$(cat -)
+# $REQUEST already populated at top of script (#4648).
 route_to_phone

@@ -1888,7 +1888,12 @@ export class ClaudeTuiSession extends BaseSession {
     )
     this.emit('error', {
       code: 'ASK_USER_QUESTION_STALL',
-      message: 'The agent\'s question response could not be delivered — likely a multi-question form. Please retry from your last message.',
+      // #4648: dropped the "likely a multi-question form" jargon. The
+      // permission-hook deny path (also #4648) prevents most multi-question
+      // forms from reaching this code path at all, and for the cases that
+      // slip through, the user doesn't care about chroxy internals — they
+      // care about how to recover. The new copy is action-oriented.
+      message: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
       toolUseId,
     })
   }
