@@ -2570,6 +2570,62 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
+    it('watchdog also emits synthetic tool_result so dashboard activeTools clears (#4616)', () => {
+      // #4616 — without the synthetic tool_result the dashboard's
+      // activeTools entry for this AskUserQuestion is never paired/cleared
+      // (handlers.handleToolResult.applyToActiveTools removes by toolUseId).
+      // Result: footer pill "Running AskUserQuestion · Ns" keeps ticking
+      // forever even though _isBusy is clear and the user sees the toast.
+      // Both events MUST emit, and tool_result MUST precede error so the
+      // dashboard's tool-pairing path resolves before the error toast lands.
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const events = []
+        session.on('tool_result', (e) => events.push({ name: 'tool_result', payload: e }))
+        session.on('error', (e) => events.push({ name: 'error', payload: e }))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_pair',
+          options: [{ label: 'a' }],
+        }
+
+        session.respondToQuestion('a')
+        // Reinstate the stuck-form condition as in the original watchdog test.
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_pair',
+          options: [{ label: 'a' }],
+        }
+
+        mock.timers.tick(31_000)
+
+        assert.equal(events.length, 2,
+          `expected exactly tool_result + error, got ${events.map(e => e.name).join(',')}`)
+        assert.deepEqual(events.map((e) => e.name), ['tool_result', 'error'],
+          'tool_result MUST precede error so activeTools clears before the toast lands')
+
+        const trEvent = events[0].payload
+        assert.equal(trEvent.toolUseId, 'toolu_aq_pair',
+          'tool_result.toolUseId must match the armed toolUseId so store-core applyToActiveTools removes the entry')
+        assert.equal(typeof trEvent.result, 'string',
+          'tool_result.result must be a string (store-core handleToolResult coerces non-strings to "")')
+        assert.equal(trEvent.truncated, false,
+          'tool_result.truncated must be boolean (store-core handleToolResult coerces non-booleans to false)')
+        assert.match(trEvent.result, /stalled/i,
+          'tool_result.result text references the stall so the bubble shows context')
+
+        const errEvent = events[1].payload
+        assert.equal(errEvent.code, 'ASK_USER_QUESTION_STALL',
+          'error event still carries the structured code so the dashboard toast renders correctly')
+        assert.equal(errEvent.toolUseId, 'toolu_aq_pair',
+          'error event still carries toolUseId for triage')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
     it('watchdog is cleared on interrupt() so a user-interrupted answer does not fire ASK_USER_QUESTION_STALL', () => {
       // #4604 review follow-up: interrupt() does NOT clear _isBusy directly
       // (Ctrl-C resolves via _finishTurn* async). Without clearing the
