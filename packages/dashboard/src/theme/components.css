@@ -4951,6 +4951,30 @@
   border-color: var(--accent-blue);
 }
 
+/* Multi-line text input (#4660 per-session preamble — first occupant).
+   Mirrors `.settings-field select` rather than introducing a new shape
+   so existing focus/disabled patterns flow through. `resize: vertical`
+   so users can grow the box for long preambles without growing horizontally
+   (which would break the settings-panel column layout). */
+.settings-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.settings-textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
 /* Checkbox-shaped settings-field — the label wraps both the checkbox and
    the option text on a single line; the hint sits below at full width.
    The base .settings-field label rule turns labels into block-level

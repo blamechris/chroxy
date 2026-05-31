@@ -213,6 +213,11 @@ export interface SessionInfo {
   // older servers (pre-#3805) that omit the field don't break the
   // parser. Renderers should treat `undefined` as `false` (toggle off).
   chroxyContextHint?: boolean;
+  // #4660: per-session user-authored preamble prepended to the system
+  // prompt every turn. Optional so older servers (pre-#4660) that omit
+  // the field don't break the parser. Renderers should treat
+  // `undefined` as empty string (no preamble injected).
+  sessionPreamble?: string;
   // #3209: per-session provider capability flags surfaced via
   // session_list. The dashboard reads these to gate UI affordances
   // (e.g. SkillsPanel disables checkboxes when `skillToggle` is

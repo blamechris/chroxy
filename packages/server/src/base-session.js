@@ -35,6 +35,14 @@ export const CHROXY_CONTEXT_HINT_TEXT =
   'The user may be on a small screen. Prefer concise, copyable answers; keep code blocks narrow (<80 cols); ' +
   'avoid ASCII diagrams and wide tables; chunk long output so it scrolls smoothly on mobile.'
 
+// #4660: per-session user-authored preamble, prepended to `_buildSystemPrompt()`
+// output every turn so the user can pre-load context once instead of retyping
+// it in every message. Cap at 4000 chars so a hand-edited state file or a
+// malicious client can't bloat the system prompt without bound — comfortably
+// fits a dense paragraph or two of style/stack notes while keeping the per-
+// turn token overhead predictable.
+export const SESSION_PREAMBLE_MAX_LENGTH = 4000
+
 // #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
 // — every provider event (SDK iterator message, CLI stdout JSONL line)
 // resets the timer; the window only bounds *silent stretches*, not wall-
@@ -116,6 +124,23 @@ function _coerceSkipPatternOpt(source) {
   }
 }
 
+// #4660: validate a constructor-supplied sessionPreamble. Only strings are
+// accepted; anything else (undefined, null, number, object) yields the
+// empty-string default so _buildSystemPrompt() stays byte-identical to
+// pre-#4660. Trim whitespace + cap to SESSION_PREAMBLE_MAX_LENGTH so a
+// hand-edited state file can't smuggle in unbounded text past the wire-
+// level cap enforced by ws-schemas. Empty-after-trim falls back to '' so
+// the OFF semantics (no injection) line up with `chroxyContextHint: false`.
+function _coerceSessionPreambleOpt(value) {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return ''
+  if (trimmed.length > SESSION_PREAMBLE_MAX_LENGTH) {
+    return trimmed.slice(0, SESSION_PREAMBLE_MAX_LENGTH)
+  }
+  return trimmed
+}
+
 export class BaseSession extends EventEmitter {
   /**
    * Custom event names emitted by this provider class that should be proxied
@@ -152,6 +177,11 @@ export class BaseSession extends EventEmitter {
     // no wide ASCII diagrams). Default false — existing users see no
     // observable change.
     chroxyContextHint,
+    // #4660: user-authored preamble prepended to `_buildSystemPrompt()`
+    // output every turn. String, trimmed + capped to
+    // SESSION_PREAMBLE_MAX_LENGTH on construction. Empty string (or any
+    // non-string input) is the byte-identical-to-pre-#4660 default.
+    sessionPreamble,
     // #3749 / #3884 / #3899: configurable SOFT-warning timeout (the
     // inactivity safety net). Subclasses arm this timer; when it fires
     // they emit an `inactivity_warning` event so the client can render
@@ -207,6 +237,13 @@ export class BaseSession extends EventEmitter {
     // versions) yields the safe `false` default and JSON.stringify
     // produces `true`/`false` (not `1`/`null`) on the wire.
     this.chroxyContextHint = !!chroxyContextHint
+    // #4660: per-session preamble. String-typed: anything else (undefined,
+    // null, number, object) falls back to the empty-string default so the
+    // _buildSystemPrompt() output stays byte-identical to pre-#4660. Trim
+    // + cap so a hand-edited state file or a malformed restore can't
+    // smuggle in unbounded text. The runtime setter (setSessionPreamble)
+    // does the same coercion and reports rejection on type mismatch.
+    this.sessionPreamble = _coerceSessionPreambleOpt(sessionPreamble)
 
     this._isBusy = false
     this._processReady = false
@@ -781,6 +818,31 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * Set the per-session preamble (#4660). Accepts a string (trimmed and
+   * capped to SESSION_PREAMBLE_MAX_LENGTH) or empty string (clears).
+   * Returns `true` when the stored value changes, `false` for either
+   * invalid input (non-string) or an idempotent no-op — same contract as
+   * `setChroxyContextHint`.
+   *
+   * Safe to call mid-turn: the preamble is only consulted at the start
+   * of the next prompt assembly via `_buildSystemPrompt()`.
+   *
+   * @param {string} value
+   * @returns {boolean}
+   */
+  setSessionPreamble(value) {
+    if (typeof value !== 'string') {
+      return false
+    }
+    const next = _coerceSessionPreambleOpt(value)
+    if (next === this.sessionPreamble) {
+      return false
+    }
+    this.sessionPreamble = next
+    return true
+  }
+
+  /**
    * Set the per-session promptEvaluatorSkipPattern (#3639). Accepts a
    * regex source string (validated by attempting to compile it), null,
    * or empty string (both clear the override). Returns `true` when the
@@ -917,14 +979,20 @@ export class BaseSession extends EventEmitter {
    */
   _buildSystemPrompt() {
     const skillsText = typeof this._skillsText === 'string' ? this._skillsText : ''
-    // #3805: opt-in Chroxy context hint. When OFF (default) the return value
-    // is byte-identical to pre-#3805 so existing users see no observable
-    // behaviour change. When ON, the short hint paragraph rides at the FRONT
-    // so the model reads it first and the existing skills text (if any)
-    // follows untouched.
-    if (!this.chroxyContextHint) return skillsText
-    if (skillsText) return `${CHROXY_CONTEXT_HINT_TEXT}\n\n${skillsText}`
-    return CHROXY_CONTEXT_HINT_TEXT
+    // Order (#4660 + #3805): user preamble → chroxy hint → skills text.
+    // The user-authored preamble rides at the FRONT so it takes precedence
+    // over the canned chroxy hint and the skills bucket — those are
+    // chroxy-controlled context, the preamble is the user's voice.
+    //
+    // When BOTH the preamble is empty AND the chroxy hint is OFF, the
+    // return value is byte-identical to pre-#3805 (skillsText only) so
+    // existing users see no observable behaviour change. Each layer is
+    // joined by `\n\n` so the model sees clean paragraph breaks.
+    const parts = []
+    if (this.sessionPreamble) parts.push(this.sessionPreamble)
+    if (this.chroxyContextHint) parts.push(CHROXY_CONTEXT_HINT_TEXT)
+    if (skillsText) parts.push(skillsText)
+    return parts.length === 0 ? '' : parts.join('\n\n')
   }
 
   /**

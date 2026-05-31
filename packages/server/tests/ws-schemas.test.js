@@ -8,6 +8,7 @@ import {
   SetPermissionModeSchema,
   SetPromptEvaluatorSchema,
   SetChroxyContextHintSchema,
+  SetSessionPreambleSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,
@@ -56,6 +57,7 @@ import {
   ServerPermissionModeChangedSchema,
   ServerPromptEvaluatorChangedSchema,
   ServerChroxyContextHintChangedSchema,
+  ServerSessionPreambleChangedSchema,
   ServerPermissionRequestSchema,
   ServerUserQuestionSchema,
   ServerAgentBusySchema,
@@ -312,6 +314,26 @@ describe('ClientMessageSchema', () => {
     assert.equal(result2.data.type, 'permission_response')
   })
 
+  // #4660: per-session preamble — both standalone schema and dispatch
+  // through the discriminated union. The wire cap is 4096 chars (slightly
+  // above the server-side SESSION_PREAMBLE_MAX_LENGTH of 4000 so a tiny
+  // client/server drift doesn't reject submissions).
+  it('SetSessionPreambleSchema (#4660) accepts string value', () => {
+    assert.ok(SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 'hello' }).success)
+    assert.ok(SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: '', sessionId: 'sess-1' }).success)
+    assert.ok(SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 'a'.repeat(4096) }).success)
+    // Over the wire cap → reject.
+    assert.ok(!SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 'a'.repeat(4097) }).success)
+    // Non-string → reject.
+    assert.ok(!SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 123 }).success)
+  })
+
+  it('ClientMessageSchema dispatches set_session_preamble (#4660)', () => {
+    const result = ClientMessageSchema.safeParse({ type: 'set_session_preamble', value: 'hello' })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'set_session_preamble')
+  })
+
   it('rejects unknown types and missing type field', () => {
     assert.ok(!ClientMessageSchema.safeParse({ type: 'unknown_type' }).success)
     assert.ok(!ClientMessageSchema.safeParse({ type: 'switch_session' }).success)
@@ -432,6 +454,7 @@ describe('simple server schemas', () => {
     ['ServerPermissionModeChangedSchema', ServerPermissionModeChangedSchema, { type: 'permission_mode_changed', mode: 'approve' }],
     ['ServerPromptEvaluatorChangedSchema (#3244)', ServerPromptEvaluatorChangedSchema, { type: 'prompt_evaluator_changed', sessionId: 'sess-1', value: true }],
     ['ServerChroxyContextHintChangedSchema (#3805)', ServerChroxyContextHintChangedSchema, { type: 'chroxy_context_hint_changed', sessionId: 'sess-1', value: true }],
+    ['ServerSessionPreambleChangedSchema (#4660)', ServerSessionPreambleChangedSchema, { type: 'session_preamble_changed', sessionId: 'sess-1', value: 'always bullet points' }],
     ['ServerPermissionRequestSchema', ServerPermissionRequestSchema, { type: 'permission_request', requestId: 'req-1', tool: 'Bash', input: 'ls -la' }],
     ['ServerUserQuestionSchema', ServerUserQuestionSchema, { type: 'user_question', toolUseId: 'tu1', questions: [{ question: 'Which?', options: ['A', 'B'] }] }],
     ['ServerAgentBusySchema', ServerAgentBusySchema, { type: 'agent_busy' }],

@@ -590,6 +590,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // diagrams). Only shown when the active session reports a boolean
   // `chroxyContextHint` field; older servers (pre-#3805) omit it.
   const setChroxyContextHint = useConnectionStore(s => s.setChroxyContextHint)
+  // #4660: per-session preamble setter. The text area below debounces
+  // user input by 400ms before calling this — per-keystroke WS chatter
+  // would otherwise blow up the state-file write rate and the broadcast
+  // bandwidth for multi-client sessions.
+  const setSessionPreamble = useConnectionStore(s => s.setSessionPreamble)
   // #4052: BYOK credentials state + actions. Status arrives via the WS
   // byok_credentials_status message; the raw key is never stored — only
   // the masked preview.
@@ -636,6 +641,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // field. Older servers omit it; rendering a non-functional control
   // would mislead.
   const activeSessionChroxyContextHint = sessions.find(s => s.sessionId === activeSessionId)?.chroxyContextHint
+  // #4660: same capability-gate pattern as chroxyContextHint — only
+  // render the text area when the active session reports the field
+  // (older servers pre-#4660 omit it entirely). The server is the
+  // authoritative trim/cap site so we render exactly what it confirmed.
+  const activeSessionSessionPreamble = sessions.find(s => s.sessionId === activeSessionId)?.sessionPreamble
   const themes = getAvailableThemes()
   const inTauri = isTauri()
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
@@ -659,6 +669,33 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [autoPermError, setAutoPermError] = useState<string | null>(null)
   const [autoPermDirty, setAutoPermDirty] = useState<boolean>(false)
   const [autoPermSaving, setAutoPermSaving] = useState<boolean>(false)
+
+  // #4660: local-edit buffer for the per-session preamble text area.
+  // Decoupled from the server-confirmed `activeSessionSessionPreamble`
+  // so typing stays responsive while a 400ms debounce gates the actual
+  // WS send. The debounce timer ref survives re-renders without
+  // forcing a re-render of its own.
+  const [preambleDraft, setPreambleDraft] = useState<string>('')
+  const preambleDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Mirror the server-confirmed value into the local draft whenever the
+  // active session changes (switching sessions) or the server broadcasts
+  // a new stored value (multi-client edit). Skip the mirror when the
+  // user is mid-edit — measured by whether the draft already matches a
+  // value we're about to flush — so a multi-client confirm doesn't
+  // overwrite half-typed text.
+  useEffect(() => {
+    const serverValue = typeof activeSessionSessionPreamble === 'string' ? activeSessionSessionPreamble : ''
+    if (preambleDebounceRef.current) return  // mid-edit; don't clobber
+    setPreambleDraft(serverValue)
+  }, [activeSessionId, activeSessionSessionPreamble])  // eslint-disable-line react-hooks/exhaustive-deps
+  // Clean up the pending debounce on unmount so we don't fire a stale
+  // WS send after the panel closes.
+  useEffect(() => () => {
+    if (preambleDebounceRef.current) {
+      clearTimeout(preambleDebounceRef.current)
+      preambleDebounceRef.current = null
+    }
+  }, [])
 
   // #4559: shared copy for the inline "server disconnected" banner so the
   // BYOK and notifications sections stay in lockstep on phrasing. Mentions
@@ -986,10 +1023,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
 
           {/* Active session — per-session toggles. Only renders when the
               active session reports a capability (e.g. boolean
-              promptEvaluator OR chroxyContextHint). Older servers
-              (pre-#3185 / pre-#3805) omit the fields entirely, in which
-              case showing a non-functional toggle would mislead. */}
-          {(typeof activeSessionPromptEvaluator === 'boolean' || typeof activeSessionChroxyContextHint === 'boolean') && (
+              promptEvaluator OR chroxyContextHint OR string preamble).
+              Older servers (pre-#3185 / pre-#3805 / pre-#4660) omit the
+              fields entirely, in which case showing a non-functional
+              control would mislead. */}
+          {(typeof activeSessionPromptEvaluator === 'boolean' || typeof activeSessionChroxyContextHint === 'boolean' || typeof activeSessionSessionPreamble === 'string') && (
             <section className="settings-section" data-testid="active-session-section">
               <h3>Active session</h3>
               {typeof activeSessionPromptEvaluator === 'boolean' && (
@@ -1029,6 +1067,37 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                     can prefer concise, mobile-friendly output (narrower code
                     blocks, no wide ASCII diagrams). Applies to this session
                     only.
+                  </p>
+                </div>
+              )}
+              {typeof activeSessionSessionPreamble === 'string' && (
+                <div className="settings-field">
+                  <label htmlFor="session-preamble-input">
+                    Always include this context in every message
+                  </label>
+                  <textarea
+                    id="session-preamble-input"
+                    value={preambleDraft}
+                    onChange={(e) => {
+                      const next = e.target.value
+                      setPreambleDraft(next)
+                      if (preambleDebounceRef.current) clearTimeout(preambleDebounceRef.current)
+                      preambleDebounceRef.current = setTimeout(() => {
+                        preambleDebounceRef.current = null
+                        setSessionPreamble(next)
+                      }, 400)
+                    }}
+                    rows={4}
+                    maxLength={4000}
+                    placeholder="e.g. This is a Godot 4 project — prefer GDScript over C#. Always respond in concise bullet points."
+                    data-testid="session-preamble-input"
+                    className="settings-textarea"
+                  />
+                  <p className="settings-hint">
+                    Prepended to the system prompt every turn so you don't have
+                    to retype the same context in each message. Capped at 4000
+                    characters. Applies to this session only and persists
+                    across server restarts.
                   </p>
                 </div>
               )}
