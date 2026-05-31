@@ -2628,6 +2628,72 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
+    // #4645 — pre-fix the stall handler only cleared _isBusy + emitted the
+    // ASK_USER_QUESTION_STALL error, leaving stream_start orphaned (no
+    // matching stream_end, no result, no agent_idle fan-out). The dashboard
+    // kept showing "Working… Ns ago" + Stop button forever even though the
+    // turn had been given up on — and the input was still in
+    // "Type to send follow-up…" mode so the user had no Send affordance to
+    // retry from. Pin the full teardown so a regression can't re-introduce
+    // the misleading UI state.
+    it('stall fires full teardown (stream_end + result + error) so dashboard banner + Stop button clear (#4645)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const events = []
+        session.on('tool_result', (e) => events.push({ type: 'tool_result', ...e }))
+        session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+        session.on('result', (e) => events.push({ type: 'result', ...e }))
+        session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+        const ptyWrites = []
+        session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg-stall'
+        session._activeTurn = { startedAt: Date.now() - 50, aborted: false, uuid: 't', synthSeq: 0 }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_stall',
+          options: [{ label: 'a' }, { label: 'b' }],
+        }
+
+        session.respondToQuestion('a')
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_stall',
+          options: [{ label: 'a' }, { label: 'b' }],
+        }
+
+        mock.timers.tick(31_000)
+
+        // Full teardown: synthetic tool_result → stream_end → result → error.
+        // tool_result first so the activeTools pill clears before the result
+        // fan-out; error last so the toast surfaces after busy state settles.
+        const types = events.map((e) => e.type)
+        assert.deepEqual(types, ['tool_result', 'stream_end', 'result', 'error'],
+          'fan-out order: tool_result → stream_end → result → error')
+
+        const streamEnd = events.find((e) => e.type === 'stream_end')
+        assert.equal(streamEnd.messageId, 'msg-stall', 'stream_end carries the current messageId')
+
+        const result = events.find((e) => e.type === 'result')
+        assert.equal(result.cost, null, 'cost=null skips billing accumulation')
+        assert.ok(Number.isFinite(result.duration), 'duration is finite')
+
+        const err = events.find((e) => e.type === 'error')
+        assert.equal(err.code, 'ASK_USER_QUESTION_STALL', 'error code preserved for dashboard chip')
+        assert.equal(err.toolUseId, 'toolu_aq_stall')
+
+        // Best-effort Ctrl-C so claude TUI itself unsticks for the next turn.
+        assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+
+        assert.equal(session._isBusy, false, 'busy cleared')
+        assert.equal(session._currentMessageId, null, 'messageId nulled')
+        assert.equal(session._activeTurn, null, 'active turn nulled')
+        assert.equal(session._pendingUserAnswer, null, 'pending answer slot cleared')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
     it('watchdog does NOT fire when PostToolUse arrives in time (happy path)', () => {
       mock.timers.enable({ apis: ['setTimeout'] })
       try {
