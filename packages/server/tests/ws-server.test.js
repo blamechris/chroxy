@@ -1297,8 +1297,12 @@ describe('_replayHistory()', () => {
     const endIdx = messages.indexOf(replayEnd)
     assert.ok(startIdx < endIdx, 'history_replay_start should come before history_replay_end')
 
-    // Full ring buffer is replayed — all 5 messages including user_input
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: replay also emits synthetic `agent_idle` after each `result`
+    // to mirror the live event-normalizer fan-out (so dashboard handleAgentIdle
+    // fires for replayed sessions). Filter those out — this test is about the
+    // original history entries, not the fan-out (which has its own test in
+    // ws-history.test.js).
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
     assert.equal(replayed.length, 5, 'Should replay full ring buffer (all 5 entries)')
     assert.equal(replayed[0].type, 'message')
     assert.equal(replayed[0].messageType, 'user_input')
@@ -1340,7 +1344,9 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: filter out synthetic agent_idle (fan-out after each `result`)
+    // — this test asserts on original history entries.
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
 
     assert.equal(replayed.length, 3, 'Should replay all 3 entries')
     for (const entry of replayed) {
@@ -1378,7 +1384,9 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: filter out synthetic agent_idle (fan-out after each `result`)
+    // — this test asserts on original history entries.
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
 
     // Full ring buffer replayed — all 5 messages across both turns
     assert.equal(replayed.length, 5, 'Should replay all turns (5 entries)')
@@ -1445,7 +1453,9 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: filter out synthetic agent_idle (fan-out after each `result`)
+    // — this test asserts on original history entries.
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
 
     assert.equal(replayed.length, 4)
 
