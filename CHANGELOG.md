@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.29] - 2026-05-31
+
+Hot-fix for the v0.9.28 dogfood: multi-line dashboard prompts (anything with an embedded newline from Shift+Enter in the composer) silently wedged claude TUI's input box. The TUI v2.1.x composer treats raw `\n` as "insert newline in multi-line composition" with no way to break out via a subsequent `\r` — the prompt appeared in the input but never submitted, leaving the dashboard's "Working…" indicator running against a TUI doing nothing. This blocked end-to-end testing of the v0.9.28 multi-question fixes because the test prompts themselves were multi-line.
+
+### Fixed
+
+- **Multi-line prompts delivered via single bracketed paste (#4678, #4679):** `_writePtyTextThrottled` in `claude-tui-session.js` now detects newlines in incoming text and bypasses the per-char throttle in favor of a single atomic write wrapping the body in CSI bracketed-paste markers (`\x1b[200~ ... \x1b[201~\r`). Order-sensitive sanitization strips embedded `\x1b[201~` end-markers BEFORE the trailing-newline strip so attacker- or user-injected paste terminators can't truncate the body and re-expose hidden trailing newlines. Single-line prompts continue through the existing paste-detector-aware throttle path unchanged. Pinned by 8 new tests in `claude-tui-session-paste-heuristic.test.js` covering byte sequence, CRLF normalization, trailing-newline strip, 201~ strip ordering, empty-body abort guard, abort-during-write, single-line regression, and the composite case where 201~ markers hide a trailing newline.
+
 ## [0.9.28] - 2026-05-31
 
 Three follow-up fixes from the v0.9.27 dogfood: the multi-question dashboard form no longer renders for tool_uses that the permission hook will deny, the desktop Copy transcript actually puts text on the OS clipboard, and the require-review-before-merge hook resolves regardless of the bash cwd. The two dashboard fixes together stop the misroute path where users would submit the dead multi-question form and have all four answers typed into Q1's slot in claude TUI.
