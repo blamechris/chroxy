@@ -18,6 +18,11 @@ import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-man
 import { SessionMessageHistory } from './session-message-history.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
+import {
+  forwardPerSessionSettingsToProviderOpts,
+  serializePerSessionSettings,
+  restorePerSessionSettings,
+} from './per-session-settings.js'
 
 const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
@@ -646,37 +651,28 @@ export class SessionManager extends EventEmitter {
     if (this._trustMismatchMode !== null) {
       providerOpts.trustMismatchMode = this._trustMismatchMode
     }
-    // Per-session promptEvaluator toggle (#3185). Forwarded as-is —
-    // BaseSession coerces to a strict boolean, so passing `undefined`
-    // (omitted by client) yields the safe `false` default. Restored
-    // sessions persist this in session-state.json (see serializeState).
-    if (typeof promptEvaluator === 'boolean') {
-      providerOpts.promptEvaluator = promptEvaluator
-    }
-    // #3639: per-session promptEvaluatorSkipPattern. Same shape as
-    // promptEvaluator above — only string sources are forwarded; null,
-    // empty string, or non-string values use BaseSession's `null`
-    // default. Validation (regex compile) happens inside BaseSession
-    // so a hand-edited state file with a malformed source falls back
-    // to null without crashing session creation.
+    // #4664: per-session toggle/string settings (promptEvaluator,
+    // chroxyContextHint, sessionPreamble) are forwarded through the
+    // registry so adding a new knob is one entry in
+    // PER_SESSION_SETTINGS rather than another `if (typeof x === ...)`
+    // block here. Each registry entry's `acceptFromWire` predicate
+    // mirrors the original per-knob shape — non-matching values are
+    // dropped so BaseSession's constructor coerce applies the default.
+    forwardPerSessionSettingsToProviderOpts(providerOpts, {
+      promptEvaluator,
+      chroxyContextHint,
+      sessionPreamble,
+    })
+    // #3639: per-session promptEvaluatorSkipPattern. Kept out of the
+    // per-session-settings registry because the wire shape ('non-empty
+    // string OR null/empty to clear', with pre-validation regex compile)
+    // doesn't fit the boolean/string factory. Only string sources are
+    // forwarded; null, empty string, or non-string values use
+    // BaseSession's `null` default. Validation (regex compile) happens
+    // inside BaseSession so a hand-edited state file with a malformed
+    // source falls back to null without crashing session creation.
     if (typeof promptEvaluatorSkipPattern === 'string' && promptEvaluatorSkipPattern.length > 0) {
       providerOpts.promptEvaluatorSkipPattern = promptEvaluatorSkipPattern
-    }
-    // #3805: per-session Chroxy context hint. Same shape as the
-    // promptEvaluator path — only forward when an explicit boolean is
-    // present so omitting the field keeps BaseSession's `false`
-    // default. Restored sessions persist this in session-state.json
-    // (see serializeState below).
-    if (typeof chroxyContextHint === 'boolean') {
-      providerOpts.chroxyContextHint = chroxyContextHint
-    }
-    // #4660: per-session preamble. Only forward when a string is supplied
-    // so omitting the field keeps BaseSession's `''` default. Trimming +
-    // length-capping happens inside BaseSession (single coercion site).
-    // Restored sessions persist this in session-state.json (see
-    // serializeState below).
-    if (typeof sessionPreamble === 'string') {
-      providerOpts.sessionPreamble = sessionPreamble
     }
     // #3540: hydrate the persisted stdin_disabled flag onto the new
     // session so restoreState() round-trips correctly. Only forwarded
@@ -868,11 +864,13 @@ export class SessionManager extends EventEmitter {
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
         isolation: entry.isolation || 'none',
-        // #3185: surface the per-session promptEvaluator toggle so the
-        // dashboard can render the toggle's current state without a
-        // separate round-trip. Defensive coerce in case a custom
-        // provider class skips the BaseSession field initialiser.
-        promptEvaluator: !!entry.session.promptEvaluator,
+        // #4664: per-session toggle/string settings (promptEvaluator,
+        // chroxyContextHint, sessionPreamble) surface through the
+        // registry so the dashboard can hydrate every knob's current
+        // state without a separate round-trip. Each registry entry's
+        // `coerce` doubles as the defensive cast guarding against a
+        // custom provider that skipped BaseSession's field initialiser.
+        ...serializePerSessionSettings(entry.session),
         // #3639: surface the per-session skip-pattern source so the
         // dashboard can show / edit the per-session override without
         // having to introspect via a separate request. `null` when
@@ -880,25 +878,14 @@ export class SessionManager extends EventEmitter {
         // applies as a fallback (see input-handlers.js). Treat empty
         // string as unset so the wire shape stays stable across the
         // setter/constructor (which normalise '' to null) and a
-        // serialise -> restore round-trip.
+        // serialise -> restore round-trip. Kept out of the registry
+        // because the empty-as-null shape doesn't fit the
+        // boolean/string factory.
         promptEvaluatorSkipPattern:
           typeof entry.session.promptEvaluatorSkipPattern === 'string' &&
           entry.session.promptEvaluatorSkipPattern.length > 0
             ? entry.session.promptEvaluatorSkipPattern
             : null,
-        // #3805: surface the per-session Chroxy-context-hint toggle so the
-        // dashboard can render its checkbox without a separate round-trip.
-        // Strict-boolean coerce so a hypothetical custom provider that
-        // skips the BaseSession field initialiser still round-trips a
-        // valid boolean on the wire.
-        chroxyContextHint: !!entry.session.chroxyContextHint,
-        // #4660: surface the per-session preamble so the dashboard can
-        // hydrate its text area without a separate round-trip. String
-        // coerce so a custom provider that skips the BaseSession field
-        // initialiser still round-trips a valid string on the wire.
-        sessionPreamble: typeof entry.session.sessionPreamble === 'string'
-          ? entry.session.sessionPreamble
-          : '',
         // #3540: surface the latched stdin_disabled flag so reconnecting
         // clients (and clients connecting after a server restart) see
         // the disabled state without waiting for a fresh `error` event.
@@ -1179,11 +1166,11 @@ export class SessionManager extends EventEmitter {
         name: entry.name,
         lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
-        // #3185: persist promptEvaluator so reconnects across restarts
-        // preserve the user's toggle state. Strict-boolean coerce so
-        // older state files (pre-#3185) round-trip as `false` rather
-        // than `undefined` after restore.
-        promptEvaluator: !!entry.session.promptEvaluator,
+        // #4664: persist per-session toggle/string settings via the
+        // shared registry — each entry's coerce produces the same
+        // strict-boolean/string-default shape the pre-refactor per-knob
+        // code wrote (so an old state file round-trips identically).
+        ...serializePerSessionSettings(entry.session),
         // #3639: persist the per-session skip-pattern source. Null when
         // unset — old state files (pre-#3639) restore as null (the
         // BaseSession default) so this is fully backward compatible.
@@ -1196,19 +1183,6 @@ export class SessionManager extends EventEmitter {
           entry.session.promptEvaluatorSkipPattern.length > 0
             ? entry.session.promptEvaluatorSkipPattern
             : null,
-        // #3805: persist the Chroxy-context-hint toggle so reconnects
-        // across restarts preserve the user's choice. Strict-boolean
-        // coerce so older state files (pre-#3805) round-trip as
-        // `false` rather than `undefined` after restore.
-        chroxyContextHint: !!entry.session.chroxyContextHint,
-        // #4660: persist the user-authored preamble so reconnects
-        // across restarts preserve the user's pre-loaded context.
-        // String coerce so a custom provider that skips the BaseSession
-        // field initialiser still writes a valid string to the state
-        // file instead of `undefined`.
-        sessionPreamble: typeof entry.session.sessionPreamble === 'string'
-          ? entry.session.sessionPreamble
-          : '',
         // #3540: persist the SidecarProcess `stdin_disabled` latch so a
         // server restart preserves the disabled state. Without this, a
         // client connecting after restart would not see the banner — the
@@ -1285,26 +1259,21 @@ export class SessionManager extends EventEmitter {
           permissionMode: saved.permissionMode,
           resumeSessionId: saved.sdkSessionId,
           provider: saved.provider || undefined,
-          // #3185: forward the persisted toggle through the typed
-          // pathway. createSession ignores non-boolean inputs (older
-          // state files lack the field), so this round-trips cleanly.
-          promptEvaluator: typeof saved.promptEvaluator === 'boolean' ? saved.promptEvaluator : undefined,
-          // #3639: same pattern — forward the persisted skip-pattern
-          // source. Non-string / empty values are dropped (createSession
-          // ignores them) so older state files restore as null.
+          // #4664: restore per-session toggle/string settings via the
+          // shared registry. Each registry entry's `acceptFromConstructor`
+          // predicate drops malformed values to `undefined` so
+          // createSession applies BaseSession's default — exact match for
+          // the pre-refactor per-knob behaviour, and older state files
+          // (without these fields) round-trip cleanly.
+          ...restorePerSessionSettings(saved),
+          // #3639: forward the persisted skip-pattern source. Non-string /
+          // empty values are dropped (createSession ignores them) so older
+          // state files restore as null. Kept out of the registry because
+          // the empty-string-as-null wire shape doesn't fit the
+          // boolean/string factory.
           promptEvaluatorSkipPattern: typeof saved.promptEvaluatorSkipPattern === 'string' && saved.promptEvaluatorSkipPattern.length > 0
             ? saved.promptEvaluatorSkipPattern
             : undefined,
-          // #3805: restore the per-session Chroxy-context-hint flag from
-          // disk so reconnects across server restarts preserve the
-          // user's choice. createSession ignores non-boolean inputs so
-          // older state files (pre-#3805, no field) restore as `false`.
-          chroxyContextHint: typeof saved.chroxyContextHint === 'boolean' ? saved.chroxyContextHint : undefined,
-          // #4660: restore the user-authored preamble from disk so
-          // reconnects across server restarts preserve the user's
-          // pre-loaded context. createSession ignores non-string inputs
-          // so older state files (pre-#4660, no field) restore as `''`.
-          sessionPreamble: typeof saved.sessionPreamble === 'string' ? saved.sessionPreamble : undefined,
           // #3540: forward the persisted stdin_disabled latch. Only
           // truthy values flip the flag; pre-#3540 state files (no
           // field) restore as `false`. The SdkSession constructor
