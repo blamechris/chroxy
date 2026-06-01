@@ -23,6 +23,27 @@
  * Analysis: tail the JSONL file to find the keystroke patterns that
  * advance between questions, toggle multiSelect, and reach Submit.
  *
+ * 10+ option questions (#4625):
+ *   The 2026-05-30 empirical recording only covered questions with ≤9
+ *   options (single-digit hotkeys '1'..'9'). For questions with 10+
+ *   options, two TUI keystroke paths are theoretically possible — neither
+ *   has been verified live:
+ *     - Arrow-key navigation: '\x1b[B' (down) N-1 times + '\r' (Enter)
+ *       to commit. Risk: claude TUI's multi-question form layout may not
+ *       accept arrow keys (no empirical recording exists).
+ *     - Multi-digit hotkey (e.g. '10', '11'): the v0.9.x single-digit
+ *       commit-on-keystroke behaviour pinned in #4292 makes this
+ *       unlikely to work; the second digit would either be dropped or
+ *       parsed as the next question's input.
+ *   Until a recorder pass exists for either path, the chroxy driver
+ *   (claude-tui-session.js) bails with ASK_USER_QUESTION_TOO_MANY_OPTIONS
+ *   when the user picks an option at index ≥9 — the dashboard surfaces a
+ *   toast asking the user to re-prompt with fewer options. To extend the
+ *   driver, record a session against a 10+ option question and pick
+ *   options 10, 11, etc. with whichever keystroke pattern works, then
+ *   add the supported keys to the multi-question driver and remove the
+ *   too-many-options guard.
+ *
  * Exit:
  *   Ctrl+D — clean exit (closes recording file)
  *   Ctrl+\ — kill claude immediately

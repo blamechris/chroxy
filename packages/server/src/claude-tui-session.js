@@ -2052,6 +2052,57 @@ export class ClaudeTuiSession extends BaseSession {
       log.warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
     }
 
+    // #4625 — claude TUI's hotkey alphabet is single-digit '1'..'9' only,
+    // which covers options at indices 0..8. When a question has 10+ options
+    // AND the user explicitly picked one at index ≥ 9, we have no
+    // representable keystroke. Pre-#4625 the driver silently defaulted
+    // such picks to option 1 (with only a buried WARN in chroxy.log),
+    // dropping the user's explicit pick without UI feedback. Detect the
+    // condition up-front and surface a structured
+    // ASK_USER_QUESTION_TOO_MANY_OPTIONS error so the dashboard can
+    // render a toast prompting the user to re-prompt the agent for fewer
+    // options. Bails BEFORE any PTY write so the form stays in its
+    // initial state — claude TUI's watchdog or the user's Ctrl-C unsticks
+    // it. We deliberately scope the check to explicit user picks: a
+    // 10+ option question with no per-question answer still falls back
+    // to option 1 (back-compat for old clients), which is acceptable
+    // because nothing was silently dropped.
+    if (haveMap) {
+      const unrepresentable = []
+      for (const q of questions) {
+        const opts = Array.isArray(q.options) ? q.options : []
+        if (opts.length <= 9) continue
+        const raw = map[q.question]
+        // Gather every label the user picked for this question (single- or multi-select).
+        let labels = []
+        if (typeof raw === 'string' && raw.length > 0) {
+          let parsed = null
+          try { parsed = JSON.parse(raw) } catch { parsed = null }
+          labels = Array.isArray(parsed)
+            ? parsed.filter((s) => typeof s === 'string')
+            : [raw]
+        } else if (Array.isArray(raw)) {
+          labels = raw.filter((s) => typeof s === 'string')
+        }
+        for (const label of labels) {
+          const idx = opts.findIndex((o) => o && o.label === label)
+          if (idx >= 9) unrepresentable.push({ question: q.question, label, index: idx, total: opts.length })
+        }
+      }
+      if (unrepresentable.length > 0) {
+        const first = unrepresentable[0]
+        log.warn(`AskUserQuestion multi-question: question has ${first.total} options and the user picked option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS instead of silently defaulting to option 1 (tool=${prevToolUseId || '?'})`)
+        this._pendingUserAnswer = null
+        this._clearAskUserQuestionLock()
+        this.emit('error', {
+          code: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
+          message: `Couldn't answer: a question has ${first.total} options and you picked option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
+          toolUseId: prevToolUseId,
+        })
+        return
+      }
+    }
+
     /** Resolve a single label to its 1-indexed digit; null if no usable digit. */
     const labelToDigit = (q, label) => {
       if (!q || !Array.isArray(q.options) || q.options.length === 0) return null

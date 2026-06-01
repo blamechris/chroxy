@@ -3662,6 +3662,150 @@ describe('ClaudeTuiSession', () => {
       assert.deepEqual(session._pendingUserAnswer.options, questions[0].options,
         'options still points at questions[0].options for back-compat')
     })
+
+    // #4625 — 10+ option questions. claude TUI's single-digit hotkey
+    // alphabet only covers indices 0..8 (digits '1'..'9'). The pre-#4625
+    // driver silently defaulted picks of options 10+ to option 1 (with a
+    // WARN buried in chroxy.log), so the user's explicit pick was
+    // dropped without any UI feedback. The fix surfaces a structured
+    // error before any keystroke is written so the dashboard can prompt
+    // the user to re-ask with fewer options.
+    describe('10+ option support (#4625)', () => {
+      // The 10-option case: user picked option 10 (index 9). The driver
+      // can't express index 9 in single-digit hotkey land, so it MUST
+      // emit ASK_USER_QUESTION_TOO_MANY_OPTIONS and tear down the turn
+      // instead of writing keystrokes that would silently land on option 1.
+      it('multi-question: pick of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS error + no PTY writes', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        // Q1 has 12 options; user picked option 10 (label 'j').
+        const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenPlusOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // No keystrokes written — bailed out before the PTY write path.
+        assert.deepEqual(writes, [], `expected no PTY writes, got ${JSON.stringify(writes)}`)
+
+        // Structured error surfaced so the dashboard can render a toast
+        // and clear the Working banner.
+        assert.equal(errors.length, 1, 'exactly one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+        assert.equal(errors[0].toolUseId, 'toolu_big')
+        assert.match(errors[0].message, /option/i,
+          `error message mentions the option-count limitation, got ${errors[0].message}`)
+
+        // Pending cleared so subsequent answers don't write into a
+        // resolved-but-now-torn-down turn.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after too-many error')
+
+        // No stall watchdog armed — the error is the resolution.
+        assert.equal(session._askUserQuestionWatchdog, null, 'watchdog NOT armed (error is the resolution)')
+
+        // WARN in chroxy.log so the wedge is greppable.
+        const warn = warnLines.find((m) => /AskUserQuestion multi-question: question has \d+ options/.test(m))
+        assert.ok(warn, `expected too-many-options WARN, got ${JSON.stringify(warnLines)}`)
+      })
+
+      // Boundary: a 10-option question where the user picked option 9 (the
+      // LAST representable digit) — driver MUST drive normally, not bail.
+      // This pins the exact edge of the supported range.
+      it('multi-question: pick of option 9 in a 10-option question still drives normally', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_edge', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // 'i' is index 8 → digit '9' (the highest supported digit).
+        session.respondToQuestion('', { 'Q1?': 'i', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // Driver wrote normally — no too-many error.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // Q1 → '9', Q2 → '1', Submit → '1', wrapped in paste toggles.
+        assert.deepEqual(writes, ['\x1b[?2004l', '9', '1', '1', '\x1b[?2004h'],
+          `expected '9' + '1' + Submit sequence, got ${JSON.stringify(writes)}`)
+      })
+
+      // Multi-select toggle of an option at index ≥ 9 also fires the error.
+      // (Mirror of the single-select case to make sure the multi-select
+      // branch isn't accidentally exempt — both go through labelToDigit.)
+      // Form has 2 questions so the multi-question driver path is taken
+      // (the questions.length===1 branch falls into the legacy single-q
+      // writer which has its own #4292 fall-through-to-label-text path).
+      it('multi-question (multi-select): toggle of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: elevenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_multi_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // User toggled options 'a' (index 0 → digit '1') AND 'k' (index 10 → unrepresentable).
+        session.respondToQuestion('', { 'Q1?': JSON.stringify(['a', 'k']), 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.deepEqual(writes, [], 'no PTY writes once any pick is unrepresentable')
+        assert.equal(errors.length, 1, 'one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+        assert.equal(errors[0].toolUseId, 'toolu_multi_big')
+      })
+
+      // Negative: a 10+ option question where the dashboard sent NO
+      // answersMap (back-compat fallback). The pre-#4625 behavior of
+      // defaulting to option 1 is preserved — no error fires because
+      // the user didn't make an unrepresentable pick.
+      it('multi-question: 10+ options with NO answersMap keeps the default-to-option-1 back-compat (no error)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenPlus = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenPlus },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_nomap_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Old client: just text, no answersMap.
+        session.respondToQuestion('a')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // No error — the user's pick (option 1) IS representable; the
+        // default-to-option-1 fallback honors it for Q2 too. This is the
+        // pre-#4625 path; #4625 only fires when the user EXPLICITLY picks
+        // an index ≥ 9.
+        assert.equal(errors.length, 0, `expected no errors for back-compat path, got ${JSON.stringify(errors)}`)
+        // Q1 → '1', Q2 → '1', Submit → '1'.
+        assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '1', '\x1b[?2004h'],
+          `expected default-to-1 sequence even with 10+ options, got ${JSON.stringify(writes)}`)
+      })
+    })
   })
 
   // #4044: per-session option that spawns claude TUI with the literal
