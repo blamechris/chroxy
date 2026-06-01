@@ -64,6 +64,7 @@ import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
 import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
 import { readClipboardImage } from './utils/clipboard-image'
 import { writeText as clipboardWriteText } from './utils/clipboard'
+import { formatQuestionAnswerSummary } from './utils/questionAnswerSummary'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
@@ -1498,11 +1499,11 @@ export function App() {
             // forms. sendUserQuestionResponse handles both shapes;
             // markPromptAnswered records a string summary on the bubble so
             // the post-answer collapse UI has something readable to show.
+            // #4622 — formatQuestionAnswerSummary pretty-prints multi-select
+            // JSON-stringified arrays as comma-joined labels so the chip
+            // doesn't leak `["App","Tests"]` JSON syntax into UX copy.
             sendUserQuestionResponse(answer, storeMsg.toolUseId)
-            const summary = typeof answer === 'string'
-              ? answer
-              : Object.entries(answer).map(([q, v]) => `${q}: ${v}`).join(' | ')
-            markPromptAnswered(storeMsg.id, summary)
+            markPromptAnswered(storeMsg.id, formatQuestionAnswerSummary(answer))
           }}
         />
       )
