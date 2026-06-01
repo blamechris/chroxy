@@ -70,37 +70,52 @@ function findMatchingParen(src, openIdx) {
   return -1
 }
 
+// Constructor → required option in tests. Each entry pins a state-bearing
+// class whose default writes under `~/.chroxy/`. Adding more entries here is
+// the right move when a new class joins the bug class.
+const RULES = [
+  { ctor: 'SessionManager', requiredOpt: 'stateFilePath', helper: 'tmpStateFile()' },
+  { ctor: 'CheckpointManager', requiredOpt: 'checkpointsDir', helper: 'a tmp directory (mkdtempSync)' },
+]
+
 const offenders = []
 for (const file of walk(TESTS_DIR)) {
   const src = readFileSync(file, 'utf8')
-  const NEEDLE = 'new SessionManager('
-  let i = 0
-  while (true) {
-    const idx = src.indexOf(NEEDLE, i)
-    if (idx === -1) break
-    i = idx + 1
-    if (isInsideComment(src, idx)) continue
-    const openParen = idx + NEEDLE.length - 1
-    const closeParen = findMatchingParen(src, openParen)
-    if (closeParen === -1) continue
-    const callBody = src.slice(idx, closeParen + 1)
-    if (!/\bstateFilePath\b/.test(callBody)) {
-      const before = src.slice(0, idx)
-      const line = before.split('\n').length
-      offenders.push(`${file}:${line}`)
+  for (const { ctor, requiredOpt } of RULES) {
+    const needle = `new ${ctor}(`
+    let i = 0
+    while (true) {
+      const idx = src.indexOf(needle, i)
+      if (idx === -1) break
+      i = idx + 1
+      if (isInsideComment(src, idx)) continue
+      const openParen = idx + needle.length - 1
+      const closeParen = findMatchingParen(src, openParen)
+      if (closeParen === -1) continue
+      const callBody = src.slice(idx, closeParen + 1)
+      const optRe = new RegExp(`\\b${requiredOpt}\\b`)
+      if (!optRe.test(callBody)) {
+        const before = src.slice(0, idx)
+        const line = before.split('\n').length
+        offenders.push({ file, line, ctor, requiredOpt })
+      }
     }
   }
 }
 
 if (offenders.length) {
-  console.error('ERROR: the following test sites construct SessionManager without an explicit stateFilePath:')
-  for (const o of offenders) console.error(`  ${o}`)
+  console.error('ERROR: the following test sites construct state-bearing classes without an explicit tmp-path option:')
+  for (const o of offenders) {
+    console.error(`  ${o.file}:${o.line}  (missing ${o.requiredOpt} in new ${o.ctor}(...))`)
+  }
   console.error('')
-  console.error('Fix: add `stateFilePath: tmpStateFile()` (or another temp path) to the constructor options.')
+  for (const { ctor, requiredOpt, helper } of RULES) {
+    console.error(`Fix for ${ctor}: pass \`${requiredOpt}: ${helper}\` in the constructor options.`)
+  }
   console.error('Pattern: see packages/server/tests/session-manager.test.js (`tmpStateFile()` helper).')
   console.error('Background: issue #4633, packages/server/tests/_setup.mjs.')
   if (process.env.DRY_RUN === '1') process.exit(0)
   process.exit(1)
 }
 
-console.log('OK: every new SessionManager(...) in tests includes stateFilePath')
+console.log(`OK: every ${RULES.map(r => 'new ' + r.ctor + '(...)').join(' / ')} in tests includes its required tmp-path option`)
