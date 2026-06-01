@@ -116,4 +116,89 @@ describe('StreamStallChip (#4476)', () => {
       }
     })
   })
+
+  // #4603 — per-provider copy variants. Different providers stall in
+  // qualitatively different ways (SDK = half-open HTTPS to Anthropic API,
+  // CLI = subprocess pipe wedge, TUI = PTY write back-pressure). Surfacing
+  // the provider short label in the chip headline gives the operator a
+  // one-glance hint about WHICH stack stalled without forcing them to dig
+  // through logs to correlate.
+  describe('per-provider copy (#4603)', () => {
+    it('prefixes the headline with the provider short label when provided', () => {
+      render(<StreamStallChip errorText="raw" provider="claude-sdk" />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/SDK · Stream stalled — retry\?/)
+    })
+
+    it('combines the provider prefix with the humanised timeout when both are present', () => {
+      render(<StreamStallChip errorText="raw" provider="claude-cli" timeoutMs={300_000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/CLI · No response for 5 minutes — retry\?/)
+    })
+
+    it('falls back gracefully for unknown providers', () => {
+      // Unknown providers should still render — getProviderInfo's fallback
+      // path uppercases the raw name. The chip should not crash and the
+      // headline should still contain a sensible short label.
+      render(<StreamStallChip errorText="raw" provider="weird-custom-provider" />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      // Unknown provider gets uppercased fallback short.
+      expect(chip.textContent).toMatch(/WEIRD-CUSTOM-PROVIDER · Stream stalled — retry\?/)
+    })
+
+    it('omits the prefix entirely when provider is undefined, empty, or whitespace', () => {
+      // No regression — older render paths (and replayed historical entries
+      // before provider was threaded in) must continue to render the
+      // bare headline without a stray "· " or "undefined · " artefact.
+      for (const bad of [undefined, '', '   ']) {
+        cleanup()
+        render(<StreamStallChip errorText="raw" provider={bad} />)
+        const chip = screen.getByTestId('stream-stall-chip')
+        expect(chip.textContent).toMatch(/^Stream stalled — retry\?$/)
+      }
+    })
+  })
+
+  // #4603 — telemetry / log link from the chip for triage. Operators
+  // investigating a recurring stall pattern need a one-tap route to the
+  // session's system pane (where the stall + surrounding context is
+  // surfaced). The chip stays decoupled from view-mode plumbing by
+  // accepting an `onViewLogs` callback — the dashboard wires it to
+  // `setViewMode('system')`; the mobile app can wire it differently
+  // or omit it entirely.
+  describe('view-logs affordance (#4603)', () => {
+    it('renders a View logs button when onViewLogs is provided', () => {
+      const onViewLogs = vi.fn()
+      render(<StreamStallChip errorText="raw" onViewLogs={onViewLogs} />)
+      expect(screen.getByTestId('stream-stall-chip-view-logs')).toBeInTheDocument()
+    })
+
+    it('hides the View logs button when onViewLogs is omitted', () => {
+      // Mobile / minimal contexts that don't have a logs view shouldn't
+      // show a dangling affordance.
+      render(<StreamStallChip errorText="raw" />)
+      expect(screen.queryByTestId('stream-stall-chip-view-logs')).toBeNull()
+    })
+
+    it('invokes onViewLogs when the View logs button is clicked', () => {
+      const onViewLogs = vi.fn()
+      render(<StreamStallChip errorText="raw" onViewLogs={onViewLogs} />)
+      fireEvent.click(screen.getByTestId('stream-stall-chip-view-logs'))
+      expect(onViewLogs).toHaveBeenCalledTimes(1)
+    })
+
+    it('renders Retry and View logs side-by-side when both callbacks are provided', () => {
+      // Common case: live stall with both affordances available. Both
+      // buttons must be present and independently clickable so the user
+      // can pick the resolution path that fits their situation.
+      const onRetry = vi.fn()
+      const onViewLogs = vi.fn()
+      render(<StreamStallChip errorText="raw" onRetry={onRetry} onViewLogs={onViewLogs} />)
+      expect(screen.getByTestId('stream-stall-chip-retry')).toBeInTheDocument()
+      expect(screen.getByTestId('stream-stall-chip-view-logs')).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('stream-stall-chip-view-logs'))
+      expect(onViewLogs).toHaveBeenCalledTimes(1)
+      expect(onRetry).not.toHaveBeenCalled()
+    })
+  })
 })

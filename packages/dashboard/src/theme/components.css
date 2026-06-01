@@ -1648,7 +1648,8 @@
 .stream-stall-chip-text {
   white-space: nowrap;
 }
-.stream-stall-chip-retry {
+.stream-stall-chip-retry,
+.stream-stall-chip-view-logs {
   background: transparent;
   border: 1px solid currentColor;
   color: inherit;
@@ -1658,10 +1659,20 @@
   cursor: pointer;
 }
 .stream-stall-chip-retry:hover,
-.stream-stall-chip-retry:focus {
+.stream-stall-chip-retry:focus,
+.stream-stall-chip-view-logs:hover,
+.stream-stall-chip-view-logs:focus {
   background: var(--warning-fg);
   color: var(--bg-primary);
   outline: none;
+}
+
+/* #4603: secondary affordance — visually de-emphasised vs Retry so the
+   primary recovery path (resending the user input) stays the obvious
+   target while still surfacing a triage shortcut for operators. */
+.stream-stall-chip-view-logs {
+  opacity: 0.85;
+  font-weight: normal;
 }
 
 .msg.thinking {
