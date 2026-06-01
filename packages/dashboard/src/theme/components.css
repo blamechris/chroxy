@@ -2218,6 +2218,21 @@
   opacity: 1;
 }
 
+/* #4666: deferred-notice variant shown when the TUI emits a multi-question
+   AskUserQuestion. The permission-hook denies the combined form (#4648);
+   chroxy waits for Claude to re-emit one question at a time, and this
+   placeholder explains the gap so the user doesn't try to interact. Muted
+   tone — visually distinct from the active question-prompt card. */
+.question-prompt--deferred {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.question-prompt--deferred .question-text {
+  margin-bottom: 0;
+  color: var(--text-muted);
+}
+
 /* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
    The component renders these class names but they previously had no
    CSS rules — Submit fell back to the native browser button (gray-on-

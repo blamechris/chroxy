@@ -46,8 +46,18 @@ export interface QuestionPromptProps {
 export function QuestionPrompt({ question, options, answered, questions, onSelect }: QuestionPromptProps) {
   const isMultiQuestion = Array.isArray(questions) && questions.length > 1
 
+  // #4666: the permission-hook (`packages/server/hooks/permission-hook.sh`,
+  // shipped in #4648 / v0.9.24) unconditionally denies any AskUserQuestion
+  // whose `questions[]` has length > 1 because the TUI keystroke driver
+  // can't reliably answer combined multi-question forms. The dashboard
+  // still receives the tool_use event though (broadcast is independent of
+  // the permission decision), so rendering the interactive MultiQuestionForm
+  // here would let the user submit answers that route through
+  // `_pendingUserAnswer` to the wrong question slot — see the live trace in
+  // #4666 / #4668. Render a non-interactive placeholder instead so the user
+  // understands chroxy is waiting for Claude to retry one-at-a-time.
   if (isMultiQuestion && answered == null) {
-    return <MultiQuestionForm questions={questions} onSelect={onSelect} />
+    return <MultiQuestionDeferredNotice count={questions.length} />
   }
 
   return (
@@ -61,19 +71,48 @@ export function QuestionPrompt({ question, options, answered, questions, onSelec
 }
 
 /**
+ * #4666 — non-interactive placeholder shown when the TUI emitted a
+ * multi-question AskUserQuestion. The permission-hook will deny the
+ * combined form and force Claude to re-emit one question at a time;
+ * those single-question retries render with the normal interactive UI.
+ */
+function MultiQuestionDeferredNotice({ count }: { count: number }) {
+  return (
+    <div
+      className="question-prompt question-prompt--deferred"
+      data-testid="multi-question-deferred-notice"
+      role="status"
+    >
+      <div className="question-text">
+        Claude tried to ask {count} questions at once. Waiting for it to retry one at a time…
+      </div>
+    </div>
+  )
+}
+
+/**
  * #4604 Chunk B — N-question form. Each question gets its own selection
  * control (radio for single-select, checkboxes for multiSelect); the
  * single Submit button at the bottom fires `onSelect(answersMap)` with
  * one entry per question (multi-select values are JSON-stringified
  * arrays so the wire shape `Record<string,string>` is preserved — the
  * server's respondToQuestion JSON.parse handles the round trip).
+ *
+ * #4666 — intentionally retained but not currently rendered by
+ * `QuestionPrompt`. The permission-hook denies multi-question
+ * AskUserQuestion tool_uses, so showing the interactive form would let
+ * the user submit answers that misroute via the single `_pendingUserAnswer`
+ * field. Once #4668's `Map<toolUseId, ...>` refactor lands, native
+ * multi-question support can be re-enabled by flipping the gate in
+ * `QuestionPrompt` back to rendering this component. Exported so that
+ * `noUnusedLocals` doesn't strip it while it sits dormant.
  */
-interface MultiQuestionFormProps {
+export interface MultiQuestionFormProps {
   questions: ChatMessageQuestion[]
   onSelect: (answersMap: Record<string, string>) => void
 }
 
-function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProps) {
+export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProps) {
   // State per question: single-select holds the chosen value string,
   // multi-select holds an array of chosen value strings. Indexed by
   // question position so duplicate question texts don't collide.

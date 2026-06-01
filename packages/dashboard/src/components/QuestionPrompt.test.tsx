@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core'
-import { QuestionPrompt } from './QuestionPrompt'
+import { QuestionPrompt, MultiQuestionForm } from './QuestionPrompt'
 
 afterEach(cleanup)
 
@@ -337,13 +337,14 @@ describe('QuestionPrompt', () => {
     })
   })
 
-  // #4604 Chunk B — multi-question form UI. Renders one selection control
-  // per question (radio for single-select, checkboxes for multi-select)
-  // with a single Submit button that fires onSelect(answersMap).
-  describe('multi-question form (#4604 Chunk B)', () => {
-    // Using `as const` so the tuple types index without
-    // noUncheckedIndexedAccess complaints. Each question is consumed as
-    // a top-level fixture below.
+  // #4666: multi-question AskUserQuestion tool_uses are denied at the
+  // permission-hook (#4648 / v0.9.24) because the keystroke driver can't
+  // reliably answer combined forms, and the broadcast layer emits the
+  // tool_use independently of the deny decision. The dashboard must render
+  // a non-interactive notice instead of the MultiQuestionForm so the user
+  // can't submit answers that misroute through `_pendingUserAnswer` to the
+  // wrong question slot (the long-term refactor lives on #4668).
+  describe('multi-question deferred notice (#4666)', () => {
     const q1 = {
       question: 'Which release strategy?',
       options: [{ label: 'Patch', value: 'Patch' }, { label: 'Minor', value: 'Minor' }],
@@ -363,97 +364,7 @@ describe('QuestionPrompt', () => {
     }
     const multiQuestions = [q1, q2, q3]
 
-    it('renders every question with its label', () => {
-      render(
-        <QuestionPrompt
-          question={q1.question}
-          options={q1.options}
-          questions={multiQuestions}
-          onSelect={vi.fn()}
-        />
-      )
-      expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
-      expect(screen.getByText('Which release strategy?')).toBeInTheDocument()
-      expect(screen.getByText('Which targets?')).toBeInTheDocument()
-      expect(screen.getByText('Confirm?')).toBeInTheDocument()
-    })
-
-    it('single-select questions render as radio buttons', () => {
-      render(
-        <QuestionPrompt
-          question={q1.question}
-          options={q1.options}
-          questions={multiQuestions}
-          onSelect={vi.fn()}
-        />
-      )
-      // Q1 single-select renders radios; the two option inputs belong to
-      // the same radio group so only one is selectable at a time.
-      const patch = screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!
-      const minor = screen.getByTestId('question-multi-option-0-Minor').querySelector('input')!
-      expect(patch.getAttribute('type')).toBe('radio')
-      expect(minor.getAttribute('type')).toBe('radio')
-      expect(patch.getAttribute('name')).toBe(minor.getAttribute('name'))
-    })
-
-    it('multi-select questions render as checkboxes', () => {
-      render(
-        <QuestionPrompt
-          question={q1.question}
-          options={q1.options}
-          questions={multiQuestions}
-          onSelect={vi.fn()}
-        />
-      )
-      const app = screen.getByTestId('question-multi-option-1-App').querySelector('input')!
-      const docs = screen.getByTestId('question-multi-option-1-Docs').querySelector('input')!
-      expect(app.getAttribute('type')).toBe('checkbox')
-      expect(docs.getAttribute('type')).toBe('checkbox')
-    })
-
-    it('Submit is disabled until every single-select question has a choice', () => {
-      render(
-        <QuestionPrompt
-          question={q1.question}
-          options={q1.options}
-          questions={multiQuestions}
-          onSelect={vi.fn()}
-        />
-      )
-      const submit = screen.getByTestId('question-multi-submit') as HTMLButtonElement
-      expect(submit).toBeDisabled()
-
-      // Answer Q1 only — still disabled, Q3 unanswered.
-      fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
-      expect(submit).toBeDisabled()
-
-      // Answer Q3 (Q2 is multi-select, allowed empty) — enables Submit.
-      fireEvent.click(screen.getByTestId('question-multi-option-2-Yes').querySelector('input')!)
-      expect(submit).not.toBeDisabled()
-    })
-
-    it('multi-select toggles let the user pick multiple options', () => {
-      render(
-        <QuestionPrompt
-          question={q1.question}
-          options={q1.options}
-          questions={multiQuestions}
-          onSelect={vi.fn()}
-        />
-      )
-      const app = screen.getByTestId('question-multi-option-1-App').querySelector<HTMLInputElement>('input')!
-      const docs = screen.getByTestId('question-multi-option-1-Docs').querySelector<HTMLInputElement>('input')!
-      fireEvent.click(app)
-      fireEvent.click(docs)
-      expect(app.checked).toBe(true)
-      expect(docs.checked).toBe(true)
-      // Toggling off works too.
-      fireEvent.click(app)
-      expect(app.checked).toBe(false)
-      expect(docs.checked).toBe(true)
-    })
-
-    it('Submit fires onSelect with the full answersMap, multi-select JSON-encoded', () => {
+    it('renders the deferred notice instead of the multi-question form when questions.length > 1', () => {
       const onSelect = vi.fn()
       render(
         <QuestionPrompt
@@ -463,24 +374,18 @@ describe('QuestionPrompt', () => {
           onSelect={onSelect}
         />
       )
-      fireEvent.click(screen.getByTestId('question-multi-option-0-Minor').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-option-1-App').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-option-1-Tests').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-option-2-No').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-submit'))
-
-      expect(onSelect).toHaveBeenCalledTimes(1)
-      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string> | undefined
-      expect(arg).toBeDefined()
-      expect(typeof arg).toBe('object')
-      expect(arg!['Which release strategy?']).toBe('Minor')
-      // Multi-select wire shape: JSON-stringified array (Record<string,string>
-      // wire constraint — server's respondToQuestion JSON.parse splits it back).
-      expect(arg!['Which targets?']).toBe(JSON.stringify(['App', 'Tests']))
-      expect(arg!['Confirm?']).toBe('No')
+      expect(screen.getByTestId('multi-question-deferred-notice')).toBeInTheDocument()
+      // The interactive multi-question form is NOT rendered — no Submit,
+      // no per-question radios/checkboxes, no per-question rows.
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('question-multi-submit')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('question-multi-row-0')).not.toBeInTheDocument()
+      // No input elements (radios/checkboxes) rendered for any question.
+      expect(screen.queryAllByRole('radio')).toHaveLength(0)
+      expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
     })
 
-    it('Submit guards against double-fire (only first click registers)', () => {
+    it('the deferred notice is non-interactive (no buttons, never invokes onSelect)', () => {
       const onSelect = vi.fn()
       render(
         <QuestionPrompt
@@ -490,18 +395,30 @@ describe('QuestionPrompt', () => {
           onSelect={onSelect}
         />
       )
-      fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-option-2-Yes').querySelector('input')!)
-      const submit = screen.getByTestId('question-multi-submit')
-      fireEvent.click(submit)
-      fireEvent.click(submit)
-      fireEvent.click(submit)
-      expect(onSelect).toHaveBeenCalledTimes(1)
+      // No buttons rendered at all in the deferred-notice variant.
+      expect(screen.queryAllByRole('button')).toHaveLength(0)
+      // Clicking the notice itself does nothing.
+      fireEvent.click(screen.getByTestId('multi-question-deferred-notice'))
+      expect(onSelect).not.toHaveBeenCalled()
     })
 
-    it('falls back to single-question UI when questions has length <= 1', () => {
-      // N=1 multi-question payload — should render the legacy
-      // single-question UI (button list), not the multi-question form.
+    it('mentions the question count in the notice copy so the user knows what was suppressed', () => {
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          onSelect={vi.fn()}
+        />
+      )
+      const notice = screen.getByTestId('multi-question-deferred-notice')
+      // 3 questions in `multiQuestions`.
+      expect(notice.textContent).toContain('3')
+    })
+
+    it('falls back to single-question UI when questions has length 1', () => {
+      // N=1 payload — single-question UI must render the interactive
+      // button list as before, NOT the deferred notice.
       render(
         <QuestionPrompt
           question="Just one?"
@@ -510,16 +427,47 @@ describe('QuestionPrompt', () => {
           onSelect={vi.fn()}
         />
       )
-      // Legacy single-q UI uses `question-prompt`, not `question-prompt-multi`.
       expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
-      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      // Interactive option buttons remain present.
+      expect(screen.getByText('Yes')).toBeInTheDocument()
+      expect(screen.getByText('No')).toBeInTheDocument()
+    })
+
+    it('falls back to single-question UI when questions is an empty array', () => {
+      // questions.length === 0 — the multi-question branch should not
+      // fire. Single-question UI renders normally.
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={[{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }]}
+          questions={[]}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      expect(screen.getByText('A')).toBeInTheDocument()
+    })
+
+    it('falls back to single-question UI when questions is undefined', () => {
+      // No questions prop at all — the legacy single-question path is
+      // the regression-guard happy path for the v0.9.4 majority case.
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={[{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }]}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
     })
 
     it('falls back to single-question UI when answered is already set (multi-question post-answer summary path)', () => {
-      // The post-answer collapse/summary path is single-question UI only;
-      // once the user has submitted a multi-question form, render the
-      // legacy collapse UI with the answer summary string. Multi-question
-      // mode is only entered when answered is null/undefined.
+      // Once an answer is recorded, render the single-question collapse
+      // UI — even for a multi-question payload. The deferred notice is
+      // strictly the pre-answer state.
       render(
         <QuestionPrompt
           question="Q1?"
@@ -532,9 +480,44 @@ describe('QuestionPrompt', () => {
           onSelect={vi.fn()}
         />
       )
-      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
-      // Single-q UI renders the answered summary
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      // Single-q UI renders the answered summary (free-text variant).
       expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
+    })
+  })
+
+  // #4666: MultiQuestionForm stays exported but unused by QuestionPrompt.
+  // When the #4668 long-term refactor lands (Map-keyed _pendingUserAnswer),
+  // native multi-question support can be re-enabled by flipping the gate
+  // in QuestionPrompt back to rendering this component. Keep a smoke test
+  // so the dormant component doesn't bit-rot in the meantime.
+  describe('MultiQuestionForm (#4604 Chunk B, dormant per #4666)', () => {
+    const q1 = {
+      question: 'Which release strategy?',
+      options: [{ label: 'Patch', value: 'Patch' }, { label: 'Minor', value: 'Minor' }],
+    }
+    const q2 = {
+      question: 'Confirm?',
+      options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }],
+    }
+
+    it('renders the interactive form when invoked directly', () => {
+      const onSelect = vi.fn()
+      render(<MultiQuestionForm questions={[q1, q2]} onSelect={onSelect} />)
+      expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+      expect(screen.getByTestId('question-multi-submit')).toBeInTheDocument()
+    })
+
+    it('Submit fires onSelect with the answersMap', () => {
+      const onSelect = vi.fn()
+      render(<MultiQuestionForm questions={[q1, q2]} onSelect={onSelect} />)
+      fireEvent.click(screen.getByTestId('question-multi-option-0-Minor').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-1-Yes').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-submit'))
+      expect(onSelect).toHaveBeenCalledTimes(1)
+      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string> | undefined
+      expect(arg!['Which release strategy?']).toBe('Minor')
+      expect(arg!['Confirm?']).toBe('Yes')
     })
   })
 })
