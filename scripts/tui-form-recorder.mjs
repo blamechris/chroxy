@@ -44,12 +44,25 @@ const recordingPath = join(tmpdir(), `tui-form-recording-${Date.now()}.jsonl`)
 const recording = createWriteStream(recordingPath, { encoding: 'utf8' })
 const startMs = Date.now()
 
+// Once true, log() becomes a no-op. flushAndExit() calls recording.end()
+// internally and any later log() (e.g. a late term.onData chunk arriving
+// after we kicked off shutdown in the Ctrl+D path) would otherwise throw
+// ERR_STREAM_WRITE_AFTER_END (#4729 review feedback).
+let recordingClosed = false
+
 const log = (kind, data) => {
+  if (recordingClosed) return
   recording.write(JSON.stringify({
     t: Date.now() - startMs,
     kind,
     data,
   }) + '\n')
+}
+
+const closeRecording = (exitCode) => {
+  if (recordingClosed) return
+  recordingClosed = true
+  flushAndExit(recording, exitCode)
 }
 
 process.stdout.write(`\x1b[33m=== tui-form-recorder ===\x1b[0m\n`)
@@ -79,8 +92,9 @@ term.onExit(({ exitCode, signal }) => {
   process.stdout.write(`Recording: ${recordingPath}\n`)
   // Wait for the recording stream to flush before exiting — process.exit
   // does not wait for buffered writes and was silently truncating the JSONL
-  // (#4729). flushAndExit calls recording.end() internally.
-  flushAndExit(recording, exitCode || 0)
+  // (#4729). closeRecording guards against double-close from the Ctrl+D
+  // path also triggering onExit via SIGTERM.
+  closeRecording(exitCode || 0)
 })
 
 // Raw mode so we capture every keystroke (arrow keys, Tab, etc.) as bytes
@@ -119,8 +133,10 @@ process.stdin.on('data', (buf) => {
     term.kill('SIGTERM')
     // Wait for the recording stream to flush before exiting — the SIGTERM
     // above races the JSONL flush, and process.exit does not wait for
-    // buffered writes (#4729). flushAndExit calls recording.end() internally.
-    flushAndExit(recording, 0)
+    // buffered writes (#4729). closeRecording also flips recordingClosed
+    // so any late onData chunk arriving after kill() becomes a no-op
+    // instead of throwing ERR_STREAM_WRITE_AFTER_END.
+    closeRecording(0)
     return
   }
   // Pass through to claude + log

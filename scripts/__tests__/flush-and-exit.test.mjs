@@ -133,7 +133,45 @@ await test('fallback timeout calls exit if finish event never fires', async () =
   }
 })
 
-// --- Test 4: fallback timer is unref'd so it doesn't keep node alive -----
+// --- Test 4: caller's "closed" guard prevents write-after-end -------------
+// This documents the pattern the recorder uses: a `closed` flag flipped
+// before invoking flushAndExit, so any late writes (e.g. a PTY chunk
+// arriving after Ctrl+D triggered SIGTERM) become no-ops instead of
+// throwing ERR_STREAM_WRITE_AFTER_END on the underlying stream.
+await test('write-after-flushAndExit guarded by caller flag does not throw', async () => {
+  const path = join(tmpdir(), `flush-and-exit-test-${process.pid}-${Date.now()}-4.txt`)
+  const stream = createWriteStream(path, { encoding: 'utf8' })
+  stream.write('first\n')
+
+  let closed = false
+  const safeLog = (line) => {
+    if (closed) return
+    stream.write(line)
+  }
+
+  await new Promise((resolveP) => {
+    closed = true
+    flushAndExit(stream, 0, {
+      exitFn: () => resolveP(),
+    })
+  })
+
+  // Simulate late writes arriving after shutdown started — must be silent.
+  let threw = false
+  try {
+    safeLog('late chunk 1\n')
+    safeLog('late chunk 2\n')
+  } catch {
+    threw = true
+  }
+  assert(!threw, 'safeLog should swallow late writes once closed flag is set')
+
+  const contents = readFileSync(path, 'utf8')
+  assert(contents === 'first\n', `file should contain only the pre-close write, got: ${JSON.stringify(contents)}`)
+  rmSync(path, { force: true })
+})
+
+// --- Test 5: fallback timer is unref'd so it doesn't keep node alive -----
 await test('fallback timer is unref-ed', async () => {
   // Spawn a small node process that calls flushAndExit on a stuck stream
   // with a long fallback timeout. If the timer is unref-ed, the process
