@@ -1900,13 +1900,22 @@ export class SessionManager extends EventEmitter {
   _sanitizeProviderTimeoutMap(input, { name, allowZero = false }) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) return null
     const sanitised = {}
+    const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
     for (const [providerId, value] of Object.entries(input)) {
       const ok = isOperatorTimeoutInRange(value, { allowZero, name: `${name}.${providerId}`, log })
       if (ok) {
         sanitised[providerId] = value
-      } else {
-        log.warn(`ignoring invalid entry '${name}.${providerId}'=${String(value)} — falling back to global / default`)
+        continue
       }
+      // `isOperatorTimeoutInRange` already emits a tagged warn for the
+      // over-ceiling case (see duration.js:39); avoid duplicating it
+      // here. The lower-bound / non-finite / negative paths return
+      // false silently, so we still need to surface those — emit ONE
+      // warn so an operator scanning logs can correlate the dropped
+      // entry back to the config.json key path.
+      const numericValue = typeof value === 'number' ? value : NaN
+      if (Number.isFinite(numericValue) && numericValue > MAX_SANE_DURATION_MS) continue
+      log.warn(`ignoring invalid entry '${name}.${providerId}'=${String(value)} — falling back to global / default`)
     }
     return sanitised
   }

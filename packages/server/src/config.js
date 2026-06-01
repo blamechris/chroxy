@@ -308,8 +308,16 @@ export function validateConfig(config, verbose = false) {
   ) {
     for (const [providerId, value] of Object.entries(config.providerStreamStallTimeoutMs)) {
       const path = `providerStreamStallTimeoutMs.${providerId}`
+      // NB: a bad per-entry value is an "Invalid value" warning (NOT
+      // "Invalid type") even when the JS-level type mismatches the
+      // expected number. The CLI layer (`cli/shared.js:loadAndMergeConfig`)
+      // treats any warning whose prefix is "Invalid type" as a fatal
+      // startup error — using that wording for a single mis-typed map
+      // entry would prevent the whole server from booting, contradicting
+      // the documented "drop bad entries, fall through to global" contract
+      // (see PR #4745 Copilot review feedback).
       if (typeof value !== 'number') {
-        warnings.push(`Invalid type for '${path}': expected number, got ${Array.isArray(value) ? 'array' : typeof value}`)
+        warnings.push(`Invalid value for '${path}': expected number, got ${Array.isArray(value) ? 'array' : typeof value}`)
         continue
       }
       if (!Number.isFinite(value) || value < 0) {
