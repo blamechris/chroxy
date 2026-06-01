@@ -1057,6 +1057,34 @@ describe('dead code removal', () => {
     }).success, false)
   })
 
+  // #4621 (Copilot review): per-array-item cap is 10_000 chars to bound
+  // total per-answer cost. Labels are short by construction; the
+  // legacy 100_000-char string cap is preserved only on the
+  // back-compat string branch (JSON-stringified arrays from older
+  // dashboards).
+  it('UserQuestionResponseSchema rejects array members longer than 10_000 chars (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    const ok = 'x'.repeat(10_000)
+    const tooBig = 'x'.repeat(10_001)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': [ok] },
+    }).success, true)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': [tooBig] },
+    }).success, false)
+    // The string branch keeps the 100_000-char cap for legacy
+    // JSON-stringified-array payloads from pre-#4621 dashboards.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': 'x'.repeat(100_000) },
+    }).success, true)
+  })
+
   it('SandboxSchema rejects arrays larger than 256', async () => {
     const { SandboxSchema } = await import('@chroxy/protocol')
     const mk = (n) => Array.from({ length: n }, (_, i) => `item${i}`)

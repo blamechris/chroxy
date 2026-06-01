@@ -344,8 +344,15 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
  * `multiSelect: true` questions instead of JSON-stringifying them.
  * The legacy JSON-encoded string shape is still accepted for back-compat
  * with in-flight payloads during deploy and with older dashboards that
- * haven't picked up the new wire shape. Array values are capped at 100
- * entries (mirroring the per-answer-map cap) to bound parse cost.
+ * haven't picked up the new wire shape.
+ *
+ * Array bounds: at most 100 entries per array (mirroring the per-answer-
+ * map cap), and at most 10_000 chars per entry. Multi-select values are
+ * option labels (short by construction) — capping at 10_000 chars keeps
+ * the total per-answer worst case bounded at ~1MB without the legacy
+ * 100_000-char-per-item cap on the string path, which exists to cover
+ * the JSON-stringified-array shape sent by pre-#4621 dashboards (and is
+ * itself bounded by the top-level CHROXY_MAX_PAYLOAD).
  */
 export declare const UserQuestionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
