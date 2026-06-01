@@ -46,6 +46,7 @@ import { ToolGroup } from './components/ToolGroup'
 import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { StreamStallChip } from './components/StreamStallChip'
+import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -1445,6 +1446,33 @@ export function App() {
     [storeMessages],
   )
 
+  // #4615: track which `type: 'prompt'` bubbles have been invalidated by a
+  // subsequent ASK_USER_QUESTION_STALL error. The server emits the error
+  // when the Claude TUI never acknowledges an AskUserQuestion answer —
+  // typically a multi-question form wedge. The pending QuestionPrompt is
+  // now dead, so submitting it would fire keystrokes into a session that
+  // already discarded the prompt context. We suppress the interactive
+  // prompt render (the AskUserQuestionStallChip rendered for the error
+  // bubble below it carries the retry affordance).
+  const stalledPromptIds = useMemo(() => {
+    const stalled = new Set<string>()
+    let lastStallIndex = -1
+    for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
+      const m = storeMessages[i]!
+      if (m.type === 'error' && m.code === 'ASK_USER_QUESTION_STALL') {
+        lastStallIndex = i
+        break
+      }
+    }
+    if (lastStallIndex >= 0) {
+      for (let i = 0; i < lastStallIndex; i += 1) {
+        const m = storeMessages[i]!
+        if (m.type === 'prompt' && !m.answered) stalled.add(m.id)
+      }
+    }
+    return stalled
+  }, [storeMessages])
+
   // Custom message renderer for permission prompts and tool bubbles
   const chatTailMessageId = chatMessages.length > 0
     ? chatMessages[chatMessages.length - 1]!.id
@@ -1495,6 +1523,13 @@ export function App() {
 
     // Question prompt (options or free-text fallback)
     if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
+      // #4615 — suppress unanswered prompts that have been invalidated by
+      // a subsequent ASK_USER_QUESTION_STALL. The chip rendered for the
+      // stall error carries the retry affordance; leaving the interactive
+      // prompt visible would let the user submit answers into a dead
+      // _pendingUserAnswer slot. Already-answered prompts still render
+      // (their answer summary is part of chat history).
+      if (stalledPromptIds.has(storeMsg.id)) return null
       return (
         <QuestionPrompt
           question={storeMsg.content}
@@ -1584,9 +1619,31 @@ export function App() {
       )
     }
 
+    // #4615: dedicated chip for ASK_USER_QUESTION_STALL errors. The server
+    // emits `error{code: 'ASK_USER_QUESTION_STALL'}` (PR #4614) when the
+    // Claude TUI never acknowledges an AskUserQuestion answer — typically
+    // a multi-question form wedge. Generic red toast reads as "broken";
+    // this affordance signals "recoverable, just retry your original
+    // request" and offers a one-tap resend of the last user message.
+    // Mirrors the StreamStallChip pattern (#4476): retry only on tail
+    // entries so replayed historical stalls show the chip + tooltip for
+    // diagnostics but don't offer a misleading resend button.
+    if (storeMsg.type === 'error' && storeMsg.code === 'ASK_USER_QUESTION_STALL') {
+      const isTail = msg.id === chatTailMessageId
+      const lastUserInput = isTail
+        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
+        : undefined
+      return (
+        <AskUserQuestionStallChip
+          errorText={storeMsg.content}
+          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
+        />
+      )
+    }
+
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, activeSessionProvider, setViewMode])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, activeSessionProvider, setViewMode, stalledPromptIds])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders
