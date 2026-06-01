@@ -2224,6 +2224,10 @@ export function App() {
         // #4653: the active session's chroxy-side intervention ring. Empty
         // by default — the chip hides itself when nothing has fired.
         interventions={interventions}
+        // #4653: threaded so the panel collapses on session switch (the
+        // FooterBar instance is shared across sessions, so without this
+        // the open panel would persist with stale entries).
+        activeSessionId={activeSessionId}
       />
 
       {/* Settings panel */}

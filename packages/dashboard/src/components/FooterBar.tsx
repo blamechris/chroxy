@@ -7,7 +7,7 @@
  * Spans full width across sidebar + main content (grid-column: 1 / -1).
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { SessionIntervention } from '@chroxy/store-core'
 import {
   costTooltip,
@@ -58,6 +58,14 @@ export interface FooterBarProps {
    * timestamps + reasons. Empty array / undefined hides the chip entirely.
    */
   interventions?: SessionIntervention[]
+  /**
+   * #4653 — active session id, threaded so the FooterBar can reset the
+   * expanded-panel local state when the user switches sessions. Without
+   * this, the panel would stay open showing the OLD session's entries
+   * after a switch (FooterBar is a single instance with no key reset).
+   * Undefined when no session is active — the panel just stays collapsed.
+   */
+  activeSessionId?: string | null
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -105,13 +113,19 @@ export function FooterBar({
   contextWindow,
   onCompact,
   interventions,
+  activeSessionId,
 }: FooterBarProps) {
   // #4653: collapsed by default — the chip just shows the count, click to
   // expand the recent-interventions list. Local state because the panel
-  // is per-active-session and the store doesn't need to remember it
-  // across session switches (a session switch will re-render with the new
-  // session's intervention list, dismissing the panel naturally).
+  // is a transient UI affordance the store doesn't need to remember.
   const [interventionsOpen, setInterventionsOpen] = useState(false)
+  // #4653 Copilot review: FooterBar is a single instance (not keyed by
+  // session id), so the panel-open state survives session switches by
+  // default. Reset it on switch so the user doesn't see the old session's
+  // entries in the panel after switching to a different session.
+  useEffect(() => {
+    setInterventionsOpen(false)
+  }, [activeSessionId])
   const interventionCount = interventions?.length ?? 0
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 

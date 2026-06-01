@@ -6670,6 +6670,7 @@ describe('handleMultiQuestionIntervention', () => {
       'active-1',
     )
     const { interventions } = builder!.applyTo([])
+    // 3.7 floors to 3 — still >= 2, so it's accepted with the floored value.
     expect(interventions[0].count).toBe(3)
   })
 
@@ -6685,7 +6686,7 @@ describe('handleMultiQuestionIntervention', () => {
     ).toBeNull()
   })
 
-  it('returns null when questionCount is missing, non-finite, or negative', () => {
+  it('returns null when questionCount is missing, non-finite, or < 2 (mirrors wire schema)', () => {
     expect(
       handleMultiQuestionIntervention({ toolUseId: 'a' }, 'active-1'),
     ).toBeNull()
@@ -6698,9 +6699,37 @@ describe('handleMultiQuestionIntervention', () => {
         'active-1',
       ),
     ).toBeNull()
+    // < 2 — the permission-hook never denies single-q forms, so a 0/1
+    // count is a malformed payload and would render a misleading
+    // "0 questions" or "1 question" in the UI.
     expect(
       handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: -1 }, 'active-1'),
     ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 0 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 1 }, 'active-1'),
+    ).toBeNull()
+    // 1.9 floors to 1 — also rejected (defence against fractional payloads
+    // that would sneak past a naive `>= 2` check).
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 1.9 }, 'active-1'),
+    ).toBeNull()
+    // Boundary: exactly 2 is the smallest valid count.
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 2 }, 'active-1'),
+    ).not.toBeNull()
+  })
+
+  it('accepts timestamp === 0 (epoch is valid per protocol — clock-skewed dev environments)', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_epoch', questionCount: 2, timestamp: 0 },
+      'a',
+    )
+    expect(builder).not.toBeNull()
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].timestamp).toBe(0)
   })
 
   it('ring-caps the array at MAX_SESSION_INTERVENTIONS (drops oldest entries)', async () => {

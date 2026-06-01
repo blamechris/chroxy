@@ -529,18 +529,26 @@ export function handleMultiQuestionIntervention(
   if (typeof toolUseIdRaw !== 'string' || toolUseIdRaw.length === 0) return null
 
   const countRaw = msg.questionCount
-  // `questionCount` from the server is always >= 2 (the hook only fires
-  // for multi-q). Defensive lower-bound at 0 here so a malformed payload
-  // doesn't store a negative — the counter UI would render "-3 questions"
-  // which is worse than dropping the entry.
-  if (typeof countRaw !== 'number' || !Number.isFinite(countRaw) || countRaw < 0) {
+  // `questionCount` from the server is always >= 2 (the permission-hook
+  // only denies multi-question forms — single-q is the happy path). Mirror
+  // the protocol Zod schema (`ServerMultiQuestionInterventionSchema`) here
+  // as defence in depth: floor BEFORE the threshold check so 1.9 doesn't
+  // sneak past as 1, then drop anything < 2 so a malformed payload doesn't
+  // render "0 questions" or "1 question" in the counter UI (both would lie
+  // about what happened — the hook only fires for >= 2).
+  if (typeof countRaw !== 'number' || !Number.isFinite(countRaw)) {
     return null
   }
   const count = Math.floor(countRaw)
+  if (count < 2) return null
 
   const tsRaw = msg.timestamp
+  // Mirror the protocol schema's `timestamp >= 0` bound — epoch 0 is
+  // explicitly allowed so a clock-skewed dev environment doesn't bounce
+  // the event off the wire. Only fall back to Date.now() when the payload
+  // is missing or non-numeric, NOT when timestamp is legitimately 0.
   const timestamp =
-    typeof tsRaw === 'number' && Number.isFinite(tsRaw) && tsRaw > 0
+    typeof tsRaw === 'number' && Number.isFinite(tsRaw) && tsRaw >= 0
       ? Math.floor(tsRaw)
       : Date.now()
 

@@ -401,5 +401,34 @@ describe('FooterBar', () => {
       fireEvent.click(screen.getByLabelText('Close interventions panel'))
       expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
     })
+
+    it('collapses the panel when the active session changes (#4653 Copilot review)', () => {
+      // The FooterBar is a single instance shared across sessions (not keyed
+      // on activeSessionId), so without an explicit effect the panel would
+      // stay open showing the OLD session's entries after a switch. This
+      // pins the reset-on-switch behavior.
+      const { rerender } = render(
+        <FooterBar
+          {...baseProps}
+          activeSessionId="sess-a"
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_a', count: 2, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      expect(screen.getByTestId('footer-interventions-panel')).toBeInTheDocument()
+      // Switch to a different session — panel must collapse.
+      rerender(
+        <FooterBar
+          {...baseProps}
+          activeSessionId="sess-b"
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_b', count: 3, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
+    })
   })
 })
