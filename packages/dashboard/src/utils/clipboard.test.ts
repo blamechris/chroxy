@@ -32,7 +32,9 @@ function clearNavigatorClipboard() {
       configurable: true,
     })
   } catch {
-    // ignore — afterEach resets via setNavigatorClipboard in each test
+    // ignore — if jsdom locks `clipboard` non-configurable, the next test
+    // that needs a specific value calls setNavigatorClipboard() before
+    // exercising the helper, which overrides the stale value.
   }
 }
 
@@ -62,6 +64,24 @@ describe('writeText() clipboard helper (#4673)', () => {
 
     expect(result).toBe(false)
     expect(tauriWrite).toHaveBeenCalledWith('hello')
+  })
+
+  // #4676 — Copilot review: when the Tauri plugin is reachable but rejects,
+  // we must NOT fall through to navigator.clipboard. Under WKWebView the
+  // navigator path is exactly the broken one #4673 was filed for (resolves
+  // without writing), so a fallback would re-introduce the lying "Copied!"
+  // indicator. Hard-fail returns false and leaves navigator untouched.
+  it('returns false (and does NOT call navigator.clipboard) when the Tauri plugin write rejects even if navigator.clipboard is present', async () => {
+    const tauriWrite = vi.fn().mockRejectedValue(new Error('plugin denied'))
+    const navWrite = vi.fn().mockResolvedValue(undefined)
+    setTauri({ writeText: tauriWrite })
+    setNavigatorClipboard({ writeText: navWrite })
+
+    const result = await writeText('hello')
+
+    expect(result).toBe(false)
+    expect(tauriWrite).toHaveBeenCalledWith('hello')
+    expect(navWrite).not.toHaveBeenCalled()
   })
 
   it('falls back to navigator.clipboard.writeText when not in Tauri', async () => {

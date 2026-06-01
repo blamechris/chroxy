@@ -37,15 +37,25 @@ export async function writeText(text: string): Promise<boolean> {
   if (isTauri()) {
     const cm = getTauriClipboardManager()
     if (cm?.writeText) {
+      // The Tauri plugin is the authoritative clipboard path under the
+      // desktop shell. If it rejects, do NOT fall through to
+      // navigator.clipboard — under WKWebView that path resolves without
+      // actually writing (the original #4673 bug), so a fallback would
+      // silently re-introduce the lying success indicator. Treat the
+      // rejection as a hard failure and return false so callers skip the
+      // "Copied!" affordance.
       try {
         await cm.writeText(text)
         return true
       } catch {
-        // Tauri plugin rejected — fall through to navigator.clipboard so the
-        // user still gets a chance to copy if the JS API happens to work in
-        // this build.
+        return false
       }
     }
+    // Plugin entry missing under Tauri (e.g. withGlobalTauri changed, or
+    // capability removed). Fall through to the navigator path below — same
+    // false-positive risk applies, but at that point the Tauri side is
+    // misconfigured and there is no better option than letting the JS API
+    // try.
   }
 
   // Browser-dashboard path (also the Tauri fallback if the plugin isn't
