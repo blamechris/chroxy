@@ -687,7 +687,14 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   useEffect(() => { preambleDirtyRef.current = preambleDirty }, [preambleDirty])
   // #4662: parked snapshot for the conflict banner. Set when a server
   // broadcast diverges from the dirty draft. `undefined` = no conflict.
+  // The ref mirror lets `handleDiscardPreambleDraft` read the current
+  // snapshot without binding it via closure (which would force the
+  // callback to re-create on every snapshot change and defeat the
+  // `useCallback([])` dep contract). Mirrors the `preambleDirtyRef`
+  // pattern above.
   const [preambleConflict, setPreambleConflict] = useState<string | undefined>(undefined)
+  const preambleConflictRef = useRef<string | undefined>(undefined)
+  useEffect(() => { preambleConflictRef.current = preambleConflict }, [preambleConflict])
   // #4662: track the session the current draft belongs to. When
   // activeSessionId changes mid-edit we MUST cancel the pending
   // debounce — otherwise `setSessionPreamble` reads activeSessionId
@@ -749,18 +756,20 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
 
   // #4662: user takes the remote snapshot — replace the draft, clear
   // dirty, drop any pending debounce so we don't immediately overwrite
-  // the snapshot we just accepted.
+  // the snapshot we just accepted. Side effects live OUTSIDE the
+  // setState updater (StrictMode would otherwise invoke them twice);
+  // we read the parked snapshot off the ref instead of via closure so
+  // the `useCallback([])` dep contract stays valid.
   const handleDiscardPreambleDraft = useCallback(() => {
-    setPreambleConflict((snap) => {
-      if (snap === undefined) return undefined
-      if (preambleDebounceRef.current) {
-        clearTimeout(preambleDebounceRef.current)
-        preambleDebounceRef.current = null
-      }
-      setPreambleDraft(snap)
-      setPreambleDirty(false)
-      return undefined
-    })
+    const snap = preambleConflictRef.current
+    if (snap === undefined) return
+    if (preambleDebounceRef.current) {
+      clearTimeout(preambleDebounceRef.current)
+      preambleDebounceRef.current = null
+    }
+    setPreambleDraft(snap)
+    setPreambleDirty(false)
+    setPreambleConflict(undefined)
   }, [])
 
   // #4559: shared copy for the inline "server disconnected" banner so the
