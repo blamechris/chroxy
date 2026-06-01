@@ -344,6 +344,38 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // #4696: trigger phrase 'show-plan-approval' emits a `plan_ready`
+        // wire message so the Maestro plan-approval flow can exercise the
+        // PlanApprovalCard render + Approve/Deny paths on a real simulator.
+        // Mirrors the production wire shape — see
+        // packages/server/src/event-normalizer.js `plan_ready` builder which
+        // ships `{ type: 'plan_ready', allowedPrompts }` after the CLI
+        // session detects ExitPlanMode (cli-session.js#L883). The mobile
+        // handler is store-core/handlers/index.ts handlePlanReady (mapped
+        // in packages/app/src/store/message-handler.ts `case 'plan_ready'`)
+        // which flips `isPlanPending` true + stores prompts. ChatView then
+        // mounts PlanApprovalCard at the bottom of the message list.
+        //
+        // Tapping Approve calls handleApprovePlan in SessionScreen — it
+        // sends the canonical PLAN_APPROVAL_MESSAGE ('Go ahead with the
+        // plan') back through `sendInput`, which loops into this `input`
+        // handler. The default branch echoes it back as a normal assistant
+        // response, satisfying the post-approval assertion. We do NOT emit
+        // anything else here for the plan_ready trigger — `agent_busy` is
+        // not set because plan-ready arrives at end-of-turn (the prior
+        // turn that produced the plan already cleared busy via `result`).
+        if (text.trim() === 'show-plan-approval') {
+          send(ws, {
+            type: 'plan_ready',
+            sessionId: 'mock-sess-1',
+            allowedPrompts: [
+              { tool: 'Bash', prompt: 'npm test' },
+              { tool: 'Edit', prompt: 'src/index.js' },
+            ],
+          })
+          break
+        }
+
         // Default: simulate a normal text-only assistant response.
         const messageId = `msg-${Date.now()}`
         send(ws, { type: 'stream_start', messageId, sessionId: 'mock-sess-1' })

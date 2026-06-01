@@ -61,10 +61,10 @@ function PlanApprovalCard({
   onFeedback: () => void;
 }) {
   return (
-    <View style={styles.planCard}>
+    <View style={styles.planCard} testID="plan-approval-card">
       <Text style={styles.planCardHeader}>Plan Ready for Review</Text>
       {allowedPrompts.length > 0 && (
-        <View style={styles.planPromptsList}>
+        <View style={styles.planPromptsList} testID="plan-content">
           <Text style={styles.planPromptsLabel}>Permissions needed:</Text>
           {allowedPrompts.map((p, i) => (
             <Text key={i} style={styles.planPromptItem}>
@@ -79,6 +79,7 @@ function PlanApprovalCard({
           onPress={onApprove}
           accessibilityRole="button"
           accessibilityLabel="Approve plan"
+          testID="plan-approve-button"
         >
           <Text style={styles.planApproveText}>Approve</Text>
         </TouchableOpacity>
@@ -87,6 +88,7 @@ function PlanApprovalCard({
           onPress={onFeedback}
           accessibilityRole="button"
           accessibilityLabel="Give feedback on plan"
+          testID="plan-deny-button"
         >
           <Text style={styles.planFeedbackText}>Give Feedback</Text>
         </TouchableOpacity>

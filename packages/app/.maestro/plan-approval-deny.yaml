@@ -1,0 +1,124 @@
+appId: com.blamechris.chroxy
+name: PlanApprovalCard deny/feedback path
+---
+
+# #4696 — Sibling to plan-approval.yaml that exercises the "Give
+# Feedback" path. In the mobile UI this button does NOT itself send
+# a wire message — it focuses the chat input so the user can type a
+# rebuttal. The plan card stays mounted until the user actually sends
+# something (SessionScreen sendMessage clears plan state on send while
+# `isPlanPending` is true), so this flow:
+#
+#   1. trigger plan_ready via 'show-plan-approval'
+#   2. tap Give Feedback (plan-deny-button)
+#   3. assert the card is still mounted (no auto-dismiss)
+#   4. type rebuttal feedback + send
+#   5. assert the card unmounts and the rebuttal lands in chat
+#
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17),
+# iPhone 17 Pro Max (iOS 26.1), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip the onboarding carousel if it's showing.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait for ConnectScreen OR Chat.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# Manual-entry connect if we landed on ConnectScreen.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+      - hideKeyboard
+      - tapOn:
+          id: "connect-submit"
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Make sure Chat tab is selected.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit `plan_ready`.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-plan-approval"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for the plan approval card to render.
+- extendedWaitUntil:
+    visible:
+      id: "plan-approval-card"
+    timeout: 10000
+
+- assertVisible:
+    id: "plan-deny-button"
+
+# Tap Give Feedback — focuses the chat input via handleFocusInput.
+# The card itself stays mounted until the next sendInput call.
+- tapOn:
+    id: "plan-deny-button"
+- waitForAnimationToEnd
+
+# Card is still mounted post-deny tap (focus-only side-effect).
+- assertVisible:
+    id: "plan-approval-card"
+
+- takeScreenshot: plan-approval-deny-feedback-focused
+
+# Type a rebuttal and send — SessionScreen sendMessage calls
+# clearPlanState because isPlanPending is true, dismissing the card.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "Please rework the plan"
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Card unmounts once plan state clears.
+- extendedWaitUntil:
+    notVisible:
+      id: "plan-approval-card"
+    timeout: 5000
+
+# Rebuttal lands in chat history as a user bubble.
+- assertVisible:
+    text: ".*Please rework the plan.*"
+
+- takeScreenshot: plan-approval-deny-sent
