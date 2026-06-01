@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.28] - 2026-05-31
+
+Three follow-up fixes from the v0.9.27 dogfood: the multi-question dashboard form no longer renders for tool_uses that the permission hook will deny, the desktop Copy transcript actually puts text on the OS clipboard, and the require-review-before-merge hook resolves regardless of the bash cwd. The two dashboard fixes together stop the misroute path where users would submit the dead multi-question form and have all four answers typed into Q1's slot in claude TUI.
+
+### Fixed
+
+- **Suppress multi-question AskUserQuestion form in dashboard (#4666, #4675):** `QuestionPrompt.tsx` now renders a non-interactive `MultiQuestionDeferredNotice` ("Claude tried to ask N questions at once. Waiting for it to retry one at a time…") when `questions.length > 1`, instead of the combined form whose Submit button was dead under the #4648 hook deny. Removes the misroute path that fed all four answers into the first question's slot via `_pendingUserAnswer`. `MultiQuestionForm` is retained (exported, with re-enable comment) for #4668's long-term Map-keyed refactor.
+- **Desktop Copy transcript actually writes to the OS clipboard (#4673, #4676):** new `packages/dashboard/src/utils/clipboard.ts` helper prefers the Tauri clipboard-manager plugin (already wired in `Cargo.toml` and `capabilities/default.json`) when running under `isTauri()`, falls back to `navigator.clipboard.writeText` for the browser dashboard. The previous `navigator.clipboard.writeText` path resolved successfully on Tauri 2's WKWebView without actually writing — the check-mark fired but the OS clipboard was empty. `handleCopyTranscript` and the sidebar Copy-path / Copy-Conversation-ID actions now only flip success state when the helper returns `true`, and the Tauri-reject path no longer falls through to the broken `navigator` call.
+- **Require-review-before-merge hook resolves from any cwd (#4674):** `.claude/settings.json` switched the PreToolUse Bash hook from `bash scripts/require-review-before-merge.sh` (cwd-relative — silently broken when agents ran tests from `packages/dashboard/`) to `bash "$CLAUDE_PROJECT_DIR/scripts/require-review-before-merge.sh"`. Before this fix, the merge gate was silently bypassed on any `gh pr merge` invoked from a subdirectory.
+
 ## [0.9.27] - 2026-05-31
 
 Short-term fix for the v0.9.26 multi-question AskUserQuestion wedge (#4668). When claude TUI retried as N "separate" single-question calls after the #4648 multi-question deny, it issued them as parallel `tool_use` blocks in one assistant turn — and chroxy's `_pendingUserAnswer` is a single field, so the user's answer to question 1 routed to question 4's slot and the 5-minute stream-stall watchdog fired. The hook now refuses sibling AskUserQuestion calls while one is already pending, forcing true serialization until the long-term Map-keyed refactor lands.
