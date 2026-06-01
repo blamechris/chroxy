@@ -227,9 +227,9 @@ wss.on('connection', (ws) => {
           break
         }
 
-        // #4701: trigger phrase 'simulate-disconnect' closes the
-        // WebSocket from the server side after a 1s delay so the
-        // Maestro `reconnect.yaml` flow can exercise the
+        // #4701: trigger phrase 'simulate-disconnect' abruptly tears
+        // down the WebSocket from the server side after a 1s delay so
+        // the Maestro `reconnect.yaml` flow can exercise the
         // ConnectionPhase `connected → reconnecting → connected`
         // transition on a real RN runtime. Production scenario —
         // Cloudflare tunnel drops + the client auto-reconnects via
@@ -238,10 +238,18 @@ wss.on('connection', (ws) => {
         // client time to ack the input before the close lands, and
         // mirrors the production case where the server is still
         // processing the in-flight request when the tunnel drops.
+        //
+        // Use `ws.terminate()` (not `ws.close(1006, ...)`) — close code
+        // 1006 is reserved by RFC 6455 and must not be sent in a Close
+        // frame; the `ws` library throws on it (which we'd swallow via
+        // the try/catch, leaving the socket open and the flow
+        // hanging). `terminate()` rips the TCP socket without a Close
+        // frame, which is exactly what an abrupt tunnel drop looks
+        // like — the client observes a 1006 close code locally.
         if (text.trim() === 'simulate-disconnect') {
           setTimeout(() => {
-            console.log('[mock] simulate-disconnect — closing WS')
-            try { ws.close(1006, 'simulate-disconnect') } catch {}
+            console.log('[mock] simulate-disconnect — terminating WS')
+            try { ws.terminate() } catch {}
           }, 1000)
           break
         }

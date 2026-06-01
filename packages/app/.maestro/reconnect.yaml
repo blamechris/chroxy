@@ -23,10 +23,12 @@ name: Reconnect after tunnel drop (#4701)
 #       send button is reachable).
 #
 # Trigger: 'simulate-disconnect' user input → mock-server schedules a
-# `ws.close(1006)` after a 1s delay. The 1s buffer lets the app ack
+# `ws.terminate()` after a 1s delay (abrupt TCP teardown, mirrors a
+# Cloudflare tunnel drop — the client observes a 1006 close locally
+# without a Close frame on the wire). The 1s buffer lets the app ack
 # the input before the close lands and mirrors the production case
 # where the server is mid-stream when the tunnel drops. After the
-# AUTO_RECONNECT_DELAY (currently 1000ms in connection.ts), the app
+# AUTO_RECONNECT_DELAY (currently 1500ms in connection.ts), the app
 # auto-reconnects to the same URL — and because the mock-server is
 # still up on port 9876, the reconnect succeeds.
 #
