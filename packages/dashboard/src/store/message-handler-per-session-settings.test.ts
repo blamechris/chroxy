@@ -267,6 +267,21 @@ describe('dashboard message-handler — per-session setting broadcast receivers 
       const s1 = state.sessions.find((s) => s.sessionId === 's1')!
       expect(s1.chroxyContextHint).toBe(false)
     })
+
+    it('falls back to activeSessionId when sessionId is missing on the wire', () => {
+      // Mirrors the prompt_evaluator_changed legacy-compat case — older
+      // servers (or replays) may omit sessionId. resolveSessionId falls
+      // back to get().activeSessionId so the active session still
+      // updates instead of the event being silently dropped.
+      handleMessage(
+        { type: 'chroxy_context_hint_changed', value: true },
+        ctx() as any,
+      )
+
+      const state = store.getState() as ConnectionState
+      const s1 = state.sessions.find((s) => s.sessionId === 's1')!
+      expect(s1.chroxyContextHint).toBe(true)
+    })
   })
 
   describe('session_preamble_changed (#4660)', () => {
@@ -338,6 +353,21 @@ describe('dashboard message-handler — per-session setting broadcast receivers 
       const state = store.getState() as ConnectionState
       const s1 = state.sessions.find((s) => s.sessionId === 's1')!
       expect(s1.sessionPreamble).toBe('')
+    })
+
+    it('falls back to activeSessionId when sessionId is missing on the wire', () => {
+      // Mirrors the prompt_evaluator_changed legacy-compat case — older
+      // servers (or replays) may omit sessionId. resolveSessionId falls
+      // back to get().activeSessionId so the active session still
+      // updates instead of the event being silently dropped.
+      handleMessage(
+        { type: 'session_preamble_changed', value: 'no sessionId on wire' },
+        ctx() as any,
+      )
+
+      const state = store.getState() as ConnectionState
+      const s1 = state.sessions.find((s) => s.sessionId === 's1')!
+      expect(s1.sessionPreamble).toBe('no sessionId on wire')
     })
   })
 
