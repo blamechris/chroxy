@@ -3677,7 +3677,14 @@ describe('ClaudeTuiSession', () => {
       // instead of writing keystrokes that would silently land on option 1.
       it('multi-question: pick of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS error + no PTY writes', async () => {
         const writes = []
+        // The teardown writes Ctrl-C ('\x03') to unstick the TUI form,
+        // matching _onAskUserQuestionStall. Captured so we can assert
+        // the form bytes are NOT written (driver bailed before any digit
+        // keystroke), and the Ctrl-C IS written (recoverable teardown).
         session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_big'
+        session._activeTurn = { uuid: 'turn_big', synthSeq: 0, startedAt: Date.now() }
         // Q1 has 12 options; user picked option 10 (label 'j').
         const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
           .map((label) => ({ label }))
@@ -3688,21 +3695,40 @@ describe('ClaudeTuiSession', () => {
         session._pendingUserAnswer = { toolUseId: 'toolu_big', questions, options: questions[0].options }
 
         const errors = []
+        const toolResults = []
+        const streamEnds = []
+        const results = []
         session.on('error', (e) => errors.push(e))
+        session.on('tool_result', (tr) => toolResults.push(tr))
+        session.on('stream_end', (se) => streamEnds.push(se))
+        session.on('result', (r) => results.push(r))
 
         session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
         await new Promise((resolve) => setTimeout(resolve, 50))
 
-        // No keystrokes written — bailed out before the PTY write path.
-        assert.deepEqual(writes, [], `expected no PTY writes, got ${JSON.stringify(writes)}`)
+        // No FORM keystrokes written — bailed out before the PTY write
+        // path. The teardown's Ctrl-C ('\x03') IS expected so claude TUI
+        // unsticks from the form screen for the next turn.
+        assert.deepEqual(writes, ['\x03'],
+          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
 
-        // Structured error surfaced so the dashboard can render a toast
-        // and clear the Working banner.
+        // Structured error surfaced so the dashboard can render a toast.
         assert.equal(errors.length, 1, 'exactly one error emitted')
         assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
         assert.equal(errors[0].toolUseId, 'toolu_big')
         assert.match(errors[0].message, /option/i,
           `error message mentions the option-count limitation, got ${errors[0].message}`)
+
+        // Full teardown so the dashboard's Working banner + Stop button +
+        // activeTools entry all clear (mirrors _onAskUserQuestionStall).
+        assert.equal(toolResults.length, 1, 'synthetic tool_result for activeTools clear')
+        assert.equal(toolResults[0].toolUseId, 'toolu_big')
+        assert.equal(streamEnds.length, 1, 'stream_end emitted to clear streamingMessageId')
+        assert.equal(streamEnds[0].messageId, 'msg_big')
+        assert.equal(results.length, 1, '_emitResult fanned for agent_idle')
+        assert.equal(session._isBusy, false, '_isBusy cleared')
+        assert.equal(session._currentMessageId, null, '_currentMessageId cleared')
+        assert.equal(session._activeTurn, null, '_activeTurn cleared')
 
         // Pending cleared so subsequent answers don't write into a
         // resolved-but-now-torn-down turn.
@@ -3753,6 +3779,9 @@ describe('ClaudeTuiSession', () => {
       it('multi-question (multi-select): toggle of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS', async () => {
         const writes = []
         session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_mb'
+        session._activeTurn = { uuid: 'turn_mb', synthSeq: 0, startedAt: Date.now() }
         const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
           .map((label) => ({ label }))
         const questions = [
@@ -3768,7 +3797,10 @@ describe('ClaudeTuiSession', () => {
         session.respondToQuestion('', { 'Q1?': JSON.stringify(['a', 'k']), 'Q2?': 'x' })
         await new Promise((resolve) => setTimeout(resolve, 50))
 
-        assert.deepEqual(writes, [], 'no PTY writes once any pick is unrepresentable')
+        // No FORM keystrokes — bailed before any digit write. Only the
+        // teardown Ctrl-C ('\x03') is present.
+        assert.deepEqual(writes, ['\x03'],
+          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
         assert.equal(errors.length, 1, 'one error emitted')
         assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
         assert.equal(errors[0].toolUseId, 'toolu_multi_big')

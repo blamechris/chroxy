@@ -2092,12 +2092,18 @@ export class ClaudeTuiSession extends BaseSession {
       if (unrepresentable.length > 0) {
         const first = unrepresentable[0]
         log.warn(`AskUserQuestion multi-question: question has ${first.total} options and the user picked option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS instead of silently defaulting to option 1 (tool=${prevToolUseId || '?'})`)
-        this._pendingUserAnswer = null
-        this._clearAskUserQuestionLock()
-        this.emit('error', {
-          code: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
-          message: `Couldn't answer: a question has ${first.total} options and you picked option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
-          toolUseId: prevToolUseId,
+        // Full AskUserQuestion teardown: synth tool_result + Ctrl-C the
+        // TUI + clear inactivity timers + stream_end + _emitResult +
+        // error (in that order). Without the full teardown the dashboard
+        // would leave the Working banner + Stop button up and the
+        // "Running AskUserQuestion · Ns" pill ticking even though
+        // chroxy gave up before writing any keystrokes (#4625 hands the
+        // form's resolution back to the user via the error toast).
+        this._teardownAskUserQuestion(prevToolUseId, {
+          synthResult: `AskUserQuestion failed: question has ${first.total} options and you picked option ${first.index + 1}, beyond the 9 the claude TUI form can drive (#4625).`,
+          emitResultReason: 'ask_user_question_too_many_options',
+          errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
+          errorMessage: `Couldn't answer: a question has ${first.total} options and you picked option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
         })
         return
       }
@@ -2263,6 +2269,41 @@ export class ClaudeTuiSession extends BaseSession {
 
     log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
 
+    this._teardownAskUserQuestion(toolUseId, {
+      synthResult: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      emitResultReason: 'ask_user_question_stall',
+      errorCode: 'ASK_USER_QUESTION_STALL',
+      // #4648: dropped the "likely a multi-question form" jargon. The
+      // permission-hook deny path (also #4648) prevents most multi-question
+      // forms from reaching this code path at all, and for the cases that
+      // slip through, the user doesn't care about chroxy internals — they
+      // care about how to recover. The new copy is action-oriented.
+      errorMessage: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
+    })
+  }
+
+  /**
+   * Shared teardown for AskUserQuestion failure modes. Used by both the
+   * 30s post-write stall watchdog (#4604) and the up-front
+   * too-many-options detector (#4625). Mirrors the end-to-end teardown
+   * order pinned in #4645: synthetic tool_result → Ctrl-C the TUI →
+   * clear inactivity timers → null active turn / busy state →
+   * stream_end + _emitResult → error event last. The caller supplies the
+   * synth result text, _emitResult reason tag, and error code/message so
+   * the same teardown serves both call sites.
+   *
+   * Splitting this out (vs the original inline form in
+   * _onAskUserQuestionStall) is intentional: #4625's too-many-options
+   * path needs the full teardown so the dashboard's Working banner +
+   * Stop button + activeTools entry all clear immediately, but the
+   * trigger and copy differ from the 30s stall path. Inlining the
+   * teardown twice risked drift; folding both into _teardownTurn would
+   * widen the helper's surface (synth tool_result + 3-timer clear +
+   * toolUseId-carrying error don't generalise to the other teardown
+   * sites), so a dedicated AskUserQuestion teardown helper earns its
+   * keep.
+   */
+  _teardownAskUserQuestion(toolUseId, { synthResult, emitResultReason, errorCode, errorMessage }) {
     const messageId = this._currentMessageId
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
 
@@ -2271,14 +2312,13 @@ export class ClaudeTuiSession extends BaseSession {
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
     // the footer "Running AskUserQuestion · Ns" pill keeps ticking
-    // forever even though _isBusy is clear and the user sees the
-    // ASK_USER_QUESTION_STALL error toast. The handler ignores any
-    // fields beyond {toolUseId, result, truncated, images} (see
-    // store-core handleToolResult); pairing-by-toolUseId is what drives
-    // the activeTools removal in store-core handlers.
+    // forever even though _isBusy is clear and the user sees the error
+    // toast. The handler ignores any fields beyond {toolUseId, result,
+    // truncated, images} (see store-core handleToolResult); pairing-by-
+    // toolUseId is what drives the activeTools removal in store-core handlers.
     this.emit('tool_result', {
       toolUseId,
-      result: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      result: synthResult,
       truncated: false,
     })
     // #4628: matching tool_start resolved — drop from the in-flight map.
@@ -2299,9 +2339,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
 
-    // #4022: drop per-turn attachment dir on stall (same as the other
-    // teardown paths) so a stalled turn doesn't leak materialized files
-    // until destroy().
+    // #4022: drop per-turn attachment dir (same as the other teardown
+    // paths) so a failed turn doesn't leak materialized files until destroy().
     this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
@@ -2317,16 +2356,11 @@ export class ClaudeTuiSession extends BaseSession {
     if (messageId) this.emit('stream_end', { messageId })
     this._emitResult(
       { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'ask_user_question_stall',
+      emitResultReason,
     )
     this.emit('error', {
-      code: 'ASK_USER_QUESTION_STALL',
-      // #4648: dropped the "likely a multi-question form" jargon. The
-      // permission-hook deny path (also #4648) prevents most multi-question
-      // forms from reaching this code path at all, and for the cases that
-      // slip through, the user doesn't care about chroxy internals — they
-      // care about how to recover. The new copy is action-oriented.
-      message: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
+      code: errorCode,
+      message: errorMessage,
       toolUseId,
     })
   }
