@@ -369,24 +369,35 @@ export const NotificationPrefsSetSchema = z.object({
     prefs: NotificationPrefsPatchSchema,
 }).passthrough();
 /**
- * #4731 — per-question answer value. Single-select questions arrive as a
- * plain string; multi-select questions arrive as an array of selected
- * label values. The server normalizes arrays to the SDK's canonical
- * comma-separated format inside `PermissionManager.respondToQuestion`
- * (the SDK's `AskUserQuestionOutput.answers` is typed
- * `{ [questionText]: string }` and the spec is explicit:
- * "multi-select answers are comma-separated"). The legacy #4604 Chunk B
- * dashboard JSON.stringifies multi-select arrays into the string variant —
- * the server unwraps that shape too, so older dashboards keep working.
+ * Per-question answer value (#4621 widened shape, #4731 SDK pathway).
+ *
+ * Single-select questions arrive as a plain string; multi-select questions
+ * arrive as a native array of selected label values. The legacy JSON-
+ * encoded string shape is still accepted on the string branch for back-
+ * compat with pre-#4621 dashboards that JSON.stringified multi-select
+ * arrays.
+ *
+ * The server normalizes arrays to the SDK's canonical comma-separated
+ * format inside `PermissionManager.respondToQuestion` (the SDK's
+ * `AskUserQuestionOutput.answers` is typed `{ [questionText]: string }`
+ * and the spec is explicit: "multi-select answers are comma-separated").
+ * Older dashboards' JSON-stringified array payloads are unwrapped on the
+ * same path, so all variants converge before reaching the SDK.
+ *
+ * Bounds:
+ *   - Array max length: 100 entries per question (mirrors the per-answer-
+ *     map cap; chroxy never sees forms past 4 options in practice, so
+ *     this is a generous safety margin).
+ *   - Per-array-entry char cap: 10_000. Multi-select values are option
+ *     labels (short by construction) — capping at 10_000 chars keeps the
+ *     per-answer worst case bounded at ~1MB without the legacy
+ *     100_000-char cap on the string path, which exists to cover the
+ *     JSON-stringified-array shape sent by pre-#4621 dashboards (and is
+ *     itself bounded by the top-level CHROXY_MAX_PAYLOAD).
  */
 const UserQuestionAnswerValueSchema = z.union([
     z.string().max(100_000),
-    // Multi-select array — cap at 32 selections per question to bound
-    // per-answer wire size at the same ~100_000-char ceiling as the string
-    // variant (32 * 4096-char label cap; chroxy never sees forms past 4
-    // options, so 32 is a comfortable safety margin without affecting any
-    // real shape).
-    z.array(z.string().max(4096)).max(32),
+    z.array(z.string().max(10_000)).max(100),
 ]);
 export const UserQuestionResponseSchema = z.object({
     type: z.literal('user_question_response'),
