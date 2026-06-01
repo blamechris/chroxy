@@ -487,13 +487,13 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
     return
   }
   // #4551 — validate every device-key against the same gate
-  // register_push_token uses (>= 20 chars, no whitespace/punctuation).
-  // The Zod schema caps the devices map size as a DoS guard but does
-  // not check key format, so without this an authenticated client can
-  // stuff arbitrary strings into ~/.chroxy/notification-prefs.json and
-  // have them re-served on every notification_prefs_get. Reject the
-  // whole patch on the first bad key (no partial-apply) so the
-  // on-disk state stays clean.
+  // register_push_token enforces (see PushManager.isValidPushTokenFormat
+  // for the canonical rules). The Zod schema caps the devices map size
+  // as a DoS guard but does not check key format, so without this an
+  // authenticated client can stuff arbitrary strings into
+  // ~/.chroxy/notification-prefs.json and have them re-served on every
+  // notification_prefs_get. Reject the whole patch on the first bad key
+  // (no partial-apply) so the on-disk state stays clean.
   if (patch.devices && typeof patch.devices === 'object') {
     for (const key of Object.keys(patch.devices)) {
       if (!PushManager.isValidPushTokenFormat(key)) {
