@@ -1553,6 +1553,12 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* #4652: keep wheel/touchpad scroll inside the chat panel even when
+     an AskUserQuestion form is open. Without `contain`, reaching the
+     top/bottom of the chat lets the scroll bubble up to the outer page
+     (or the form's own inputs absorb the wheel before the chat does),
+     which felt like scrolling was "stuck" while a prompt was visible. */
+  overscroll-behavior: contain;
 }
 
 /* ---- Message rows with sender icons ---- */
@@ -1582,6 +1588,14 @@
 
 .msg {
   max-width: 85%;
+  /* #4757: flex/grid child needs min-width: 0 so a long <pre> or wide
+     inline-code line can't push the bubble past its 85% cap. Without
+     this, intrinsic content width wins and the bubble overflows the
+     chat panel (visible bleed past the right edge on v0.9.32). The
+     same applies inside `.msg-row` where `max-width: unset` removes
+     the bubble's own cap and the parent row's 88% cap is the only
+     wall — without min-width: 0 the bubble blew past it. */
+  min-width: 0;
   padding: 10px 14px;
   border-radius: 12px;
   font-size: var(--text-md);
@@ -1642,7 +1656,8 @@
 .stream-stall-chip-text {
   white-space: nowrap;
 }
-.stream-stall-chip-retry {
+.stream-stall-chip-retry,
+.stream-stall-chip-view-logs {
   background: transparent;
   border: 1px solid currentColor;
   color: inherit;
@@ -1652,10 +1667,20 @@
   cursor: pointer;
 }
 .stream-stall-chip-retry:hover,
-.stream-stall-chip-retry:focus {
+.stream-stall-chip-retry:focus,
+.stream-stall-chip-view-logs:hover,
+.stream-stall-chip-view-logs:focus {
   background: var(--warning-fg);
   color: var(--bg-primary);
   outline: none;
+}
+
+/* #4603: secondary affordance — visually de-emphasised vs Retry so the
+   primary recovery path (resending the user input) stays the obvious
+   target while still surfacing a triage shortcut for operators. */
+.stream-stall-chip-view-logs {
+  opacity: 0.85;
+  font-weight: normal;
 }
 
 .msg.thinking {
@@ -1714,6 +1739,14 @@
   background: var(--bg-code-block);
   border-radius: 6px;
   padding: 10px 12px;
+  /* #4757: cap width at the bubble and scroll the long line INSIDE the
+     <pre>. Previously `overflow-x: auto` was set but no max-width, so a
+     200+ char single line still expanded the <pre>'s intrinsic width
+     past the bubble — the scrollbar never engaged because nothing was
+     actually clipped. `100%` against the min-width:0 bubble means the
+     <pre> takes the bubble's available width and the long line scrolls
+     horizontally inside it. */
+  max-width: 100%;
   overflow-x: auto;
   margin: 6px 0;
   font-size: var(--text-base);
@@ -1724,6 +1757,13 @@
   color: #c8d0e0;
   background: none;
   padding: 0;
+  /* #4757: explicitly keep code inside <pre> on its original lines —
+     the `.msg code` rule below applies break-word for inline spans, and
+     we must NOT inherit that into fenced blocks where line breaks are
+     load-bearing (directory trees, ASCII tables, code formatting). */
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 
 .msg code {
@@ -1733,6 +1773,14 @@
   border-radius: 4px;
   font-size: 0.9em;
   color: #c8d0e0;
+  /* #4757: inline <code> in a paragraph must be able to wrap mid-token
+     when the surrounding text + code exceeds the bubble width.
+     `overflow-wrap: anywhere` is the modern, well-supported answer;
+     `word-break: break-word` adds Safari < 15 coverage. The `.msg pre
+     code` rule above re-asserts `normal` so fenced blocks aren't
+     affected. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .msg strong { color: var(--text-heading); }
@@ -2236,11 +2284,20 @@
 /* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
    The component renders these class names but they previously had no
    CSS rules — Submit fell back to the native browser button (gray-on-
-   dark, unreadable) and questions had no visual separation. */
+   dark, unreadable) and questions had no visual separation.
+
+   #4652: cap height to the viewport and let the form scroll internally
+   when it would otherwise grow taller than the chat pane. Without this
+   cap a large multi-question form pushed messages off-screen and
+   trapped wheel events because the chat-messages container had no room
+   to scroll past the form. */
 .question-prompt--multi {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .question-prompt-multi-row {

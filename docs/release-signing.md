@@ -13,6 +13,10 @@ Used by both macOS and Windows desktop jobs to sign the auto-update artifacts (`
 
 Both must be set and non-empty for signing to run. If either is missing, the workflow passes `-c '{"bundle":{"createUpdaterArtifacts":false}}'` to `cargo tauri build` to suppress the updater bundle entirely. The MSI / DMG / `.app` still build and upload; the `.sig` / `latest.json` outputs do not. The committed `plugins.updater.pubkey` in `tauri.conf.json` remains untouched — only the runtime artifact generation is skipped.
 
+### Cross-platform feed assembly
+
+The `desktop-macos` and `desktop-windows` jobs each emit their own `latest.json` containing only the platform entries they built. The `github-release` job then downloads both artifacts and runs `scripts/merge-updater-feeds.mjs` to combine them into a single `artifacts/updater/latest.json` whose `platforms` map covers `darwin-aarch64`, `darwin-x86_64`, and `windows-x86_64`. The merged file is what gets attached to the GitHub Release and consumed by the auto-updater endpoint configured in `tauri.conf.json`. If updater signing is disabled for one of the jobs (e.g. signing secrets are only configured for macOS), the merge step still publishes the surviving platform; if neither job produced a feed, no `latest.json` is attached and installed clients keep their existing update endpoint until the next release.
+
 ### Generating a new key
 
 ```bash

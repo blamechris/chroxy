@@ -629,22 +629,24 @@ export interface ConnectionState {
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
   /**
-   * #4604 Chunk B / #4651 — answer may be one of three shapes:
+   * #4604 Chunk B / #4621 / #4651 — answer may be one of three shapes:
    * - `string`: legacy single-question / free-text path (back-compat).
-   * - `Record<string,string>`: multi-question form, keyed by question text
-   *   with multi-select values JSON-stringified arrays. The Record path
-   *   populates the wire's `answers` field.
+   * - `Record<string, string | string[]>`: multi-question form, keyed
+   *   by question text. Multi-select values are emitted as native
+   *   `string[]` (#4621) so consumers don't have to JSON.parse to
+   *   recover the chosen labels. The Record path populates the wire's
+   *   `answers` field.
    * - `{otherLabel, freeformText}`: single-question "Other" with freeform
    *   text (#4651). The store sets `answer` to `otherLabel` (so the server
    *   can resolve it to a 1-indexed TUI digit) and `freeformText` to the
    *   typed text. The server writes the digit first, waits for claude
    *   TUI's text-input prompt swap, then writes the freeform text + Enter.
    *
-   * All paths populate `answer` with a human-readable label so older servers
-   * stay functional.
+   * All paths populate `answer` with a human-readable summary so older
+   * servers stay functional.
    */
   sendUserQuestionResponse: (
-    answer: string | Record<string, string> | { otherLabel: string; freeformText: string },
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
     toolUseId?: string,
   ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;

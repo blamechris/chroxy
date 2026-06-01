@@ -49,14 +49,14 @@ export interface QuestionPromptProps {
   /**
    * Fires with one of three shapes:
    * - `string` — legacy single-question / free-text-only path (back-compat).
-   * - `Record<string,string>` — multi-question form (#4604 Chunk B), keyed
-   *   by `question.question` with multi-select values JSON-stringified
-   *   arrays of chosen labels.
+   * - `Record<string, string | string[]>` — multi-question form (#4604
+   *   Chunk B), keyed by `question.question` with multi-select values
+   *   as native `string[]` arrays of chosen labels (#4621).
    * - `OtherFreeformAnswer` — single-question "Other" with freeform text
    *   (#4651), carrying both the Other option's label (for digit lookup
    *   on the server) and the typed text.
    */
-  onSelect: (answer: string | Record<string, string> | OtherFreeformAnswer) => void
+  onSelect: (answer: string | Record<string, string | string[]> | OtherFreeformAnswer) => void
 }
 
 export function QuestionPrompt({ question, options, answered, questions, onSelect }: QuestionPromptProps) {
@@ -110,9 +110,10 @@ function MultiQuestionDeferredNotice({ count }: { count: number }) {
  * #4604 Chunk B — N-question form. Each question gets its own selection
  * control (radio for single-select, checkboxes for multiSelect); the
  * single Submit button at the bottom fires `onSelect(answersMap)` with
- * one entry per question (multi-select values are JSON-stringified
- * arrays so the wire shape `Record<string,string>` is preserved — the
- * server's respondToQuestion JSON.parse handles the round trip).
+ * one entry per question. Multi-select values are emitted as native
+ * `string[]` (#4621) — the wire schema accepts `string | string[]`
+ * directly, so no JSON encoding is required and the server's TUI driver
+ * receives the chosen labels without a round-trip through JSON.parse.
  *
  * #4666 — intentionally retained but not currently rendered by
  * `QuestionPrompt`. The permission-hook denies multi-question
@@ -125,7 +126,7 @@ function MultiQuestionDeferredNotice({ count }: { count: number }) {
  */
 export interface MultiQuestionFormProps {
   questions: ChatMessageQuestion[]
-  onSelect: (answersMap: Record<string, string>) => void
+  onSelect: (answersMap: Record<string, string | string[]>) => void
 }
 
 export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProps) {
@@ -157,15 +158,14 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
   const handleSubmit = () => {
     if (submittedRef.current) return
     submittedRef.current = true
-    const answersMap: Record<string, string> = {}
+    const answersMap: Record<string, string | string[]> = {}
     questions.forEach((q, idx) => {
       if (q.multiSelect) {
-        const chosen = multiSelectByIdx[idx] || []
-        // JSON-encode multi-select answers so the wire shape
-        // (Record<string,string>) is preserved. The server's
-        // respondToQuestion JSON.parse splits this back into per-option
-        // digits + Tab to commit + advance.
-        answersMap[q.question] = JSON.stringify(chosen)
+        // #4621 — emit a native string[]. The wire schema accepts
+        // `string | string[]` directly; the server's TUI driver iterates
+        // the array (or falls back to JSON.parse + comma-split for
+        // legacy payloads from older dashboards).
+        answersMap[q.question] = multiSelectByIdx[idx] || []
       } else {
         const chosen = singleSelectByIdx[idx]
         if (chosen != null) answersMap[q.question] = chosen

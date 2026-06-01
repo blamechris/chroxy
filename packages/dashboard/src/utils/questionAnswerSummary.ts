@@ -1,6 +1,6 @@
 /**
- * #4622 — pure helper that turns a `QuestionPrompt` onSelect answer
- * payload into the one-line summary string that App.tsx hands to
+ * #4622 / #4621 — pure helper that turns a `QuestionPrompt` onSelect
+ * answer payload into the one-line summary string that App.tsx hands to
  * `markPromptAnswered`. The summary surfaces on the collapsed
  * post-answer chip after the user submits the form.
  *
@@ -8,27 +8,28 @@
  *
  * 1. `string` — the legacy single-question / free-text path. Returned
  *    verbatim.
- * 2. `Record<string,string>` — the multi-question form path (#4604
- *    Chunk B). One entry per question, keyed by question text.
- *    Multi-select values arrive as JSON-stringified string arrays
- *    (see `MultiQuestionForm.handleSubmit` — the wire shape is
- *    `Record<string,string>`, and the server's `respondToQuestion`
- *    JSON.parse splits it back). The summary helper detects and
- *    pretty-prints those arrays as `App, Tests` instead of leaking
- *    `["App","Tests"]` JSON syntax into the UX copy.
+ * 2. `Record<string, string | string[]>` — the multi-question form path
+ *    (#4604 Chunk B). One entry per question, keyed by question text.
+ *    Multi-select values arrive as native `string[]` (#4621) and are
+ *    pretty-printed as comma-joined labels (`App, Tests`) instead of
+ *    `["App","Tests"]` JSON syntax.
  *
- * Non-array JSON shapes (objects, numbers) are kept as their raw
- * stringified form — `MultiQuestionForm` only ever JSON-encodes
- * arrays, so anything else didn't come from the form and we'd rather
- * surface it as-is than mangle it.
+ *    For back-compat with payloads sent by older dashboards still using
+ *    the pre-#4621 wire shape, a JSON-stringified array value is also
+ *    detected and flattened the same way. Non-array JSON shapes
+ *    (objects, numbers) keep their raw stringified form — the form only
+ *    ever produced array JSON, so anything else didn't come from us and
+ *    we'd rather surface it as-is than mangle it.
  */
 
 /**
- * Pretty-print a single answer value. If the value parses as a JSON
- * array of primitives we render it as a comma-joined list (no
- * brackets, no quotes); otherwise the value is returned unchanged.
+ * Pretty-print a single answer value:
+ *  - `string[]`   → comma-joined labels (native #4621 path).
+ *  - `'[...]'`    → parsed as JSON; if it's an array, joined; else returned as-is.
+ *  - anything else → returned unchanged.
  */
-function formatMultiSelectValue(value: string): string {
+function formatAnswerValue(value: string | string[]): string {
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(', ')
   // Cheap pre-check to avoid JSON.parse-ing every short-string answer.
   if (!value.startsWith('[')) return value
   let parsed: unknown
@@ -42,7 +43,7 @@ function formatMultiSelectValue(value: string): string {
 }
 
 export function formatQuestionAnswerSummary(
-  answer: string | Record<string, string> | { otherLabel: string; freeformText: string },
+  answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
 ): string {
   if (typeof answer === 'string') return answer
   // #4651 — single-question Other / freeform path. The summary chip
@@ -53,8 +54,8 @@ export function formatQuestionAnswerSummary(
   //
   // Copilot review (#4753): tight detection — require EXACTLY two keys
   // (`freeformText` + `otherLabel`) AND string values for both. A
-  // multi-question Record<string,string> whose question keys happen to
-  // be those exact strings would otherwise misclassify here.
+  // multi-question Record whose question keys happen to be those exact
+  // strings would otherwise misclassify here.
   if (
     !Array.isArray(answer)
     && Object.keys(answer).length === 2
@@ -64,7 +65,7 @@ export function formatQuestionAnswerSummary(
   ) {
     return (answer as { freeformText: string }).freeformText
   }
-  return Object.entries(answer as Record<string, string>)
-    .map(([question, value]) => `${question}: ${formatMultiSelectValue(value)}`)
+  return Object.entries(answer as Record<string, string | string[]>)
+    .map(([question, value]) => `${question}: ${formatAnswerValue(value)}`)
     .join(' | ')
 }
