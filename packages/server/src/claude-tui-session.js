@@ -2081,6 +2081,77 @@ export class ClaudeTuiSession extends BaseSession {
       log.warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
     }
 
+    // #4625 — claude TUI's hotkey alphabet is single-digit '1'..'9' only,
+    // which covers options at indices 0..8. When a question has 10+ options
+    // AND the user explicitly picked one at index ≥ 9, we have no
+    // representable keystroke. Pre-#4625 the driver silently defaulted
+    // such picks to option 1 (with only a buried WARN in chroxy.log),
+    // dropping the user's explicit pick without UI feedback. Detect the
+    // condition up-front and surface a structured
+    // ASK_USER_QUESTION_TOO_MANY_OPTIONS error so the dashboard can
+    // render a toast prompting the user to re-prompt the agent for fewer
+    // options. Bails BEFORE any PTY write so the form stays in its
+    // initial state — claude TUI's watchdog or the user's Ctrl-C unsticks
+    // it. We deliberately scope the check to explicit user picks: a
+    // 10+ option question with no per-question answer still falls back
+    // to option 1 (back-compat for old clients), which is acceptable
+    // because nothing was silently dropped.
+    if (haveMap) {
+      const unrepresentable = []
+      for (const q of questions) {
+        const opts = Array.isArray(q.options) ? q.options : []
+        if (opts.length <= 9) continue
+        const raw = map[q.question]
+        // Gather every label the user picked for this question (single- or
+        // multi-select). MUST mirror resolveQuestionDigits' multi-select
+        // parsing — array → JSON-encoded array → comma-joined list — so
+        // an unrepresentable pick sent via the comma-joined fallback
+        // (e.g. "a,k") isn't accidentally treated as a single 3-char
+        // label and missed (Copilot review feedback). For single-select
+        // we don't split on comma because option labels may legitimately
+        // contain commas; the multi-select code path is the only one
+        // that defined comma-joining as a wire encoding.
+        let labels = []
+        if (Array.isArray(raw)) {
+          labels = raw.filter((s) => typeof s === 'string')
+        } else if (typeof raw === 'string' && raw.length > 0) {
+          if (q.multiSelect) {
+            let parsed = null
+            try { parsed = JSON.parse(raw) } catch { parsed = null }
+            if (Array.isArray(parsed)) {
+              labels = parsed.filter((s) => typeof s === 'string')
+            } else {
+              labels = raw.split(',').map((s) => s.trim()).filter(Boolean)
+            }
+          } else {
+            labels = [raw]
+          }
+        }
+        for (const label of labels) {
+          const idx = opts.findIndex((o) => o && o.label === label)
+          if (idx >= 9) unrepresentable.push({ question: q.question, label, index: idx, total: opts.length })
+        }
+      }
+      if (unrepresentable.length > 0) {
+        const first = unrepresentable[0]
+        log.warn(`AskUserQuestion multi-question: question has ${first.total} options and the user picked option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS instead of silently defaulting to option 1 (tool=${prevToolUseId || '?'})`)
+        // Full AskUserQuestion teardown: synth tool_result + Ctrl-C the
+        // TUI + clear inactivity timers + stream_end + _emitResult +
+        // error (in that order). Without the full teardown the dashboard
+        // would leave the Working banner + Stop button up and the
+        // "Running AskUserQuestion · Ns" pill ticking even though
+        // chroxy gave up before writing any keystrokes (#4625 hands the
+        // form's resolution back to the user via the error toast).
+        this._teardownAskUserQuestion(prevToolUseId, {
+          synthResult: `AskUserQuestion failed: question has ${first.total} options and you picked option ${first.index + 1}, beyond the 9 the claude TUI form can drive (#4625).`,
+          emitResultReason: 'ask_user_question_too_many_options',
+          errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
+          errorMessage: `Couldn't answer: a question has ${first.total} options and you picked option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
+        })
+        return
+      }
+    }
+
     /** Resolve a single label to its 1-indexed digit; null if no usable digit. */
     const labelToDigit = (q, label) => {
       if (!q || !Array.isArray(q.options) || q.options.length === 0) return null
@@ -2242,6 +2313,41 @@ export class ClaudeTuiSession extends BaseSession {
     this._assertBusyHasMessageId('_onAskUserQuestionStall')
     log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
 
+    this._teardownAskUserQuestion(toolUseId, {
+      synthResult: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      emitResultReason: 'ask_user_question_stall',
+      errorCode: 'ASK_USER_QUESTION_STALL',
+      // #4648: dropped the "likely a multi-question form" jargon. The
+      // permission-hook deny path (also #4648) prevents most multi-question
+      // forms from reaching this code path at all, and for the cases that
+      // slip through, the user doesn't care about chroxy internals — they
+      // care about how to recover. The new copy is action-oriented.
+      errorMessage: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
+    })
+  }
+
+  /**
+   * Shared teardown for AskUserQuestion failure modes. Used by both the
+   * 30s post-write stall watchdog (#4604) and the up-front
+   * too-many-options detector (#4625). Mirrors the end-to-end teardown
+   * order pinned in #4645: synthetic tool_result → Ctrl-C the TUI →
+   * clear inactivity timers → null active turn / busy state →
+   * stream_end + _emitResult → error event last. The caller supplies the
+   * synth result text, _emitResult reason tag, and error code/message so
+   * the same teardown serves both call sites.
+   *
+   * Splitting this out (vs the original inline form in
+   * _onAskUserQuestionStall) is intentional: #4625's too-many-options
+   * path needs the full teardown so the dashboard's Working banner +
+   * Stop button + activeTools entry all clear immediately, but the
+   * trigger and copy differ from the 30s stall path. Inlining the
+   * teardown twice risked drift; folding both into _teardownTurn would
+   * widen the helper's surface (synth tool_result + 3-timer clear +
+   * toolUseId-carrying error don't generalise to the other teardown
+   * sites), so a dedicated AskUserQuestion teardown helper earns its
+   * keep.
+   */
+  _teardownAskUserQuestion(toolUseId, { synthResult, emitResultReason, errorCode, errorMessage }) {
     const messageId = this._currentMessageId
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
 
@@ -2250,14 +2356,13 @@ export class ClaudeTuiSession extends BaseSession {
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
     // the footer "Running AskUserQuestion · Ns" pill keeps ticking
-    // forever even though _isBusy is clear and the user sees the
-    // ASK_USER_QUESTION_STALL error toast. The handler ignores any
-    // fields beyond {toolUseId, result, truncated, images} (see
-    // store-core handleToolResult); pairing-by-toolUseId is what drives
-    // the activeTools removal in store-core handlers.
+    // forever even though _isBusy is clear and the user sees the error
+    // toast. The handler ignores any fields beyond {toolUseId, result,
+    // truncated, images} (see store-core handleToolResult); pairing-by-
+    // toolUseId is what drives the activeTools removal in store-core handlers.
     this.emit('tool_result', {
       toolUseId,
-      result: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      result: synthResult,
       truncated: false,
     })
     // #4628: matching tool_start resolved — drop from the in-flight map.
@@ -2278,9 +2383,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
 
-    // #4022: drop per-turn attachment dir on stall (same as the other
-    // teardown paths) so a stalled turn doesn't leak materialized files
-    // until destroy().
+    // #4022: drop per-turn attachment dir (same as the other teardown
+    // paths) so a failed turn doesn't leak materialized files until destroy().
     this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
@@ -2296,16 +2400,11 @@ export class ClaudeTuiSession extends BaseSession {
     if (messageId) this.emit('stream_end', { messageId })
     this._emitResult(
       { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'ask_user_question_stall',
+      emitResultReason,
     )
     this.emit('error', {
-      code: 'ASK_USER_QUESTION_STALL',
-      // #4648: dropped the "likely a multi-question form" jargon. The
-      // permission-hook deny path (also #4648) prevents most multi-question
-      // forms from reaching this code path at all, and for the cases that
-      // slip through, the user doesn't care about chroxy internals — they
-      // care about how to recover. The new copy is action-oriented.
-      message: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
+      code: errorCode,
+      message: errorMessage,
       toolUseId,
     })
   }
