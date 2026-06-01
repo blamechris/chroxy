@@ -6,8 +6,9 @@
  *
  * NOTE: status pings 127.0.0.1:<port>/ where <port> comes from connection.json
  * or defaults to 8765. The dev machine running these tests may have its own
- * chroxy listening on 8765, so we plant a fake connection.json that points
- * status at a guaranteed-dead high random port.
+ * chroxy listening on 8765, so we plant a fake connection.json pointing at
+ * a high random port — not reserved, just unlikely-to-be-bound — so the
+ * ping fails fast and exercises the "not running" path.
  */
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'

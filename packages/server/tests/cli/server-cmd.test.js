@@ -19,7 +19,10 @@ describe('chroxy start / dev', () => {
     assert.match(r.stdout, /Start the Chroxy server/)
     assert.match(r.stdout, /--config/)
     assert.match(r.stdout, /--tunnel/)
-    assert.match(r.stdout, /--port|--config/) // sanity: at least one shared opt
+    // --cwd is registered by addServerOptions(); asserting it gives us
+    // real coverage of the shared-options dispatch instead of duplicating
+    // the --config assertion above.
+    assert.match(r.stdout, /--cwd/)
   })
 
   it('dev --help describes development mode', async () => {

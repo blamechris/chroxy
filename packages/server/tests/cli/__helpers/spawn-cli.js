@@ -65,11 +65,15 @@ export function pickPort() {
  * @returns {Promise<{ stdout: string, stderr: string, code: number|null, signal: string|null, timedOut: boolean }>}
  */
 export function runCli(args, opts = {}) {
+  // If the caller didn't provide a HOME, mint one here and tear it down
+  // on child exit so ad-hoc callers don't silently leak tmpdirs.
+  const ownsHome = !opts.home
   const home = opts.home || mkdtempSync(join(tmpdir(), 'chroxy-cli-test-'))
   const timeoutMs = opts.timeoutMs ?? 15000
 
-  // Use Node 22 from homebrew if present; otherwise fall back to whatever
-  // node ran the test (which is also expected to be 22).
+  // The child runs under `process.execPath`, i.e. whichever Node binary
+  // ran this test. We do not modify PATH to select a different Node;
+  // callers are expected to invoke the test runner with Node 22 already.
   const env = {
     PATH: process.env.PATH,
     HOME: home,
@@ -112,8 +116,16 @@ export function runCli(args, opts = {}) {
       stderr += chunk.toString()
     })
 
+    const tearDownTempHome = () => {
+      if (!ownsHome) return
+      try {
+        rmSync(home, { recursive: true, force: true })
+      } catch {}
+    }
+
     child.on('error', (err) => {
       clearTimeout(timer)
+      tearDownTempHome()
       resolvePromise({
         stdout,
         stderr: stderr + `\n[spawn error] ${err.message}`,
@@ -125,6 +137,7 @@ export function runCli(args, opts = {}) {
 
     child.on('close', (code, signal) => {
       clearTimeout(timer)
+      tearDownTempHome()
       resolvePromise({ stdout, stderr, code, signal, timedOut })
     })
 

@@ -12,8 +12,9 @@ describe('chroxy doctor', () => {
   after(cleanup)
 
   it('prints the Chroxy Doctor banner and a summary line', async () => {
-    // Bind to a random free port to avoid flagging "port in use" on the
-    // default 8765 if some other dev server is listening there locally.
+    // Pass a high random port (not reserved, just unlikely-to-be-bound)
+    // so the "port in use" probe doesn't flag the default 8765 when a
+    // local dev server is already listening there.
     const r = await runCli(['doctor', '--port', String(pickPort())], { home })
     // Exit code can be 0 or 1 depending on whether cloudflared/other
     // optional deps are installed on the test machine, so don't assert
