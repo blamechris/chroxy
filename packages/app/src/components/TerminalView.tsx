@@ -107,7 +107,7 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
   }, []);
 
   return (
-    <View style={styles.wrapper}>
+    <View style={styles.wrapper} testID="terminal-view">
       {recovering && (
         <View style={styles.recoveryBanner}>
           <Text style={styles.recoveryText}>Terminal recovering...</Text>

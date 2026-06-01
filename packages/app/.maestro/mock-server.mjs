@@ -83,7 +83,12 @@ wss.on('connection', (ws) => {
             name: 'Mock Session',
             cwd: '/tmp/mock-project',
             type: 'cli',
-            hasTerminal: false,
+            // #4701: report `hasTerminal: true` so the SessionScreen
+            // mode toggle includes the Terminal button (which the
+            // terminal-view.yaml flow taps). Existing flows do not
+            // assert on the absence of the Term button, so flipping
+            // this default is safe.
+            hasTerminal: true,
             model: 'sonnet',
             permissionMode: 'approve',
             isBusy: false,
@@ -192,6 +197,54 @@ wss.on('connection', (ws) => {
       case 'input': {
         const text = msg.data || ''
         console.log(`[mock] Input: "${text}"`)
+
+        // #4701: trigger phrase 'show-terminal' emits a synthetic `raw`
+        // terminal-data envelope so the Maestro `terminal-view.yaml`
+        // flow can exercise the TerminalView WebView render on a real
+        // simulator. Mirrors the production wire shape — PTY-mode
+        // servers stream PTY output as `{ type: 'raw', data: '...' }`
+        // (see packages/server/src/ws-server.js terminal forwarding +
+        // packages/app/src/store/message-handler.ts `case 'raw'`).
+        // The handler calls `appendTerminalData(data)` which both
+        // updates `terminalRawBuffer` and forwards to the WebView via
+        // the `terminalWrite` imperative callback wired in
+        // SessionScreen.useEffect when `viewMode === 'terminal'`.
+        // We emit ANSI escape colors so the output is visually
+        // distinguishable in screenshots without polluting the
+        // `assertVisible` text comparison done downstream — Maestro's
+        // matcher reads accessibility text, not pixel content, and
+        // the WebView's xterm.js layer isn't introspectable anyway,
+        // so the test only asserts the `terminal-view` testID is
+        // present (the render path itself is what we're pinning).
+        if (text.trim() === 'show-terminal') {
+          // Trip a CR + carriage return so xterm renders cleanly,
+          // then a styled line + reset.
+          send(ws, {
+            type: 'raw',
+            sessionId: 'mock-sess-1',
+            data: '\r\n\x1b[32mmaestro-terminal-fixture\x1b[0m\r\n$ ',
+          })
+          break
+        }
+
+        // #4701: trigger phrase 'simulate-disconnect' closes the
+        // WebSocket from the server side after a 1s delay so the
+        // Maestro `reconnect.yaml` flow can exercise the
+        // ConnectionPhase `connected → reconnecting → connected`
+        // transition on a real RN runtime. Production scenario —
+        // Cloudflare tunnel drops + the client auto-reconnects via
+        // `AUTO_RECONNECT_DELAY` (see packages/app/src/store/
+        // connection.ts socket.onclose). The 1s delay gives the
+        // client time to ack the input before the close lands, and
+        // mirrors the production case where the server is still
+        // processing the in-flight request when the tunnel drops.
+        if (text.trim() === 'simulate-disconnect') {
+          setTimeout(() => {
+            console.log('[mock] simulate-disconnect — closing WS')
+            try { ws.close(1006, 'simulate-disconnect') } catch {}
+          }, 1000)
+          break
+        }
 
         // #4507: trigger phrase 'show-stream-stall' emits a recoverable
         // `error{code:'stream_stall'}` so the Maestro stream-stall-chip
