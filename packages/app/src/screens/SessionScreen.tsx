@@ -13,6 +13,7 @@ import {
   Modal,
   Pressable,
   LayoutAnimation,
+  ActivityIndicator as RNActivityIndicator,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -856,6 +857,7 @@ export function SessionScreen() {
           )}
           {hasTerminal && (
             <TouchableOpacity
+              testID="terminal-mode-button"
               style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
               onPress={() => setViewMode('terminal')}
               accessibilityRole="button"
@@ -1036,8 +1038,14 @@ export function SessionScreen() {
 
       {/* Reconnecting / restarting banner */}
       {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
-        <View style={styles.reconnectingBanner}>
+        <View testID="reconnect-banner" style={styles.reconnectingBanner}>
           <View style={styles.reconnectingRow}>
+            <RNActivityIndicator
+              testID="reconnect-spinner"
+              size="small"
+              color={COLORS.accentBlue}
+              style={styles.reconnectingSpinner}
+            />
             <Text style={[styles.reconnectingText, { flex: 1 }]}>
               {connectionPhase === 'server_restarting'
                 ? shutdownReason === 'shutdown'
@@ -1623,6 +1631,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     gap: 8,
+  },
+  reconnectingSpinner: {
+    marginRight: 4,
   },
   reconnectDisconnect: {
     paddingHorizontal: 10,

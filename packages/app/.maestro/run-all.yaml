@@ -60,3 +60,14 @@ name: All E2E flows
 # dismissing the card, and that sending a rebuttal afterwards clears
 # plan state.
 - runFlow: plan-approval-deny.yaml
+
+# Flow 14: TerminalView render (#4701) — exercises the Terminal mode
+# toggle and the WebView mount on the chroxy dev client via
+# mock-server 'show-terminal' trigger.
+- runFlow: terminal-view.yaml
+
+# Flow 15: Reconnect after tunnel drop (#4701) — exercises the
+# ConnectionPhase `connected → reconnecting → connected` transition +
+# the reconnect banner / spinner via mock-server 'simulate-disconnect'
+# trigger.
+- runFlow: reconnect.yaml

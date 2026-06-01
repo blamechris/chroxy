@@ -1,0 +1,151 @@
+appId: com.blamechris.chroxy
+name: Reconnect after tunnel drop (#4701)
+---
+
+# #4701 — End-to-end coverage for the ConnectionPhase
+# `connected → reconnecting → connected` transition after the WebSocket
+# drops. Unit tests in `__tests__/store/connection.*.test.ts` pin the
+# state-machine transitions, but no E2E ever exercised the visual
+# reconnect banner / spinner on a real RN runtime. Production scenario
+# — Cloudflare tunnel drops, the app's `socket.onclose` handler bumps
+# phase to `reconnecting`, the auto-reconnect timer fires after
+# `AUTO_RECONNECT_DELAY`, and (when the server is reachable again)
+# phase returns to `connected`.
+#
+# This flow pins:
+#   (a) The `reconnect-banner` testID (added in this PR to
+#       SessionScreen.tsx) becomes visible when phase enters
+#       `reconnecting`,
+#   (b) The `reconnect-spinner` testID (RNActivityIndicator inside the
+#       banner) is wired,
+#   (c) The auto-reconnect succeeds — the banner clears and the chat
+#       input is usable again (we re-tap the input and assert the
+#       send button is reachable).
+#
+# Trigger: 'simulate-disconnect' user input → mock-server schedules a
+# `ws.terminate()` after a 1s delay (abrupt TCP teardown, mirrors a
+# Cloudflare tunnel drop — the client observes a 1006 close locally
+# without a Close frame on the wire). The 1s buffer lets the app ack
+# the input before the close lands and mirrors the production case
+# where the server is mid-stream when the tunnel drops. After the
+# AUTO_RECONNECT_DELAY (currently 1500ms in connection.ts), the app
+# auto-reconnects to the same URL — and because the mock-server is
+# still up on port 9876, the reconnect succeeds.
+#
+# Reconnect timing is inherently flakey on a simulator (Metro pause,
+# bridge GC, network throttle), so the assertion uses generous
+# `extendedWaitUntil` timeouts. The fixture seeding pattern is
+# documented in CLAUDE.md → "Fixture Seeding for Structured
+# Renderers".
+#
+# Tested devices: portrait iPhone (iOS 17+). Mirrors chat-todolist /
+# stream-stall-chip flows.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Self-contained (no `runFlow: setup/...`) because the existing setup/
+# flows target Expo Go (appId host.exp.Exponent), whereas this needs
+# the chroxy dev client (com.blamechris.chroxy).
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Ensure Chat tab is selected.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Send the simulate-disconnect trigger. Mock-server schedules a WS
+# close 1s after receiving this input, so we get a clean ack first.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "simulate-disconnect"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for the reconnect banner to appear. The mock-server's 1s
+# scheduled close + AUTO_RECONNECT_DELAY (1s) + a generous Metro
+# bridge buffer warrants the long timeout. We assert on the testID
+# rather than the banner text because text varies by retry count
+# (`Reconnecting...` vs `Reconnecting (attempt 2)...`).
+- extendedWaitUntil:
+    visible:
+      id: "reconnect-banner"
+    timeout: 15000
+
+# Spinner is wired inside the banner (RNActivityIndicator).
+- assertVisible:
+    id: "reconnect-spinner"
+
+- takeScreenshot: reconnect-banner-visible
+
+# Wait for the reconnect to succeed. The mock-server stays up on port
+# 9876 so the auto-reconnect lands → phase flips back to `connected`
+# → the banner unmounts. Long timeout because the reconnect may take
+# multiple attempts on a slow simulator. We assert by `notVisible`
+# on the banner, with a fallback positive assertion that the chat
+# input is reachable (i.e. SessionScreen is in its happy-path layout).
+- extendedWaitUntil:
+    notVisible:
+      id: "reconnect-banner"
+    timeout: 30000
+
+# Positive confirmation: the input bar is still wired and we can
+# focus it (proves the SessionScreen is in a usable state, not stuck
+# in a disconnected / cached-history fallback).
+- tapOn:
+    id: "chat-message-input"
+- assertVisible:
+    id: "chat-send-button"
+
+- takeScreenshot: reconnect-completed
