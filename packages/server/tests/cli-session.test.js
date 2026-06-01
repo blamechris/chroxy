@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'no
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { CliSession } from '../src/cli-session.js'
+import { SessionStatePersistence } from '../src/session-state-persistence.js'
 
 /**
  * Tests for CliSession lifecycle: process management, respawn,
@@ -41,11 +42,13 @@ after(() => {
 
 function createSession(opts = {}) {
   const stateFilePath = opts.stateFilePath || tmpStateFile()
-  // CliSession constructor ignores unknown keys via destructuring, so
-  // forwarding `stateFilePath` is harmless today and future-proofs the
-  // suite. The path is stashed on the instance so individual tests can
-  // assert on it (the roundtrip suite below uses this).
-  const session = new CliSession({ cwd: '/tmp', ...opts })
+  // CliSession ignores unknown keys via destructuring today, so passing
+  // `stateFilePath` is a harmless no-op now AND auto-protects the suite
+  // the moment someone wires a persistence path on the session class —
+  // the destructured value will point at the per-test temp file instead
+  // of `~/.chroxy/session-state.json`. The path is also stashed on the
+  // instance so individual tests can assert on it.
+  const session = new CliSession({ cwd: '/tmp', stateFilePath, ...opts })
   session._testStateFilePath = stateFilePath
   return session
 }
@@ -1470,28 +1473,43 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
     restored.destroy()
   })
 
-  it('corrupt state file: parse failure must surface as a graceful null instead of crashing', () => {
+  it('corrupt state file: production restoreState must return null silently, not throw', () => {
     // A truncated / hand-edited / partial-write state file must not take
-    // the server down. The persistence layer's `restoreState` catches the
-    // SyntaxError and returns null; this test pins the contract that a
-    // parser placed in front of the CliSession reconstruction step does
-    // the same — no throw, no orphan session, the caller can move on.
+    // the server down. Pin the PRODUCTION contract: drive the real
+    // `SessionStatePersistence.restoreState()` (the entry point
+    // `SessionManager.restoreState()` calls — see session-manager.js:1266)
+    // and assert it returns `null` without throwing. The internal
+    // try/catch in session-state-persistence.js:148-170 swallows the
+    // SyntaxError, attempts .bak recovery, and falls back to null when
+    // no backup exists — supervisor / dashboard depend on that silent
+    // behaviour so a corrupt state file cannot block server boot.
     writeFileSync(stateFile, '{ this is not valid json')
 
-    let restored = null
+    const persistence = new SessionStatePersistence({ stateFilePath: stateFile })
+    let restored
     let threw = null
     try {
-      const raw = readFileSync(stateFile, 'utf-8')
-      const parsed = JSON.parse(raw)
-      restored = parsed.sessions?.[0] ?? null
+      restored = persistence.restoreState()
     } catch (err) {
       threw = err
     }
 
-    assert.ok(threw instanceof SyntaxError,
-      'corrupt JSON must surface as a SyntaxError so callers can branch on type')
+    assert.equal(threw, null,
+      'restoreState() MUST NOT throw on corrupt JSON — supervisor depends on the silent-null contract; ' +
+      'a throw here would crash the server on every restart after a partial write')
     assert.equal(restored, null,
-      'restored payload must be null on parse failure — caller treats it as "no prior state"')
+      'restoreState() must return null on corrupt JSON so SessionManager treats it as "no prior state" and starts fresh')
+
+    // Secondary assertion documenting the underlying mechanism: the raw
+    // JSON.parse used inside restoreState() does throw a SyntaxError —
+    // that's why restoreState() wraps it in try/catch. The corrupt file
+    // was unlinked by restoreState's recovery path, so we re-write it
+    // here to pin the raw behaviour.
+    writeFileSync(stateFile, '{ this is not valid json')
+    let rawThrew = null
+    try { JSON.parse(readFileSync(stateFile, 'utf-8')) } catch (err) { rawThrew = err }
+    assert.ok(rawThrew instanceof SyntaxError,
+      'raw JSON.parse throws SyntaxError — restoreState() exists specifically to swallow this')
 
     // The fallback path: instantiate a fresh CliSession with no restored
     // opts. Must succeed — a corrupt state file cannot block new session
