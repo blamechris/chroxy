@@ -498,11 +498,14 @@ describe('PermissionManager', () => {
       assert.ok(!('Unknown?' in result.updatedInput.answers))
     })
 
-    // #4621 — answersMap values may be string[] (native multi-select),
-    // not just string. PermissionManager just forwards the value to the
-    // SDK's updatedInput.answers; the SDK accepts string[] for
-    // multi-select questions.
-    it('forwards string[] answersMap values verbatim for multi-select questions (#4621)', async () => {
+    // #4621 wire shape + #4731 SDK normalization. answersMap values may
+    // arrive as string[] (native multi-select from updated dashboards).
+    // PermissionManager normalizes arrays to the SDK's canonical
+    // comma-separated string shape (see normalizeAnswerValue and
+    // sdk-multi-question-shapes.test.js for the full coverage) because
+    // the SDK's `AskUserQuestionOutput.answers` is typed
+    // `{ [questionText]: string }`. Single-select strings pass through.
+    it('normalizes string[] answersMap values to comma-separated strings for the SDK (#4621 + #4731)', async () => {
       const questions = [
         { question: 'Areas?', multiSelect: true, options: [{ label: 'App' }, { label: 'Tests' }] },
         { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
@@ -515,11 +518,11 @@ describe('PermissionManager', () => {
       })
       const result = await promise
       assert.deepEqual(result.updatedInput.answers, {
-        'Areas?': ['App', 'Tests'],
+        'Areas?': 'App, Tests',
         'Strategy?': 'Minor',
       })
-      assert.ok(Array.isArray(result.updatedInput.answers['Areas?']),
-        'array value should be preserved (not coerced to string)')
+      assert.equal(typeof result.updatedInput.answers['Areas?'], 'string',
+        'multi-select array must be coerced to comma-separated string per SDK contract')
     })
   })
 
