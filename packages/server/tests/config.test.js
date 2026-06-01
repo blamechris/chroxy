@@ -192,6 +192,65 @@ describe('validateConfig', () => {
     })
   })
 
+  // #4601: per-provider override map for streamStallTimeoutMs. Keys are
+  // provider ids (claude-sdk, codex, gemini, …); values are stall windows
+  // in ms with the same 5s-24h-or-0 validation as the global setting.
+  // Default behaviour is unchanged when the map is omitted.
+  describe('providerStreamStallTimeoutMs (#4601)', () => {
+    it('accepts a valid per-provider map', () => {
+      const result = validateConfig({
+        providerStreamStallTimeoutMs: {
+          codex: 900_000,
+          gemini: 600_000,
+        },
+      })
+      assert.equal(result.valid, true)
+      assert.equal(result.warnings.length, 0)
+    })
+
+    it('accepts an empty object', () => {
+      const result = validateConfig({ providerStreamStallTimeoutMs: {} })
+      assert.equal(result.valid, true)
+    })
+
+    it('accepts 0 as an explicit per-provider disable', () => {
+      const result = validateConfig({
+        providerStreamStallTimeoutMs: { codex: 0 },
+      })
+      assert.equal(result.valid, true)
+    })
+
+    it('rejects array values (type mismatch)', () => {
+      const result = validateConfig({ providerStreamStallTimeoutMs: [1, 2, 3] })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('providerStreamStallTimeoutMs') && w.includes('object')))
+    })
+
+    it('warns when a non-number value is supplied for a provider entry', () => {
+      const result = validateConfig({
+        providerStreamStallTimeoutMs: { codex: '15m' },
+      })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes("providerStreamStallTimeoutMs.codex") && w.includes('number')))
+    })
+
+    it('warns when a per-provider value is below the 5s minimum', () => {
+      const result = validateConfig({
+        providerStreamStallTimeoutMs: { gemini: 1000 },
+      })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes("providerStreamStallTimeoutMs.gemini") && w.includes('minimum')))
+    })
+
+    it('warns when a per-provider value is above the 24h maximum', () => {
+      const result = validateConfig({
+        providerStreamStallTimeoutMs: { codex: 25 * 60 * 60 * 1000 },
+      })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes("providerStreamStallTimeoutMs.codex") && w.includes('maximum')))
+    })
+  })
+
   // #4482: per-call MCP tools/call timeout. Defaults to 30s (matches
   // byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS). Allowed range
   // 1s-10min — below 1s every realistic MCP server times out, above
@@ -443,6 +502,13 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({})
     assert.equal(merged.streamStallTimeoutMs, 0)
     delete process.env.CHROXY_STREAM_STALL_TIMEOUT_MS
+  })
+
+  it('reads providerStreamStallTimeoutMs from CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS env var as JSON object (#4601)', () => {
+    process.env.CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS = JSON.stringify({ codex: 900000, gemini: 600000 })
+    const merged = mergeConfig({})
+    assert.deepEqual(merged.providerStreamStallTimeoutMs, { codex: 900000, gemini: 600000 })
+    delete process.env.CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS
   })
 
   it('reads mcpToolCallTimeoutMs from CHROXY_MCP_TOOL_CALL_TIMEOUT_MS env var as number (#4482)', () => {

@@ -214,6 +214,17 @@ export class SessionManager extends EventEmitter {
     // #4467: stream-stall recovery timeout (ms). Forwarded via providerOpts.
     // null = use BaseSession's DEFAULT_STREAM_STALL_TIMEOUT_MS (5min).
     streamStallTimeoutMs,
+    // #4601: per-provider override map for streamStallTimeoutMs. Keys are
+    // provider ids (e.g. 'codex', 'gemini'); values are stall windows in
+    // ms (or 0 to disable for that provider). When a session is created
+    // for a provider listed here, that entry wins over the global
+    // `streamStallTimeoutMs`; otherwise the global value (or BaseSession
+    // default) applies. Each entry is validated with the same allowZero
+    // + MAX_SANE_DURATION_MS ceiling as `streamStallTimeoutMs` — bogus
+    // entries are dropped (with a warn) and the call falls through to
+    // the global value, so a single mis-typed entry can't silently
+    // produce a >24h timer.
+    providerStreamStallTimeoutMs,
     // #4482: per-MCP-call timeout (ms). Forwarded via providerOpts to
     // byok-session, which threads it into MCPFleet.callTool. null = use
     // byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS (30s).
@@ -288,6 +299,17 @@ export class SessionManager extends EventEmitter {
       isOperatorTimeoutInRange(streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
         ? streamStallTimeoutMs
         : null
+    // #4601: sanitise the per-provider override map at construction time —
+    // each entry runs through the same `isOperatorTimeoutInRange` guard as
+    // the global value (`allowZero: true` + 24h ceiling). Bad entries are
+    // dropped and the warn log identifies which provider's entry was
+    // ignored so an operator can correlate it back to their config.json
+    // key path. Storing the SANITISED map means createSession() doesn't
+    // have to re-validate on every session boot.
+    this._providerStreamStallTimeoutMs = this._sanitizeProviderTimeoutMap(
+      providerStreamStallTimeoutMs,
+      { name: 'providerStreamStallTimeoutMs', allowZero: true },
+    )
     // #4482: per-MCP-call timeout. Unlike streamStallTimeoutMs, 0 is not a
     // valid disable here — a 0-ms callTool timeout fires immediately. Only
     // positive finite values are accepted; null falls through to byok-mcp-
@@ -627,7 +649,22 @@ export class SessionManager extends EventEmitter {
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
     if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs
-    if (this._streamStallTimeoutMs != null) providerOpts.streamStallTimeoutMs = this._streamStallTimeoutMs
+    // #4601: per-provider streamStallTimeoutMs override resolution. Lookup
+    // is by RESOLVED provider id (the same key SessionManager used to fetch
+    // the ProviderClass from `getProvider()` above) so a session whose
+    // explicit `provider` arg differs from the server default picks up the
+    // override for its actual provider rather than the default. When the
+    // map has an entry for `resolvedProvider` it wins over the global value;
+    // `hasOwnProperty` keeps `0` (explicit per-provider disable) honoured.
+    // When the entry is absent we fall back to the global
+    // `_streamStallTimeoutMs` (or omit the key entirely so BaseSession's
+    // 5min default applies).
+    const perProviderStall = this._providerStreamStallTimeoutMs
+    if (perProviderStall && Object.prototype.hasOwnProperty.call(perProviderStall, resolvedProvider)) {
+      providerOpts.streamStallTimeoutMs = perProviderStall[resolvedProvider]
+    } else if (this._streamStallTimeoutMs != null) {
+      providerOpts.streamStallTimeoutMs = this._streamStallTimeoutMs
+    }
     if (this._mcpToolCallTimeoutMs != null) providerOpts.mcpToolCallTimeoutMs = this._mcpToolCallTimeoutMs
     if (this._mcpStartCapMs != null) providerOpts.mcpStartCapMs = this._mcpStartCapMs
     // Skills size budgets — pass through if configured. BaseSession forwards
@@ -1834,6 +1871,44 @@ export class SessionManager extends EventEmitter {
       return fallback
     }
     return value
+  }
+
+  /**
+   * #4601: Sanitise a per-provider timeout-override map at construction time.
+   *
+   * Returns a NEW plain object containing only the entries whose value passed
+   * `isOperatorTimeoutInRange`. Non-object inputs return `null` (no overrides
+   * apply). Each rejected entry logs ONE warn line tagged with the offending
+   * provider id so an operator scanning logs can correlate it back to the
+   * config.json key path.
+   *
+   * Keeping the validation here (vs. inlining it in createSession) means
+   * each session boot does a single map lookup instead of revalidating
+   * every entry on every call.
+   *
+   * @param {unknown} input — raw config map (object | null | undefined | bogus)
+   * @param {object} opts
+   * @param {string} opts.name — config-key prefix used in warn logs
+   *   (e.g. `providerStreamStallTimeoutMs`); each rejected entry is logged as
+   *   `<name>.<providerId>` so the warn matches the operator's config path.
+   * @param {boolean} [opts.allowZero=false] — passed through to
+   *   `isOperatorTimeoutInRange` (set true for stream-stall, which uses 0 as
+   *   an explicit per-provider disable).
+   * @returns {object|null} sanitised entries, or null if the input wasn't a
+   *   plain object.
+   */
+  _sanitizeProviderTimeoutMap(input, { name, allowZero = false }) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+    const sanitised = {}
+    for (const [providerId, value] of Object.entries(input)) {
+      const ok = isOperatorTimeoutInRange(value, { allowZero, name: `${name}.${providerId}`, log })
+      if (ok) {
+        sanitised[providerId] = value
+      } else {
+        log.warn(`ignoring invalid entry '${name}.${providerId}'=${String(value)} — falling back to global / default`)
+      }
+    }
+    return sanitised
   }
 
   /**
