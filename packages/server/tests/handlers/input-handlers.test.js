@@ -327,6 +327,46 @@ describe('input-handlers', () => {
       assert.equal(session.respondToQuestion.callCount, 1)
       assert.equal(session.respondToQuestion.lastCall[0], 'yes')
     })
+
+    // #4651 — forward freeformText as a 4th positional `opts` arg when the
+    // wire message carries it. Sessions that don't care about freeform
+    // (cli-session, sdk-session) ignore the trailing arg; claude-tui-session
+    // reads opts.freeformText to drive the two-stage Other-path write.
+    it('forwards freeformText as opts.freeformText', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.user_question_response(makeWs(), client, {
+        answer: 'Other',
+        freeformText: 'typed text',
+        toolUseId: 'tool-1',
+      }, ctx)
+
+      assert.equal(session.respondToQuestion.callCount, 1)
+      assert.deepStrictEqual(session.respondToQuestion.lastCall, ['Other', undefined, 'tool-1', { freeformText: 'typed text' }])
+    })
+
+    it('omits opts entirely when freeformText is empty', () => {
+      // Empty-string freeformText must not get treated as present — the
+      // server should fall through to the legacy single-write path.
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.user_question_response(makeWs(), client, {
+        answer: 'Patch',
+        freeformText: '',
+        toolUseId: 'tool-2',
+      }, ctx)
+
+      assert.equal(session.respondToQuestion.callCount, 1)
+      assert.deepStrictEqual(session.respondToQuestion.lastCall, ['Patch', undefined, 'tool-2', undefined])
+    })
   })
 
   // #3186: auto-evaluation hook on user_input. When session.promptEvaluator

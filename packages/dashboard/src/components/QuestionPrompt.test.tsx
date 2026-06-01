@@ -281,6 +281,13 @@ describe('QuestionPrompt', () => {
     })
 
     it('submits the typed answer when Send is clicked from Other mode', () => {
+      // #4651 — Other-mode submissions now emit an object payload carrying
+      // both the typed text AND the option label that triggered Other-mode
+      // ("Other" by default; a model-supplied label like "Custom" if the
+      // model overrode the label). The connection store reads this shape
+      // to send a two-stage `user_question_response` (digit → freeform
+      // text) to the server, so claude TUI's text-input prompt receives
+      // the freeform answer instead of jump-nav-ing on the menu.
       const onSelect = vi.fn()
       render(
         <QuestionPrompt
@@ -292,7 +299,27 @@ describe('QuestionPrompt', () => {
       fireEvent.click(screen.getByText('Other'))
       fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'custom answer' } })
       fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-      expect(onSelect).toHaveBeenCalledWith('custom answer')
+      expect(onSelect).toHaveBeenCalledWith({ otherLabel: 'Other', freeformText: 'custom answer' })
+    })
+
+    it('still emits a plain string when no options exist (free-text-only AskUserQuestion)', () => {
+      // #4651 — the freeform object shape is reserved for the
+      // "Other option exists in a menu" path. A question with zero
+      // options (free-text-only fallback, #1245) doesn't render an
+      // "Other" button at all, so onSelect must keep the legacy
+      // string shape for back-compat with the server's free-text
+      // handler.
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Any thoughts?"
+          options={[]}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'free text' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      expect(onSelect).toHaveBeenCalledWith('free text')
     })
 
     it('Cancel returns to the option buttons without submitting', () => {

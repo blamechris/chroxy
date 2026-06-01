@@ -1521,6 +1521,48 @@ describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
       'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
     );
   });
+
+  it('emits {answer:<otherLabel>, freeformText} when called with the Other / freeform shape (#4651)', async () => {
+    // #4651 — single-question "Other" path. The dashboard sends both:
+    // - `answer` = the Other option's label, so the server can resolve
+    //   it to a 1-indexed digit (claude TUI hotkey) and write the digit
+    //   FIRST to swap the menu into text-input mode.
+    // - `freeformText` = the typed text, which the server writes after
+    //   the prompt-swap settles + Enter to submit.
+    // The Output-tab echo surfaces the typed text (not the literal
+    // "Other" label) to match the user's mental model of what they sent.
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'my custom answer' },
+      'toolu_other_freeform',
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'my custom answer',
+      toolUseId: 'toolu_other_freeform',
+    });
+    // No `answers` field — that's reserved for multi-question forms.
+    expect(sent[0]).not.toHaveProperty('answers');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: my custom answer');
+  });
 });
 
 // ---------------------------------------------------------------------------

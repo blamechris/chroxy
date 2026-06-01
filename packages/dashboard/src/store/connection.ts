@@ -212,6 +212,11 @@ const EMPTY_ACTIVE_TOOLS: never[] = [];
 // #4307: stable empty reference for `pendingBackgroundShells` —
 // same `useShallow` stability rationale as the others above.
 const EMPTY_PENDING_BACKGROUND_SHELLS: never[] = [];
+// #4653: stable empty reference for `interventions` — same `useShallow`
+// stability rationale as the others above. SessionIntervention[] in the
+// type system; never[] here because the array is provably empty and
+// TypeScript widens `never[]` to any element type at the call site.
+const EMPTY_INTERVENTIONS: never[] = [];
 
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
@@ -767,6 +772,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #3899: no warning is ever surfaced in the flat-state fallback;
       // inactivity_warning only arrives once SessionStates is populated.
       inactivityWarning: null,
+      // #4653: no chroxy intervention is ever surfaced in the flat-state
+      // fallback — intervention events are routed by sessionId, which only
+      // populates after a session_list snapshot lands.
+      interventions: EMPTY_INTERVENTIONS,
     };
   },
 
@@ -1550,9 +1559,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
-  sendUserQuestionResponse: (answer: string | Record<string, string | string[]>, toolUseId?: string) => {
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => {
     const { socket, activeSessionId, sessionStates } = get();
-    // #4604 Chunk B / #4621 / #4735 — split the wire payload by call shape:
+    // #4604 Chunk B / #4621 / #4651 / #4735 — split the wire payload by call shape:
     // - string `answer`: legacy single-question / free-text path. Wire
     //   shape stays `{ type, answer, toolUseId? }` so older servers
     //   keep working without schema migration.
@@ -1574,13 +1586,47 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //   when mixed-version rehydrated state replays an old answersMap.
     //   The helper detects array-shaped values AND JSON-stringified
     //   arrays and renders both the same way (comma-joined labels).
-    const isMultiAnswer = typeof answer !== 'string'
-    const answerSummary = formatQuestionAnswerSummary(
-      answer as string | Record<string, string | string[]>,
-    );
-    const payload: Record<string, unknown> = { type: 'user_question_response', answer: answerSummary };
+    // - {otherLabel, freeformText} (#4651): single-question Other path.
+    //   `answer` carries the Other option's label so the server can
+    //   resolve it to a 1-indexed digit; `freeformText` carries the
+    //   typed text so the server can drive a two-stage TUI write
+    //   (digit → text-input prompt → freeform text + Enter). Older
+    //   servers that ignore `freeformText` fall through to the legacy
+    //   path and type the label literally — a clean degradation.
+    // Copilot review (#4753): tighten the freeform-shape detection to
+    // avoid misclassifying a multi-question Record whose question keys
+    // happen to be literally "freeformText" and "otherLabel" (rare, but
+    // possible if the model phrases a question that way). The freeform
+    // shape is an object with EXACTLY those two keys AND both string
+    // values — anything else falls through to the multi-question path.
+    const isFreeformAnswer = typeof answer === 'object' && answer !== null
+      && !Array.isArray(answer)
+      && Object.keys(answer).length === 2
+      && 'freeformText' in answer && 'otherLabel' in answer
+      && typeof (answer as Record<string, unknown>).freeformText === 'string'
+      && typeof (answer as Record<string, unknown>).otherLabel === 'string';
+    const isMultiAnswer = !isFreeformAnswer && typeof answer !== 'string';
+    let answerSummary: string;
+    if (isFreeformAnswer) {
+      const f = answer as { otherLabel: string; freeformText: string };
+      answerSummary = f.freeformText;
+    } else {
+      // Delegate to the shared summary helper so multi-question Records
+      // (and the legacy JSON-stringified array envelope from #4621) both
+      // render consistently — comma-joined labels for multi-select, no
+      // leaked JSON syntax in the terminal echo or wire `answer` field.
+      answerSummary = formatQuestionAnswerSummary(
+        answer as string | Record<string, string | string[]>,
+      );
+    }
+    const payload: Record<string, unknown> = { type: 'user_question_response', answer: isFreeformAnswer
+      ? (answer as { otherLabel: string; freeformText: string }).otherLabel
+      : answerSummary };
     if (isMultiAnswer) {
       payload.answers = answer;
+    }
+    if (isFreeformAnswer) {
+      payload.freeformText = (answer as { otherLabel: string; freeformText: string }).freeformText;
     }
     if (toolUseId) payload.toolUseId = toolUseId;
     // #4296: echo the resolved answer to the terminal buffer so the Output

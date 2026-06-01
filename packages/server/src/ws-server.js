@@ -309,6 +309,7 @@ function _isSecureRequest(req) {
  *   { type: 'plan_started' }                         — Claude entered plan mode (transient)
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'inactivity_warning', messageId, idleMs, prefab } — soft check-in prompt, session stays alive (#3899)
+ *   { type: 'multi_question_intervention', toolUseId, questionCount, reason, timestamp } — chroxy permission-hook denied a multi-question AskUserQuestion (#4653)
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable, sessionId? } — server-side error forwarded to app

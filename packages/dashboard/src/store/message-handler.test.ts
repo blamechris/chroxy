@@ -3183,6 +3183,154 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #4653 — multi_question_intervention dispatch. The server fires this
+  // session_event when ClaudeTuiSession's PreToolUse hook sees a multi-q
+  // AskUserQuestion (the exact deny condition shipped in #4648). The
+  // dashboard appends to the per-session interventions ring + on the FIRST
+  // intervention also pushes a one-time system ChatMessage so the user
+  // actually sees the deny happened.
+  describe('multi_question_intervention dispatch (#4653)', () => {
+    it('appends an intervention entry to the targeted session', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'multi_question_intervention',
+          sessionId: 's1',
+          toolUseId: 'toolu_first',
+          questionCount: 3,
+          reason: 'multi_question',
+          timestamp: 1700000000000,
+        },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.interventions).toHaveLength(1)
+      expect(ss.interventions[0]).toEqual({
+        kind: 'multi_question',
+        toolUseId: 'toolu_first',
+        count: 3,
+        timestamp: 1700000000000,
+      })
+    })
+
+    it('pushes a one-time system ChatMessage on the FIRST intervention', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'multi_question_intervention',
+          sessionId: 's1',
+          toolUseId: 'toolu_a',
+          questionCount: 2,
+        },
+        ctx() as any,
+      )
+
+      const messages = (store.getState() as any).sessionStates.s1.messages
+      expect(messages).toHaveLength(1)
+      expect(messages[0].type).toBe('system')
+      expect(messages[0].content).toMatch(/multi-question form/i)
+      expect(messages[0].content).toMatch(/one at a time|single questions/i)
+    })
+
+    it('does NOT push a second system message for subsequent distinct interventions', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      // First intervention — system message lands.
+      handleMessage(
+        { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu_1', questionCount: 2 },
+        ctx() as any,
+      )
+      // Second distinct intervention — counter ticks, no second system message.
+      handleMessage(
+        { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu_2', questionCount: 4 },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.interventions).toHaveLength(2)
+      // Only ONE system message — repeats just bump the counter.
+      const systemMessages = ss.messages.filter((m: any) => m.type === 'system')
+      expect(systemMessages).toHaveLength(1)
+    })
+
+    it('dedups repeats by toolUseId — counter does not tick for stuck-model re-emits', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu_stuck', questionCount: 3 },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu_stuck', questionCount: 3 },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu_stuck', questionCount: 3 },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.interventions).toHaveLength(1)
+    })
+
+    it('drops the event when the targeted session is unknown', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'multi_question_intervention',
+          sessionId: 'unknown-sess',
+          toolUseId: 'tu_x',
+          questionCount: 2,
+        },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.interventions).toHaveLength(0)
+      expect(ss.messages).toHaveLength(0)
+    })
+
+    it('ignores malformed payloads (missing toolUseId)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'multi_question_intervention', sessionId: 's1', questionCount: 2 } as any,
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.interventions).toHaveLength(0)
+    })
+  })
+
   // #4466: switching tabs sends `switch_session`, which causes the server to
   // dispatch history_replay_start → all past events → history_replay_end.
   // Pre-fix, the dashboard's pre-handler logic ran the lastClientActivityAt

@@ -400,6 +400,12 @@ export const UserQuestionResponseSchema = z.object({
         z.array(z.string().max(10_000)).max(100),
     ])).refine((obj) => Object.keys(obj).length <= 100, { message: 'Too many answers (max 100)' }).optional(),
     toolUseId: z.string().max(256).optional(),
+    // #4651 — single-question "Other" / freeform path. When set, the server
+    // resolves the chosen option (`answer`) to its 1-indexed digit, writes
+    // the digit to open claude TUI's text-input prompt, then writes
+    // `freeformText` + Enter to submit. Mutually exclusive with `answers`
+    // (multi-question forms are out of scope per #4648 / #4651).
+    freeformText: z.string().max(100_000).optional(),
 });
 export const ListDirectorySchema = z.object({
     type: z.literal('list_directory'),

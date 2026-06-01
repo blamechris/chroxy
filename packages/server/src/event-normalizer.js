@@ -250,6 +250,22 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #4653: chroxy-side multi-question AskUserQuestion deny — surfaces the
+  // permission-hook's silent intervention (#4648) as a user-visible event.
+  // Forwarded only to subscribers of THIS session: the counter is per-
+  // session and a deny on session A shouldn't tick the chip on session B.
+  multi_question_intervention: (data) => ({
+    messages: [{
+      msg: {
+        type: 'multi_question_intervention',
+        toolUseId: data.toolUseId,
+        questionCount: data.questionCount,
+        reason: data.reason,
+        timestamp: data.timestamp,
+      },
+    }],
+  }),
+
   result: (data, ctx) => {
     const messages = [
       { msg: { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId } },
