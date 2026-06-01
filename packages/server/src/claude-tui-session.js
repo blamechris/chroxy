@@ -989,7 +989,7 @@ export class ClaudeTuiSession extends BaseSession {
         lastHeartbeatMs = now
         let sinkFileCount = 0
         try { sinkFileCount = readdirSync(this._sinkDir).length } catch {}
-        log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${this._consumedFiles.size - consumedAtStart} stopFound=false)`)
+        log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${this._consumedFiles.size - consumedAtStart} stopFound=${stopPayload ? 'yes' : 'no'})`)
       }
       if (stopPayload) break
       await new Promise((r) => setTimeout(r, 150))
