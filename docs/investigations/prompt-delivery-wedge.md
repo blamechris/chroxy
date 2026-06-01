@@ -126,6 +126,91 @@ Only after Phase 2 evidence. Likely candidates depending on confirmed cause:
 | 2026-06-01 | Cut v0.9.29 with multi-line bracketed-paste fix (#4679) | Addressed multi-line manifestation only. Did NOT address multi-session-restore wedge. |
 | 2026-06-01 | Pause; full audit before option 3 | User requested investigation rather than another guess-fix. |
 | 2026-06-01 | Plan v0.9.30 as instrumentation-only release | Audit showed proposed "bypass throttle for first prompt" fix aimed at wrong layer (rank 4); rank 1 and 2 are higher-plausibility but require evidence to discriminate. |
+| 2026-06-01 | **v0.9.30 instrumentation produced a complete diagnosis on first repro.** | The wedge is NOT in `sendMessage`'s prompt-write path at all. It's in the AskUserQuestion answer round-trip — chroxy writes the 1-byte option-digit to claude TUI, TUI never emits PostToolUse. Full evidence below. **Investigation pivots from #4678 (which was effectively a misdiagnosis) to #4668.** Wedge-point candidates 1, 2, 3, 4 from the audit table are all RULED OUT — the wedge sits downstream of all of them, inside claude TUI's keystroke processing for AskUserQuestion answers. |
+
+## 2026-06-01 repro on v0.9.30 — full per-stage trail
+
+Live repro on the multi-session-restore conditions described in "Current symptom" above. Single-line prompt asking claude to call AskUserQuestion 4 times.
+
+```
+04:47:53.948  sendMessage start         (msg=14fd4a-1 bytes=243)
+04:47:53.949  Broadcasting stream_start (msg=14fd4a-1)
+04:47:53.950  waitForPrompt             elapsedMs=0 sawStatus=true ready=true
+04:47:53.951  writePtyText              path=paste codePoints=243 elapsedMs=0 completed=true
+04:47:59.088  hookPoll heartbeat        iters=35  elapsedMs=5137   sinkFiles=2 consumed=0
+04:48:04.233  hookPoll heartbeat        iters=69  elapsedMs=10282  sinkFiles=2 consumed=0
+04:48:08.311  AskUserQuestion pending   tool=toolu_011G... questions=4 options.q1=4
+04:48:08.311  WARN: 4-question form, only q1 will be answered (#4604)
+04:48:09.368  hookPoll heartbeat        iters=103 elapsedMs=15417  sinkFiles=3 consumed=1
+04:48:12.349  Permission request broadcast to dashboard
+04:48:12.393  AskUserQuestion pending   tool=toolu_0192... questions=1 options.q1=4   ← _pendingUserAnswer OVERWRITTEN
+04:48:14.512  hookPoll heartbeat        iters=137 elapsedMs=20561  sinkFiles=5 consumed=2
+[8 more 5s heartbeats — sinkFiles=5 consumed=2, no progress]
+04:49:13.484  user_question_response received  toolUseId=toolu_0192... answer.length=12
+04:49:13.485  writePtyText              path=throttled codePoints=1 bytes=1 elapsedMs=0 completed=true   ← 1-byte answer keystroke DELIVERED
+[6 more 5s heartbeats — TUI completely silent post-keystroke]
+04:49:43.485  WARN: AskUserQuestion stall: tool=toolu_0192... — claude TUI never emitted
+              PostToolUse after answer write (30000ms). Likely a multi-question form (#4604).
+              Tearing down turn so the session is recoverable.
+04:49:43.488  Broadcasting stream_end
+04:49:43.615  hookPoll exit             iters=725 elapsedMs=109664 consumed=2 stopFound=no
+              aborted=no ptyExited=no stillBusy=no
+```
+
+### What this proves
+
+- **Prompt-delivery path is healthy.** `_waitForPrompt` → 0ms, `_writePtyText` → 0ms via paste-path (the dashboard composer appended a `\n`, so #4679's multi-line bracketed-paste kicked in for what we thought was "single-line" — both work).
+- **Hook poll loop is alive and consuming files.** Heartbeats every 5s, sink-file count rose from 2 → 5 as claude TUI emitted PreToolUse hooks.
+- **Claude TUI is fully responsive.** It received the prompt, planned, called AskUserQuestion, and accepted permission denials.
+- **The wedge is in the answer-keystroke round-trip.** Chroxy wrote 1 byte at `04:49:13.485`; TUI emitted nothing for 30s; watchdog fired with the exact correct diagnosis pre-written into its WARN.
+
+### Ruled-out hypotheses
+
+| Rank | Candidate | Verdict | Evidence |
+|------|-----------|---------|----------|
+| 1 | `_waitForPrompt` degraded probe | **RULED OUT** | `elapsedMs=0 sawStatus=true ready=true` |
+| 2 | hook poll loop never iterates | **RULED OUT** | 725 iters over 109s, files consumed as they appeared |
+| 3 | WS backpressure drops broadcasts | **RULED OUT** | All broadcasts present in log, dashboard rendered the question card |
+| 4 | PTY internal buffer stall | **RULED OUT** | Both prompt write and answer keystroke completed in 0ms |
+| 5 | sink dir cross-contamination | **RULED OUT** | Per-session UUID sink dirs as designed |
+
+### Confirmed root cause
+
+This is the **#4668 manifestation** (`feedback_multi_question_post_deny_wedge.md` memory note): the post-deny single-question retry wedge. Mechanism:
+
+1. Claude calls AskUserQuestion with 4 questions
+2. Chroxy WARNs "only q1 will be answered" + sets `_pendingUserAnswer = {tool=toolu_011G...}`
+3. Permission hook broadcasts permission request to dashboard
+4. Claude (in parallel, in the same assistant turn) retries with a fresh single-question call → `_pendingUserAnswer` is OVERWRITTEN to `{tool=toolu_0192...}`
+5. Dashboard renders the question card, user picks an option
+6. Dashboard sends `user_question_response` back for `toolu_0192...`
+7. Chroxy writes the option-digit keystroke to PTY → delivered in 0ms
+8. Claude TUI's input state is misaligned (likely it's still showing the FIRST multi-q form, or its `askuserquestion-active` lock from #4669 has corrupted the interaction state)
+9. TUI consumes the keystroke as a no-op or option-toggle; never submits, never emits PostToolUse
+10. 30s later the AskUserQuestion stall watchdog fires and tears the turn down
+
+### Sink dir state at wedge time (confirms hypothesis)
+
+```
+askuserquestion-active/          ← sibling-deny lock from #4669, never cleaned up
+permission-mode
+pre-05B67...json                 ← PreToolUse for first call (multi-q, denied)
+pre-2690...json                  ← PreToolUse for second call (single-q retry)
+settings.json
+```
+
+No `post-*` files. The first PreToolUse never got a PostToolUse, which means the permission-hook chain for the first call was denied at the PreToolUse stage and the cleanup path that releases `askuserquestion-active` never ran. The second call's keystroke landed on a TUI whose input state was still oriented at the first call's (denied) form.
+
+## Next steps (refined from earlier "Phase 3")
+
+The wedge is now firmly **#4668**, not #4678. The doc's earlier "Phase 3 targeted fix" was speculating about prompt-delivery layer fixes; the actual fix shape now becomes:
+
+1. **`_pendingUserAnswer` → Map keyed by toolUseId** (the long-term fix from `feedback_multi_question_post_deny_wedge.md`). Prevents the overwrite that happens when claude retries with a sibling tool_use in the same turn.
+2. **`respondToQuestion(toolUseId, ...)`** signature change to match.
+3. **Cleanup the `askuserquestion-active` lock on permission DENY**, not just on PostToolUse. The current chain only releases the lock when PostToolUse fires — but a denied tool_use NEVER fires PostToolUse, so the lock leaks and corrupts the next call's interaction.
+4. **Either suppress the dashboard's permission-card retry OR make answer-keystroke writing tool_use-aware** so a keystroke for `toolu_0192...` doesn't land in a TUI form bound to `toolu_011G...`.
+
+Will be tracked under #4668 (existing open issue). v0.9.31 should ship the Map-keyed refactor as the minimum viable fix.
 
 ## How to add evidence to this doc
 
