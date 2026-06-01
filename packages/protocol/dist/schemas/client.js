@@ -368,10 +368,29 @@ export const NotificationPrefsSetSchema = z.object({
     requestId: z.string().max(128).optional(),
     prefs: NotificationPrefsPatchSchema,
 }).passthrough();
+/**
+ * #4735 — per-question answer wire format.
+ *
+ * `answers` is a map keyed by question text. Values are either:
+ * - `string` — single-select label or a free-form ("Other"/text) answer
+ * - `string[]` — multi-select labels (one entry per selected option)
+ *
+ * Pre-#4735 clients JSON-stringified multi-select arrays into a single
+ * string so the wire shape `Record<string, string>` was preserved; the
+ * widened union accepts the native array form so newer dashboard / app
+ * builds can submit multi-select answers without the JSON envelope. The
+ * server-side consumers (`PermissionManager.respondToQuestion`,
+ * `ClaudeTuiSession.respondToQuestion`) already accept both shapes —
+ * see `resolveQuestionDigits` in `claude-tui-session.js` for the TUI
+ * path that handles the array variant directly.
+ */
 export const UserQuestionResponseSchema = z.object({
     type: z.literal('user_question_response'),
     answer: z.string().max(100_000),
-    answers: z.record(z.string(), z.string().max(100_000)).refine((obj) => Object.keys(obj).length <= 100, { message: 'Too many answers (max 100)' }).optional(),
+    answers: z.record(z.string(), z.union([
+        z.string().max(100_000),
+        z.array(z.string().max(100_000)).max(100),
+    ])).refine((obj) => Object.keys(obj).length <= 100, { message: 'Too many answers (max 100)' }).optional(),
     toolUseId: z.string().max(256).optional(),
 });
 export const ListDirectorySchema = z.object({

@@ -2097,8 +2097,10 @@ export class ClaudeTuiSession extends BaseSession {
       if (q.multiSelect) {
         // multi-select expects 0+ choices. Accept array, JSON-encoded
         // array string, or comma-joined list — the wire schema is
-        // string-only (Record<string,string>) so the dashboard encodes
-        // multi-selects as JSON.
+        // `Record<string, string | string[]>` post-#4735 so newer
+        // dashboard / app builds send the native array form; pre-#4735
+        // builds JSON-stringified the array into a single string for
+        // back-compat. Both shapes resolve here.
         let labels = []
         if (Array.isArray(rawAnswer)) {
           labels = rawAnswer.filter((s) => typeof s === 'string')

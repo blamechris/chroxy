@@ -331,11 +331,28 @@ export function App() {
     [activeMismatched],
   )
 
+  // #4735: the multi-question AskUserQuestion form is gated per session
+  // type. TUI sessions (`claude-tui`) keep the #4666 deferred notice
+  // because the permission-hook denies multi-question tool_uses there
+  // and answers would misroute through `_pendingUserAnswer`. SDK / BYOK
+  // / Codex sessions support per-question delivery natively (#4731), so
+  // the dashboard renders the interactive `MultiQuestionForm` for them
+  // and submits per-question answers (including multi-select arrays) on
+  // the widened wire.
+  const activeSessionProvider = useMemo(
+    () => sessions.find(s => s.sessionId === activeSessionId)?.provider,
+    [sessions, activeSessionId],
+  )
+  const allowMultiQuestionForm = useMemo(
+    () => activeSessionProvider != null && activeSessionProvider !== 'claude-tui',
+    [activeSessionProvider],
+  )
+
   // #3839: dropdown-gating flags derived from the active session's provider
   // capabilities. Hoisted out of the JSX so the lookups don't re-run on every
   // render of <App>, which fires on most WS messages.
   const dropdownFlags = useMemo(() => {
-    const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+    const activeProvider = activeSessionProvider
     const providerInfo = availableProviders.find(p => p.name === activeProvider)
     const caps = providerInfo?.capabilities
     // The store carries one `availableModels` slot tagged with the provider
@@ -356,7 +373,7 @@ export function App() {
       showPermissionMode: caps?.permissionModeSwitch !== false,
       showThinkingLevel: !!caps?.thinkingLevel,
     }
-  }, [sessions, activeSessionId, availableProviders, availableModelsProvider, activeModel])
+  }, [activeSessionProvider, availableProviders, availableModelsProvider, activeModel])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
@@ -1493,15 +1510,21 @@ export function App() {
           options={storeMsg.options}
           questions={storeMsg.questions}
           answered={storeMsg.answered}
+          // #4735 — SDK-mode sessions get the interactive
+          // MultiQuestionForm; TUI sessions keep the #4666 deferred
+          // notice. Derivation lives at activeSessionProvider above so
+          // the flag flips correctly on session-switch without a full
+          // re-render of every prompt.
+          allowMultiQuestion={allowMultiQuestionForm}
           onSelect={(answer) => {
-            // #4604 Chunk B — answer is `string` for single-question /
-            // free-text paths and `Record<string,string>` for multi-question
-            // forms. sendUserQuestionResponse handles both shapes;
-            // markPromptAnswered records a string summary on the bubble so
-            // the post-answer collapse UI has something readable to show.
-            // #4622 — formatQuestionAnswerSummary pretty-prints multi-select
-            // JSON-stringified arrays as comma-joined labels so the chip
-            // doesn't leak `["App","Tests"]` JSON syntax into UX copy.
+            // #4604 Chunk B / #4735 — answer is `string` for
+            // single-question / free-text paths and
+            // `Record<string, string | string[]>` for multi-question
+            // forms (multi-select values are native arrays on the
+            // widened wire). sendUserQuestionResponse handles both
+            // shapes; markPromptAnswered records a string summary on
+            // the bubble so the post-answer collapse UI has something
+            // readable to show.
             sendUserQuestionResponse(answer, storeMsg.toolUseId)
             markPromptAnswered(storeMsg.id, formatQuestionAnswerSummary(answer))
           }}
@@ -1568,7 +1591,7 @@ export function App() {
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders

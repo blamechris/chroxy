@@ -497,6 +497,50 @@ describe('PermissionManager', () => {
       assert.deepEqual(result.updatedInput.answers, { 'Color?': 'Red' })
       assert.ok(!('Unknown?' in result.updatedInput.answers))
     })
+
+    // #4735 — per-question answer wire format. Multi-select answers may
+    // arrive as `string[]` (native array) from #4735+ clients. The
+    // PermissionManager passes the value through to `updatedInput.answers`
+    // unchanged so the SDK's canUseTool callback receives the array as the
+    // value for that question — the SDK accepts both shapes per the
+    // AskUserQuestion contract. Older clients that JSON-stringified the
+    // array continue to flow through as plain strings (unchanged).
+    it('passes string[] answers through to updatedInput.answers (#4735 multi-select native array)', async () => {
+      const questions = [
+        { question: 'Which targets?', multiSelect: true, options: [
+          { label: 'App' }, { label: 'Docs' }, { label: 'Tests' },
+        ] },
+      ]
+      const promise = pm._handleAskUserQuestion({ questions }, null)
+
+      pm.respondToQuestion('summary', { 'Which targets?': ['App', 'Tests'] })
+      const result = await promise
+      assert.deepEqual(result.updatedInput.answers, { 'Which targets?': ['App', 'Tests'] })
+      assert.ok(Array.isArray(result.updatedInput.answers['Which targets?']))
+    })
+
+    it('passes mixed string + string[] answers through unchanged (#4735)', async () => {
+      const questions = [
+        { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
+        { question: 'Targets?', multiSelect: true, options: [
+          { label: 'App' }, { label: 'Docs' },
+        ] },
+        { question: 'Confirm?', options: [{ label: 'Yes' }, { label: 'No' }] },
+      ]
+      const promise = pm._handleAskUserQuestion({ questions }, null)
+
+      pm.respondToQuestion('summary', {
+        'Strategy?': 'Patch',
+        'Targets?': ['App', 'Docs'],
+        'Confirm?': 'Yes',
+      })
+      const result = await promise
+      assert.deepEqual(result.updatedInput.answers, {
+        'Strategy?': 'Patch',
+        'Targets?': ['App', 'Docs'],
+        'Confirm?': 'Yes',
+      })
+    })
   })
 
   // -- clearAll --

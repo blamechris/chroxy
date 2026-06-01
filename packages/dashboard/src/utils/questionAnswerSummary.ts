@@ -8,27 +8,32 @@
  *
  * 1. `string` — the legacy single-question / free-text path. Returned
  *    verbatim.
- * 2. `Record<string,string>` — the multi-question form path (#4604
- *    Chunk B). One entry per question, keyed by question text.
- *    Multi-select values arrive as JSON-stringified string arrays
- *    (see `MultiQuestionForm.handleSubmit` — the wire shape is
- *    `Record<string,string>`, and the server's `respondToQuestion`
- *    JSON.parse splits it back). The summary helper detects and
- *    pretty-prints those arrays as `App, Tests` instead of leaking
- *    `["App","Tests"]` JSON syntax into the UX copy.
+ * 2. `Record<string, string | string[]>` — the multi-question form path
+ *    (#4604 Chunk B, widened in #4735). One entry per question, keyed
+ *    by question text. Multi-select values arrive as native `string[]`
+ *    arrays via the post-#4735 wire (`UserQuestionResponseSchema`
+ *    accepts `string | string[]` per question). The summary helper
+ *    pretty-prints those arrays as `App, Tests`.
  *
- * Non-array JSON shapes (objects, numbers) are kept as their raw
- * stringified form — `MultiQuestionForm` only ever JSON-encodes
- * arrays, so anything else didn't come from the form and we'd rather
- * surface it as-is than mangle it.
+ * Back-compat: pre-#4735 dashboards JSON-stringified multi-select
+ * arrays into a single string (`["App","Tests"]`) so the wire shape
+ * stayed `Record<string,string>`. The helper still recognises that
+ * encoding and renders it the same way as the native-array form so
+ * mixed-version rehydrated state stays readable. Non-array JSON shapes
+ * (objects, numbers) are kept as their raw stringified form — only
+ * arrays trigger the pretty-print path.
  */
 
 /**
- * Pretty-print a single answer value. If the value parses as a JSON
- * array of primitives we render it as a comma-joined list (no
- * brackets, no quotes); otherwise the value is returned unchanged.
+ * Pretty-print a single answer value. Arrays render as comma-joined
+ * label lists (no brackets, no quotes); a JSON-stringified array string
+ * (pre-#4735 wire) is parsed and rendered the same way; everything else
+ * is returned unchanged.
  */
-function formatMultiSelectValue(value: string): string {
+function formatAnswerValue(value: string | string[]): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).join(', ')
+  }
   // Cheap pre-check to avoid JSON.parse-ing every short-string answer.
   if (!value.startsWith('[')) return value
   let parsed: unknown
@@ -42,10 +47,10 @@ function formatMultiSelectValue(value: string): string {
 }
 
 export function formatQuestionAnswerSummary(
-  answer: string | Record<string, string>,
+  answer: string | Record<string, string | string[]>,
 ): string {
   if (typeof answer === 'string') return answer
   return Object.entries(answer)
-    .map(([question, value]) => `${question}: ${formatMultiSelectValue(value)}`)
+    .map(([question, value]) => `${question}: ${formatAnswerValue(value)}`)
     .join(' | ')
 }

@@ -116,4 +116,45 @@ describe('formatQuestionAnswerSummary', () => {
       )
     })
   })
+
+  // #4735 — per-question wire was widened to
+  // `Record<string, string | string[]>` so multi-select answers can be
+  // emitted as native arrays. The summary helper renders the array form
+  // the same way as the pre-#4735 JSON-stringified form so mixed-version
+  // rehydrated state stays readable end-to-end.
+  describe('native string[] multi-select (#4735)', () => {
+    it('renders a native string[] multi-select as comma-joined labels', () => {
+      const answer = {
+        'Which areas?': ['App', 'Tests'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which areas?: App, Tests',
+      )
+    })
+
+    it('renders a mixed string + string[] payload readably', () => {
+      const answer = {
+        'Which release strategy?': 'Minor',
+        'Which areas?': ['App', 'Tests', 'Docs'],
+        'Confirm?': 'Yes',
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which release strategy?: Minor | Which areas?: App, Tests, Docs | Confirm?: Yes',
+      )
+    })
+
+    it('renders an empty native string[] as an empty value', () => {
+      const answer = {
+        'Which areas?': [],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: ')
+    })
+
+    it('renders a single-item native string[] without brackets or quotes', () => {
+      const answer = {
+        'Which areas?': ['App'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: App')
+    })
+  })
 })

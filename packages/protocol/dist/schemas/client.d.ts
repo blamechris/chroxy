@@ -338,10 +338,26 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
         bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>;
 }, z.core.$loose>;
+/**
+ * #4735 — per-question answer wire format.
+ *
+ * `answers` is a map keyed by question text. Values are either:
+ * - `string` — single-select label or a free-form ("Other"/text) answer
+ * - `string[]` — multi-select labels (one entry per selected option)
+ *
+ * Pre-#4735 clients JSON-stringified multi-select arrays into a single
+ * string so the wire shape `Record<string, string>` was preserved; the
+ * widened union accepts the native array form so newer dashboard / app
+ * builds can submit multi-select answers without the JSON envelope. The
+ * server-side consumers (`PermissionManager.respondToQuestion`,
+ * `ClaudeTuiSession.respondToQuestion`) already accept both shapes —
+ * see `resolveQuestionDigits` in `claude-tui-session.js` for the TUI
+ * path that handles the array variant directly.
+ */
 export declare const UserQuestionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ListDirectorySchema: z.ZodObject<{
@@ -700,7 +716,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;

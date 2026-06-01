@@ -1638,4 +1638,76 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(ByokClearCredentialsSchema.safeParse({ type: 'byok_clear_credentials' }).success)
     })
   })
+
+  // #4735 — per-question answer wire format. Values may be either a
+  // string (single-select / free-form) or string[] (multi-select). The
+  // back-compat string-only shape must still validate; the new array
+  // shape must validate too.
+  describe('UserQuestionResponseSchema per-question answer values (#4735)', () => {
+    it('accepts string answers (back-compat single-select / free-form)', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'Patch',
+        answers: { 'Which release strategy?': 'Patch', 'Confirm?': 'Yes' },
+      })
+      assert.ok(result.success, JSON.stringify(result))
+    })
+
+    it('accepts string[] answers (multi-select native array)', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'App, Tests',
+        answers: { 'Which targets?': ['App', 'Tests'] },
+      })
+      assert.ok(result.success, JSON.stringify(result))
+    })
+
+    it('accepts mixed string and string[] across questions', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'summary',
+        answers: {
+          'Which release strategy?': 'Patch',
+          'Which targets?': ['App', 'Tests'],
+          'Confirm?': 'Yes',
+        },
+      })
+      assert.ok(result.success, JSON.stringify(result))
+    })
+
+    it('rejects non-string array entries', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'x',
+        answers: { 'q?': [1, 2, 3] },
+      })
+      assert.ok(!result.success)
+    })
+
+    it('caps multi-select array length at 100', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const big = Array.from({ length: 101 }, (_, i) => `opt${i}`)
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'x',
+        answers: { 'q?': big },
+      })
+      assert.ok(!result.success)
+    })
+
+    it('caps individual array entries at 100k chars', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const huge = 'x'.repeat(100_001)
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'x',
+        answers: { 'q?': [huge] },
+      })
+      assert.ok(!result.success)
+    })
+  })
 })

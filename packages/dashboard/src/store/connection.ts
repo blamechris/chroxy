@@ -1549,20 +1549,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
-  sendUserQuestionResponse: (answer: string | Record<string, string>, toolUseId?: string) => {
+  sendUserQuestionResponse: (answer: string | Record<string, string | string[]>, toolUseId?: string) => {
     const { socket, activeSessionId, sessionStates } = get();
-    // #4604 Chunk B — split the wire payload by call shape:
+    // #4604 Chunk B / #4735 — split the wire payload by call shape:
     // - string `answer`: legacy single-question / free-text path. Wire
     //   shape stays `{ type, answer, toolUseId? }` so older servers
     //   keep working without schema migration.
-    // - Record `answer`: multi-question form (Chunk B). Populate the
-    //   `answers` field (protocol already supports it) AND a string
+    // - Record `answer`: multi-question form. Populate the `answers`
+    //   field (`UserQuestionResponseSchema` accepts
+    //   `Record<string, string | string[]>` per #4735) AND a string
     //   `answer` summary so a server running an older build that only
     //   reads `answer` falls through to its default-to-option-1 path
     //   (a noisy WARN in chroxy.log) instead of stalling the form.
+    //   Multi-select values flow through as native arrays — the
+    //   summary helper flattens them to comma-joined labels so the
+    //   string-only `answer` field stays readable.
     const isMultiAnswer = typeof answer !== 'string'
     const answerSummary = isMultiAnswer
-      ? Object.entries(answer as Record<string, string>).map(([q, v]) => `${q}: ${v}`).join(' | ')
+      ? Object.entries(answer as Record<string, string | string[]>)
+          .map(([q, v]) => `${q}: ${Array.isArray(v) ? v.join(', ') : v}`)
+          .join(' | ')
       : (answer as string);
     const payload: Record<string, unknown> = { type: 'user_question_response', answer: answerSummary };
     if (isMultiAnswer) {

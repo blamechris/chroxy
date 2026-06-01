@@ -1432,6 +1432,52 @@ describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
     // nothing.
     expect(terminalRawBuffer).not.toContain('User answered:');
   });
+
+  // #4735 — multi-question multi-select wire format. The widened wire
+  // (UserQuestionResponseSchema) accepts `string | string[]` per question.
+  // The store should forward the answers map shape verbatim AND populate
+  // the `answer` summary field with a comma-joined flattening of any
+  // array values so older servers reading only `answer` still see a
+  // human-readable line.
+  it('forwards multi-question Record<string, string | string[]> verbatim and flattens arrays in the answer summary (#4735)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const answersMap = {
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(answersMap, 'toolu_multi');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu_multi');
+    // answers field passes the map through unchanged — arrays stay arrays.
+    expect(payload.answers).toEqual({
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    });
+    expect(Array.isArray(payload.answers['Which targets?'])).toBe(true);
+    // Summary string flattens arrays as comma-joined labels so the
+    // string-only `answer` field stays readable on older servers.
+    expect(payload.answer).toBe(
+      'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
