@@ -213,6 +213,35 @@ describe('notification prefs handlers (#4541)', () => {
       assert.equal(existsSync(prefsPath), false, 'prefs file must not exist after rejection')
     })
 
+    // #4610 — `typeof [] === 'object'` so an array-typed `devices` payload
+    // would otherwise reach the key-format loop and reject with the wrong
+    // error message ("Invalid device token format" — true but misleading
+    // about the actual shape mismatch). Reject arrays explicitly up front
+    // with a shape-specific message so misbehaving clients get a clear
+    // signal and the on-disk state stays untouched.
+    it('rejects array-typed devices payload with a shape-specific message (#4610)', () => {
+      const setPrefsSpy = createSpy((patch, opts) => pushManager.setPrefs(patch, opts))
+      const wrappedManager = Object.assign(Object.create(Object.getPrototypeOf(pushManager)), pushManager, {
+        setPrefs: setPrefsSpy,
+      })
+      const ctx = makeCtx(wrappedManager)
+      const ws = makeWs()
+      const before = JSON.parse(JSON.stringify(pushManager.getPrefs()))
+      inputHandlers.notification_prefs_set(
+        ws, { id: 'c1' },
+        { requestId: 'r1', prefs: { devices: ['foo', 'bar'] } },
+        ctx,
+      )
+      const err = ws._messages.find((m) => m.type === 'error')
+      assert.ok(err, 'expected an error reply')
+      assert.equal(err.code, 'INVALID_REQUEST')
+      assert.match(err.message, /devices must be an object, not an array/)
+      // No partial-apply: setPrefs must not be invoked and disk stays clean.
+      assert.equal(setPrefsSpy.callCount, 0, 'setPrefs must not be invoked on array-typed devices')
+      assert.deepEqual(pushManager.getPrefs(), before, 'prefs snapshot must be unchanged')
+      assert.equal(existsSync(prefsPath), false, 'prefs file must not exist after rejection')
+    })
+
     it('rejects notification_prefs_set when device key is too short', () => {
       const setPrefsSpy = createSpy((patch, opts) => pushManager.setPrefs(patch, opts))
       const wrappedManager = Object.assign(Object.create(Object.getPrototypeOf(pushManager)), pushManager, {
