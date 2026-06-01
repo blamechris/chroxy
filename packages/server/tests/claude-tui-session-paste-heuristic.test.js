@@ -256,6 +256,67 @@ describe('ClaudeTuiSession paste-heuristic integration (#4271)', () => {
       assert.ok(!allBytes.includes('\x1b[201~'), 'single-line must not emit paste-end CSI')
     })
 
+    it('strips embedded paste-end markers (\\x1b[201~) from the body so attacker content cannot escape the paste', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      // Without stripping, the embedded \x1b[201~ would terminate
+      // claude TUI's paste at "legit content" and the suffix
+      // ("rm -rf /") would land as typed input in the input box —
+      // a sandbox-escape primitive if any future code path feeds
+      // attacker-controlled content into _writePtyTextThrottled.
+      const prompt = 'legit content\n\x1b[201~rm -rf /\nmore content'
+      const completed = await session._writePtyTextThrottled(prompt)
+      assert.equal(completed, true)
+
+      const sent = pty.allWrites()[0]
+      // Exactly one start and one end marker — the embedded one is gone.
+      assert.equal((sent.match(/\x1b\[200~/g) || []).length, 1, 'one paste-start marker')
+      assert.equal((sent.match(/\x1b\[201~/g) || []).length, 1, 'one paste-end marker (embedded one stripped)')
+      // Suffix text survives (it's just text, no longer a sandbox-escape).
+      assert.ok(sent.includes('rm -rf /'), 'attacker text passes through as inert content')
+      assert.ok(sent.includes('legit content'), 'legitimate content passes through')
+    })
+
+    it('all-newline prompt collapses to empty body and aborts cleanly (no degenerate empty-paste)', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      // After CRLF normalise + trailing-newline strip, body == ''. Sending
+      // \x1b[200~\x1b[201~\r is a degenerate empty paste — undocumented
+      // claude TUI behaviour. The guard short-circuits via the abort path
+      // so no bytes leak to the PTY and the caller sees a clean turn end.
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('\n\n\n', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, 'empty-body returns false (treated as abort)')
+      assert.equal(onAbortCalled, true, 'onAbort fired so caller can surface turn error')
+      assert.equal(pty.allWrites().length, 0, 'no bytes leaked to the PTY for empty-body input')
+    })
+
+    it('prompt that is entirely embedded paste-end markers also aborts cleanly (defense-in-depth + empty-body interplay)', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      // After stripping \x1b[201~ from "\n\x1b[201~\x1b[201~\n", body
+      // is "\n\n" which then trims trailing newlines to "". Both guards
+      // run in sequence; verify the abort path fires for the composite
+      // case as well.
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('\n\x1b[201~\x1b[201~\n', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false)
+      assert.equal(onAbortCalled, true)
+      assert.equal(pty.allWrites().length, 0)
+    })
+
     it('multi-line write honours abort flag set before the paste fires', async () => {
       const session = makeSession()
       const pty = new PasteHeuristicPtyStub()
