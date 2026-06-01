@@ -562,5 +562,30 @@ describe('ToolBubble', () => {
       )
       expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('rm -rf /tmp/foo')
     })
+
+    it('hides the partial-preview block when the tool resolved with empty-string result (#4667 / Copilot)', () => {
+      // A tool that finished with `result === ''` (resolved-with-no-output,
+      // #4308) was still rendering the streaming `inputPartial` code
+      // block when expanded — the legacy `result`-truthy gate treated
+      // empty-string as "still in flight." Pulse / ActivityIndicator
+      // already use `hasResult` (`result !== undefined`) so the bubble
+      // header correctly hid the pulse for these cases, but the
+      // expanded preview path was inconsistent. Fixed alongside the
+      // #4667 suppression refactor; this test pins the contract.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="bash-empty-result"
+          inputPartial='{"command":"true"}'
+          result=""
+        />,
+      )
+      // Empty-string result means hasResult is true → no pulse.
+      expect(screen.queryByTestId('tool-bubble-pulse-bash-empty-result')).not.toBeInTheDocument()
+      // Force-expand: the streaming preview must NOT render because
+      // the tool already resolved (even with no output).
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.queryByTestId('tool-input-partial-bash-empty-result')).not.toBeInTheDocument()
+    })
   })
 })

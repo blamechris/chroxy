@@ -90,6 +90,13 @@ export interface ToolBubbleProps {
 // option 1 in #4667 ("suppress tool_input_delta rendering for
 // AskUserQuestion") and aligns with the precedent of other internal
 // tools whose canonical render path is a dedicated card.
+//
+// Add a tool here only when BOTH conditions hold: (a) the dashboard
+// already has a dedicated structured renderer for it (driven by a
+// parallel event, the way `user_question` drives QuestionPrompt) AND
+// (b) the tool_input shape carries no user-meaningful text on its own.
+// "This shape looks ugly when rendered raw" is NOT sufficient — that's
+// what #4655's generic key:value fallback in `tool-summary.ts` is for.
 const SUPPRESS_RAW_INPUT_TOOLS = new Set(['AskUserQuestion'])
 
 export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages }: ToolBubbleProps) {
@@ -155,14 +162,19 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // block. The structured QuestionPrompt card carries the question
   // text + options; rendering raw JSON beside it produces the
   // double-bubble reconciliation problem this fix addresses.
+  // #4667 (Copilot review) — gate on `hasResult`, not `result`, so a
+  // tool that resolved with `result === ''` (resolved-with-no-output,
+  // #4308) or images-only (#4317) is treated as done — matches the
+  // pulse / ActivityIndicator predicate. Pre-fix this branch could
+  // render the streaming preview for a tool that had already resolved.
   const partialPreview = useMemo(() => {
-    if (!expanded || result || !inputPartial || suppressRawInput) return null
+    if (!expanded || hasResult || !inputPartial || suppressRawInput) return null
     const parsed = tryParseCompleteJson(inputPartial)
     if (parsed !== undefined) {
       return { text: JSON.stringify(parsed, null, 2), parsed: true }
     }
     return { text: inputPartial, parsed: false }
-  }, [expanded, result, inputPartial, suppressRawInput])
+  }, [expanded, hasResult, inputPartial, suppressRawInput])
 
   const toggle = () => setExpanded(prev => !prev)
 
@@ -230,8 +242,13 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
           result yet. The `tool_input_delta` accumulator renders as a
           code block; unparseable mid-stream JSON renders verbatim
           (NOT as an error). Result arrival flips the bubble to the
-          standard result view above. */}
-      {expanded && !result && partialPreview && (
+          standard result view above.
+          #4667 (Copilot review) — gate on `hasResult` rather than
+          `result`, so a tool that resolved with empty-string result
+          (#4308) or images-only (#4317) hides the streaming preview.
+          `partialPreview` itself also gates on hasResult; this JSX
+          gate is the belt-and-braces match. */}
+      {expanded && !hasResult && partialPreview && (
         <div
           className="tool-input-partial"
           data-testid={`tool-input-partial-${toolUseId}`}
