@@ -222,6 +222,55 @@ describe('generic-fallback summary for unknown tool shapes (#4655)', () => {
       expect(out.length).toBeLessThanOrEqual(100)
     })
 
+    it('degrades cleanly without slicing mid-key when the first key name overflows', () => {
+      // Regression guard for Copilot finding on the degradation branch:
+      // a 150-char first key must NOT appear as a sliced partial
+      // identifier. The fallback drops keys that don't fit and emits
+      // only the prefix + any fitting names — never a half-rendered
+      // identifier.
+      const longKey = 'x'.repeat(150)
+      const out = getInputSummary({ [longKey]: 'value', shortA: 1, shortB: 2 })
+      expect(out.startsWith('3 keys: ')).toBe(true)
+      // The over-budget key must NOT appear at all (even partially):
+      // the rest after the prefix may only contain shorter key names
+      // that fit. No `xxxxxxxx...` partial-identifier leaks.
+      expect(out).not.toMatch(/xxxx/)
+      expect(out.length).toBeLessThanOrEqual(100)
+    })
+
+    it('degrades to key-count summary listing only keys that fit within budget', () => {
+      // Long first key, shorter follow-ups — the prefix + shorter keys
+      // should fit, the long key should be dropped entirely.
+      const longKey = 'x'.repeat(150)
+      const out = getInputSummary({ [longKey]: 'value', foo: 1, bar: 2 })
+      // Shorter keys remain visible; long key omitted entirely.
+      expect(out).toContain('foo')
+      expect(out).toContain('bar')
+      expect(out).not.toContain('x')
+    })
+
+    it('escapes embedded quotes in string values so previews stay unambiguous', () => {
+      // Naive `"${value}"` produced ambiguous `"foo "bar" baz"` previews —
+      // route through JSON.stringify so embedded quotes are escaped.
+      expect(getInputSummary({ note: 'foo "bar" baz' }))
+        .toBe('note: "foo \\"bar\\" baz"')
+    })
+
+    it('escapes embedded newlines so collapsed bubbles stay single-line', () => {
+      // A `\n` in the string would otherwise produce a multi-line
+      // collapsed summary and blow the bubble height. JSON.stringify
+      // emits `\\n` (escape sequence), keeping the preview one line.
+      expect(getInputSummary({ note: 'line1\nline2' }))
+        .toBe('note: "line1\\nline2"')
+    })
+
+    it('escapes backslashes in string values', () => {
+      // Use a non-PRIORITY_FIELD key (`win_path`) so we hit the generic
+      // fallback rather than the priority-field path.
+      expect(getInputSummary({ win_path: 'C:\\Users\\foo' }))
+        .toBe('win_path: "C:\\\\Users\\\\foo"')
+    })
+
     it('returns "" for an empty object (no keys to summarize)', () => {
       expect(getInputSummary({})).toBe('')
     })

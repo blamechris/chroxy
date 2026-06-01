@@ -59,26 +59,56 @@ function buildGenericSummary(obj: Record<string, unknown>): string | null {
   if (parts.length === 0) {
     // First key:value already overflowed — degrade to a bare key-count
     // summary so something useful still shows ("3 keys: query,
-    // max_results, foo"). Caps at PREVIEW_MAX_LEN.
-    const head = `${keys.length} key${keys.length === 1 ? '' : 's'}: ${keys.join(', ')}`
-    return head.slice(0, PREVIEW_MAX_LEN)
+    // max_results, foo"). Append key names one at a time inside the
+    // budget so we never cut mid-identifier (Copilot #4655 review:
+    // mid-key slice produces a confusing partial identifier — the
+    // whole point of the fallback is "drop later items, never
+    // truncate mid-value").
+    const prefix = `${keys.length} key${keys.length === 1 ? '' : 's'}: `
+    const keyParts: string[] = []
+    let keyTotalLen = prefix.length
+    for (const key of keys) {
+      // Skip (not break) over keys that don't fit — a later shorter
+      // key may still earn a spot in the budget. The whole point of
+      // the fallback is "drop later items, never truncate mid-value",
+      // and "later" here means "by budget fit", not "by index".
+      const additional = keyParts.length === 0 ? key.length : key.length + 2
+      if (keyTotalLen + additional > PREVIEW_MAX_LEN) continue
+      keyParts.push(key)
+      keyTotalLen += additional
+    }
+    // If no key name fits alongside the prefix, emit just the prefix —
+    // readable, no broken identifier. Caller can still expand the
+    // bubble to see the full JSON.
+    return `${prefix}${keyParts.join(', ')}`
   }
 
-  const joined = parts.join(', ')
-  // The remaining keys are implied by the truncation; we don't tack on
-  // `…` because the bubble itself is already a disclosure widget that
-  // expands to the full JSON.
-  return joined.slice(0, PREVIEW_MAX_LEN)
+  // No `.slice` here — the budget loop above already kept us under
+  // PREVIEW_MAX_LEN, so slicing the joined string would only ever
+  // truncate mid-value (the exact foot-gun we documented avoiding).
+  return parts.join(', ')
 }
 
 function renderGenericValue(value: unknown): string {
   if (value === null) return 'null'
   if (value === undefined) return 'undefined'
   if (typeof value === 'string') {
-    // Quoted so it's visually distinct from key names. Long strings get
-    // truncated inside the quotes so the suffix is still visible
-    // structure.
-    return value.length > 40 ? `"${value.slice(0, 37)}..."` : `"${value}"`
+    // Route through `JSON.stringify` so embedded quotes, backslashes,
+    // and control chars (newline / tab) are properly escaped — naive
+    // `"${value}"` produced ambiguous previews like `"foo "bar" baz"`
+    // and multi-line collapsed bubbles for any string containing `\n`
+    // (Copilot #4655 review). Truncate inside the quotes when long so
+    // the structure remains visible.
+    if (value.length > 40) {
+      // Truncate BEFORE stringify so the rendered length stays bounded
+      // even when the truncated prefix happens to contain escapable
+      // chars (a `"` at position 36 would otherwise expand to `\"`).
+      const head = JSON.stringify(value.slice(0, 37))
+      // `JSON.stringify` returns `"foo"` — drop the trailing quote,
+      // append the ellipsis and re-close so we land on `"foo..."`.
+      return `${head.slice(0, -1)}..."`
+    }
+    return JSON.stringify(value)
   }
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (Array.isArray(value)) return `[${value.length}]`
@@ -111,11 +141,12 @@ function pickPriorityString(obj: Record<string, unknown>): string | null {
 /**
  * Extract the most useful single-field preview from a partial-JSON
  * buffer streamed via `tool_input_delta`. Prefers `command`,
- * `file_path`, `path`, `description` in that order. Returns `null`
- * when:
+ * `file_path`, `filePath`, `path`, `description` in that order (see
+ * PRIORITY_FIELDS). Returns `null` when:
  *
  *   - the buffer isn't yet valid JSON (mid-stream)
- *   - the parse yields a non-object (`null`, string, number)
+ *   - the parse yields a non-object value (`null`, string, number, array)
+ *   - the parsed object has zero keys (#4655 generic fallback can't render)
  *
  * Callers render the verbatim accumulator head when this returns null
  * so the JSON still shows assembling on-screen.
