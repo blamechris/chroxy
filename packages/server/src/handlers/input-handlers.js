@@ -495,6 +495,17 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
   // notification_prefs_get. Reject the whole patch on the first bad key
   // (no partial-apply) so the on-disk state stays clean.
   if (patch.devices && typeof patch.devices === 'object') {
+    // #4610 — `typeof [] === 'object'` so an array-typed `devices`
+    // payload would otherwise reach the key-format loop and reject
+    // with a misleading "Invalid device token format" error (true,
+    // since '0'/'1'/... fail the 20-char gate, but it mis-describes
+    // the real shape mismatch). Reject arrays explicitly with a
+    // shape-specific message so misbehaving clients get a clear
+    // signal that `devices` must be a map keyed by push token.
+    if (Array.isArray(patch.devices)) {
+      sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'devices must be an object, not an array')
+      return
+    }
     for (const key of Object.keys(patch.devices)) {
       if (!PushManager.isValidPushTokenFormat(key)) {
         sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'Invalid device token format in notification_prefs_set')
