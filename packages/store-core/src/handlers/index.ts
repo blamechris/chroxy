@@ -685,6 +685,19 @@ export type ServerMode = 'cli' | 'terminal'
 const VALID_SERVER_MODES: readonly ServerMode[] = ['cli', 'terminal']
 
 /**
+ * Validated `webFeatures` map advertised by the server. Each flag is a hard
+ * boolean — the parser coerces missing/malformed values to `false` so a
+ * misshapen wire message can't accidentally light up a feature gate. Both
+ * clients fall back to `{ available: false, remote: false, teleport: false }`
+ * when the field is absent so consumer call sites get a uniform shape.
+ */
+export interface AuthOkWebFeatures {
+  available: boolean
+  remote: boolean
+  teleport: boolean
+}
+
+/**
  * Typed payload extracted from an `auth_ok` message.
  *
  * Side-effects (reset replay flags, save connection, start heartbeat, kick
@@ -694,16 +707,13 @@ const VALID_SERVER_MODES: readonly ServerMode[] = ['cli', 'terminal']
  * setup; the dashboard owns lastConnectedUrl tracking) and out of scope for
  * the data-extraction seam.
  *
- * Intentionally NOT extracted into the shared payload:
- *   - `clientId` + `connectedClients` (validation requires the
- *     `ConnectedClient` type which lives at the consumer level)
- *   - `webFeatures` (small but app/dashboard call sites already build it
- *     with platform-specific defaults)
- *   - `encryption` flag and `sessionToken` (only the app uses sessionToken
- *     for the pairing flow; encryption gates a side effect, not state)
- *
- * Tightening any of these would be a behaviour change — see the parent
- * #2661 plan.
+ * #4766 — fields below were previously decoded inline in both clients,
+ * which let `streamStallTimeoutMs` silently drop on mobile (StreamStallChip
+ * couldn't humanise the headline phrase). The parser now owns the full
+ * wire-shape decode; consumers assemble their platform-specific state
+ * patches around the shared payload. `connectedClients` parsing lives in
+ * its sibling helper `parseConnectedClients` so the `ConnectedClient` type
+ * stays at the consumer boundary.
  */
 export interface AuthOkPayload {
   /** Validated server mode (`'cli'`, `'terminal'`, or null). */
@@ -720,6 +730,49 @@ export interface AuthOkPayload {
   serverCommit: string | null
   /** Validated integer >= 1, else null. */
   protocolVersion: number | null
+  /**
+   * #3760 — server-advertised inactivity timeout in ms. Validated positive
+   * finite number, else null (older servers omit the field; consumers fall
+   * back to their built-in reference timeout).
+   */
+  resultTimeoutMs: number | null
+  /**
+   * #4497 / #4477 — server-advertised stream-stall window in ms. 0 is the
+   * protocol's explicit "disabled" sentinel and is treated as absent so the
+   * chip falls back to the generic phrase. Was previously dropped on mobile
+   * (#4766 latent bug — fixed by unifying the parser).
+   */
+  streamStallTimeoutMs: number | null
+  /** Raw encryption directive from the server (`'required'` or other). */
+  encryption: string | null
+  /**
+   * `sessionToken` issued via the pairing flow. Only the mobile app currently
+   * consumes this; the dashboard ignores it. Exposed in the shared payload so
+   * the wire-shape decode lives in one place.
+   */
+  sessionToken: string | null
+  /** Self-identifying clientId issued by the server, null when missing/malformed. */
+  myClientId: string | null
+  /** Validated webFeatures flags with hardened defaults — never null. */
+  webFeatures: AuthOkWebFeatures
+  /**
+   * #4560 / #3272 — server-advertised capability map. Keys are feature names,
+   * values are strict booleans (`true` only when the wire value was literally
+   * `true`). Empty object when the field is absent so consumers can blindly
+   * spread it into state without an existence check.
+   */
+  serverCapabilities: Record<string, boolean>
+}
+
+const DEFAULT_WEB_FEATURES: AuthOkWebFeatures = {
+  available: false,
+  remote: false,
+  teleport: false,
+}
+
+/** Validated positive finite number, else null. Used for both timeout fields. */
+function parsePositiveFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 }
 
 /** Extract typed server-context fields from an `auth_ok` message. */
@@ -732,6 +785,27 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     protoRaw >= 1
       ? protoRaw
       : null
+
+  // webFeatures: object → boolean-coerced subset; otherwise hardened defaults.
+  const webFeaturesRaw = msg.webFeatures
+  const webFeatures: AuthOkWebFeatures =
+    webFeaturesRaw && typeof webFeaturesRaw === 'object' && !Array.isArray(webFeaturesRaw)
+      ? {
+          available: !!(webFeaturesRaw as Record<string, unknown>).available,
+          remote: !!(webFeaturesRaw as Record<string, unknown>).remote,
+          teleport: !!(webFeaturesRaw as Record<string, unknown>).teleport,
+        }
+      : { ...DEFAULT_WEB_FEATURES }
+
+  // capabilities: object → strict-true boolean map; absent/non-object → {}.
+  const capabilitiesRaw = msg.capabilities
+  const serverCapabilities: Record<string, boolean> = {}
+  if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
+    for (const [k, v] of Object.entries(capabilitiesRaw)) {
+      serverCapabilities[k] = v === true
+    }
+  }
+
   return {
     serverMode: parseEnumField(msg, 'serverMode', VALID_SERVER_MODES),
     sessionCwd: parseRawStringField(msg, 'cwd'),
@@ -740,7 +814,58 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     latestVersion: parseRawStringField(msg, 'latestVersion'),
     serverCommit: parseRawStringField(msg, 'serverCommit'),
     protocolVersion,
+    resultTimeoutMs: parsePositiveFiniteNumber(msg.resultTimeoutMs),
+    streamStallTimeoutMs: parsePositiveFiniteNumber(msg.streamStallTimeoutMs),
+    encryption: parseRawStringField(msg, 'encryption'),
+    sessionToken: parseRawStringField(msg, 'sessionToken'),
+    myClientId: parseRawStringField(msg, 'clientId'),
+    webFeatures,
+    serverCapabilities,
   }
+}
+
+/**
+ * Parse the `connectedClients` array from an `auth_ok` message, marking the
+ * caller's own entry via `myClientId`.
+ *
+ * Behaviour-preserving — matches the inline `filter().map()` block previously
+ * duplicated across app and dashboard (#4766):
+ *   - drops entries that aren't objects or lack a string `clientId`
+ *   - narrows `deviceType` to the validated enum, falling back to `'unknown'`
+ *   - falls back `deviceName` to null and `platform` to `'unknown'` for
+ *     missing/non-string values
+ *   - sets `isSelf: true` only when the entry's clientId matches `myClientId`
+ *
+ * Returns `[]` when `rawClients` isn't an array — call sites no longer need
+ * the `Array.isArray` guard.
+ */
+export function parseConnectedClients(
+  rawClients: unknown,
+  myClientId: string | null,
+): ConnectedClient[] {
+  if (!Array.isArray(rawClients)) return []
+  return rawClients
+    .filter(
+      (c: unknown): c is { clientId: string } =>
+        !!c &&
+        typeof c === 'object' &&
+        typeof (c as Record<string, unknown>).clientId === 'string',
+    )
+    .map((c) => {
+      const entry = c as Record<string, unknown>
+      const deviceType: ConnectedClient['deviceType'] = VALID_DEVICE_TYPES.has(
+        entry.deviceType as ConnectedClient['deviceType'],
+      )
+        ? (entry.deviceType as ConnectedClient['deviceType'])
+        : 'unknown'
+      return {
+        clientId: c.clientId,
+        deviceName: typeof entry.deviceName === 'string' ? entry.deviceName : null,
+        deviceType,
+        platform: typeof entry.platform === 'string' ? entry.platform : 'unknown',
+        isSelf: c.clientId === myClientId,
+      }
+    })
 }
 
 /**

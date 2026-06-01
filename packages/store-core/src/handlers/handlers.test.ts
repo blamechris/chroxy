@@ -24,6 +24,7 @@ import {
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,
+  parseConnectedClients,
   handleAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
@@ -1183,6 +1184,13 @@ describe('handleAuthOk', () => {
       latestVersion: '0.6.13',
       serverCommit: 'abc123',
       protocolVersion: 2,
+      resultTimeoutMs: 45 * 60 * 1000,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+      encryption: 'required',
+      sessionToken: 'tok-abc',
+      clientId: 'client-1',
+      webFeatures: { available: true, remote: false, teleport: true },
+      capabilities: { notificationPrefs: true, somethingElse: false },
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1192,6 +1200,13 @@ describe('handleAuthOk', () => {
       latestVersion: '0.6.13',
       serverCommit: 'abc123',
       protocolVersion: 2,
+      resultTimeoutMs: 45 * 60 * 1000,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+      encryption: 'required',
+      sessionToken: 'tok-abc',
+      myClientId: 'client-1',
+      webFeatures: { available: true, remote: false, teleport: true },
+      serverCapabilities: { notificationPrefs: true, somethingElse: false },
     })
   })
 
@@ -1241,7 +1256,149 @@ describe('handleAuthOk', () => {
     expect(handleAuthOk({ protocolVersion: 5 }).protocolVersion).toBe(5)
   })
 
-  it('returns all-null payload for an empty message', () => {
+  // #3760 — resultTimeoutMs guard (positive finite number, else null).
+  describe('resultTimeoutMs', () => {
+    it('passes through positive finite numbers', () => {
+      expect(handleAuthOk({ resultTimeoutMs: 1 }).resultTimeoutMs).toBe(1)
+      expect(handleAuthOk({ resultTimeoutMs: 45 * 60 * 1000 }).resultTimeoutMs).toBe(45 * 60 * 1000)
+    })
+
+    it('rejects 0, negative, non-finite, or non-number values', () => {
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '20m', null, undefined, {}]) {
+        expect(handleAuthOk({ resultTimeoutMs: bad }).resultTimeoutMs).toBeNull()
+      }
+    })
+
+    it('returns null when the field is omitted', () => {
+      expect(handleAuthOk({}).resultTimeoutMs).toBeNull()
+    })
+  })
+
+  // #4497 / #4477 — streamStallTimeoutMs guard. 0 is the protocol's "disabled"
+  // sentinel so it must be treated the same as absent (chip falls back to the
+  // generic phrase). This was the latent #4766 bug on mobile.
+  describe('streamStallTimeoutMs', () => {
+    it('passes through positive finite numbers', () => {
+      expect(handleAuthOk({ streamStallTimeoutMs: 5 * 60 * 1000 }).streamStallTimeoutMs).toBe(
+        5 * 60 * 1000,
+      )
+    })
+
+    it('rejects 0, negative, non-finite, or non-number values', () => {
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '5m', null, undefined, []]) {
+        expect(handleAuthOk({ streamStallTimeoutMs: bad }).streamStallTimeoutMs).toBeNull()
+      }
+    })
+
+    it('returns null when the field is omitted', () => {
+      expect(handleAuthOk({}).streamStallTimeoutMs).toBeNull()
+    })
+  })
+
+  describe('encryption', () => {
+    it('passes through string values verbatim', () => {
+      expect(handleAuthOk({ encryption: 'required' }).encryption).toBe('required')
+      expect(handleAuthOk({ encryption: 'optional' }).encryption).toBe('optional')
+    })
+
+    it('returns null for missing or non-string values', () => {
+      expect(handleAuthOk({}).encryption).toBeNull()
+      expect(handleAuthOk({ encryption: true }).encryption).toBeNull()
+      expect(handleAuthOk({ encryption: 42 }).encryption).toBeNull()
+    })
+  })
+
+  describe('sessionToken', () => {
+    it('extracts string sessionToken (pairing flow)', () => {
+      expect(handleAuthOk({ sessionToken: 'tok-xyz' }).sessionToken).toBe('tok-xyz')
+    })
+
+    it('returns null when missing or non-string', () => {
+      expect(handleAuthOk({}).sessionToken).toBeNull()
+      expect(handleAuthOk({ sessionToken: 42 }).sessionToken).toBeNull()
+    })
+  })
+
+  describe('myClientId', () => {
+    it('extracts clientId as myClientId', () => {
+      expect(handleAuthOk({ clientId: 'client-1' }).myClientId).toBe('client-1')
+    })
+
+    it('returns null when missing or non-string', () => {
+      expect(handleAuthOk({}).myClientId).toBeNull()
+      expect(handleAuthOk({ clientId: 42 }).myClientId).toBeNull()
+    })
+  })
+
+  describe('webFeatures', () => {
+    it('coerces wire flags to hard booleans', () => {
+      const wf = handleAuthOk({
+        webFeatures: { available: 1, remote: 'yes', teleport: 0 },
+      }).webFeatures
+      expect(wf).toEqual({ available: true, remote: true, teleport: false })
+    })
+
+    it('defaults to all-false when the field is missing', () => {
+      expect(handleAuthOk({}).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+    })
+
+    it('defaults to all-false when the field is non-object or an array', () => {
+      expect(handleAuthOk({ webFeatures: null }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+      expect(handleAuthOk({ webFeatures: [] }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+      expect(handleAuthOk({ webFeatures: 'true' }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+    })
+
+    it('does not share the default object across calls (mutation safety)', () => {
+      const a = handleAuthOk({}).webFeatures
+      a.available = true
+      const b = handleAuthOk({}).webFeatures
+      expect(b.available).toBe(false)
+    })
+  })
+
+  describe('serverCapabilities', () => {
+    it('only stores strict-true values (fail-closed)', () => {
+      const caps = handleAuthOk({
+        capabilities: {
+          notificationPrefs: true,
+          taggedOnly: 'true',
+          falsy: false,
+          numeric: 1,
+        },
+      }).serverCapabilities
+      expect(caps).toEqual({
+        notificationPrefs: true,
+        taggedOnly: false,
+        falsy: false,
+        numeric: false,
+      })
+    })
+
+    it('returns empty object when missing or malformed', () => {
+      expect(handleAuthOk({}).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: null }).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: [] }).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: 'cap' }).serverCapabilities).toEqual({})
+    })
+  })
+
+  it('returns the hardened defaults payload for an empty message', () => {
     expect(handleAuthOk({})).toEqual({
       serverMode: null,
       sessionCwd: null,
@@ -1250,7 +1407,107 @@ describe('handleAuthOk', () => {
       latestVersion: null,
       serverCommit: null,
       protocolVersion: null,
+      resultTimeoutMs: null,
+      streamStallTimeoutMs: null,
+      encryption: null,
+      sessionToken: null,
+      myClientId: null,
+      webFeatures: { available: false, remote: false, teleport: false },
+      serverCapabilities: {},
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseConnectedClients (#4766)
+// ---------------------------------------------------------------------------
+describe('parseConnectedClients', () => {
+  it('parses a well-formed roster and marks self via myClientId', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'client-1', deviceName: 'Dashboard', deviceType: 'desktop', platform: 'macos' },
+        { clientId: 'client-2', deviceName: 'Phone', deviceType: 'phone', platform: 'ios' },
+      ],
+      'client-1',
+    )
+    expect(result).toEqual([
+      {
+        clientId: 'client-1',
+        deviceName: 'Dashboard',
+        deviceType: 'desktop',
+        platform: 'macos',
+        isSelf: true,
+      },
+      {
+        clientId: 'client-2',
+        deviceName: 'Phone',
+        deviceType: 'phone',
+        platform: 'ios',
+        isSelf: false,
+      },
+    ])
+  })
+
+  it('marks no entries as self when myClientId is null', () => {
+    const result = parseConnectedClients(
+      [{ clientId: 'a', deviceType: 'phone', platform: 'ios' }],
+      null,
+    )
+    expect(result[0].isSelf).toBe(false)
+  })
+
+  it('returns [] when rawClients is not an array', () => {
+    expect(parseConnectedClients(undefined, 'c1')).toEqual([])
+    expect(parseConnectedClients(null, 'c1')).toEqual([])
+    expect(parseConnectedClients('clients', 'c1')).toEqual([])
+    expect(parseConnectedClients({ clientId: 'oops' }, 'c1')).toEqual([])
+  })
+
+  it('drops entries missing a string clientId', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'good', deviceType: 'desktop', platform: 'macos' },
+        { clientId: 42, deviceType: 'desktop' },
+        { deviceType: 'desktop' },
+        null,
+        'not-an-object',
+      ],
+      'good',
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].clientId).toBe('good')
+  })
+
+  it('falls back deviceType to "unknown" for malformed/unknown values', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'a', deviceType: 'space-station' },
+        { clientId: 'b', deviceType: 42 },
+        { clientId: 'c' },
+      ],
+      null,
+    )
+    expect(result.map((c) => c.deviceType)).toEqual(['unknown', 'unknown', 'unknown'])
+  })
+
+  it('falls back deviceName=null and platform="unknown" when missing/non-string', () => {
+    const result = parseConnectedClients(
+      [{ clientId: 'a' }, { clientId: 'b', deviceName: 42, platform: false }],
+      null,
+    )
+    expect(result[0].deviceName).toBeNull()
+    expect(result[0].platform).toBe('unknown')
+    expect(result[1].deviceName).toBeNull()
+    expect(result[1].platform).toBe('unknown')
+  })
+
+  it('accepts every valid deviceType variant', () => {
+    const variants = ['phone', 'tablet', 'desktop', 'unknown'] as const
+    const result = parseConnectedClients(
+      variants.map((dt, i) => ({ clientId: `c${i}`, deviceType: dt })),
+      null,
+    )
+    expect(result.map((c) => c.deviceType)).toEqual([...variants])
   })
 })
 

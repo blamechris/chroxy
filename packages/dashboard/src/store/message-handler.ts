@@ -43,6 +43,7 @@ import {
   handleStreamStart as sharedStreamStart,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
+  parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
@@ -114,7 +115,6 @@ import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import type {
   ChatMessage,
-  ConnectedClient,
   ConnectionContext,
   ConnectionState,
   CustomAgent,
@@ -1939,71 +1939,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _replayingSessions.clear();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context fields via shared handler (#3102)
-      const authPayload = sharedAuthOk(msg);
-      const authServerMode = authPayload.serverMode;
-      const authSessionCwd = authPayload.sessionCwd;
-      const authDefaultCwd = authPayload.defaultCwd;
-      const authServerVersion = authPayload.serverVersion;
-      const authLatestVersion = authPayload.latestVersion;
-      const authServerCommit = authPayload.serverCommit;
-      const authProtocolVersion = authPayload.protocolVersion;
-      // #3760: server-advertised inactivity timeout. Older servers omit this
-      // field — we leave it null and ActivityIndicator falls back to its
-      // hardcoded reference timeout. Mirror the server's Number.isFinite
-      // guard so Infinity/NaN never reach the store (the server would have
-      // rejected them upstream, but clients shouldn't trust the wire).
-      const authResultTimeoutMs =
-        typeof msg.resultTimeoutMs === 'number' &&
-        Number.isFinite(msg.resultTimeoutMs) &&
-        msg.resultTimeoutMs > 0
-          ? msg.resultTimeoutMs
-          : null;
-      // #4497 / #4477: server-advertised stream-stall window — threaded to
-      // StreamStallChip so the headline can humanise to "No response for
-      // 5 minutes — retry?". 0 is the protocol's "disabled" sentinel so we
-      // treat it the same as absent: the chip falls back to the static
-      // phrase. Same finite/positive guard as resultTimeoutMs.
-      const authStreamStallTimeoutMs =
-        typeof msg.streamStallTimeoutMs === 'number' &&
-        Number.isFinite(msg.streamStallTimeoutMs) &&
-        msg.streamStallTimeoutMs > 0
-          ? msg.streamStallTimeoutMs
-          : null;
-      // Parse connected clients list with self-detection via clientId
-      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-      const clients: ConnectedClient[] = rawClients
-        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-          clientId: c.clientId,
-          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-          isSelf: c.clientId === myClientId,
-        }));
-
-      // Parse web feature status from auth_ok
-      const webFeaturesRaw = msg.webFeatures as Record<string, unknown> | undefined;
-      const webFeatures = webFeaturesRaw ? {
-        available: !!webFeaturesRaw.available,
-        remote: !!webFeaturesRaw.remote,
-        teleport: !!webFeaturesRaw.teleport,
-      } : { available: false, remote: false, teleport: false };
-
-      // #3272: parse server-advertised capability map. Older servers
-      // omit the field; treat absence as "no advertised capabilities"
-      // so feature-gated UI hides itself fail-closed (rather than
-      // silently no-oping clicks against unimplemented WS handlers).
-      // Coerce values to boolean so a malformed entry can't accidentally
-      // enable a gate.
-      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
-      const serverCapabilities: Record<string, boolean> = {};
-      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
-        for (const [k, v] of Object.entries(capabilitiesRaw)) {
-          serverCapabilities[k] = v === true;
-        }
-      }
+      // #4766: full wire-shape decode lives in the shared parser
+      // (handleAuthOk + parseConnectedClients). The dashboard assembles the
+      // platform-specific `set()` patch from the parsed payload below.
+      const auth = sharedAuthOk(msg);
+      const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
@@ -2013,17 +1953,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         apiToken: ctx.token,
         socket: ctx.socket,
         claudeReady: false,
-        serverMode: authServerMode,
-        sessionCwd: authSessionCwd,
-        defaultCwd: authDefaultCwd,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
-        serverCommit: authServerCommit,
-        serverProtocolVersion: authProtocolVersion,
-        serverResultTimeoutMs: authResultTimeoutMs,
-        streamStallTimeoutMs: authStreamStallTimeoutMs,
+        serverMode: auth.serverMode,
+        sessionCwd: auth.sessionCwd,
+        defaultCwd: auth.defaultCwd,
+        serverVersion: auth.serverVersion,
+        latestVersion: auth.latestVersion,
+        serverCommit: auth.serverCommit,
+        serverProtocolVersion: auth.protocolVersion,
+        serverResultTimeoutMs: auth.resultTimeoutMs,
+        streamStallTimeoutMs: auth.streamStallTimeoutMs,
         streamingMessageId: null,
-        myClientId: myClientId,
+        myClientId: auth.myClientId,
         connectedClients: clients,
         connectionError: null as string | null,
         connectionRetryCount: 0,
@@ -2033,8 +1973,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
-        webFeatures,
-        serverCapabilities,
+        webFeatures: auth.webFeatures,
+        serverCapabilities: auth.serverCapabilities,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -2054,7 +1994,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       startHeartbeat(ctx.socket);
 
       // Initiate key exchange if server requires encryption
-      if (msg.encryption === 'required') {
+      if (auth.encryption === 'required') {
         _pendingKeyPair = createKeyPair();
         _pendingSalt = generateConnectionSalt();
         // Send key_exchange plaintext (before encryption is active)

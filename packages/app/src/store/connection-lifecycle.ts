@@ -37,6 +37,9 @@ interface ServerInfo {
   serverCommit?: string | null;
   serverProtocolVersion?: number | null;
   serverResultTimeoutMs?: number | null;
+  // #4497 / #4477 / #4766 — server-advertised stream-stall window in ms.
+  // See ConnectionLifecycleState.streamStallTimeoutMs for the rationale.
+  streamStallTimeoutMs?: number | null;
   sessionCwd?: string | null;
   isEncrypted?: boolean;
   // #4560 — server-advertised capability map from auth_ok. See the
@@ -66,6 +69,18 @@ interface ConnectionLifecycleState {
    * older server that doesn't broadcast the field.
    */
   serverResultTimeoutMs: number | null;
+  /**
+   * #4497 / #4477 / #4766 — effective server stream-stall window in ms, as
+   * advertised in auth_ok. Threaded to StreamStallChip so the headline can
+   * humanise to "No response for 5 minutes — retry?". Null when the server
+   * omits the field or advertises the protocol's `0` "disabled" sentinel,
+   * in which case the chip falls back to the generic phrase.
+   *
+   * Was silently dropped on mobile until #4766 unified the auth_ok parser
+   * — the dashboard already plumbed it through `streamStallTimeoutMs` on
+   * its connection store.
+   */
+  streamStallTimeoutMs: number | null;
   isEncrypted: boolean;
 
   /**
@@ -113,6 +128,7 @@ const initialState = {
   serverCommit: null as string | null,
   serverProtocolVersion: null as number | null,
   serverResultTimeoutMs: null as number | null,
+  streamStallTimeoutMs: null as number | null,
   isEncrypted: false,
   // #4560 — empty map until auth_ok lands; cleared on every disconnect via
   // reset() so a reconnect against a different (or older) server can't have
