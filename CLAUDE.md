@@ -174,6 +174,19 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 - Zustand for state management
 - React Navigation for routing
 
+## Testing Conventions
+
+### Server tests must not touch real user state (#4633)
+
+Every test that constructs a `SessionManager` **must** pass `stateFilePath` pointing at a temp file. Otherwise the manager defaults to `~/.chroxy/session-state.json` and the test silently clobbers your live state (this happened on 2026-05-30 — see `feedback_test_state_contamination.md`).
+
+Two layers of defence are wired up:
+
+1. **Sandbox guard** (`packages/server/tests/_setup.mjs`, loaded via `node --import`) — monkey-patches `fs.writeFileSync`/`promises.writeFile`/`renameSync`/`mkdirSync`/`createWriteStream`/`openSync(w*)` to throw `CHROXY_TEST_SANDBOX` if any test writes to the real `~/.chroxy/` or `~/.claude/` tree. The error includes the call site, so the next bare `new SessionManager()` fails loudly at the offending test.
+2. **CI lint** (`packages/server/scripts/lint-tests-state-file-path.sh`) — fails the build if any `new SessionManager(...)` in `tests/` is missing `stateFilePath`. Run locally with `cd packages/server && ./scripts/lint-tests-state-file-path.sh`.
+
+If you need to write to the real home for a legitimate reason (no current test does), set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'` scoped to the test and restore it after. The sandbox guard MUST stay enabled in `package.json`.
+
 ## Architecture
 
 Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / desktop dashboard:

@@ -26,6 +26,11 @@ jobs:
           # Never stale the repo owner's own PRs
           exempt-pr-authors: blamechris
 
+          # PRs carrying any of these labels are parked indefinitely.
+          # actions/stale@v9 matches labels literally (no glob support),
+          # so enumerate each blocked:* label explicitly.
+          exempt-pr-labels: 'pinned,needs-discussion,blocked:developer-program,priority: critical,priority: high'
+
           stale-pr-label: stale
 
           stale-pr-message: >
