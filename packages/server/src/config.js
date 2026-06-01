@@ -161,6 +161,16 @@ const CONFIG_SCHEMA = {
   // and the dashboard can offer a retry. Default 300000 (5 min). Set to
   // 0 to disable (operators with legitimately long event gaps).
   streamStallTimeoutMs: 'number',
+  // #4601: per-provider override map for streamStallTimeoutMs. An object
+  // keyed by provider id (e.g. 'codex', 'gemini', 'claude-sdk') whose
+  // value is a stall window in ms. Same 5s-24h-or-0 validation as
+  // `streamStallTimeoutMs` applies to each entry. When a session is
+  // created for a provider that has an entry here, that entry wins over
+  // the global `streamStallTimeoutMs`; otherwise the global value (or
+  // BaseSession default) applies. Default behaviour is unchanged when
+  // omitted — Codex/Gemini/long-running upstream APIs were the original
+  // motivation but operators can override any provider id.
+  providerStreamStallTimeoutMs: 'object',
   // #4482: per-call MCP tools/call timeout (ms). Forwarded to
   // byok-mcp-client.callTool's setTimeout via byok-session →
   // MCPFleet.callTool → MCPClient.callTool. Default 30000 (30s) at the
@@ -280,6 +290,46 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (minimum 5000 / 5s; set 0 to disable)`)
     } else if (config.streamStallTimeoutMs > 24 * 60 * 60 * 1000) {
       warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (maximum 86400000 / 24h)`)
+    }
+  }
+
+  // #4601: per-provider override map. Each entry follows the same
+  // 5s-24h-or-0 range as the global `streamStallTimeoutMs`. Values that
+  // pass type-of-map but fail per-entry validation produce a single warn
+  // per offending entry; the runtime ignores those entries and falls
+  // back to the global / default value (see SessionManager). The
+  // top-level type check above (object) already rejects arrays via the
+  // `actualType === 'array'` branch, so this block only runs on real
+  // plain objects.
+  if (
+    config.providerStreamStallTimeoutMs &&
+    typeof config.providerStreamStallTimeoutMs === 'object' &&
+    !Array.isArray(config.providerStreamStallTimeoutMs)
+  ) {
+    for (const [providerId, value] of Object.entries(config.providerStreamStallTimeoutMs)) {
+      const path = `providerStreamStallTimeoutMs.${providerId}`
+      // NB: a bad per-entry value is an "Invalid value" warning (NOT
+      // "Invalid type") even when the JS-level type mismatches the
+      // expected number. The CLI layer (`cli/shared.js:loadAndMergeConfig`)
+      // treats any warning whose prefix is "Invalid type" as a fatal
+      // startup error — using that wording for a single mis-typed map
+      // entry would prevent the whole server from booting, contradicting
+      // the documented "drop bad entries, fall through to global" contract
+      // (see PR #4745 Copilot review feedback).
+      if (typeof value !== 'number') {
+        warnings.push(`Invalid value for '${path}': expected number, got ${Array.isArray(value) ? 'array' : typeof value}`)
+        continue
+      }
+      if (!Number.isFinite(value) || value < 0) {
+        warnings.push(`Invalid value for '${path}': ${value} (must be 0 or a positive number)`)
+        continue
+      }
+      if (value === 0) continue
+      if (value < 5_000) {
+        warnings.push(`Invalid value for '${path}': ${value} (minimum 5000 / 5s; set 0 to disable)`)
+      } else if (value > 24 * 60 * 60 * 1000) {
+        warnings.push(`Invalid value for '${path}': ${value} (maximum 86400000 / 24h)`)
+      }
     }
   }
 
@@ -482,6 +532,12 @@ function envKeyForConfig(key) {
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
     hardTimeoutMs: 'CHROXY_HARD_TIMEOUT_MS',
     streamStallTimeoutMs: 'CHROXY_STREAM_STALL_TIMEOUT_MS',
+    // #4601: JSON-encoded provider→ms map (e.g.
+    // `CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS='{"codex":900000}'`).
+    // parseEnvValue dispatches on CONFIG_SCHEMA's `'object'` type and
+    // runs JSON.parse, falling back to the raw string on parse error so
+    // validateConfig can surface the eventual type mismatch.
+    providerStreamStallTimeoutMs: 'CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS',
     mcpToolCallTimeoutMs: 'CHROXY_MCP_TOOL_CALL_TIMEOUT_MS',
     // #4384 — canonical env var for the #4246 rename. Without this entry
     // the fallback was `key.toUpperCase()` (DANGEROUSLYSKIPPERMISSIONS,

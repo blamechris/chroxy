@@ -68,7 +68,7 @@ export interface QuestionPromptProps {
    * Fires with either a plain string (single-question / free-text path,
    * back-compat) or a `MultiQuestionAnswersMap` keyed by question text
    * (multi-question form). Multi-select values are emitted as native
-   * `string[]` arrays per the widened wire (#4735).
+   * `string[]` arrays per the widened wire (#4621 / #4735).
    */
   onSelect: (answer: string | MultiQuestionAnswersMap) => void
 }
@@ -125,7 +125,10 @@ function MultiQuestionDeferredNotice({ count }: { count: number }) {
  * #4604 Chunk B — N-question form. Each question gets its own selection
  * control (radio for single-select, checkboxes for multiSelect); the
  * single Submit button at the bottom fires `onSelect(answersMap)` with
- * one entry per question.
+ * one entry per question. Multi-select values are emitted as native
+ * `string[]` (#4621) — the wire schema accepts `string | string[]`
+ * directly, so no JSON encoding is required and the server's TUI driver
+ * receives the chosen labels without a round-trip through JSON.parse.
  *
  * #4735 — multi-select values are emitted as native `string[]` arrays
  * via the widened wire shape (`Record<string, string | string[]>`).
@@ -179,14 +182,14 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
     const answersMap: MultiQuestionAnswersMap = {}
     questions.forEach((q, idx) => {
       if (q.multiSelect) {
-        // #4735 — emit multi-select as a native `string[]` via the
-        // widened wire shape. Pre-#4735 dashboards JSON.stringified the
-        // array so the schema (`Record<string,string>`) accepted it;
-        // the server side already handled both forms (the TUI driver
-        // parses JSON or comma-joined strings; the SDK path passes the
-        // value through unchanged). Sending arrays natively gives the
-        // SDK canUseTool callback the structured shape it expects
-        // without a JSON.parse hop.
+        // #4621 / #4735 — emit multi-select as a native `string[]` via
+        // the widened wire shape. Pre-#4621 dashboards JSON.stringified
+        // the array so the schema (`Record<string,string>`) accepted
+        // it; the server side already handled both forms (the TUI
+        // driver parses JSON or comma-joined strings; the SDK path
+        // passes the value through unchanged). Sending arrays natively
+        // gives the SDK canUseTool callback the structured shape it
+        // expects without a JSON.parse hop.
         answersMap[q.question] = multiSelectByIdx[idx] || []
       } else {
         const chosen = singleSelectByIdx[idx]

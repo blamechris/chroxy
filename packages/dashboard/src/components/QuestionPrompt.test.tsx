@@ -599,14 +599,14 @@ describe('QuestionPrompt', () => {
       expect(arg!['Confirm?']).toBe('Yes')
     })
 
-    // #4735 — multi-select answers used to be JSON.stringify'd into a
-    // single string because the wire schema was Record<string,string>.
-    // Post-#4735 the wire accepts Record<string, string | string[]>, so
-    // the form emits native arrays. The server still accepts the old
-    // JSON-string shape for back-compat; the dashboard prefers arrays
-    // so the SDK canUseTool callback receives the structured form
-    // without a JSON.parse hop.
-    describe('multi-select native array emission (#4735)', () => {
+    // #4621 / #4735 — multi-select answers used to be JSON.stringify'd
+    // into a single string because the wire schema was
+    // Record<string,string>. Post-#4621 the wire accepts
+    // Record<string, string | string[]>, so the form emits native arrays.
+    // The server still accepts the old JSON-string shape for back-compat;
+    // the dashboard prefers arrays so the SDK canUseTool callback
+    // receives the structured form without a JSON.parse hop.
+    describe('multi-select native array emission (#4621 / #4735)', () => {
       const qMulti = {
         question: 'Which targets?',
         multiSelect: true,

@@ -5,7 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
-import { assertForwardingPattern } from './helpers/provider-forwarding.js'
+import { assertForwardingPattern, captureProviderOpts } from './helpers/provider-forwarding.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -3383,6 +3383,102 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
       providerOptsKey: 'mcpToolCallTimeoutMs',
       setValue: 45_000,
     })
+  })
+})
+
+// #4601: per-provider override map for streamStallTimeoutMs. When a session is
+// created for a provider listed in the map, that provider's override wins over
+// the global streamStallTimeoutMs. When the provider isn't listed (or the map
+// is empty / unset) the global value (or BaseSession default) applies — no
+// regression to existing single-knob behaviour.
+describe('SessionManager providerStreamStallTimeoutMs forwarding (#4601)', () => {
+  it('forwards the per-provider override for the resolved provider', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 900_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      900_000,
+      'per-provider override should win for the resolved provider',
+    )
+  })
+
+  it('per-provider override wins over the global streamStallTimeoutMs', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 600_000 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      600_000,
+      'per-provider override should beat the global value when both are set',
+    )
+  })
+
+  it('falls back to the global streamStallTimeoutMs when the provider has no override entry', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { codex: 900_000 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      300_000,
+      'a provider with no entry in the map should still inherit the global value',
+    )
+  })
+
+  it('omits streamStallTimeoutMs from providerOpts when neither per-provider nor global is set', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { codex: 900_000 },
+    })
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(opts, 'streamStallTimeoutMs'),
+      false,
+      'an unmatched provider with no global value should leave streamStallTimeoutMs unset (BaseSession default applies)',
+    )
+  })
+
+  it('forwards 0 as an explicit per-provider disable (matches global semantics)', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 0 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      0,
+      '0 must flow through verbatim — it explicitly disables stream-stall recovery for this provider',
+    )
+  })
+
+  it('ignores out-of-range per-provider entries and falls through to the global value', async () => {
+    const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': MAX_SANE_DURATION_MS + 1 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      300_000,
+      'an over-ceiling per-provider entry must fall back to the global value rather than silently producing a >24h timer',
+    )
   })
 })
 

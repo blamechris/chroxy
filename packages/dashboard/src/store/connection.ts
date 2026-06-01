@@ -1552,13 +1552,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendUserQuestionResponse: (answer: string | Record<string, string | string[]>, toolUseId?: string) => {
     const { socket, activeSessionId, sessionStates } = get();
-    // #4604 Chunk B / #4735 — split the wire payload by call shape:
+    // #4604 Chunk B / #4621 / #4735 — split the wire payload by call shape:
     // - string `answer`: legacy single-question / free-text path. Wire
     //   shape stays `{ type, answer, toolUseId? }` so older servers
     //   keep working without schema migration.
     // - Record `answer`: multi-question form. Populate the `answers`
     //   field (`UserQuestionResponseSchema` accepts
-    //   `Record<string, string | string[]>` per #4735) AND a string
+    //   `Record<string, string | string[]>` per #4621) AND a string
     //   `answer` summary so a server running an older build that only
     //   reads `answer` falls through to its default-to-option-1 path
     //   (a noisy WARN in chroxy.log) instead of stalling the form.
@@ -1567,7 +1567,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //   string-only `answer` field stays readable.
     //
     //   Delegate to `formatQuestionAnswerSummary` so the legacy
-    //   JSON-stringified array envelope (pre-#4735 wire: a single
+    //   JSON-stringified array envelope (pre-#4621 wire: a single
     //   value like `'["App","Tests"]'` for multi-select) is also
     //   flattened here — otherwise the terminal echo + the required
     //   string `answer` field can leak `["App","Tests"]` JSON syntax
@@ -2065,6 +2065,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // switch_session WS message is processed.
       // Reset all session-scoped fields so the previous session's values don't bleed through
       // during the server round-trip.
+      //
+      // #4639: seed `isIdle` from the most-recent `session_list` snapshot
+      // (where the server reports `isBusy` per session) instead of hardcoding
+      // `true`. Without this, clicking a tab whose session is still in-flight
+      // on the server would silently drop the Working banner and the Stop
+      // button until the next server event lands.
+      const sessionInfo = get().sessions.find((s) => s.sessionId === sessionId);
+      const seedIsIdle = typeof sessionInfo?.isBusy === 'boolean' ? !sessionInfo.isBusy : true;
       set({
         activeSessionId: sessionId,
         messages: [],
@@ -2075,7 +2083,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         contextUsage: null,
         lastResultCost: null,
         lastResultDuration: null,
-        isIdle: true,
+        isIdle: seedIsIdle,
         sessionNotifications: filteredNotifications,
       });
     }

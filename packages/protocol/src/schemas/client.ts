@@ -416,13 +416,13 @@ export const NotificationPrefsSetSchema = z.object({
 }).passthrough()
 
 /**
- * #4735 — per-question answer wire format.
+ * #4735 / #4621 — per-question answer wire format.
  *
  * `answers` is a map keyed by question text. Values are either:
  * - `string` — single-select label or a free-form ("Other"/text) answer
  * - `string[]` — multi-select labels (one entry per selected option)
  *
- * Pre-#4735 clients JSON-stringified multi-select arrays into a single
+ * Pre-#4621 clients JSON-stringified multi-select arrays into a single
  * string so the wire shape `Record<string, string>` was preserved; the
  * widened union accepts the native array form so newer dashboard / app
  * builds can submit multi-select answers without the JSON envelope. The
@@ -430,6 +430,14 @@ export const NotificationPrefsSetSchema = z.object({
  * `ClaudeTuiSession.respondToQuestion`) already accept both shapes —
  * see `resolveQuestionDigits` in `claude-tui-session.js` for the TUI
  * path that handles the array variant directly.
+ *
+ * Array bounds: at most 100 entries per array (mirroring the per-answer-
+ * map cap), and at most 10_000 chars per entry. Multi-select values are
+ * option labels (short by construction) — capping at 10_000 chars keeps
+ * the total per-answer worst case bounded at ~1MB without the legacy
+ * 100_000-char-per-item cap on the string path, which exists to cover
+ * the JSON-stringified-array shape sent by pre-#4621 dashboards (and is
+ * itself bounded by the top-level CHROXY_MAX_PAYLOAD).
  */
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
@@ -438,7 +446,7 @@ export const UserQuestionResponseSchema = z.object({
     z.string(),
     z.union([
       z.string().max(100_000),
-      z.array(z.string().max(100_000)).max(100),
+      z.array(z.string().max(10_000)).max(100),
     ]),
   ).refine(
     (obj) => Object.keys(obj).length <= 100,

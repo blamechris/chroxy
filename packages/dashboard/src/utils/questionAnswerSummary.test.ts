@@ -117,14 +117,16 @@ describe('formatQuestionAnswerSummary', () => {
     })
   })
 
-  // #4735 — per-question wire was widened to
+  // #4621 / #4735 — per-question wire was widened to
   // `Record<string, string | string[]>` so multi-select answers can be
   // emitted as native arrays. The summary helper renders the array form
-  // the same way as the pre-#4735 JSON-stringified form so mixed-version
-  // rehydrated state stays readable end-to-end.
-  describe('native string[] multi-select (#4735)', () => {
+  // the same way as the pre-#4621 JSON-stringified form so mixed-version
+  // rehydrated state stays readable end-to-end — without leaking
+  // `["App","Tests"]` JSON syntax (which the legacy back-compat path
+  // also covered).
+  describe('native string[] multi-select (#4621 / #4735)', () => {
     it('renders a native string[] multi-select as comma-joined labels', () => {
-      const answer = {
+      const answer: Record<string, string | string[]> = {
         'Which areas?': ['App', 'Tests'],
       }
       expect(formatQuestionAnswerSummary(answer)).toBe(
@@ -133,7 +135,7 @@ describe('formatQuestionAnswerSummary', () => {
     })
 
     it('renders a mixed string + string[] payload readably', () => {
-      const answer = {
+      const answer: Record<string, string | string[]> = {
         'Which release strategy?': 'Minor',
         'Which areas?': ['App', 'Tests', 'Docs'],
         'Confirm?': 'Yes',
@@ -144,17 +146,39 @@ describe('formatQuestionAnswerSummary', () => {
     })
 
     it('renders an empty native string[] as an empty value', () => {
-      const answer = {
+      const answer: Record<string, string | string[]> = {
         'Which areas?': [],
       }
       expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: ')
     })
 
     it('renders a single-item native string[] without brackets or quotes', () => {
-      const answer = {
+      const answer: Record<string, string | string[]> = {
         'Which areas?': ['App'],
       }
       expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: App')
+    })
+
+    it('renders mixed single-select string + native multi-select string[]', () => {
+      const answer: Record<string, string | string[]> = {
+        'Which release strategy?': 'Minor',
+        'Which areas?': ['App', 'Tests', 'Docs'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which release strategy?: Minor | Which areas?: App, Tests, Docs',
+      )
+    })
+
+    it('preserves labels that contain commas (no comma-split corruption)', () => {
+      // The legacy JSON-encoded path also handled this, but the native
+      // string[] path makes it trivially obvious: round-tripping a label
+      // with embedded commas must not split into separate entries.
+      const answer: Record<string, string | string[]> = {
+        'Which?': ['Hello, world', 'foo'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which?: Hello, world, foo',
+      )
     })
   })
 })

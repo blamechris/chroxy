@@ -2192,18 +2192,38 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             set({ activeModel: matched ? matched.id : fullId });
           }
         }
-        // Initialize session state for any new sessions not yet tracked
+        // Initialize session state for any new sessions not yet tracked.
+        // #4639: seed `isIdle` from the server's authoritative `isBusy` so a
+        // fresh tab / new-session entry reflects the real working state
+        // instead of defaulting to `isIdle: true` and silently dropping the
+        // Working banner until the next live event arrives.
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
         let initStatesChanged = false;
         for (const s of sessionList) {
           if (!newInitStates[s.sessionId]) {
-            newInitStates[s.sessionId] = createEmptySessionState();
+            const fresh = createEmptySessionState();
+            if (typeof s.isBusy === 'boolean') fresh.isIdle = !s.isBusy;
+            newInitStates[s.sessionId] = fresh;
             initStatesChanged = true;
           }
         }
         if (initStatesChanged) {
           set({ sessionStates: newInitStates });
+        }
+        // #4639: resync `isIdle` on EXISTING session states against the
+        // snapshot's `isBusy`. Without this, a session that became busy on
+        // the server while the dashboard's local handlers missed the flip
+        // (tab swap during a long turn, peer-tab triggered the work, race
+        // between agent_busy and history_replay) shows the wrong banner and
+        // the wrong Send/Stop button. The snapshot is the source of truth.
+        for (const s of sessionList) {
+          if (typeof s.isBusy !== 'boolean') continue;
+          if (!get().sessionStates[s.sessionId]) continue;
+          const desiredIsIdle = !s.isBusy;
+          updateSession(s.sessionId, (ss) =>
+            ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+          );
         }
         // Sync conversationId from session list into session states
         for (const s of sessionList) {
@@ -2269,6 +2289,28 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const { sessionId: ctxSessionId, patch } = sharedSessionContext(msg, get().activeSessionId);
       if (ctxSessionId && get().sessionStates[ctxSessionId]) {
         updateSession(ctxSessionId, () => patch);
+      }
+      break;
+    }
+
+    case 'session_activity': {
+      // #4639: server-emitted busy/idle broadcast (ws-forwarding.js fires it
+      // on stream_start and result for every session, to every authenticated
+      // client). Pre-fix the dashboard had no handler, so a peer tab driving
+      // the session — or this tab's own session_list snapshot — was the only
+      // way to learn about busy state changes for non-active sessions. That
+      // gap is what made the Working banner desync after a tab swap.
+      //
+      // Defensive: ignore if either field is missing/wrong type, and skip
+      // unknown sessions (session_list is responsible for seeding new
+      // entries — we don't want session_activity racing it).
+      const activitySessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const activityIsBusy = typeof msg.isBusy === 'boolean' ? msg.isBusy : null;
+      if (activitySessionId && activityIsBusy !== null && get().sessionStates[activitySessionId]) {
+        const desiredIsIdle = !activityIsBusy;
+        updateSession(activitySessionId, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
       }
       break;
     }

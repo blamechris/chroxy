@@ -46,6 +46,7 @@ import { ToolGroup } from './components/ToolGroup'
 import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { StreamStallChip } from './components/StreamStallChip'
+import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -267,6 +268,14 @@ export function App() {
   const activeSessionCwd = useConnectionStore(s =>
     s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.cwd ?? null,
   )
+  // #4603: active session's provider name (e.g. `'claude-sdk'`,
+  // `'claude-cli'`) so the StreamStallChip can prefix its headline
+  // with the provider short label for one-glance triage. Subscribed
+  // here so a tab switch updates the chip's variant on the next render
+  // without a full message-map rebuild.
+  const activeSessionProvider = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider ?? null,
+  )
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
   const sessionStates = useConnectionStore(s => s.sessionStates)
@@ -338,11 +347,8 @@ export function App() {
   // / Codex sessions support per-question delivery natively (#4731), so
   // the dashboard renders the interactive `MultiQuestionForm` for them
   // and submits per-question answers (including multi-select arrays) on
-  // the widened wire.
-  const activeSessionProvider = useMemo(
-    () => sessions.find(s => s.sessionId === activeSessionId)?.provider,
-    [sessions, activeSessionId],
-  )
+  // the widened wire. Reuses the `activeSessionProvider` selector declared
+  // above (#4603) so we don't re-derive the same value.
   const allowMultiQuestionForm = useMemo(
     () => activeSessionProvider != null && activeSessionProvider !== 'claude-tui',
     [activeSessionProvider],
@@ -1454,6 +1460,33 @@ export function App() {
     [storeMessages],
   )
 
+  // #4615: track which `type: 'prompt'` bubbles have been invalidated by a
+  // subsequent ASK_USER_QUESTION_STALL error. The server emits the error
+  // when the Claude TUI never acknowledges an AskUserQuestion answer —
+  // typically a multi-question form wedge. The pending QuestionPrompt is
+  // now dead, so submitting it would fire keystrokes into a session that
+  // already discarded the prompt context. We suppress the interactive
+  // prompt render (the AskUserQuestionStallChip rendered for the error
+  // bubble below it carries the retry affordance).
+  const stalledPromptIds = useMemo(() => {
+    const stalled = new Set<string>()
+    let lastStallIndex = -1
+    for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
+      const m = storeMessages[i]!
+      if (m.type === 'error' && m.code === 'ASK_USER_QUESTION_STALL') {
+        lastStallIndex = i
+        break
+      }
+    }
+    if (lastStallIndex >= 0) {
+      for (let i = 0; i < lastStallIndex; i += 1) {
+        const m = storeMessages[i]!
+        if (m.type === 'prompt' && !m.answered) stalled.add(m.id)
+      }
+    }
+    return stalled
+  }, [storeMessages])
+
   // Custom message renderer for permission prompts and tool bubbles
   const chatTailMessageId = chatMessages.length > 0
     ? chatMessages[chatMessages.length - 1]!.id
@@ -1504,6 +1537,13 @@ export function App() {
 
     // Question prompt (options or free-text fallback)
     if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
+      // #4615 — suppress unanswered prompts that have been invalidated by
+      // a subsequent ASK_USER_QUESTION_STALL. The chip rendered for the
+      // stall error carries the retry affordance; leaving the interactive
+      // prompt visible would let the user submit answers into a dead
+      // _pendingUserAnswer slot. Already-answered prompts still render
+      // (their answer summary is part of chat history).
+      if (stalledPromptIds.has(storeMsg.id)) return null
       return (
         <QuestionPrompt
           question={storeMsg.content}
@@ -1575,6 +1615,14 @@ export function App() {
     // most recent bubble (chatTailMessageId) — replayed historical stalls
     // surface the chip text + tooltip for diagnostics, but resending an
     // ancient user_input from a long-finished turn would be misleading.
+    //
+    // #4603: thread the active session's provider through so the chip
+    // headline can carry a short label ("SDK · ...", "CLI · ...") for
+    // one-glance triage, and hand the View-logs affordance a closure
+    // that switches the view to the System pane (where session-level
+    // context lives). The View-logs button is only shown on the tail
+    // entry — replaying historical stalls shouldn't offer to jump the
+    // operator out of the chat for an old event.
     if (storeMsg.type === 'error' && storeMsg.code === 'stream_stall') {
       const isTail = msg.id === chatTailMessageId
       const lastUserInput = isTail
@@ -1585,13 +1633,37 @@ export function App() {
           errorText={storeMsg.content}
           onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
           timeoutMs={streamStallTimeoutMs ?? undefined}
+          provider={activeSessionProvider ?? undefined}
+          onViewLogs={isTail ? () => setViewMode('system') : undefined}
+        />
+      )
+    }
+
+    // #4615: dedicated chip for ASK_USER_QUESTION_STALL errors. The server
+    // emits `error{code: 'ASK_USER_QUESTION_STALL'}` (PR #4614) when the
+    // Claude TUI never acknowledges an AskUserQuestion answer — typically
+    // a multi-question form wedge. Generic red toast reads as "broken";
+    // this affordance signals "recoverable, just retry your original
+    // request" and offers a one-tap resend of the last user message.
+    // Mirrors the StreamStallChip pattern (#4476): retry only on tail
+    // entries so replayed historical stalls show the chip + tooltip for
+    // diagnostics but don't offer a misleading resend button.
+    if (storeMsg.type === 'error' && storeMsg.code === 'ASK_USER_QUESTION_STALL') {
+      const isTail = msg.id === chatTailMessageId
+      const lastUserInput = isTail
+        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
+        : undefined
+      return (
+        <AskUserQuestionStallChip
+          errorText={storeMsg.content}
+          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
         />
       )
     }
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders
